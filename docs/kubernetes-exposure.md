@@ -122,6 +122,16 @@ spec:
             backend: { service: { name: dial-adas, port: { number: 80 } } }
 ```
 
+### Request and response sizes
+
+No exposed route needs special Ingress handling. Responses, the CSV exports included, are built in full before
+they are sent and carry a `Content-Length`, so neither response buffering nor chunked transfer has to be
+configured. The only uploads are `POST /v1/catalog/import` and `/import/preview` (`multipart/form-data`, up
+to `CATALOG_IMPORT_MAX_FILE_SIZE` per file and `CATALOG_IMPORT_MAX_REQUEST_SIZE` per request, `20MB` and
+`25MB` by default). They are administrative and stay off the allowlist above; if a deployment routes them,
+the Ingress body limit must be at least the request limit. ADAS sends no CORS headers and applies no rate
+limit of its own: browser access from another origin and any rate limit are configured at the Ingress.
+
 ## Flight SQL Ingress
 
 Flight SQL is gRPC, so it gets its own hostname and routes to the h2c-annotated Service. Traefik

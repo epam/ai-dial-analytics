@@ -29,7 +29,7 @@ public class OpenApiConfiguration {
     public OpenAPI adasOpenApi() {
         return new OpenAPI()
                 .info(new Info()
-                        .title("Analytics Data Access Service API")
+                        .title("AI DIAL Analytics API")
                         .description("Gateway between analytics consumers and the underlying data stores.")
                         .version("v1"))
                 .components(new Components()

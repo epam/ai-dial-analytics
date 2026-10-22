@@ -357,7 +357,7 @@ public class AdasFlightSqlProducer extends BasicFlightSqlProducer {
             FlightSql.CommandGetSqlInfo command, CallContext context, ServerStreamListener listener) {
         new SqlInfoBuilder()
                 // Server identity and posture.
-                .withFlightSqlServerName("analytics-data-access-service")
+                .withFlightSqlServerName("ai-dial-analytics")
                 .withFlightSqlServerVersion("1.0")
                 .withFlightSqlServerArrowVersion("18.3.0")
                 .withFlightSqlServerReadOnly(true)

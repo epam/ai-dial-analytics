@@ -40,6 +40,21 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   practice the UI is closed; an API client sending any valid credential still reads the OpenAPI JSON. Set
   `DISABLE_SWAGGER_AUTHORIZATION=true` where the UI is needed and ADAS is not broadly reachable; `/v1` stays
   protected either way. In `none` mode nothing changes.
+- **Readiness now includes PostgreSQL.** `/actuator/health/readiness` reports the catalog database (`db`) beside
+  the readiness state, so a pod that cannot reach PostgreSQL answers `503` there and leaves Service rotation
+  instead of serving errors. A readiness probe on that path sees this; one on the aggregate `/actuator/health`
+  sees no change, and neither does any liveness probe. The liveness and readiness groups are now served outside
+  Kubernetes too (inside a cluster Spring Boot already enabled them). Point liveness at
+  `/actuator/health/liveness`, which consults no dependency, so a PostgreSQL outage never restarts the pod.
+  The image's Docker `HEALTHCHECK` now calls that path.
+- **Default service name is now `ai-dial-analytics`.** The `OTEL_SERVICE_NAME` default changes from
+  `analytics-data-access-service`, so a deployment that leaves it unset exports traces, metrics and logs under the
+  new `service.name`. Dashboards, alerts and queries that filter on the old name stop matching. To keep the old
+  identity, set `OTEL_SERVICE_NAME=analytics-data-access-service` before the deploy.
+- **Flight SQL server name is now `ai-dial-analytics`.** `GetSqlInfo` reports it as `FLIGHT_SQL_SERVER_NAME`, and
+  JDBC and ADBC clients show it as the database product name (`DatabaseMetaData.getDatabaseProductName()`).
+  Queries and results do not change. The name is fixed, not configurable, so a client that keys a connection
+  profile, dialect or driver setting on `analytics-data-access-service` has to match the new name instead.
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
   stood before the evaluator fold (0.2.2) and of the pre-fold rule revisions. To keep them, dump the four
@@ -151,6 +166,8 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_MODE=drop-truncated` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_MODE=keep` to store bodies as sent (§7) |
+| Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
+| Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
 
 ## 7. New configuration
