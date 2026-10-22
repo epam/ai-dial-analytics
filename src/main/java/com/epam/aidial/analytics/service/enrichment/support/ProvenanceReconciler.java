@@ -79,9 +79,8 @@ import java.util.Set;
  *
  * <p><b>It warns and continues; it never fails startup.</b> The degraded mode already exists and is
  * defined — the write's best-effort drop — so a ClickHouse hiccup costs lineage for one boot and is
- * retried on the next. Aborting instead would be actively worse: ADAS's liveness probe reads the
- * aggregate {@code /actuator/health}, so a boot-failing contributor restart-loops the service over a
- * lineage column. The accepted cost is that a reconciler which never succeeds logs every boot and stamps
+ * retried on the next. Aborting instead would be actively worse: a failed boot never reaches
+ * {@code /actuator/health/liveness}, so the pod restart-loops over a lineage column. The accepted cost is that a reconciler which never succeeds logs every boot and stamps
  * nothing, which looks exactly like the pre-change behaviour; the log and the counter are the signal.
  *
  * <p>{@code @Order(2)}: after {@code ClickHouseMigrationRunner} ({@code @Order(0)}, which provisions the

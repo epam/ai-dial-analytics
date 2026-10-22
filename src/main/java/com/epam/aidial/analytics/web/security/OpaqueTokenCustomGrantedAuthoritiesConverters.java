@@ -87,13 +87,13 @@ public final class OpaqueTokenCustomGrantedAuthoritiesConverters {
                     .retrieve()
                     .body(STRING_OBJECT_MAP);
             if (body == null) {
-                throw new OAuth2IntrospectionException("Empty group-membership response for " + email);
+                throw new OAuth2IntrospectionException("Empty group-membership response");
             }
             return body;
         } catch (OAuth2IntrospectionException ex) {
             throw ex;
         } catch (Exception ex) {
-            log.debug("Failed to retrieve Google Workspace groups for {}", email, ex);
+            log.debug("Failed to retrieve Google Workspace groups", ex);
             throw new OAuth2IntrospectionException("Failed to retrieve Google Workspace groups", ex);
         }
     }

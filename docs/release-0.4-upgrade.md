@@ -40,6 +40,13 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   practice the UI is closed; an API client sending any valid credential still reads the OpenAPI JSON. Set
   `DISABLE_SWAGGER_AUTHORIZATION=true` where the UI is needed and ADAS is not broadly reachable; `/v1` stays
   protected either way. In `none` mode nothing changes.
+- **Readiness now includes PostgreSQL.** `/actuator/health/readiness` reports the catalog database (`db`) beside
+  the readiness state, so a pod that cannot reach PostgreSQL answers `503` there and leaves Service rotation
+  instead of serving errors. A readiness probe on that path sees this; one on the aggregate `/actuator/health`
+  sees no change, and neither does any liveness probe. The liveness and readiness groups are now served outside
+  Kubernetes too (inside a cluster Spring Boot already enabled them). Point liveness at
+  `/actuator/health/liveness`, which consults no dependency, so a PostgreSQL outage never restarts the pod.
+  The image's Docker `HEALTHCHECK` now calls that path.
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
   stood before the evaluator fold (0.2.2) and of the pre-fold rule revisions. To keep them, dump the four

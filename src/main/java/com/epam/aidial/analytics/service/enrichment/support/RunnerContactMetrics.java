@@ -21,9 +21,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * skewed or refused makes those rollups write zero rows per tick with the clamp naming an enrichment —
  * and nothing else in ADAS distinguishes that from a quiet period.
  *
- * <p><b>Metrics, never a health contributor.</b> The deployment's liveness probe targets the aggregate
- * {@code /actuator/health}, so a contributor reporting DOWN for "no runner" would restart ADAS every few
- * ticks instead of reporting the condition.
+ * <p><b>Metrics, never a health contributor.</b> A contributor reporting DOWN for "no runner" would fail the
+ * aggregate {@code /actuator/health}, and with it any liveness probe still pointed there, restarting ADAS
+ * every few ticks instead of reporting the condition.
  *
  * <h2>Registration is part of the contract, not bookkeeping</h2>
  *

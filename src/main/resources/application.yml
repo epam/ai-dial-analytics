@@ -41,6 +41,11 @@ management:
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
   opentelemetry:
     resource-attributes:
       "service.name": ${OTEL_SERVICE_NAME:analytics-data-access-service}

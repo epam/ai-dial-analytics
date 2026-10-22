@@ -75,6 +75,28 @@ metrics regardless of OTLP export flags. OTLP metrics export is additive.
 - **THEN** `/actuator/prometheus` continues to respond with the metrics exposition, and the same
   meters are also pushed over OTLP
 
+### Requirement: Liveness and readiness probe groups
+ADAS SHALL serve `/actuator/health/liveness` and `/actuator/health/readiness` on the HTTP port whether or not
+it runs in Kubernetes, and both SHALL be reachable without a credential in every security mode. Liveness
+SHALL report the application's liveness state alone, so no dependency outage restarts the service.
+Readiness SHALL report the readiness state, which is out of service until startup (schema migrations
+included) completes, together with the PostgreSQL catalog connection, so a pod that cannot read the catalog
+leaves rotation. ClickHouse SHALL NOT be a health contributor. Each group answers `200` when `UP` and `503`
+otherwise. The image's Docker `HEALTHCHECK` calls the liveness path.
+
+#### Scenario: Probes answer without a credential
+- **WHEN** a caller with no credential calls `GET /actuator/health/liveness` or `/actuator/health/readiness`
+  in `oidc` mode on a started instance
+- **THEN** each answers `200` with `status` `UP`
+
+#### Scenario: Liveness carries no dependency
+- **WHEN** liveness is called
+- **THEN** the response reports only the liveness state and names no `db` component
+
+#### Scenario: Readiness includes the catalog database
+- **WHEN** readiness is called on a started instance
+- **THEN** the response reports the readiness state and the `db` component
+
 ### Requirement: Trace context in HTTP responses
 Every HTTP response processed by the MVC layer SHALL carry a W3C `traceparent` header
 (`00-{trace-id}-{span-id}-{trace-flags}`) derived from the current OpenTelemetry span context,
