@@ -1,0 +1,361 @@
+import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+    id 'java'
+    id 'checkstyle'
+    id 'io.freefair.lombok' version '9.5.0'
+    id 'org.springframework.boot' version '4.0.8'
+}
+
+group = 'com.epam.aidial'
+version = '0.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+    configureEach {
+        // Log4j2 is the chosen logging backend; drop Boot's default Logback starter.
+        exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
+    }
+}
+
+checkstyle {
+    toolVersion = '10.21.4'
+    configDirectory = file("$rootProject.projectDir/checkstyle")
+    configProperties['org.checkstyle.google.suppressionfilter.config'] =
+            file("$rootDir/checkstyle/checkstyle-suppressions.xml")
+}
+
+repositories {
+    // EPAM's fork of jclouds (GitHub Packages). Its azureblob provider accepts an Azure AD bearer
+    // token (managed identity) via credentialsSupplier, which upstream Apache jclouds does not.
+    // Requires GitHub Packages credentials (gpr.user/gpr.key or GPR_USERNAME/GPR_PASSWORD).
+    // Must be listed before mavenCentral so the fork's 2.7.3 wins.
+    maven {
+        url = uri("https://maven.pkg.github.com/epam/jclouds")
+        credentials {
+            username = project.findProperty("gpr.user") ?: System.getenv("GPR_USERNAME")
+            password = project.findProperty("gpr.key") ?: System.getenv("GPR_PASSWORD")
+        }
+    }
+    mavenCentral()
+}
+
+dependencies {
+    implementation platform(SpringBootPlugin.BOM_COORDINATES)
+    // Overrides the Boot-BOM-managed OpenTelemetry 1.55.0 — unbounded memory allocation in W3C
+    // baggage propagation, patched in 1.62.0.
+    implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
+
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.apache.commons:commons-lang3'
+
+    // Authentication: OAuth2 resource server validating Bearer JWTs from multiple OIDC issuers.
+    // Both starters are BOM-managed (Spring Boot 4.0.8); the resource-server starter pulls in
+    // spring-security-oauth2-jose and nimbus-jose-jwt transitively for JWKS-backed JWT decoding.
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-security-oauth2-resource-server'
+
+    // In-memory cache for API-key introspection results. Not BOM-managed; pinned.
+    implementation 'com.github.ben-manes.caffeine:caffeine:3.2.3'
+
+    // PostgreSQL metadata store. spring-boot-starter-data-jpa brings Hibernate, HikariCP and
+    // spring-jdbc, which gives ADAS its first Spring-managed DataSource. The metadata store is
+    // deliberately outside the structured-query DSL (ClickHouse-only); see openspec metadata-store.
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    // Spring Boot 4 split Flyway auto-configuration out of spring-boot-autoconfigure into its own
+    // module; without it Boot never runs the PostgreSQL migrations under db/migration/postgres even
+    // with spring.flyway.enabled=true. (ClickHouse migrations stay on the programmatic runner.)
+    implementation 'org.springframework.boot:spring-boot-flyway'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // Change tracking for the table catalog: Envers writes a full-state snapshot of every audited
+    // entity into a *_aud table inside the caller's own transaction. BOM-managed, so it moves with
+    // Hibernate itself — a version skew between envers and hibernate-core is not a supported combination.
+    implementation 'org.hibernate.orm:hibernate-envers'
+    // Time-ordered UUIDv7 for audit activity ids, so the feed's primary key sorts by creation time.
+    // Not BOM-managed; pinned. Same generator the sibling DIAL control planes use.
+    implementation 'com.github.f4b6a3:uuid-creator:6.0.0'
+
+    implementation('org.springframework.boot:spring-boot-starter-log4j2') {
+        exclude group: 'org.apache.logging.log4j'
+    }
+    implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.25.5'
+    implementation 'org.apache.logging.log4j:log4j-core:2.25.5'
+
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    // OTLP export of metrics/traces/logs via Boot-native management.* properties; disabled by
+    // default (see docs/configuration.md § OpenTelemetry). Prometheus above stays additive.
+    implementation 'org.springframework.boot:spring-boot-starter-opentelemetry'
+    // Routes log4j2 events into the OTel SDK; the official starter does not auto-install the
+    // appender (OpenTelemetryLogAppenderConfiguration does). Version aligned with the OTel API
+    // 1.62.0 pinned via opentelemetry-bom above (instrumentation 2.28.x <-> SDK 1.62.x).
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.28.1-alpha'
+    // CLIENT-span instrumentation for the auto-configured JDBC DataSource (Postgres metadata store).
+    // Same OTel instrumentation family/version as the log4j appender above; the OTel API it needs is
+    // managed by the opentelemetry-bom pinned at the top. Boot-version-independent (it wraps the
+    // DataSource bean), so it sidesteps datasource-micrometer's lack of a Spring Boot 4 release.
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-jdbc:2.28.1-alpha'
+
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.3'
+
+    // ClickHouse HTTP client for the runtime read/sync paths. MUST stay in lockstep with the
+    // clickhouse-jdbc version below: clickhouse-jdbc depends on the matching client-v2 and calls
+    // Client.Builder APIs (e.g. typeHintMapping) that only exist in its own minor — a mismatch
+    // throws NoSuchMethodError at runtime when the JDBC-backed migration path builds its client.
+    implementation 'com.clickhouse:client-v2:0.9.8'
+
+    // jOOQ is used render-only (no DataSource): the structured-query DSL builds a query model and
+    // renders ClickHouse SQL strings, executed via the ClickHouse HTTP client. Pinned explicitly —
+    // SQLDialect.CLICKHOUSE only exists in jOOQ 3.20+ (experimental) and may differ from the
+    // Spring Boot BOM-managed version. No jooq-codegen: there are no generated tables.
+    implementation 'org.jooq:jooq:3.21.5'
+
+    // Flyway schema migrations for ClickHouse, run programmatically by ClickHouseMigrationRunner.
+    // flyway-core is BOM-managed (Spring Boot 4 -> 11.x); flyway-database-clickhouse 10.24.0 is the
+    // community ClickHouse support module (its version is the community-module line, not the Flyway
+    // core version — it targets Flyway 11.x). clickhouse-jdbc is the JDBC driver Flyway connects
+    // through; the app's read/sync paths use the HTTP client-v2.
+    // Keep this version in lockstep with client-v2 above (see the note there).
+    //
+    // Also load-bearing at 0.9.8: jdbc-v2's ConnectionImpl hardcodes async_insert=0 (and
+    // wait_end_of_query=0) into its default QuerySettings, which is what keeps the Flyway migration path
+    // synchronous on a 26.2+ server, where the server default is 1. ADAS never sets it on the migration
+    // JDBC URL. A driver bump that drops that hardcoding must pin the setting here instead — see the
+    // async_insert note in docs/clickhouse-server.md and ClickHouseWriterClient.ASYNC_INSERT. (The proxy
+    // driver com.clickhouse.jdbc.ClickHouseDriver, which Flyway resolves, defaults to v2 unless
+    // clickhouse.jdbc.v1=true, so v2 is the path in play.)
+    //
+    // NOT the `:all` classifier. That fat jar relocates its own HttpComponents/lz4 copies under
+    // com.clickhouse.client.internal.*, while Gradle still resolves the same libraries externally from
+    // the module metadata — so the image shipped both, and the relocated copy pinned a stale httpcore5
+    // (5.3.4) that no constraint can reach. Trivy reads the leftover META-INF/maven pom.properties and
+    // reports it. The plain jar carries only the driver, so lz4-java and httpclient5/httpcore5 come from
+    // the classpath at their constrained versions.
+    implementation 'org.flywaydb:flyway-core'
+    runtimeOnly 'org.flywaydb:flyway-database-clickhouse:10.24.0'
+    runtimeOnly 'com.clickhouse:clickhouse-jdbc:0.9.8'
+
+    // Flyway 11 ships per-database support as separate modules; flyway-core no longer bundles
+    // PostgreSQL, so Boot's Flyway autoconfig fails with "Unsupported Database: PostgreSQL" without
+    // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
+    runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+
+    // Provider-agnostic blob access (azureblob in deployments, filesystem in tests). Uses EPAM's jclouds
+    // fork (2.7.3) so the azureblob provider supports Azure AD / managed identity.
+    // Not BOM-managed, so pinned explicitly.
+    implementation 'org.apache.jclouds:jclouds-allblobstore:2.7.3'
+    // Routes jclouds' internal logging through SLF4J (kept at upstream 2.7.0).
+    implementation 'org.apache.jclouds.driver:jclouds-slf4j:2.7.0'
+    // Azure AD / managed-identity token acquisition (DefaultAzureCredential) for blob auth.
+    implementation 'com.azure:azure-identity:1.18.2'
+    // AWS workload identity (EKS IRSA) for the aws-s3 blob provider: StsWebIdentityTokenFileCredentialsProvider
+    // exchanges the projected service-account token for temporary credentials. jclouds' own STS API exposes
+    // only createTemporaryCredentials/assumeRole/createFederatedUser, no AssumeRoleWithWebIdentity, so the
+    // exchange needs the AWS SDK. Not BOM-managed; pinned.
+    //
+    // netty-nio-client is excluded: sts declares both HTTP clients, and 2.46.8 is managed against Netty
+    // 4.1.135.Final while this project pins netty-bom 4.2.17.Final above — keeping it would force a 4.2
+    // runtime onto a client compiled against 4.1, one we never use. The sync path survives on apache5-client,
+    // whose httpclient5 5.6.1 / httpcore5 5.4.2 floors are already exceeded by the project's resolved
+    // versions. A second SdkHttpService on the classpath fails the StsClient build with "Multiple HTTP
+    // implementations were found" — that is the tripwire to watch on any future bump.
+    implementation('software.amazon.awssdk:sts:2.46.8') {
+        exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
+    }
+
+    implementation 'org.mapstruct:mapstruct:1.6.3'
+    annotationProcessor 'org.mapstruct:mapstruct-processor:1.6.3'
+    // Lets the MapStruct and Lombok annotation processors cooperate so MapStruct sees Lombok-generated
+    // getters/setters on the entity/model classes it maps. Not BOM-managed; pinned.
+    annotationProcessor 'org.projectlombok:lombok-mapstruct-binding:0.2.0'
+
+    // JSONata parser for pipeline transform expressions (input/output field mapping). ADAS
+    // does static parse-only validation at registration; runtime evaluation lives in the runner.
+    // Pin the SAME version as the runner so an expression that parses here can't fail on a dialect
+    // difference at runtime. Not BOM-managed; pinned.
+    implementation 'com.dashjoin:jsonata:0.9.10'
+
+    // Calcite parses/validates external SQL (Babel parser) and lowers it to a RelNode that the
+    // flight-sql-endpoint translates into the structured-query DSL. Not BOM-managed; pinned.
+    // Calcite brings its own Guava/Jackson constraints — the Jackson 2.x version is set by the
+    // constraint below; Guava comes in transitively via Calcite only.
+    implementation 'org.apache.calcite:calcite-core:1.42.0'
+    implementation 'org.apache.calcite:calcite-babel:1.42.0'
+
+    // Arrow Flight SQL endpoint: gRPC transport + FlightSqlProducer scaffolding, vectors for
+    // columnar result batches, netty allocator. Not BOM-managed; pinned. flight-sql excludes its
+    // own flight-core so the explicit pin above is the only version on the classpath (no skew).
+    // Requires the --add-opens=java.base/java.nio JVM flag (see test/bootRun below).
+    implementation 'org.apache.arrow:arrow-vector:18.3.0'
+    implementation 'org.apache.arrow:arrow-memory-netty:18.3.0'
+    implementation 'org.apache.arrow:flight-core:18.3.0'
+    implementation('org.apache.arrow:flight-sql:18.3.0') {
+        exclude group: 'org.apache.arrow', module: 'flight-core'
+    }
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
+
+    // Runtime-only via spring-boot-starter-opentelemetry; needed at compile time by
+    // OpenTelemetryExportConfigurationTest to assert on exporter/registry bean types.
+    testImplementation 'io.opentelemetry:opentelemetry-exporter-otlp'
+    testImplementation 'io.micrometer:micrometer-registry-otlp'
+    // In-memory span exporter + SdkTracerProvider for asserting CLIENT span kind/attributes in
+    // ClientSpanTracerTest. BOM-managed (opentelemetry-bom).
+    testImplementation 'io.opentelemetry:opentelemetry-sdk-testing'
+
+    // Security test support, plus jjwt for minting locally-signed (HMAC) JWTs in auth slice tests
+    // so they need no live JWKS endpoint. Test scope only.
+    testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+    testImplementation 'io.jsonwebtoken:jjwt-api:0.13.0'
+    testRuntimeOnly 'io.jsonwebtoken:jjwt-impl:0.13.0'
+    testRuntimeOnly 'io.jsonwebtoken:jjwt-jackson:0.13.0'
+    // jclouds filesystem provider — used only by data-sync tests to back BlobClient on local disk.
+    testImplementation 'org.apache.jclouds.api:filesystem:2.7.3'
+
+    // Testcontainers for end-to-end query integration tests against a real ClickHouse. Versions are
+    // Spring Boot BOM-managed (the Boot 4 BOM imports the Testcontainers BOM -> 2.0.x); no explicit
+    // pins. Testcontainers 2.0 renamed the module artifactIds to the `testcontainers-` prefix
+    // (`testcontainers-clickhouse`, `testcontainers-junit-jupiter`) — the old `org.testcontainers:
+    // clickhouse`/`:junit-jupiter` coordinates stop at 1.21.x and do not resolve under the 2.0 BOM.
+    // The clickhouse module supplies ClickHouseContainer. Requires a running Docker daemon.
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-clickhouse'
+    // PostgreSQL Testcontainers module (PostgreSQLContainer) for the metadata integration tests.
+    // Same Testcontainers 2.0 BOM-managed line as the clickhouse module above; the 2.0 rename means
+    // the artifactId is `testcontainers-postgresql` (the old `org.testcontainers:postgresql`
+    // coordinate stops at 1.21.x and does not resolve under the 2.0 BOM). Requires a Docker daemon.
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    constraints {
+        // Tomcat embed (Boot BOM manages 11.0.22): 11.0.25 fixes CVE-2026-65182 (security
+        // constraint bypass via improper access control), CVE-2026-65905 (authentication bypass via
+        // limited replay attack in the DIGEST authenticator) and CVE-2026-68525 (unauthorized
+        // resource access via FORM authentication bypass). All three embed modules are one release
+        // train and must move together — a skew between them is not a supported combination.
+        implementation('org.apache.tomcat.embed:tomcat-embed-core:11.0.25') {
+            because('CVE-2026-65182, CVE-2026-65905, CVE-2026-68525')
+        }
+        implementation('org.apache.tomcat.embed:tomcat-embed-el:11.0.25') {
+            because('Aligned with tomcat-embed-core 11.0.25 — same release train')
+        }
+        implementation('org.apache.tomcat.embed:tomcat-embed-websocket:11.0.25') {
+            because('Aligned with tomcat-embed-core 11.0.25 — same release train')
+        }
+        // Jackson 2.x line (transitive from Calcite, Avatica, jclouds): Avatica 1.29.0 requires 2.22.x, and
+        // 2.22.3 is the first 2.22 release with the fixes first shipped in 2.21.7: CVE-2026-91776, CVE-2026-91777,
+        // the jackson-core CVE-2026-89407 and CVE-2026-89425, the @JsonIgnoreProperties + case-insensitive and
+        // @JsonUnwrapped + @JsonView CVEs, plus CVE-2026-68497 (CPU DoS via unbounded numeric parsing).
+        // Note: the ExternalTypeId @JsonView + @JsonCreator bypass was not backported to the
+        // 2.x line; the fix exists only in jackson-databind 3.x.
+        implementation('com.fasterxml.jackson.core:jackson-databind:2.22.3') {
+            because('CVE-2026-54512, CVE-2026-54513, @JsonIgnoreProperties/case-insensitive CVE, @JsonUnwrapped/@JsonView CVE, CVE-2026-68497, CVE-2026-91776, CVE-2026-91777')
+        }
+        implementation('com.fasterxml.jackson.core:jackson-core:2.22.3') {
+            because('CVE-2026-89407, CVE-2026-89425; aligned with jackson-databind 2.22.3')
+        }
+        // Jackson 3.x line (Spring Boot 4 primary): 3.1.7 fixes CVE-2026-91776, CVE-2026-91777 and the same @JsonIgnoreProperties
+        // and @JsonUnwrapped CVEs, the ExternalTypeId @JsonView + @JsonCreator bypass, and CVE-2026-68497.
+        // jackson-core must move in lockstep with jackson-databind — both are part of the same
+        // release train and a version skew surfaces as NoSuchMethodError at runtime.
+        implementation('tools.jackson.core:jackson-databind:3.1.7') {
+            because('CVE-2026-54512, CVE-2026-54513, @JsonIgnoreProperties/case-insensitive CVE, @JsonUnwrapped/@JsonView CVE, ExternalTypeId @JsonView + @JsonCreator bypass, CVE-2026-68497, CVE-2026-91776, CVE-2026-91777')
+        }
+        implementation('tools.jackson.core:jackson-core:3.1.7') {
+            because('Aligned with jackson-databind 3.1.7 — same release train, version skew causes NoSuchMethodError')
+        }
+        implementation('org.postgresql:postgresql:42.7.12') {
+            because('CVE-2026-42198, CVE-2026-54291')
+        }
+        // LZ4 Java (transitive from ClickHouse client-v2 / clickhouse-jdbc): the JNI-backed
+        // XXHash implementation in versions prior to 1.11.1 is vulnerable, and versions prior to
+        // 1.11.4 allow arbitrary code execution via insecure temporary file handling (CVE-2026-106451).
+        // The ClickHouse client ships the at.yawk.lz4 fork; the constraint applies to that coordinate.
+        implementation('at.yawk.lz4:lz4-java:1.11.4') {
+            because('JNI-backed XXHash vulnerability before 1.11.1; CVE-2026-106451 before 1.11.4')
+        }
+        // httpclient5 5.x through 5.6.2 has a connection-release bug for invalid/unsupported
+        // Content-Encoding responses in the classic I/O client. The Spring Boot 4.0.8 BOM
+        // manages 5.5.2; this constraint overrides it to the first fixed release.
+        implementation('org.apache.httpcomponents.client5:httpclient5:5.6.3') {
+            because('connection-release issue for invalid Content-Encoding responses in versions through 5.6.2')
+        }
+        // Boot's BOM manages 5.3.6, which Gradle picks over the 5.4.4/5.5 requested by the ClickHouse
+        // clients and Calcite's Avatica. httpcore5-h2 moves in lockstep — it is the same release train
+        // and skew between the two surfaces as NoSuchMethodError inside the HTTP client.
+        // Floor raised to 5.4.3 for CVE-2026-54399; httpclient5 5.6.3 pulls httpcore5 5.6.x so
+        // Gradle's conflict resolution will pick the highest request anyway.
+        implementation('org.apache.httpcomponents.core5:httpcore5:5.4.3') {
+            because('CVE-2026-54399')
+        }
+        implementation('org.apache.httpcomponents.core5:httpcore5-h2:5.4.3') {
+            because('CVE-2026-54399 (same release train as httpcore5)')
+        }
+        // ASM (transitive from the ClickHouse clients and json-smart): versions before 9.11 allow
+        // memory/CPU exhaustion on crafted class files. The ClickHouse client stays pinned at 0.9.8
+        // (see client-v2 above), so the fix comes in as a constraint rather than a client bump.
+        implementation('org.ow2.asm:asm:9.11.1') {
+            because('CVE-2026-110257, CVE-2026-110258, CVE-2026-110260, CVE-2026-110261, CVE-2026-110263, CVE-2026-110591')
+        }
+        // Avatica (transitive from Calcite 1.42.0, the latest release): versions before 1.29.0
+        // initialize arbitrary classes during plugin instantiation. avatica-metrics moves in lockstep.
+        implementation('org.apache.calcite.avatica:avatica-core:1.29.0') {
+            because('CVE-2026-70410')
+        }
+        implementation('org.apache.calcite.avatica:avatica-metrics:1.29.0') {
+            because('Aligned with avatica-core 1.29.0 — same release train')
+        }
+    }
+}
+
+// Arrow's direct-memory allocator needs reflective access to java.nio on JDK 16+, and its Netty
+// allocation manager still uses sun.misc.Unsafe memory access, which JDK 24+ (JEP 498) disables by
+// default with UnsupportedOperationException. Netty also loads a native library via System.loadLibrary,
+// a restricted method on JDK 24+ (JEP 472) that warns without --enable-native-access. Without these
+// flags Arrow allocation fails (or warns) at runtime. The Docker image sets them via the entrypoint;
+// non-Docker launches need them too (documented in docs/configuration.md). Arrow always runs on the
+// classpath (unnamed module) here, so --add-opens targets ALL-UNNAMED — not the org.apache.arrow.memory.core
+// named module, which never exists at runtime and only triggers an "Unknown module" warning.
+def arrowJvmArgs = [
+        '--add-opens=java.base/java.nio=ALL-UNNAMED',
+        '--sun-misc-unsafe-memory-access=allow',
+        '--enable-native-access=ALL-UNNAMED',
+]
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs arrowJvmArgs
+    // DeltaSpecStructureTest reads spec files from disk, so they are a real input of this task: without
+    // declaring them Gradle reports it UP-TO-DATE after a spec-only edit and the check never runs against
+    // the change it exists to guard. Narrowed to the files the test actually walks — declaring all of
+    // openspec/ would re-run the whole suite, integration tests included, every time /opsx:apply ticks a
+    // checkbox in a tasks.md the test never opens.
+    inputs.files(
+            fileTree('openspec/specs') { include '**/spec.md' },
+            fileTree('openspec/changes') { include '**/specs/**/spec.md'; exclude 'archive/**' })
+            .withPropertyName('openspecSpecs')
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+            .optional()
+}
+
+tasks.named('bootRun') {
+    jvmArgs arrowJvmArgs
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += '-Werror'
+}

@@ -1,0 +1,7 @@
+# Verification client for the ADAS Arrow Flight SQL endpoint.
+# Floor pins — known-good minimums, not exact pins.
+pandas>=2.2
+pyarrow>=17.0
+# Arrow Flight SQL transport: the ADBC Flight SQL driver.
+adbc-driver-flightsql>=1.0
+adbc-driver-manager>=1.0

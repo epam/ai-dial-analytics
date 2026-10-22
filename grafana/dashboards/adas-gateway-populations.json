@@ -1,0 +1,912 @@
+{
+  "uid": "adas-gateway-populations",
+  "title": "ADAS — AI gateway populations",
+  "description": "How a DIAL gateway is used. ONE actor dimension: user_ref, with auth type and client mix as attributes rather than as separate views — auth type does not imply what an actor is (chat sessions can run on an api_key, and Claude Code on a jwt). Built on the usage-log spine, because `sessions` drops identified events that carry no session id. Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side. Once identity enrichment is backfilled to the oldest usage-log row the range is not capped by coverage; the coverage panel is the guard.",
+  "tags": [
+    "adas",
+    "adoption"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**One actor dimension: `user_ref`.** Every principal panel here is keyed on `user_ref` and nothing else. It is already the normalised actor key — the identity-provider user id on `jwt` calls, the DIAL project id on `api_key` calls — so read the **Auth** column to know which id space a row belongs to. The jwt and api_key id spaces are disjoint, so there is no cross-space identity to resolve. `user_hash` cannot help: it is empty on every api_key row, so `coalesce(user_hash, project)` collapses to exactly `user_ref`.\n\n**Auth type does NOT imply what the actor is.** Splitting panels into 'projects/keys' (agent) and 'people' (chat) would be wrong: **chat sessions can authenticate with an api_key**, **Claude Code can run on a jwt**, and a single API key can drive several client types at once (codex, chat, opencode, other and claudecode). Client mix is a *property* of an actor, shown as a column, never the basis for a separate view.\n\n**Everything is on the usage-log spine.** `sessions` is a biased spine for actor questions: many events carry identity but no session id, so a `sessions`-based actor view can drop many jwt and api_key principals outright — potentially including the largest actor by turns, such as a service identity that sends no session id. Turns here are `uniqExact(trace_id)` and sessions are `uniqExact(client_session_id)` over the usage log, so nothing is lost. A `Sessions` value of 0 means real traffic that sends no session id, not absence of traffic.\n\n**Coverage: identity is complete, client resolution is not.** Once the identity backfill has reached the oldest row in `dial_usage_log`, `user_ref` coverage is 100% at any range, so the default range can be 30d like the other dashboards. Client resolution is usually *not* complete: events whose `client_type` is the `other` catch-all, or that carry no session id, can be a large share — the client-mix and session columns describe only the resolved part. The coverage panel plots all three lines. Separately, **if `conversation_insights` stalls or lags**, the chat activity-mix panel reads `not yet enriched` for every conversation in a recent window until that pipeline resumes.\n\n**`user_roles` is not job function.** It mixes DIAL permissions (`default`, `admin`, `full`), service identities, Keycloak boilerplate (`uma_authorization`), AD groups and even DIAL folder paths. The roles panel is a governance view, not an org chart.\n\n**Never join `sessions` to `conversations`.** The ids collide (Core stamps the harness session id as the chat id on router-wrapped traffic) but the two tables count different hop populations — the same id can read hundreds of turns in `sessions` and one in `conversations`. One spine per panel.\n\n**Cost columns.** Usage-log panels use `deployment_price` (per-hop, no chain double-counting). The activity panel uses `conversations.total_price` and says so in its column name; the two do not tie.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and this dashboard has none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values.\n\n**Roles come from `array_join`.** The roles panel expands the `user_roles` array into one row per role per principal. *Spend by client type over time* buckets **daily** to stay under the 1,000-row cap."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Headline",
+      "description": "Principals, sessions, turns and spend over the usage-log spine, keyed on user_ref, over identified events only (user_ref present). The JWT and key sub-counts are shown because they tell you the id-space composition, and they partition exactly — they are NOT a people-vs-machines split. Spend is deployment_price (a hop's own cost, so a routed chain is not double-counted), which runs below total_price. Sessions counts distinct non-empty client_session_id, so it can sit far below Turns: much traffic sends no session id. Where identity coverage is 100% these are gateway totals; widen the range past the identity backfill and Turns/Spend silently shrink to the enriched subset.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(DISTINCT \\\"usage_client_identity.user_ref\\\") AS \\\"Principals\\\", count(DISTINCT CASE WHEN \\\"usage_client_identity.auth_type\\\" = 'jwt' THEN \\\"usage_client_identity.user_ref\\\" END) AS \\\"of which JWT id space\\\", count(DISTINCT CASE WHEN \\\"usage_client_identity.auth_type\\\" = 'api_key' THEN \\\"usage_client_identity.user_ref\\\" END) AS \\\"of which key id space\\\", count(DISTINCT CASE WHEN \\\"usage_client_identity.client_session_id\\\" <> '' THEN \\\"usage_client_identity.client_session_id\\\" END) AS \\\"Sessions\\\", count(DISTINCT trace_id) AS \\\"Turns\\\", round(sum(deployment_price), 2) AS \\\"Spend $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"usage_client_identity.user_ref\\\" IS NOT NULL AND \\\"usage_client_identity.user_ref\\\" <> ''\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Principals",
+              "text": "Principals",
+              "type": "number"
+            },
+            {
+              "selector": "of which JWT id space",
+              "text": "of which JWT id space",
+              "type": "number"
+            },
+            {
+              "selector": "of which key id space",
+              "text": "of which key id space",
+              "type": "number"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Principals": 0,
+              "of which JWT id space": 1,
+              "of which key id space": 2,
+              "Sessions": 3,
+              "Turns": 4,
+              "Spend $": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Enrichment coverage — the honesty guard",
+      "description": "Three hourly coverage lines over the usage-log spine (fixed 1h buckets, not panel width). **Principal coverage %** is the share of events whose `usage_client_identity.user_ref` is populated — every principal panel here is blind wherever it is below 100%, and it reads 0 for any hour whose events have not been identity-enriched yet, so it is also the freshness guard. **Client resolved %** is the share whose `client_type` is something other than the `other` catch-all: where it is low, the client-mix panels describe only a minority of the traffic. **Session-id coverage %** is the share carrying a normalised `client_session_id` — the rest is real traffic that sends no session id, which is why a `Sessions` value of 0 is not absence of traffic. A cliff in principal coverage marks where the identity backfill stops.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, round(100.0 * count(CASE WHEN \\\"usage_client_identity.user_ref\\\" <> '' THEN 1 END) / count(*), 1) AS \\\"Principal coverage %\\\", round(100.0 * count(CASE WHEN \\\"usage_client_identity.client_type\\\" <> 'other' THEN 1 END) / count(*), 1) AS \\\"Client resolved %\\\", round(100.0 * count(CASE WHEN \\\"usage_client_identity.client_session_id\\\" <> '' THEN 1 END) / count(*), 1) AS \\\"Session-id coverage %\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Principal coverage %",
+              "text": "Principal coverage %",
+              "type": "number"
+            },
+            {
+              "selector": "Client resolved %",
+              "text": "Client resolved %",
+              "type": "number"
+            },
+            {
+              "selector": "Session-id coverage %",
+              "text": "Session-id coverage %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false,
+          "calcs": [
+            "mean",
+            "min"
+          ]
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "Principal coverage %": 1,
+              "Client resolved %": 2,
+              "Session-id coverage %": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Cohorts by client mix — not by identity type",
+      "description": "Principals bucketed by the client mix they actually drove, computed per user_ref over the usage log (only identity-enriched events count, so the range matters). A principal is in 'Both' if it made at least one agent-client call (claudecode/codex/opencode) AND at least one chat call; 'Agent only'/'Chat only' mean 'no chat'/'no agent' — either may still carry 'other' traffic. That a mixed cohort exists at all is why splitting panels by auth type was wrong: one key is both a coding agent and a chat user. Which cohort spends most moves with the window, so read the numbers, not a fixed ranking. 'Other client only' is app and service traffic (service identities, evaluation jobs, the enrichment runner): neither coding-agent nor interactive, and it can dominate turn volume. Sorted by Spend $ descending; cost is deployment_price (per-hop, no chain double-counting).",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT CASE WHEN agent > 0 AND chat > 0 THEN 'Both (agent + chat)' WHEN agent > 0 THEN 'Agent only' WHEN chat > 0 THEN 'Chat only' ELSE 'Other client only' END AS \\\"Cohort\\\", count(*) AS \\\"Principals\\\", sum(turns) AS \\\"Turns\\\", round(sum(turns) * 1.0 / count(*), 0) AS \\\"Turns per principal\\\", round(sum(spend), 2) AS \\\"Spend $\\\", round(sum(spend) / count(*), 2) AS \\\"Spend per principal $\\\" FROM (SELECT \\\"usage_client_identity.user_ref\\\" AS user_ref, count(CASE WHEN \\\"usage_client_identity.client_type\\\" IN ('claudecode','codex','opencode') THEN 1 END) AS agent, count(CASE WHEN \\\"usage_client_identity.client_type\\\" = 'chat' THEN 1 END) AS chat, count(DISTINCT trace_id) AS turns, sum(deployment_price) AS spend FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"usage_client_identity.user_ref\\\" IS NOT NULL AND \\\"usage_client_identity.user_ref\\\" <> '' GROUP BY 1) GROUP BY 1 ORDER BY 5 DESC NULLS LAST LIMIT 100\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Cohort",
+              "text": "Cohort",
+              "type": "string"
+            },
+            {
+              "selector": "Principals",
+              "text": "Principals",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Turns per principal",
+              "text": "Turns per principal",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Spend per principal $",
+              "text": "Spend per principal $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend per principal $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns per principal"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Cohort": 0,
+              "Principals": 1,
+              "Turns": 2,
+              "Turns per principal": 3,
+              "Spend $": 4,
+              "Spend per principal $": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Spend by client type over time",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'day', request_time) AS ts, coalesce(\\\"usage_client_identity.client_type\\\", 'unattributed') AS client, sum(deployment_price) AS spend FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment_price > 0 GROUP BY 1, 2 ORDER BY 1, 2 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "client",
+              "text": "client",
+              "type": "string"
+            },
+            {
+              "selector": "spend",
+              "text": "spend",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "client"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ],
+      "description": "Daily spend (`sum(deployment_price)`, USD) split by the client type the request came from, stacked. `deployment_price` is a hop's own cost, so summing it over a routed chain does not double-count; `total_price` would. Client type is read as a dotted column on the usage-log spine (`usage_client_identity.client_type`), which is a left-join semantic: a hop with no identity row lands in 'unattributed' rather than being dropped (once identity is backfilled that bucket is empty - its appearance means the range has outrun enrichment). Only priced hops count (`deployment_price > 0`); a large share of hops can carry no price, and a client type whose hops are all unpriced gets no series at all. Buckets are a fixed 1 day and do NOT follow panel width - ADAS has no `$__timeInterval` macro - which also keeps 5 series x 14 days well under the hard 1,000-row cap (hourly would be 1,680 rows and ADAS would truncate silently). With a `now-14d` range the first and last bars are partial, starting and ending at the range boundary rather than midnight: a boundary bar can hold only an hour or two of spend against a full day's worth elsewhere."
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Activity mix in chat conversations",
+      "description": "Activity mix of chat conversations: the LLM-derived conversation_insights.activity_type read as a dotted column on the conversations spine — same grain (chat_id), left-join semantics, no cross-spine join. One row per label, sorted by total Turns descending; Turns/conversation is Turns / Conversations. Population: only chat traffic gets a conversations row, because native harness traffic carries no chat id, so harness activity cannot be labelled until session_insights is populated. Coverage caveat: if the conversation-insights pipeline has not covered the window, every conversation falls in 'not yet enriched' and the panel carries no signal — move the range to a period the pipeline has labelled. Compare Turns/conversation across labels: chat traffic can carry heavy development work, not only harness traffic. Spend is conversations.total_price (the conversation rollup) and does not tie to the deployment_price usage-log panels.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT CASE WHEN \\\"conversation_insights.enriched_at\\\" IS NULL THEN 'not yet enriched' WHEN \\\"conversation_insights.activity_type\\\" IS NULL THEN 'enriched, no label' ELSE to_string(\\\"conversation_insights.activity_type\\\") END AS \\\"Activity\\\", count(*) AS \\\"Conversations\\\", sum(turn_count) AS \\\"Turns\\\", round(sum(turn_count) * 1.0 / count(*), 1) AS \\\"Turns/conversation\\\", round(sum(total_price), 2) AS \\\"Spend $ (conv rollup)\\\" FROM conversations WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Conversations",
+              "text": "Conversations",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Turns/conversation",
+              "text": "Turns/conversation",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $ (conv rollup)",
+              "text": "Spend $ (conv rollup)",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $ (conv rollup)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Activity": 0,
+              "Conversations": 1,
+              "Turns": 2,
+              "Turns/conversation": 3,
+              "Spend $ (conv rollup)": 4
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Actors — one row per principal, whatever it is",
+      "description": "Every principal on one list, keyed on user_ref, replacing the old separate 'projects/keys' and 'people' tables. Auth tells you the id space; Clients is the mix that principal actually drove. Read the id space off the Auth column, not off the string: api_key principals are readable DIAL project names, jwt principals are opaque ids — usually a UUID, but some can be 'auth0|…' or a bare numeric IdP id. Sessions = 0 is real traffic that sends no session id (service and SDK paths), not missing data — which is why this is built on the usage log rather than on sessions. Sorted by Spend $ descending, top 500 principals; a blank Spend $ means every hop that principal drove carries a null price, and those rows sort last.",
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT \\\"usage_client_identity.user_ref\\\" AS \\\"Principal\\\", array_to_string(group_uniq_array(\\\"usage_client_identity.auth_type\\\"), ', ') AS \\\"Auth\\\", array_to_string(group_uniq_array(\\\"usage_client_identity.client_type\\\"), ', ') AS \\\"Clients\\\", count(DISTINCT CASE WHEN \\\"usage_client_identity.client_session_id\\\" <> '' THEN \\\"usage_client_identity.client_session_id\\\" END) AS \\\"Sessions\\\", count(DISTINCT trace_id) AS \\\"Turns\\\", round(sum(deployment_price), 2) AS \\\"Spend $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"usage_client_identity.user_ref\\\" IS NOT NULL AND \\\"usage_client_identity.user_ref\\\" <> '' GROUP BY 1 ORDER BY 6 DESC NULLS LAST LIMIT 500\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Principal",
+              "text": "Principal",
+              "type": "string"
+            },
+            {
+              "selector": "Auth",
+              "text": "Auth",
+              "type": "string"
+            },
+            {
+              "selector": "Clients",
+              "text": "Clients",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Spend $",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Principal": 0,
+              "Auth": 1,
+              "Clients": 2,
+              "Sessions": 3,
+              "Turns": 4,
+              "Spend $": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Roles — governance view, not an org chart",
+      "description": "Roles carried by the token or key, exploded: every event is counted once per role it holds, so Events and Spend $ deliberately double-count — the column can sum to several times actual gateway spend. Compare rows with each other; never read the column as a total. Principals is distinct user_ref; Auth is the set of auth types seen under the role (unordered). Events whose token carries no role at all are excluded. Sorted by Spend $ descending, top 500 roles (the 1,000-row cap is the ceiling). Read it for governance: how many principals hold admin or full, and which service identities burn budget. A role with few principals but high spend is a service identity or a shared key worth a look. NOT a job-function breakdown — see the notes panel.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT array_join(\\\"usage_client_identity.user_roles\\\") AS \\\"Role\\\", count(DISTINCT \\\"usage_client_identity.user_ref\\\") AS \\\"Principals\\\", array_to_string(group_uniq_array(coalesce(\\\"usage_client_identity.auth_type\\\", 'unknown')), ', ') AS \\\"Auth\\\", count(*) AS \\\"Events\\\", round(sum(deployment_price), 2) AS \\\"Spend $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND array_length(\\\"usage_client_identity.user_roles\\\") > 0 GROUP BY 1 ORDER BY 5 DESC NULLS LAST LIMIT 500\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Role",
+              "text": "Role",
+              "type": "string"
+            },
+            {
+              "selector": "Principals",
+              "text": "Principals",
+              "type": "number"
+            },
+            {
+              "selector": "Auth",
+              "text": "Auth",
+              "type": "string"
+            },
+            {
+              "selector": "Events",
+              "text": "Events",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Spend $",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Role": 0,
+              "Principals": 1,
+              "Auth": 2,
+              "Events": 3,
+              "Spend $": 4
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

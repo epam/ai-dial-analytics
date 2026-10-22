@@ -1,0 +1,99 @@
+# Data-sync column mapping for the dial_usage_log_payload table — the five verbatim-content columns of
+# the usage log, stored separately so they can carry a shorter retention (90 days against
+# dial_usage_log's one year). See db/migration/clickhouse/V10__create_dial_usage_log_payload.sql.
+#
+# THIS IS THE ONLY PLACE THESE FIVE COLUMNS ARE CAPTURED. dial-usage-log.yaml declared them until the
+# split; it stopped declaring them when this mapping took over capturing them, so removing a column
+# here is now the off switch for capturing it at all. The physical columns still exist on
+# dial_usage_log, unmapped there, so they read back at their type default on every new row.
+#
+# Match-all (no `match:` block), exactly like dial-usage-log.yaml: this table shadows the usage log
+# one-for-one, so it must emit for every record the parent emits for. Both mappings run over the same
+# record under the same predicate and the same dedup-key drop rule, so the two rows a record produces
+# are always both produced or both dropped — which is what keeps the grain join from finding a usage-log
+# row with no payload row.
+#
+# WARNING — PII / credentials: this mapping captures the raw prompt body, the raw response body, the
+# producer's merged answer, the caller's JWT claims and the request headers. The last two are why the
+# claim/header pair moved at all — headers can carry bearer tokens, cookies and forwarded client IPs
+# (see Postgres V3 and V12), and a year is a long time to hold one. All five are seeded `sensitive` in
+# the catalog, so only FULL_ADMIN callers see them; the table's 90-day TTL bounds how long they are
+# kept.
+#
+# Columns beyond the five moved ones, and why each is here:
+#   event_id     — the row key. ORDER BY (event_id) is this table's unique key, and the column the
+#                  catalog's grain join matches on. Derived by the same hash-uuid over
+#                  (trace.trace_id, trace.core_span_id) that dial-usage-log.yaml uses, so the two rows
+#                  a record produces carry the SAME event_id and correspond one-to-one.
+#   request_time — drives PARTITION BY toYYYYMMDD(request_time) and the TTL. NO default, on purpose: a
+#                  record whose request.time is absent is dropped at ingest (see BlobIngestor) rather
+#                  than defaulted to an epoch timestamp that would land in a separate partition.
+#   trace_id,
+#   core_span_id — load-bearing, not provenance. BlobIngestor decides the dedup-key drop on the row a
+#                  target produced: a row with a blank trace_id or core_span_id is dropped for that
+#                  target. Without these two columns EVERY payload row would be dropped. Keeping the
+#                  rule honest matters on its own terms as well, since a record with a blank trace_id
+#                  hashes to a constant event_id and would collapse every such payload into one row.
+#                  rate-analytics.yaml maps the same pair for the same reason.
+#
+# Column order matches the physical table. _updated_at (DEFAULT now64(3)) is the only table column left
+# unmapped, so it applies its ClickHouse default: the caller never sets the ReplacingMergeTree version,
+# and duplicate writes per event_id collapse to the latest on a final=1 read.
+#
+# Override the active targets/mappings via sync.targets (see docs/configuration.md).
+
+columns:
+  - column: event_id
+    derive: hash-uuid
+    sources: [trace.trace_id, trace.core_span_id]
+    kind: string
+  - column: request_time
+    source: request.time
+    kind: string
+    transform: iso-to-ch-datetime
+  - column: trace_id
+    source: trace.trace_id
+    kind: string
+  - column: core_span_id
+    source: trace.core_span_id
+    kind: string
+  # Non-nullable, because ClickHouse has no Nullable(JSON). An absent source object falls back to the
+  # empty JSON object, and an unmatched grain join renders the same {} — which is safe here precisely
+  # because no accessor can tell those apart from a present document missing the key (see
+  # EntityFields.absenceIsUnrepresentable, which exempts object columns for that reason).
+  # request_tags additionally lower-cases its top-level KEYS (values are untouched) so header names are
+  # stored in one case; rows written before that took effect keep their original case, which
+  # json_extract_string_ci reads.
+  - column: jwt_claims
+    source: claims
+    kind: object
+  - column: request_tags
+    source: headers
+    kind: object
+    transform: lowercase-json-keys
+  # Nullable so "the producer sent nothing" stays distinguishable from "the producer sent empty".
+  # Stored verbatim under sync.inline-files-mode=keep: ingest then never parses, validates or
+  # reshapes a payload. A minority of records carry an assembled_response that is not JSON (some an SSE
+  # transcript); under keep those are stored as-is, and under drop/drop-truncated an SSE transcript is
+  # scanned event by event like a streamed response body.
+  # inline-files marks the three as bodies whose inline files sync.inline-files-mode governs. Under
+  # drop-truncated, only a body Core cut at 4 MiB is touched: it is cut back to before the half file the
+  # cut landed in, and complete files are kept. Under drop,
+  # the payloads of files at the fixed JSON locations of the record's API (inferred from request.uri the
+  # way DIAL Core routes it) are removed, and nothing else is changed. assembled_response is the merged
+  # response, so it is scanned as a response body.
+  - column: request_body
+    source: request.body
+    kind: string
+    nullable: true
+    inline-files: { body: request, uri: request.uri }
+  - column: response_body
+    source: response.body
+    kind: string
+    nullable: true
+    inline-files: { body: response, uri: request.uri }
+  - column: assembled_response
+    source: assembled_response
+    kind: string
+    nullable: true
+    inline-files: { body: response, uri: request.uri }

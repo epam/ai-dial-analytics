@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="${env:LOGGER_STATUS_LOG_LEVEL:-WARN}">
+
+    <!-- No monitorInterval: runtime level changes come from the mounted level file (LOG_CONFIG_PATH), applied
+         per logger with a time box and an audit line. A whole-configuration reload would compete with it. -->
+
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout
+                    pattern="%style{%d{ISO8601}}{green} %highlight{%-5level} trace_id: %X{trace_id} span_id=%X{span_id} pipeline=%X{pipeline_name} request=%X{request_id} [%style{%t}{bright,blue}] %style{%c{1.}}{bright,yellow}: %msg%n%throwable"/>
+        </Console>
+        <!-- buffer startup log events until OpenTelemetryLogAppenderConfiguration installs the SDK,
+             so logs emitted before Spring context refresh still reach the OTLP exporter -->
+        <OpenTelemetry name="OpenTelemetryAppender" numLogsCapturedBeforeOtelInstall="1000"
+                       captureContextDataAttributes="pipeline_name,request_id,caller,query_id"/>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="OpenTelemetryAppender" level="All"/>
+            <AppenderRef ref="Console"/>
+        </Root>
+
+        <Logger name="com.epam" level="${env:APP_LOG_LEVEL:-INFO}"/>
+
+        <!-- Pinned at INFO independently of APP_LOG_LEVEL. The SQL logger carries statement text, which inlines
+             filter values, cursor tuples and group keys; Spring's HTTP client and converter loggers print request
+             and response bodies at DEBUG and TRACE; Hibernate's and Spring JDBC's statement loggers print the
+             catalog's SQL and its bound values (declarations, saved queries). Each pin is its own logger entry, so
+             a level set on an ancestor (com.epam, org.springframework, org.hibernate) leaves it in place, and the
+             runtime level file refuses anything below INFO for these names and their descendants. The same set
+             as the Enrichment Runner's, plus this service's own SQL logger and jclouds' blob-storage loggers,
+             which print request and response bodies, the Authorization header and the string-to-sign at DEBUG. -->
+        <Logger name="com.epam.aidial.analytics.sql" level="INFO"/>
+        <Logger name="jclouds.wire" level="INFO"/>
+        <Logger name="jclouds.headers" level="INFO"/>
+        <Logger name="jclouds.signature" level="INFO"/>
+        <Logger name="org.springframework.web.client" level="INFO"/>
+        <Logger name="org.springframework.http.converter" level="INFO"/>
+        <Logger name="org.hibernate.SQL" level="INFO"/>
+        <Logger name="org.hibernate.orm.jdbc.bind" level="INFO"/>
+        <Logger name="org.springframework.jdbc.core" level="INFO"/>
+    </Loggers>
+
+</Configuration>

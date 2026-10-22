@@ -1,0 +1,93 @@
+# Local preview of the ADAS dashboards — a development convenience, NOT a deployment.
+#
+# It brings up a throwaway Grafana with the Infinity plugin, the datasource in provisioning/ and the
+# dashboards in dashboards/, pointed at an ADAS you are already running. Use it to look at a change
+# to a dashboard before committing it. Its posture (anonymous access, no login form, loopback bind)
+# is safe only because it is loopback-only and holds no secrets — see docs/grafana-dashboards.md,
+# "The local preview stack", and do not lift this service definition into a cluster.
+#
+# Standalone on purpose: it shares no network or volume with local_env/docker-compose.yml and can be
+# started, stopped and deleted without disturbing the data stores.
+#
+#   docker compose -f grafana/docker-compose.yml up -d --wait
+#
+# Requires ADAS running on the host. Everything goes over REST (`execute-sql`), so the Arrow Flight
+# listener can stay off — FLIGHT_ENABLED is not needed.
+
+name: adas-grafana
+
+services:
+  grafana:
+    image: grafana/grafana:${GRAFANA_IMAGE_TAG:-11.6.3}
+    container_name: adas-grafana
+    ports:
+      # Loopback-qualified on purpose. This service runs an unauthenticated web UI (see
+      # GF_AUTH_ANONYMOUS_* below) that can read dial_usage_log through ADAS, and an unqualified
+      # "3000:3000" mapping would bind 0.0.0.0 — handing that to anyone on the network.
+      # Override GRAFANA_BIND_ADDR (e.g. 0.0.0.0) only if you deliberately want it reachable.
+      - "${GRAFANA_BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    # ADAS runs on the host (./gradlew bootRun), not in a container — the repo Dockerfile's build
+    # stage needs GPR credentials, which local dev shouldn't require. Docker Desktop and Rancher
+    # Desktop both already resolve host.docker.internal to the real host, so there is deliberately NO
+    # extra_hosts entry: adding `host.docker.internal:host-gateway` OVERRIDES that mapping with the
+    # in-VM bridge address (172.17.0.1) and every request to ADAS fails with connection refused.
+    # On plain Linux Docker, where the name does not exist at all, override the address instead:
+    #   ADAS_BASE_URL=http://172.17.0.1:5000 docker compose -f <this file> up -d
+    environment:
+      # Infinity is a community plugin fetched at container start — this service needs network
+      # access on its first boot (it is then cached in the grafana-data volume). Mind the plugin id:
+      # asking for one that does not exist makes the entrypoint exit 1 ("404: Plugin not found"),
+      # which combined with `restart: unless-stopped` is an endless restart loop rather than an
+      # obvious error. The version is pinned because plugin behaviour the dashboards depend on is
+      # version-specific (Infinity's $__from interpolation and its backend parser alphabetizing
+      # fields), which an unpinned upgrade could change with no diff to show for it. The dashboards
+      # were also confirmed on Infinity 4.0.0 under a vanilla Grafana 13.2.2.
+      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource 3.11.1
+      # MANDATORY on 11.x, and the reason is not obvious: 11.6.3 auto-preinstalls
+      # grafana-lokiexplore-app and grafana-pyroscope-app, and lokiexplore's module.js imports
+      # `react/jsx-runtime` as a SystemJS external that this Grafana build does not serve. The
+      # resulting 404 does not stay contained to that one app — it breaks the SystemJS resolver for
+      # EVERY plugin, so all panels hang forever on "Loading plugin panel..." and the dashboards
+      # render as an empty page with no error shown. Nothing here uses Loki or Pyroscope, so the fix
+      # is to not install them at all. NB this only takes effect on a fresh volume: Grafana loads
+      # whatever is already in /var/lib/grafana/plugins regardless of the flag, so flipping it needs
+      # `down -v`.
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      # Local-only convenience: open http://localhost:3000 straight onto the dashboards, no login.
+      # Editor, not Admin: it is the least role that can still view the dashboards and use Explore,
+      # while being unable to CREATE datasources — which matters because an Admin here could add a
+      # ClickHouse datasource and read dial_usage_log directly, bypassing the ADAS governance every
+      # panel goes through. Nothing needs Admin: dashboards are file-provisioned and the datasource
+      # is declared `editable: false`. Never copy anonymous auth into a deployment, and do not widen
+      # GRAFANA_BIND_ADDR while it is on.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      # Consumed by provisioning/datasources/adas.yml (Grafana expands $VARS in provisioning files),
+      # so pointing Grafana at an ADAS running elsewhere needs no file edit.
+      ADAS_BASE_URL: ${ADAS_BASE_URL:-http://host.docker.internal:5000}
+      # Sent as ADAS's `Api-Key` header by the datasource. The default is a placeholder, not a
+      # credential: a security.mode=none ADAS ignores the header entirely, so local dev needs no
+      # key. Export the real one when ADAS_BASE_URL points at a secured deployment, e.g.
+      #   ADAS_BASE_URL=https://adas.example.com ADAS_API_KEY=$DIAL_API_KEY \
+      #     docker compose -f grafana/docker-compose.yml up -d --wait
+      ADAS_API_KEY: ${ADAS_API_KEY:-unset}
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      # The dashboard JSONs are mounted separately from provisioning/ because they are the artifact,
+      # not configuration of this particular Grafana. provisioning/dashboards/adas.yml points the
+      # file provider here.
+      - ./dashboards:/etc/adas-dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      # Generous retries: the first boot downloads the datasource plugin before serving.
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

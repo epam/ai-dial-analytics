@@ -1,0 +1,190 @@
+# Default data-sync column mapping for the dial_usage_log table (Analytics 2.0 `events` structure).
+#
+# A column is either MAPPED or DERIVED:
+#   - mapped:  declares `source` (a dotted JSON path within the record, or the $sourceFile synthetic
+#              token), an extraction `kind`, and optionally a `transform`, `default`, and `nullable`.
+#   - derived: declares a `derive` name (from the closed DeriverRegistry), an ordered `sources` list of
+#              dotted paths, optional `args`, and a `kind`. The deriver computes the value at ingest
+#              from the resolved source nodes; the same absent/blank fallback then applies.
+#
+# A nullable column whose value is absent/blank and has no default emits a JSON null (ClickHouse NULL);
+# a non-nullable column falls back to the kind's zero value so the insert stays valid.
+#
+# This mapping no longer captures any verbatim request/response content: the two bodies, the merged
+# `assembled_response`, the JWT claims and the request headers are all captured by
+# mapping/dial-usage-log-payload.yaml into dial_usage_log_payload, under a 90-day retention instead of
+# this table's year. The bodies remain DERIVER SOURCES here (response_id, reasoning_tokens,
+# number_request_messages, mcp_method, mcp_tool_call_name, request_body_bytes, response_body_bytes
+# all read them off the parsed record), which is a read of the incoming record and persists nothing.
+#
+# Column order matches the physical table: db/migration/clickhouse/V1__create_dial_usage_log.sql,
+# less the five columns this mapping stopped capturing (see below). _ingested_at (DEFAULT
+# now64(3)) is the only table column left unmapped, so it applies its ClickHouse default.
+# operation_duration_ms is the producer's own measurement, copied as reported and never recomputed here:
+# DIAL measures from accepting the request to having the full response body (for a background job, to
+# emitting the log entry, which includes its detection lag) and clamps the result at zero, so a reported 0
+# is a real sub-millisecond operation, not a missing value. A core predating the field omits it entirely
+# and the non-nullable fallback then stores 0 — on that producer version the column cannot distinguish
+# "not reported" from a measured zero, which is why it stays non-nullable.
+# _source_file carries ingest provenance only; it is
+# NOT part of the dedup key. Dedup is by the table's ReplacingMergeTree engine on the full ORDER BY sort
+# key (project_id, deployment, request_time, trace_id, core_span_id) within a daily partition — so every
+# column in that key must be deterministic per span. request_time has NO default here on purpose: a
+# record whose request.time is absent is dropped at ingest (see BlobIngestor) rather than defaulted to an
+# epoch timestamp that would land in a separate partition and never collapse with the real row.
+#
+# The three body columns this mapping used to declare — request_body, response_body,
+# assembled_response — have MOVED to mapping/dial-usage-log-payload.yaml and to the
+# dial_usage_log_payload table, which holds them for 90 days rather than a year. This mapping no
+# longer declares any of the five verbatim-content columns, and ClickHouse V11 has dropped them from
+# the physical dial_usage_log table. They are still queryable, from the same entity, under their
+# qualified names ("dial_usage_log_payload.request_body" and so on).
+#
+# None of the derivers below was affected by that move: response_id, reasoning_tokens,
+# number_request_messages, mcp_method, mcp_tool_call_name and the two *_bytes columns all read
+# request.body / response.body / assembled_response from the PARSED RECORD, never from a stored
+# ClickHouse column, so where the payload is persisted is irrelevant to them. The two *_bytes columns
+# stay here deliberately — they are 4 bytes each, they are the only way to size a payload before
+# fetching it, and they must outlive the payload they describe.
+#
+# Override the active mapping with SYNC_MAPPING_FILE (e.g. file:/config/mapping.yaml).
+
+columns:
+  - column: event_id
+    derive: hash-uuid
+    sources: [trace.trace_id, trace.core_span_id]
+    kind: string
+  - column: event_kind
+    derive: classify-event-kind
+    sources: [request.uri]
+    kind: string
+  - column: request_time
+    source: request.time
+    kind: string
+    transform: iso-to-ch-datetime
+  - column: _source_file
+    source: $sourceFile
+    kind: string
+  - column: project_id
+    source: project.id
+    kind: string
+  - column: chat_id
+    source: chat.id
+    kind: string
+  - column: trace_id
+    source: trace.trace_id
+    kind: string
+  - column: core_span_id
+    source: trace.core_span_id
+    kind: string
+  - column: core_parent_span_id
+    source: trace.core_parent_span_id
+    kind: string
+    nullable: true
+  - column: execution_path
+    source: execution_path
+    kind: array<string>
+    # Redundant by design: the array<string> kind already coerces the source node to a List<String>, so
+    # the string-array transform (which re-coerces that same list element-by-element) is an identity no-op
+    # here. It is kept as an explicit declaration of intent that this column is array-shaped, mirroring how
+    # scalar columns name their transforms; it changes no output. Drop it only together with the kind.
+    transform: string-array
+  - column: parent_deployment
+    source: parent_deployment
+    kind: string
+    nullable: true
+  - column: deployment
+    source: deployment
+    kind: string
+  - column: response_upstream_uri
+    source: response.upstream_uri
+    kind: string
+    nullable: true
+  - column: user_hash
+    source: user.id
+    kind: string
+  - column: response_id
+    derive: json-extract-string
+    sources: [assembled_response, response.body]
+    args: { path: id }
+    kind: string
+  - column: prompt_tokens
+    source: token_usage.prompt_tokens
+    kind: long
+    nullable: true
+  - column: completion_tokens
+    source: token_usage.completion_tokens
+    kind: long
+    nullable: true
+  - column: total_tokens
+    source: token_usage.total_tokens
+    kind: long
+    nullable: true
+  - column: cached_prompt_tokens
+    source: token_usage.prompt_tokens_details.cached_tokens
+    kind: long
+    nullable: true
+  # Mapped from the producer's own accounting, NOT derived from the response payload. The count is not
+  # reachable there for most calls: a streamed response leaves both `assembled_response` and
+  # response.body holding an SSE transcript, which is not a JSON document at all, and the normalized
+  # (OpenAI-shaped) payload spells the count `usage.prompt_tokens_details.cache_write_tokens` while an
+  # Anthropic-native one spells it `usage.cache_creation_input_tokens`. Every one of those misses ends
+  # in the deriver's absent fallback, which is indistinguishable from a real zero. `token_usage` is
+  # populated by DIAL for every transport and upstream dialect, so it is the one source that answers
+  # for all of them — the sibling `cached_prompt_tokens` reads the neighbouring key of this same object.
+  - column: cache_creation_tokens
+    source: token_usage.prompt_tokens_details.cache_write_tokens
+    kind: long
+    nullable: true
+  - column: reasoning_tokens
+    derive: json-extract-uint
+    sources: [assembled_response, response.body]
+    args: { path: usage.completion_tokens_details.reasoning_tokens }
+    kind: long
+  - column: number_request_messages
+    derive: json-array-length
+    sources: [request.body]
+    args: { path: messages }
+    kind: long
+  - column: total_price
+    source: token_usage.price
+    kind: double
+    nullable: true
+  - column: deployment_price
+    source: token_usage.deployment_price
+    kind: double
+    nullable: true
+  - column: operation_duration_ms
+    source: operation_duration_ms
+    kind: long
+  - column: response_status
+    source: response.status
+    kind: long
+  - column: success
+    derive: success-from-status
+    sources: [response.status]
+    kind: bool
+  - column: request_method
+    source: request.method
+    kind: string
+  - column: request_uri
+    source: request.uri
+    kind: string
+  - column: mcp_method
+    derive: json-extract-string
+    sources: [request.body]
+    args: { path: method }
+    kind: string
+  - column: mcp_tool_call_name
+    derive: json-extract-string
+    sources: [request.body]
+    args: { path: params.name }
+    kind: string
+  - column: request_body_bytes
+    derive: byte-length
+    sources: [request.body]
+    kind: long
+  - column: response_body_bytes
+    derive: byte-length
+    sources: [response.body]
+    kind: long

@@ -1,0 +1,31 @@
+-- Make retention expiry drop whole parts instead of rewriting them, on both ingest targets.
+--
+-- V1/V2 give dial_usage_log and rate_analytics a row-level `TTL toDateTime(request_time) + INTERVAL 1 YEAR`.
+-- A row-level TTL is applied by a mutation-style rewrite: ClickHouse writes the surviving rows of a part
+-- to a new part before releasing the old one, so it needs free disk equal to the part it is rewriting. On a
+-- volume that has filled up that is exactly backwards — the mechanism meant to reclaim space is the one
+-- thing that cannot run, the same trap as `OPTIMIZE ... FINAL`. With `ttl_only_drop_parts = 1` an expired
+-- part is dropped instead, which frees space without needing any.
+--
+-- Precision cost, accepted deliberately: a part is dropped only once its NEWEST row has expired. Both
+-- tables are `PARTITION BY toYYYYMMDD(request_time)` and both express the TTL on request_time, so a part
+-- holds a single day's rows and a row can outlive its TTL by at most that day. Against a one-year retention
+-- that is noise, and it buys expiry that works on a full disk.
+--
+-- The server default is 0 (verified on ClickHouse 25.3.14.14), so this is a real change rather than a
+-- restatement; re-running it is accepted, so the statements are idempotent. `MODIFY SETTING` is
+-- metadata-only: it schedules no mutation, rewrites no part, needs no free space, and leaves the sort key,
+-- the partitioning and the TTL expression untouched. The setting becomes visible in `SHOW CREATE TABLE`
+-- (and `system.tables.engine_full`) as part of the table's `SETTINGS` clause.
+--
+-- Grant note: `MODIFY SETTING` is an alias of the `ALTER SETTINGS` privilege — a different ALTER TABLE
+-- sub-privilege from the `ALTER ADD COLUMN` / `ALTER MODIFY COLUMN` / `ALTER ADD INDEX` /
+-- `ALTER MATERIALIZE INDEX` that V3/V6/V7 exercise. A deployment whose writer credential is granted ALTER
+-- sub-privileges individually rather than wholesale must add it, or startup fails here (by design: a
+-- migration failure aborts startup rather than ingesting against a half-provisioned table).
+--
+-- This complements V1/V2 rather than editing them (an applied migration's checksum is fixed): a fresh
+-- install runs V1/V2 then this file, and an operator running with clickhouse.migrations.enabled=false
+-- applies the DDL out of band in the same version order.
+ALTER TABLE dial_usage_log MODIFY SETTING ttl_only_drop_parts = 1;
+ALTER TABLE rate_analytics MODIFY SETTING ttl_only_drop_parts = 1;

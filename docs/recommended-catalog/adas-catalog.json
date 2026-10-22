@@ -1,0 +1,816 @@
+{
+  "format": "adas-catalog",
+  "format_version": 1,
+  "exported_at": "2026-10-20T11:22:44.814042610Z",
+  "skipped": [],
+  "required_system_tables": [
+    "dial_usage_log",
+    "dial_usage_log_payload"
+  ],
+  "tables": [
+    {
+      "table": {
+        "name": "sessions",
+        "description": "One row per client session, rolled up from dial_usage_log. The session key is the client's own id, normalised across clients by the usage_client_identity enrichment: DIAL's conversation id for chat traffic, the harness session or thread id for coding agents. Covers chat and coding-agent traffic alike. Hops that carry no session id at all are out of scope and get no row.",
+        "type": "source",
+        "write": "upsert_by_key",
+        "tag_order": [
+          "identity",
+          "client",
+          "principal",
+          "response",
+          "token-usage",
+          "cost",
+          "performance",
+          "deployment"
+        ]
+      },
+      "schema": {
+        "columns": [
+          {
+            "source_name": "client_session_id",
+            "name": "client_session_id",
+            "type": "string",
+            "nullable": false,
+            "description": "The client's own session id: DIAL's conversation id for chat traffic, the harness session or thread id for coding agents. Equal to chat_id for every chat session.",
+            "display_name": "Session ID",
+            "tag": "identity",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "client_types",
+            "name": "client_types",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Every distinct client label seen across the session's hops, ascending. Two entries mean a router-wrapped session, where the chain's entry hops carry a conversation id and the inner hops carry the harness header. Keeps the mixed case visible behind the single client_type.",
+            "display_name": "Client types",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "project_id",
+            "name": "project_id",
+            "type": "string",
+            "nullable": false,
+            "description": "DIAL project of the API key that made the requests. Arbitrary winner when a session spans more than one project.",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_hash",
+            "name": "user_hash",
+            "type": "string",
+            "nullable": false,
+            "description": "Anonymized hash identifying the end user. Empty for API-key sessions, which have no user.",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_refs",
+            "name": "user_refs",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Every distinct principal seen across the session's hops, ascending. More than one entry means the session mixed a user token with app or per-request keys.",
+            "display_name": "User references",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "auth_types",
+            "name": "auth_types",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Distinct authentication kinds seen across the session: jwt, api_key or both. Stored as a set rather than a single value because a session that starts on a user token and fans out into per-request keys is genuinely both.",
+            "display_name": "Auth types",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "turn_count",
+            "name": "turn_count",
+            "type": "long",
+            "nullable": false,
+            "description": "Number of turns (distinct traces) rolled up into this session.",
+            "tag": "response",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "success_count",
+            "name": "success_count",
+            "type": "long",
+            "nullable": false,
+            "description": "Number of turns that completed successfully (2xx response).",
+            "tag": "response",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "first_request_time",
+            "name": "first_request_time",
+            "type": "timestamp",
+            "nullable": false,
+            "description": "Timestamp of the session's first request.",
+            "tag": "identity",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "last_request_time",
+            "name": "last_request_time",
+            "type": "timestamp",
+            "nullable": false,
+            "description": "Timestamp of the session's last request.",
+            "tag": "identity",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "prompt_tokens",
+            "name": "prompt_tokens",
+            "type": "long",
+            "nullable": true,
+            "description": "Total prompt (input) tokens across all turns of the session. Summed over every hop of each turn, so work an application delegates to other deployments is counted more than once.",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "completion_tokens",
+            "name": "completion_tokens",
+            "type": "long",
+            "nullable": true,
+            "description": "Total completion (output) tokens across all turns of the session. Same all-span caveat as prompt_tokens.",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "total_tokens",
+            "name": "total_tokens",
+            "type": "long",
+            "nullable": true,
+            "description": "Total tokens across all turns (prompt plus completion). Same all-span caveat as prompt_tokens.",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "cache_creation_tokens",
+            "name": "cache_creation_tokens",
+            "type": "long",
+            "nullable": true,
+            "description": "Tokens written to the prompt cache across the session.",
+            "display_name": "Cache creation tokens",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "cached_prompt_tokens",
+            "name": "cached_prompt_tokens",
+            "type": "long",
+            "nullable": true,
+            "description": "Prompt tokens served from cache across the session.",
+            "display_name": "Cached prompt tokens",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "reasoning_tokens",
+            "name": "reasoning_tokens",
+            "type": "long",
+            "nullable": false,
+            "description": "Reasoning tokens generated across the session.",
+            "display_name": "Reasoning tokens",
+            "tag": "token-usage",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "total_price",
+            "name": "total_price",
+            "type": "decimal",
+            "nullable": true,
+            "description": "Session cost, summed from the per-hop deployment_price as computed at request-execution time. Later pricing corrections are not reflected.",
+            "tag": "cost",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "chain_price_total",
+            "name": "chain_price_total",
+            "type": "decimal",
+            "nullable": true,
+            "description": "Session cost summed top-down over chain-starting hops only. NULL when no turn has a chain-starting hop inside this session's population, which is common because DIAL Core does not stamp a conversation id on the proxy entry record. Use total_price as the cost column.",
+            "display_name": "Chain cost (top-down)",
+            "tag": "cost",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "duration_ms",
+            "name": "duration_ms",
+            "type": "long",
+            "nullable": false,
+            "description": "Hop durations added up. A hop's duration contains the durations of the hops it called, so a chained turn counts nested hops more than once and this exceeds elapsed time.",
+            "tag": "performance",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "avg_duration_ms",
+            "name": "avg_duration_ms",
+            "type": "decimal",
+            "nullable": false,
+            "description": "Mean duration per hop, not per turn — it averages over every hop of every turn.",
+            "tag": "performance",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "deployments",
+            "name": "deployments",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Distinct deployments that handled any hop of the session, ascending.",
+            "display_name": "Deployments",
+            "tag": "deployment",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "traces",
+            "name": "traces",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Distinct trace ids of the session's turns, ascending — one trace per turn, so the array's length equals turn_count.",
+            "display_name": "Trace IDs",
+            "tag": "identity",
+            "sensitive": false,
+            "heavy": true
+          },
+          {
+            "source_name": "client_type",
+            "name": "client_type",
+            "type": "string",
+            "nullable": true,
+            "description": "The most specific client seen in the session: claudecode, codex, opencode or chat. Taken as max(client_type) over the session's hops, which resolves to the harness whenever one is present because chat sorts before every harness name and other can never appear here (an other hop carries no session id and is filtered out). A router-wrapped harness session therefore reads as the harness, not as chat. Nullable because it is read through the outer grain join to usage_client_identity; in practice never null, since the pipeline filter already excludes every hop that enrichment has not reached.",
+            "display_name": "Client type",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "client_session_source",
+            "name": "client_session_source",
+            "type": "string",
+            "nullable": true,
+            "description": "Which field the session id was read from, taken as max over the session's hops so a native harness header wins over chat_id. Nullable because it is read through the outer grain join to usage_client_identity; in practice never null, since the pipeline filter already excludes every hop that enrichment has not reached.",
+            "display_name": "Session ID source",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_ref",
+            "name": "user_ref",
+            "type": "string",
+            "nullable": true,
+            "description": "Reference to the calling principal: the identity-provider user id for token calls, the DIAL project for API-key calls. Arbitrary winner when a session involves several principals, so read user_refs when that matters. Nullable because it is read through the outer grain join to usage_client_identity; in practice never null, since the pipeline filter already excludes every hop that enrichment has not reached.",
+            "display_name": "User reference",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_email",
+            "name": "user_email",
+            "type": "string",
+            "nullable": true,
+            "description": "Email of the calling user, from usage_client_identity.user_email taken as max over the session's hops, so a real email wins over the empty value API-key hops carry. Empty for API-key-only sessions. Personal data: admin-only.",
+            "display_name": "User email",
+            "tag": "principal",
+            "sensitive": true,
+            "heavy": false
+          },
+          {
+            "source_name": "user_display_name",
+            "name": "user_display_name",
+            "type": "string",
+            "nullable": true,
+            "description": "The calling user's name from the token's user_display_name claim, taken as max over the session's JWT hops only, since on API-key hops the same claim carries the key or project name. NULL for API-key-only sessions. Personal data: admin-only.",
+            "display_name": "User display name",
+            "tag": "principal",
+            "sensitive": true,
+            "heavy": false
+          }
+        ],
+        "ordering_key": [
+          "client_session_id"
+        ],
+        "identity_column": "client_session_id",
+        "version_column": "_updated_at"
+      }
+    },
+    {
+      "table": {
+        "name": "usage_client_identity",
+        "description": "Per-event client and principal identity derived from the usage log's captured headers and JWT claims: which client sent the request (DIAL Chat, Claude Code, Codex, OpenCode, other), the client's own session/conversation id normalised into one column, and how the caller authenticated (API key vs JWT) with the matching user reference, email and roles.",
+        "type": "enrichment",
+        "source_table": "dial_usage_log",
+        "tag_order": [
+          "client",
+          "principal",
+          "provenance"
+        ]
+      },
+      "schema": {
+        "columns": [
+          {
+            "source_name": "client_type",
+            "name": "client_type",
+            "type": "string",
+            "nullable": true,
+            "description": "Client that originated the request: claudecode, codex, opencode, chat or other. Decided by the native session header first, then by the user agent (a claude-cli, claude-code, codex or opencode build string), then by the DIAL channel header or a conversation id. Best-effort: a deep hop of a DIAL Chat chain reads as chat because it inherits the conversation id.",
+            "display_name": "Client type",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "client_session_id",
+            "name": "client_session_id",
+            "type": "string",
+            "nullable": true,
+            "description": "The client's own session or conversation id, normalised into one column: DIAL's conversation id when present, else the harness session or thread id. Empty when the client sends none — including the Claude Code SDK and CI paths, which client_type still labels claudecode. Id spaces differ per client, so read it together with client_type, and read client_session_source to know which field it came from.",
+            "display_name": "Client session ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "client_session_source",
+            "name": "client_session_source",
+            "type": "string",
+            "nullable": true,
+            "description": "Which field client_session_id was taken from: chat_id, x-claude-code-session-id, thread-id, x-session-id, or none. Keeps a normalised id from being mistaken for a native one.",
+            "display_name": "Session ID source",
+            "tag": "provenance",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "auth_type",
+            "name": "auth_type",
+            "type": "string",
+            "nullable": true,
+            "description": "How the caller authenticated: jwt when the request carried a user token (JWT claims present), api_key when it was made with a DIAL API key or a Core-issued per-request key, unknown when neither signal is present.",
+            "display_name": "Auth type",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_ref",
+            "name": "user_ref",
+            "type": "string",
+            "nullable": true,
+            "description": "Stable reference to the calling principal: the JWT user id for token calls, the DIAL project id for API-key calls. Opaque on both branches, so it can be grouped and counted without exposing personal data; read auth_type to know which id space it belongs to.",
+            "display_name": "User reference",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "user_email",
+            "name": "user_email",
+            "type": "string",
+            "nullable": true,
+            "description": "Email of the calling user, from the token's email claim and falling back to preferred_username. Empty for API-key calls, which have no user. Personal data: admin-only.",
+            "display_name": "User email",
+            "tag": "principal",
+            "sensitive": true,
+            "heavy": false
+          },
+          {
+            "source_name": "user_roles",
+            "name": "user_roles",
+            "type": "array",
+            "element_type": "string",
+            "nullable": false,
+            "description": "Role names carried by the token's roles claim, verbatim and unordered. For API-key calls this is the role set attached to the key. Empty array when the request carried no roles.",
+            "display_name": "User roles",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "cc_session_id",
+            "name": "cc_session_id",
+            "type": "string",
+            "nullable": true,
+            "description": "Claude Code session id from the x-claude-code-session-id request header, read case-insensitively. One value per CLI session; sub-agents of the same session repeat it. Empty for the Claude Code paths that send no session header (SDK and CI runners), which client_type still detects from the user agent.",
+            "display_name": "Claude Code session ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "cc_agent_id",
+            "name": "cc_agent_id",
+            "type": "string",
+            "nullable": true,
+            "description": "Claude Code sub-agent id from x-claude-code-agent-id, present only while a sub-agent runs. Keeps parallel sub-agent traffic separable inside one session instead of flattening it.",
+            "display_name": "Claude Code agent ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "codex_thread_id",
+            "name": "codex_thread_id",
+            "type": "string",
+            "nullable": true,
+            "description": "Codex CLI conversation id from the thread-id header: stable across codex resume, and the correct conversation key for Codex.",
+            "display_name": "Codex thread ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "opencode_session_id",
+            "name": "opencode_session_id",
+            "type": "string",
+            "nullable": true,
+            "description": "OpenCode session id from the X-Session-Id header, a ses_... value, read case-insensitively. Undocumented upstream but shipped, so treat it as convenient rather than contractual.",
+            "display_name": "OpenCode session ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "dial_channel_id",
+            "name": "dial_channel_id",
+            "type": "string",
+            "nullable": true,
+            "description": "DIAL client channel id from X-DIAL-CLIENT-CHANNEL-ID, sent by the DIAL Chat front end. A positive marker for chat traffic that does not depend on the conversation id.",
+            "display_name": "DIAL channel ID",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "client_user_agent",
+            "name": "client_user_agent",
+            "type": "string",
+            "nullable": true,
+            "description": "User-Agent header verbatim, read case-insensitively. Carries the client's own name and version, for example a claude-cli or claude-code build string, and is the fallback signal client_type uses when a client sends no session header.",
+            "display_name": "User agent",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "jwt_user_id",
+            "name": "jwt_user_id",
+            "type": "string",
+            "nullable": true,
+            "description": "The token's user_id claim: the identity-provider user id, present on token calls and absent on API-key calls. Its presence is the reliable marker of JWT authentication.",
+            "display_name": "JWT user ID",
+            "tag": "principal",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "jwt_preferred_username",
+            "name": "jwt_preferred_username",
+            "type": "string",
+            "nullable": true,
+            "description": "The token's preferred_username claim, in practice the user's email. Personal data: admin-only.",
+            "display_name": "Preferred username",
+            "tag": "principal",
+            "sensitive": true,
+            "heavy": false
+          },
+          {
+            "source_name": "jwt_display_name",
+            "name": "jwt_display_name",
+            "type": "string",
+            "nullable": true,
+            "description": "The user_display_name claim: a person's name on token calls, the key or project name on API-key calls. Personal data on the token branch: admin-only.",
+            "display_name": "Display name",
+            "tag": "principal",
+            "sensitive": true,
+            "heavy": false
+          },
+          {
+            "source_name": "pipeline_generation",
+            "name": "pipeline_generation",
+            "type": "long",
+            "nullable": true,
+            "description": "System column stamped by the pipeline that wrote this row, not produced by the model: the pipeline generation that produced it. Read the pipeline's audit trail at that generation to see the declaration — including the prompt — the row was computed under.",
+            "display_name": "Pipeline generation",
+            "tag": "system",
+            "sensitive": false,
+            "heavy": false
+          }
+        ],
+        "grain_key": "event_id"
+      }
+    },
+    {
+      "table": {
+        "name": "usage_request_baggage",
+        "description": "Per-event W3C baggage propagation header, lifted out of the usage log's captured request tags so it can be kept for a year — the retention of the event itself — where dial_usage_log_payload.request_tags expires at 90 days. Sparse by design: only events whose request carried a non-empty baggage header get a row.",
+        "type": "enrichment",
+        "source_table": "dial_usage_log",
+        "tag_order": [
+          "tracing",
+          "provenance"
+        ]
+      },
+      "schema": {
+        "columns": [
+          {
+            "source_name": "baggage",
+            "name": "baggage",
+            "type": "string",
+            "nullable": true,
+            "description": "The request's baggage header verbatim, read case-insensitively out of the captured request tags. A comma-separated list of key=value pairs — DIAL eval traffic sends eval.run.id, eval.phase, eval.suite.id, run.index and testcase.id. Stored raw rather than parsed, so every key a producer sends survives; filter it with a contains comparison on the whole 'key=value' pair. NULL means the event carried no baggage header (this table holds no row for such an event).",
+            "display_name": "Baggage",
+            "tag": "tracing",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "request_time",
+            "name": "request_time",
+            "type": "timestamp",
+            "nullable": false,
+            "description": "The parent event's request_time, copied here solely to drive this table's one-year TTL: a ClickHouse row-expiry TTL is a property of the table, not of a column, so the retention clock must be a column of this table. Prefer dial_usage_log.request_time for anything else — this column is non-nullable, so an event with no baggage row reads it as the epoch default rather than NULL.",
+            "display_name": "Request time",
+            "tag": "provenance",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "pipeline_generation",
+            "name": "pipeline_generation",
+            "type": "long",
+            "nullable": true,
+            "description": "System column stamped by the pipeline that wrote this row, not produced by the model: the pipeline generation that produced it. Read the pipeline's audit trail at that generation to see the declaration — including the prompt — the row was computed under.",
+            "display_name": "Pipeline generation",
+            "tag": "system",
+            "sensitive": false,
+            "heavy": false
+          }
+        ],
+        "grain_key": "event_id",
+        "ttl": {
+          "column": "request_time",
+          "interval": 1,
+          "unit": "year"
+        }
+      }
+    }
+  ],
+  "pipelines": [
+    {
+      "pipeline": {
+        "name": "sessions_rollup",
+        "kind": "aggregate",
+        "target": "sessions",
+        "inputs": [
+          "dial_usage_log"
+        ],
+        "filter": "length(\"usage_client_identity.client_session_id\") > 0",
+        "trigger": {
+          "kind": "schedule",
+          "cron": "0 3/15 * * * *"
+        },
+        "group_by": [
+          {
+            "column": "usage_client_identity.client_session_id",
+            "as": "client_session_id"
+          }
+        ],
+        "measures": [
+          {
+            "name": "first_request_time",
+            "fn": "min",
+            "column": "request_time"
+          },
+          {
+            "name": "last_request_time",
+            "fn": "max",
+            "column": "request_time"
+          },
+          {
+            "name": "traces",
+            "fn": "group_uniq_array",
+            "column": "trace_id"
+          },
+          {
+            "name": "client_session_source",
+            "fn": "max",
+            "column": "usage_client_identity.client_session_source"
+          },
+          {
+            "name": "client_type",
+            "fn": "max",
+            "column": "usage_client_identity.client_type"
+          },
+          {
+            "name": "client_types",
+            "fn": "group_uniq_array",
+            "column": "usage_client_identity.client_type"
+          },
+          {
+            "name": "auth_types",
+            "fn": "group_uniq_array",
+            "column": "usage_client_identity.auth_type"
+          },
+          {
+            "name": "project_id",
+            "fn": "max",
+            "column": "project_id"
+          },
+          {
+            "name": "user_hash",
+            "fn": "max",
+            "column": "user_hash"
+          },
+          {
+            "name": "user_ref",
+            "fn": "max",
+            "column": "usage_client_identity.user_ref"
+          },
+          {
+            "name": "user_refs",
+            "fn": "group_uniq_array",
+            "column": "usage_client_identity.user_ref"
+          },
+          {
+            "name": "user_email",
+            "fn": "max",
+            "column": "usage_client_identity.user_email"
+          },
+          {
+            "name": "user_display_name",
+            "fn": "max",
+            "column": "usage_client_identity.jwt_display_name",
+            "where": "\"usage_client_identity.auth_type\" = 'jwt'"
+          },
+          {
+            "name": "success_count",
+            "fn": "count",
+            "column": "trace_id",
+            "where": "success = true",
+            "distinct": true
+          },
+          {
+            "name": "turn_count",
+            "fn": "count",
+            "column": "trace_id",
+            "distinct": true
+          },
+          {
+            "name": "cache_creation_tokens",
+            "fn": "sum",
+            "column": "cache_creation_tokens"
+          },
+          {
+            "name": "cached_prompt_tokens",
+            "fn": "sum",
+            "column": "cached_prompt_tokens"
+          },
+          {
+            "name": "completion_tokens",
+            "fn": "sum",
+            "column": "completion_tokens"
+          },
+          {
+            "name": "prompt_tokens",
+            "fn": "sum",
+            "column": "prompt_tokens"
+          },
+          {
+            "name": "reasoning_tokens",
+            "fn": "sum",
+            "column": "reasoning_tokens"
+          },
+          {
+            "name": "total_tokens",
+            "fn": "sum",
+            "column": "total_tokens"
+          },
+          {
+            "name": "chain_price_total",
+            "fn": "sum",
+            "column": "total_price",
+            "where": "parent_deployment IS NULL"
+          },
+          {
+            "name": "total_price",
+            "fn": "sum",
+            "column": "deployment_price"
+          },
+          {
+            "name": "avg_duration_ms",
+            "fn": "avg",
+            "column": "operation_duration_ms"
+          },
+          {
+            "name": "duration_ms",
+            "fn": "sum",
+            "column": "operation_duration_ms"
+          },
+          {
+            "name": "deployments",
+            "fn": "group_uniq_array",
+            "column": "deployment"
+          }
+        ]
+      },
+      "exported_enabled": true
+    },
+    {
+      "pipeline": {
+        "name": "usage-client-identity-live",
+        "kind": "enrich",
+        "target": "usage_client_identity",
+        "inputs": [
+          "dial_usage_log"
+        ],
+        "trigger": {
+          "kind": "schedule",
+          "cron": "23 * * * * *"
+        },
+        "transform": {
+          "type": "sql",
+          "outputs": {
+            "client_type": "if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-session-id')), 'claudecode', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'thread-id')), 'codex', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-session-id')), 'opencode', if(contains(lower(json_extract_string(\"dial_usage_log_payload.request_tags\", 'user-agent')), 'claude-cli'), 'claudecode', if(contains(lower(json_extract_string(\"dial_usage_log_payload.request_tags\", 'user-agent')), 'claude-code'), 'claudecode', if(contains(lower(json_extract_string(\"dial_usage_log_payload.request_tags\", 'user-agent')), 'codex'), 'codex', if(contains(lower(json_extract_string(\"dial_usage_log_payload.request_tags\", 'user-agent')), 'opencode'), 'opencode', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-dial-client-channel-id')), 'chat', if(not_empty(chat_id), 'chat', 'other')))))))))",
+            "client_session_id": "if(not_empty(chat_id), chat_id, if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-session-id')), json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-session-id'), if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'thread-id')), json_extract_string(\"dial_usage_log_payload.request_tags\", 'thread-id'), if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-session-id')), json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-session-id'), ''))))",
+            "client_session_source": "if(not_empty(chat_id), 'chat_id', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-session-id')), 'x-claude-code-session-id', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'thread-id')), 'thread-id', if(not_empty(json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-session-id')), 'x-session-id', 'none'))))",
+            "auth_type": "if(not_empty(json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'user_id')), 'jwt', if(not_empty(project_id), 'api_key', 'unknown'))",
+            "user_ref": "if(not_empty(json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'user_id')), json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'user_id'), project_id)",
+            "user_email": "if(not_empty(json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'email')), json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'email'), json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'preferred_username'))",
+            "user_roles": "json_extract_array(\"dial_usage_log_payload.jwt_claims\", 'roles')",
+            "cc_session_id": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-session-id')",
+            "cc_agent_id": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-claude-code-agent-id')",
+            "codex_thread_id": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'thread-id')",
+            "opencode_session_id": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-session-id')",
+            "dial_channel_id": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'x-dial-client-channel-id')",
+            "client_user_agent": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'user-agent')",
+            "jwt_user_id": "json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'user_id')",
+            "jwt_preferred_username": "json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'preferred_username')",
+            "jwt_display_name": "json_extract_string(\"dial_usage_log_payload.jwt_claims\", 'user_display_name')"
+          }
+        },
+        "advanced": {
+          "rows_per_scan": 20000
+        }
+      },
+      "exported_enabled": true
+    },
+    {
+      "pipeline": {
+        "name": "usage-request-baggage-live",
+        "kind": "enrich",
+        "target": "usage_request_baggage",
+        "inputs": [
+          "dial_usage_log"
+        ],
+        "filter": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'baggage') <> ''",
+        "trigger": {
+          "kind": "schedule",
+          "cron": "19 * * * * *"
+        },
+        "transform": {
+          "type": "sql",
+          "outputs": {
+            "baggage": "json_extract_string(\"dial_usage_log_payload.request_tags\", 'baggage')",
+            "request_time": "request_time"
+          }
+        },
+        "advanced": {
+          "rows_per_scan": 20000
+        }
+      },
+      "exported_enabled": true
+    }
+  ]
+}

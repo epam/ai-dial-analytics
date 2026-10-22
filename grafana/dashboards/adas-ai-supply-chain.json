@@ -1,0 +1,785 @@
+{
+  "uid": "adas-ai-supply-chain",
+  "title": "ADAS — AI supply chain",
+  "description": "The gateway's own call graph: which deployment calls which, at what cost and latency. Built from parent_deployment / execution_path on dial_usage_log. Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side.",
+  "tags": [
+    "adas",
+    "topology"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**What this shows.** A request to DIAL is often not one call. A router or application receives it and calls further deployments, which may call more — so one user turn fans out into a chain. `parent_deployment` names the previous hop, which makes the whole thing a graph. This is the AI supply chain: what the org's AI traffic actually traverses.\n\n**Latency does NOT compound with depth — read the depth table carefully.** Depth is `array_length(execution_path)`, so depth 1 is a request's root span and its duration covers the whole request, while deeper rows are nested hops whose durations are slices of their parent's. Per-hop p95 therefore tends to peak at shallow depths and fall beyond; depth 0 means `execution_path` was never stamped and is a data-quality bucket, not the shallowest chain. What indirection really costs shows up as hops per trace, which is 1 at depth 1 and grows steeply with depth. Both edge tables are cuts — top 300 and top 20 edges in the window — so a slow but rare edge can be outside them.\n\n**A self-loop is usually NOT recursion.** A row where `parent_deployment = deployment` is typically **exactly one hop per trace** (`self_hops = traces = spans`, `execution_path` = `[X, X]`, kind `llm_call`, the model's own `/chat/completions` URI). That is how DIAL Core stamps a plain direct call to one model — an entry record plus the upstream hop — not a model calling itself. Genuine recursion looks completely different: a recursing deployment shows many self-hops inside a **single trace**, with a very long `execution_path`. To find real recursion, look for many self-hops sharing ONE trace_id, never for a high self-hop count alone.\n\n**`Role` is derived from what a deployment calls, self-loops excluded.** `router/app` means it is the parent of some *other* deployment. A model that only ever appears as its own parent is a **leaf**, which is what it should be. Counting self-loops would wrongly label plain models as routers.\n\n**A null cost on an edge is correct.** Only the billed hop of a chain carries a price, so router and MCP edges legitimately show no cost while carrying the calls. Do not read null as free — read it as 'billed elsewhere in this chain'.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and these panels use none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values.\n\n**Two panel choices worth knowing.** The edge label uses an ASCII `->` rather than `→`: a non-Latin-1 string literal is currently answered with HTTP 500. And *p95 latency by chain depth over time* buckets **daily**, not by panel width — that panel is long-format (one row per bucket per depth), so hourly buckets over 30 days would produce ~3,600 rows and be silently truncated at the 1,000-row cap."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Topology at a glance",
+      "description": "Six numbers for the 30-day window, over usage-log hops with a non-empty deployment (hops with none are dropped). 'Deployments' = distinct deployment names that appear as the target of a hop. A 'caller' is a deployment that is the parent of some OTHER deployment - a router or an application; it is counted from parent_deployment, so it is NOT a subset of 'Deployments' (a caller that never appears as a target itself does not show up in 'routers vs leaves' at all). 'Chained hops' and 'Self-loop hops' count events, not traces or user turns; 'Chained %' is chained hops as a share of all counted hops. Self-loops are excluded from both the caller count and 'Chained hops', and counted separately: a self-loop is normally Core's entry+upstream pair for a direct model call, not a chain (characteristically one self-loop hop per trace, with execution_path = [X, X]). 'Deepest chain' is the largest number of entries in execution_path, the same measure the 'Chain depth' panel uses - a plain direct call is 2, not 1 - and being a max it is an anecdote: a handful of events from a single deployment can set it. See the notes panel.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(DISTINCT deployment) AS \\\"Deployments\\\", count(DISTINCT CASE WHEN parent_deployment <> '' AND parent_deployment <> deployment THEN parent_deployment END) AS \\\"Act as callers\\\", count(CASE WHEN parent_deployment <> '' AND parent_deployment IS NOT NULL AND parent_deployment <> deployment THEN 1 END) AS \\\"Chained hops\\\", round(100.0 * count(CASE WHEN parent_deployment <> '' AND parent_deployment IS NOT NULL AND parent_deployment <> deployment THEN 1 END) / count(*), 1) AS \\\"Chained %\\\", count(CASE WHEN parent_deployment = deployment AND deployment <> '' THEN 1 END) AS \\\"Self-loop hops\\\", max(array_length(execution_path)) AS \\\"Deepest chain\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment <> ''\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Deployments",
+              "text": "Deployments",
+              "type": "number"
+            },
+            {
+              "selector": "Act as callers",
+              "text": "Act as callers",
+              "type": "number"
+            },
+            {
+              "selector": "Chained hops",
+              "text": "Chained hops",
+              "type": "number"
+            },
+            {
+              "selector": "Chained %",
+              "text": "Chained %",
+              "type": "number"
+            },
+            {
+              "selector": "Self-loop hops",
+              "text": "Self-loop hops",
+              "type": "number"
+            },
+            {
+              "selector": "Deepest chain",
+              "text": "Deepest chain",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Chained %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Deployments": 0,
+              "Act as callers": 1,
+              "Chained hops": 2,
+              "Chained %": 3,
+              "Self-loop hops": 4,
+              "Deepest chain": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Call edges — who calls whom",
+      "description": "One row per caller -> callee pair over the dashboard window, cut to the 300 busiest pairs (calls DESC). The excluded long tail may carry little of the calls and cost but can hold many of the slowest pairs, so read p95_ms as 'the slow legs among the busy 300', not as the slowest legs overall. Self-loops are excluded - parent_deployment = deployment is Core's entry+upstream pair for a plain direct call, not a real edge (see the notes panel) - and so are chain-entry rows, where parent_deployment is null. cost is sum(deployment_price), a hop's own billed cost; null means this leg is billed elsewhere in the chain, not that it is free.",
+      "gridPos": {
+        "h": 12,
+        "w": 14,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT parent_deployment AS source, deployment AS target, count(*) AS calls, round(sum(deployment_price), 2) AS cost, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY operation_duration_ms)) AS p95_ms FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND parent_deployment IS NOT NULL AND parent_deployment <> '' AND deployment <> '' AND parent_deployment <> deployment GROUP BY 1, 2 ORDER BY 3 DESC NULLS LAST, 1, 2 LIMIT 300\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "source",
+              "text": "source",
+              "type": "string"
+            },
+            {
+              "selector": "target",
+              "text": "target",
+              "type": "string"
+            },
+            {
+              "selector": "calls",
+              "text": "calls",
+              "type": "number"
+            },
+            {
+              "selector": "cost",
+              "text": "cost",
+              "type": "number"
+            },
+            {
+              "selector": "p95_ms",
+              "text": "p95_ms",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "calls"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "calls",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "source": 0,
+              "target": 1,
+              "calls": 2,
+              "cost": 3,
+              "p95_ms": 4
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Deployments — routers vs leaves",
+      "description": "'router/app' means this deployment is the parent of some OTHER deployment. A model that only appears as its own parent is a leaf, as it should be - self-loops do NOT promote a deployment to router/app. 'Callers' counts distinct OTHER deployments routing into it, a fan-in measure. 'Self-loop hops' is shown separately so the artefact stays visible instead of distorting the role. 'Calls' counts usage-log hops, not user turns, and 'Cost $' sums deployment_price - a hop's own cost - so an empty cost on a router or MCP row means 'billed elsewhere in the chain', not free. Top 300 deployments by call count; on a large deployment the low-volume tail is not shown.",
+      "gridPos": {
+        "h": 12,
+        "w": 10,
+        "x": 14,
+        "y": 13
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT deployment AS \\\"Deployment\\\", CASE WHEN deployment IN (SELECT parent_deployment FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND parent_deployment <> '' AND parent_deployment <> deployment) THEN 'router/app' ELSE 'leaf' END AS \\\"Role\\\", count(*) AS \\\"Calls\\\", count(DISTINCT CASE WHEN parent_deployment <> '' AND parent_deployment <> deployment THEN parent_deployment END) AS \\\"Callers\\\", count(CASE WHEN parent_deployment = deployment THEN 1 END) AS \\\"Self-loop hops\\\", round(sum(deployment_price), 2) AS \\\"Cost $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment <> '' GROUP BY 1, 2 ORDER BY 3 DESC NULLS LAST LIMIT 300\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Deployment",
+              "text": "Deployment",
+              "type": "string"
+            },
+            {
+              "selector": "Role",
+              "text": "Role",
+              "type": "string"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            },
+            {
+              "selector": "Callers",
+              "text": "Callers",
+              "type": "number"
+            },
+            {
+              "selector": "Self-loop hops",
+              "text": "Self-loop hops",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Calls"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Calls",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Deployment": 0,
+              "Role": 1,
+              "Calls": 2,
+              "Callers": 3,
+              "Self-loop hops": 4,
+              "Cost $": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Chain depth — traffic, hops and cost at each level of indirection",
+      "description": "Depth is the number of elements in execution_path for one logged hop; depth 0 means no path was recorded (typically MCP calls, which carry no price). Latency does NOT grow with depth: every depth-1 row is a request's root span, so its duration covers the whole request, while depth 2+ rows are nested hops whose durations are slices of their parent's and therefore fall as depth grows. What indirection really costs is in 'Hops per trace': 1.0 at depth 1, growing steeply beyond. Deep chains are rare traces rather than rare hops — the deepest levels typically hold many events from only a few traces, or only a handful of events at all, so read those rows as anecdotes, not rates. 'Cost $' sums deployment_price (a hop's own cost); it is null at depth 0 when no depth-0 hop carries a price, not because depth 0 is free.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT array_length(execution_path) AS \\\"Chain depth\\\", count(*) AS \\\"Events\\\", count(DISTINCT trace_id) AS \\\"Traces\\\", round(count(*) * 1.0 / count(DISTINCT trace_id), 1) AS \\\"Hops per trace\\\", round(percentile_cont(0.5) WITHIN GROUP (ORDER BY operation_duration_ms)) AS \\\"p50 hop ms\\\", round(percentile_cont(0.95) WITHIN GROUP (ORDER BY operation_duration_ms)) AS \\\"p95 hop ms\\\", round(sum(deployment_price), 2) AS \\\"Cost $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 100\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Chain depth",
+              "text": "Chain depth",
+              "type": "number"
+            },
+            {
+              "selector": "Events",
+              "text": "Events",
+              "type": "number"
+            },
+            {
+              "selector": "Traces",
+              "text": "Traces",
+              "type": "number"
+            },
+            {
+              "selector": "Hops per trace",
+              "text": "Hops per trace",
+              "type": "number"
+            },
+            {
+              "selector": "p50 hop ms",
+              "text": "p50 hop ms",
+              "type": "number"
+            },
+            {
+              "selector": "p95 hop ms",
+              "text": "p95 hop ms",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50 hop ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95 hop ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Events"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Chain depth": 0,
+              "Events": 1,
+              "Traces": 2,
+              "Hops per trace": 3,
+              "p50 hop ms": 4,
+              "p95 hop ms": 5,
+              "Cost $": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "p95 latency by chain depth over time",
+      "description": "p95 of `operation_duration_ms` per day and per chain depth, where depth = `array_length(execution_path)` — the number of hops up to and including this one. So 'depth 1' is a top-level call with no parent, and 'depth 0' means `execution_path` was never stamped (typically `mcp` and blank-kind records) — read it as a data-quality bucket, not a real depth. 'depth 4' holds depth 4 *and deeper* (deeper levels are rare). Buckets are a fixed 1 day, not panel width, so the first and last buckets are partial. p95 need not peak at the deepest series — deep hops are nested slices of their parent's duration, often small leaf calls.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'day', request_time) AS ts, concat('depth ', to_string(CASE WHEN array_length(execution_path) < 4 THEN array_length(execution_path) ELSE 4 END)) AS depth, percentile_cont(0.95) WITHIN GROUP (ORDER BY operation_duration_ms) AS p95_ms FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1, 2 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "depth",
+              "text": "depth",
+              "type": "string"
+            },
+            {
+              "selector": "p95_ms",
+              "text": "p95_ms",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "depth"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "barchart",
+      "title": "Top call edges",
+      "description": "The 20 heaviest legs of the call graph by call count (usage-log hops, not user turns), as a chart rather than a table - the same population as 'Call edges - who calls whom' above, ranked visually. Self-loops are excluded: a row where parent_deployment = deployment is Core's entry+upstream pair for a plain direct call, not a real edge (see the notes panel); including them would push plain direct model calls up the ranking. This replaces a nodeGraph panel: neither the ClickHouse datasource nor the Infinity/ADAS REST datasource emits the nodes+edges frame shape Grafana's Node Graph requires, and no core panel draws a directed graph from SQL - a real graph visual needs a graph panel plugin installed on this Grafana.",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT concat(parent_deployment, ' -> ', deployment) AS \\\"Edge\\\", count(*) AS \\\"Calls\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND parent_deployment IS NOT NULL AND parent_deployment <> '' AND deployment <> '' AND parent_deployment <> deployment GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 20\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Edge",
+              "text": "Edge",
+              "type": "string"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "Edge",
+        "orientation": "horizontal",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Edge": 0,
+              "Calls": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

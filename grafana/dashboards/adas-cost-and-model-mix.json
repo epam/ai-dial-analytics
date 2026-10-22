@@ -1,0 +1,1026 @@
+{
+  "uid": "adas-cost-model-mix",
+  "title": "ADAS — Cost & model mix",
+  "description": "Where the money goes by model deployment, cost decoupled from volume, and prompt-cache coverage per deployment — all over dial_usage_log with cost = deployment_price (a hop's own cost). Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side.",
+  "tags": [
+    "adas",
+    "cost"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**`deployment_price`, not `total_price`.** `deployment_price` is this hop's own cost, so summing it over hops does not double-count a routed chain. `total_price` is the whole chain's cost repeated on every hop — summing that inflates spend.\n\n**Cost is decoupled from volume.** Per-token cost can differ by more than an order of magnitude between models, so a low-cost model can move far more tokens than a frontier model for a fraction of its spend, and the busiest model by calls need not be among the top spenders. Rank by spend, never by call or token count.\n\n**Cache coverage is a control, not a saving.** The cache panel reports how much of each model's prompt is served from cache. It deliberately does NOT claim dollars saved: ADAS does not record each provider's cache discount, so a saving cannot be derived from this data. Sort it by uncached tokens to find where full-price prompt tokens actually pile up.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and these panels use none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values.\n\n**Attribution and bucket widths.** *Spend by client type* reads `usage_client_identity.client_type` as a dotted (left-join) column and puts priced hops with no identity row or no client type into an `unattributed` bar instead of dropping them, so the bars always sum to window spend (that bar stays empty while identity coverage of priced hops is complete). *Daily spend by model* buckets **daily** so that 9 series over 30 days (the top 8 plus `all other deployments`) stay under the 1,000-row cap; the `all other` series is what makes the stack height equal total spend."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Headline",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT round(sum(deployment_price), 2) AS \\\"Spend $\\\", count(*) AS \\\"Calls\\\", sum(total_tokens) AS \\\"Tokens\\\", round(sum(deployment_price) / nullif(count(*), 0), 5) AS \\\"USD / call\\\", round(sum(deployment_price) / nullif(sum(total_tokens), 0) * 1000000, 2) AS \\\"USD / Mtok\\\", round(100.0 * sum(cached_prompt_tokens) / nullif(sum(prompt_tokens), 0), 1) AS \\\"Prompt cache hit %\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}'\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            },
+            {
+              "selector": "Tokens",
+              "text": "Tokens",
+              "type": "number"
+            },
+            {
+              "selector": "USD / call",
+              "text": "USD / call",
+              "type": "number"
+            },
+            {
+              "selector": "USD / Mtok",
+              "text": "USD / Mtok",
+              "type": "number"
+            },
+            {
+              "selector": "Prompt cache hit %",
+              "text": "Prompt cache hit %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "USD / call"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "USD / Mtok"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prompt cache hit %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Spend $": 0,
+              "Calls": 1,
+              "Tokens": 2,
+              "USD / call": 3,
+              "USD / Mtok": 4,
+              "Prompt cache hit %": 5
+            }
+          }
+        }
+      ],
+      "description": "Fleet totals over the dashboard's selected range, from dial_usage_log (deduplicated server-side, so no FINAL to spell out).\n\n**Spend $** sums `deployment_price` — each hop's OWN cost, so a routed chain is not double-counted. `total_price` would read higher wherever chains are routed, because it repeats a chain's cost on every hop.\n\n**Calls** counts usage-log rows, i.e. model hops, not user-visible requests, and includes the rows that carry no price at all — unpriced or free deployments. Spend covers only the priced ones.\n\n**USD / call** is Spend / Calls. It is the unit that survives a mix change, which is why the per-model table below ranks on it.\n\n**USD / Mtok** is Spend / Tokens, with Tokens = `sum(total_tokens)` = prompt + completion (reasoning and cache-write tokens are NOT added in). It is a BLENDED rate across every model, prompt and completion, cached and uncached — it is not any model's list price, and ADAS holds no pricing table. Read it as 'what a million tokens cost us on average this range', never as a price comparison; that is why the per-model table has no such column.\n\n**Prompt cache hit %** is `sum(cached_prompt_tokens) / sum(prompt_tokens)`: the token-weighted share of prompt tokens served from cache, not a per-request hit rate. Cached tokens are a subset of prompt tokens, so it does not exceed 100%. It deliberately does not claim dollars saved — ADAS records no per-provider cache discount."
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Spend vs call volume — the decoupling",
+      "description": "Hourly spend (bars, left, USD) from sum(deployment_price) against call count (line, right) from count(*). deployment_price is the hop's own cost, so a routed chain is not double-counted. Cost and volume can move largely independently: a day can carry several times the median spend at median call volume, or the reverse, depending on which models the traffic reaches. Buckets are a fixed 1 hour (ADAS has no $__timeInterval macro), so bucket width does NOT follow panel width; the first and last bucket of a rolling window are partial, and hours with no calls are absent rather than zero.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, sum(deployment_price) AS \\\"Spend $\\\", count(*) AS \\\"Calls\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 0
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Calls"
+            },
+            "properties": [
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "Spend $": 1,
+              "Calls": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Daily spend by model (top 8 + all other)",
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'day', request_time) AS ts, CASE WHEN deployment IN (SELECT deployment FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment_price > 0 GROUP BY deployment ORDER BY sum(deployment_price) DESC NULLS LAST LIMIT 8) THEN deployment ELSE 'all other deployments' END AS series, sum(deployment_price) AS spend FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment_price > 0 GROUP BY 1, 2 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "series",
+              "text": "series",
+              "type": "string"
+            },
+            {
+              "selector": "spend",
+              "text": "spend",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "series"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ],
+      "description": "Daily spend (`sum(deployment_price)`, USD) per model deployment, stacked. Ranks deployments by total spend over the whole dashboard range and names the top 8; every other deployment is folded into one `all other deployments` series, so the stack height is the period's full spend, not a subset. `deployment_price` is a hop's own cost, so summing over a routed chain does not double-count; `total_price` would. Rows with no cost (free or failed hops) are excluded and contribute nothing. Buckets are a fixed 1 day and do NOT follow panel width -- ADAS has no `$__timeInterval` macro; with a `now-30d` range the first and last buckets are partial (they start/end at the range boundary, not at midnight), so the edge bars are short by construction."
+    },
+    {
+      "id": 5,
+      "type": "barchart",
+      "title": "Spend by client type",
+      "description": "Spend (sum of deployment_price, this hop's own cost) in the dashboard window, split by the client type the request came from, bars sorted by spend descending. Client type is read as a dotted column on the usage-log spine (usage_client_identity.client_type) - a left-join semantic, so events with no identity row land in 'unattributed' rather than being dropped. Only priced hops count (deployment_price > 0), so a client type that made only free calls does not get a bar.",
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 14,
+        "y": 17
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT CASE WHEN coalesce(\\\"usage_client_identity.client_type\\\", '') = '' THEN 'unattributed' ELSE \\\"usage_client_identity.client_type\\\" END AS \\\"Client\\\", round(sum(deployment_price), 2) AS \\\"Spend $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment_price > 0 GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 100\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Client",
+              "text": "Client",
+              "type": "string"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "xField": "Client",
+        "orientation": "horizontal",
+        "showValue": "always",
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Client": 0,
+              "Spend $": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Models by spend — what you get for the money",
+      "gridPos": {
+        "h": 11,
+        "w": 14,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT deployment AS \\\"Deployment\\\", CASE WHEN event_kind = '' THEN 'unlabelled' ELSE event_kind END AS \\\"Kind\\\", count(*) AS \\\"Calls\\\", round(sum(deployment_price), 2) AS \\\"Spend $\\\", round(sum(deployment_price) / count(*), 5) AS \\\"Dollar per call\\\", round(sum(total_tokens) * 1.0 / count(*)) AS \\\"Tokens per call\\\", round(percentile_cont(0.95) WITHIN GROUP (ORDER BY operation_duration_ms)) AS \\\"p95 ms\\\", round(100.0 * count(CASE WHEN success = false THEN 1 END) / count(*), 2) AS \\\"Failure %\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND deployment <> '' GROUP BY 1, 2 HAVING sum(deployment_price) > 0 ORDER BY 4 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Deployment",
+              "text": "Deployment",
+              "type": "string"
+            },
+            {
+              "selector": "Kind",
+              "text": "Kind",
+              "type": "string"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per call",
+              "text": "Dollar per call",
+              "type": "number"
+            },
+            {
+              "selector": "Tokens per call",
+              "text": "Tokens per call",
+              "type": "number"
+            },
+            {
+              "selector": "p95 ms",
+              "text": "p95 ms",
+              "type": "number"
+            },
+            {
+              "selector": "Failure %",
+              "text": "Failure %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per call"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 5
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95 ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failure %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 10
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Spend $",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "description": "What each deployment costs and what it delivers for the money. One row per deployment x `event_kind` (an empty kind shows as `unlabelled`), so the same model appears more than once - that is the point.\n\nREAD FAILURE AND LATENCY BY KIND, not just by model. The same model can fail far more often, or show a much longer p95, on one API path (say its `unlabelled` calls) than on another (`llm_call`) - so compare a model's rows with each other. Figures move with the time range, so read the panel rather than this note.\n\nTHE COLUMNS. `Spend $` is `sum(deployment_price)` - a hop's own cost, so a routed chain is not double-counted (`total_price` would be). `Dollar per call` is the unit that survives a mix change: what one attempt costs, which can span several orders of magnitude from embedding models to video generation. `Tokens per call` explains why - an agentic coding call can use orders of magnitude more tokens than a short chat call. `p95 ms` is `percentile_cont(0.95)` over `operation_duration_ms`; `Failure %` is `success = false` over ALL calls of the row. There is no $/token column: ADAS stores the amounts a provider reports and holds no pricing table, and a blended rate over prompt + completion + cached + reasoning tokens reads like a price without being one.\n\nTHE POPULATION. Rows are kept by `HAVING sum(deployment_price) > 0` and ranked by spend, while `Failure %` and `p95 ms` are computed over every call of those rows. That matters - a `deployment_price > 0` row filter would make `Failure %` structurally zero, because a failed call carries no cost: failed calls have a null `deployment_price`.\n\nREAD THE TAIL WITH CARE. The `HAVING` tests the unrounded sum, so some rows still display `Spend $ 0.00`, and many rows can have fewer than 50 calls - on those, `Dollar per call` and `Failure %` are samples, not rates. The `Failure %` gauge is scaled 0-10%, so the worst rows saturate the bar - read the number, not the bar.",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Deployment": 0,
+              "Kind": 1,
+              "Calls": 2,
+              "Spend $": 3,
+              "Dollar per call": 4,
+              "Tokens per call": 5,
+              "p95 ms": 6,
+              "Failure %": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Cache coverage by model — where prompt tokens go uncached",
+      "description": "Prompt-cache control, grouped by DEPLOYMENT (routers and app deployments appear next to base models) and sorted by UNCACHED prompt tokens, so the biggest opportunity is on top rather than the biggest model. 'Uncached tok' is what gets paid for at full price on every call: prompt tokens minus cached ones. Population: usage-log rows in the range with `prompt_tokens > 0`, keeping deployments with at least 1,000 prompt tokens in the window; 'Cost $' is `deployment_price` (this hop's own cost), not `total_price`.\n\nThree caveats. (1) A blank 'Cache hit %' means the provider reported no cached-prompt count at all for that deployment; the panel then counts its entire prompt volume as uncached — correct for ranking where full-price prompt tokens pile up, but do not read it as 'this provider has no cache'. Text-embedding and RAG app deployments typically land here. (2) `cache_creation_tokens` is only reported by some providers, so a zero or blank 'Cache writes' can mean 'not reported' rather than 'no writes'. (3) A high hit rate is not automatically a saving: ADAS records no per-provider cache discount, so dollars saved cannot be derived from this data — read this as coverage, not cost avoidance.",
+      "gridPos": {
+        "h": 11,
+        "w": 10,
+        "x": 14,
+        "y": 26
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT deployment AS \\\"Deployment\\\", sum(prompt_tokens) AS \\\"Prompt tok\\\", round(100.0 * sum(cached_prompt_tokens) / nullif(sum(prompt_tokens), 0), 1) AS \\\"Cache hit %\\\", sum(prompt_tokens) - coalesce(sum(cached_prompt_tokens), 0) AS \\\"Uncached tok\\\", sum(cache_creation_tokens) AS \\\"Cache writes\\\", round(sum(deployment_price), 2) AS \\\"Cost $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND prompt_tokens > 0 GROUP BY 1 HAVING sum(prompt_tokens) >= 1000 ORDER BY 4 DESC LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Deployment",
+              "text": "Deployment",
+              "type": "string"
+            },
+            {
+              "selector": "Prompt tok",
+              "text": "Prompt tok",
+              "type": "number"
+            },
+            {
+              "selector": "Cache hit %",
+              "text": "Cache hit %",
+              "type": "number"
+            },
+            {
+              "selector": "Uncached tok",
+              "text": "Uncached tok",
+              "type": "number"
+            },
+            {
+              "selector": "Cache writes",
+              "text": "Cache writes",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cache hit %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 25
+                    },
+                    {
+                      "color": "green",
+                      "value": 60
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Uncached tok"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Uncached tok",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Deployment": 0,
+              "Prompt tok": 1,
+              "Cache hit %": 2,
+              "Uncached tok": 3,
+              "Cache writes": 4,
+              "Cost $": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Token mix over time — how much prompt is served from cache",
+      "description": "Hourly token volume, not dollars — this dashboard's own rule is that cost is decoupled from volume, so read the spend panels for money. The lines are nested, not additive: 'Prompt (cached)' is the part of 'Prompt' served from cache and 'Reasoning' is part of 'Completion'. A gap or a zero in a cache line can mean the hour's providers did not report the field rather than no caching — cache_creation_tokens is only reported by some providers. Buckets are a fixed 1 hour, so a range beyond ~42 days hits the 1,000-row cap and silently loses the newest hours.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, sum(prompt_tokens) AS \\\"Prompt\\\", sum(cached_prompt_tokens) AS \\\"Prompt (cached)\\\", sum(cache_creation_tokens) AS \\\"Cache writes\\\", sum(completion_tokens) AS \\\"Completion\\\", sum(reasoning_tokens) AS \\\"Reasoning\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Prompt",
+              "text": "Prompt",
+              "type": "number"
+            },
+            {
+              "selector": "Prompt (cached)",
+              "text": "Prompt (cached)",
+              "type": "number"
+            },
+            {
+              "selector": "Cache writes",
+              "text": "Cache writes",
+              "type": "number"
+            },
+            {
+              "selector": "Completion",
+              "text": "Completion",
+              "type": "number"
+            },
+            {
+              "selector": "Reasoning",
+              "text": "Reasoning",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "Prompt": 1,
+              "Prompt (cached)": 2,
+              "Cache writes": 3,
+              "Completion": 4,
+              "Reasoning": 5
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

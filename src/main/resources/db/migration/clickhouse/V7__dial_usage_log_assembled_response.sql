@@ -1,0 +1,33 @@
+-- Persist the producer's merged streaming response on dial_usage_log.
+--
+-- The field has always been read at ingest — it is where response_id comes from — but the shipped
+-- mapping dropped it, so on a streamed call the assistant's answer was recoverable only by
+-- reassembling the SSE transcript response_body holds. This column stores the merged JSON message the
+-- producer already computed, verbatim -- ADAS never parses or normalizes it, so the column is String
+-- rather than JSON: validating the shape would mean parsing a payload this service otherwise never
+-- reads. A minority of records -- current ones included, not only old ones -- carry a value that is not
+-- JSON, some of them an SSE transcript; those are stored as-is rather than rejected, so a consumer parses
+-- defensively. Storing the column is also what makes that rate directly measurable: until now it could
+-- only be inferred from response_id coming back empty, which conflates 'did not parse' with 'parsed but
+-- carried no id'.
+--
+-- This complements the CREATE TABLE in V1 rather than editing it (an applied migration's checksum is
+-- fixed): a fresh install runs V1 then this file, and an operator applying the DDL out of band does
+-- the same in that order. The declaration mirrors the two sibling payload columns exactly —
+-- Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV) — because it holds the same class of content:
+-- verbatim, user-visible, unbounded per row. Nullable is load-bearing: "the producer sent nothing"
+-- must stay distinguishable from "the producer sent an empty response".
+--
+-- The AES_256_GCM_SIV codec REQUIRES a server-side encryption key (encryption_codecs in config.d) or
+-- this ALTER fails, exactly as V1's CREATE TABLE does without it.
+--
+-- Cost: ADD COLUMN is metadata-only. It schedules no mutation and rewrites no part — unlike V6's
+-- MODIFY COLUMN — so existing rows read back NULL until they are re-ingested, and the sort key is
+-- untouched so dedup behavior is unchanged. History is populated by an operator-run
+-- data-sync-backfill pass, not by this migration.
+--
+-- Ordering invariant: SchemaValidator refuses at startup a mapping declaring a column the physical
+-- table lacks, so this file and the mapping entry in mapping/dial-usage-log.yaml ship together. An
+-- operator running with clickhouse.migrations.enabled=false applies this DDL BEFORE the new build.
+ALTER TABLE dial_usage_log
+    ADD COLUMN IF NOT EXISTS assembled_response Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV);

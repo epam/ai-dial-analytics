@@ -1,0 +1,45 @@
+-- Preserve the submitted form of a rating on rate_analytics.
+--
+-- `rate` is normalized at ingest: a number passes through, boolean true maps to 1 and false maps to 0.
+-- That normalization is lossy in one specific way -- a stored 0 is either a thumbs-down submitted as
+-- boolean `false` or a rating cleared to numeric 0, and nothing in the row says which. On dev that is
+-- 37 of 142 rate events (26%), so "how much negative feedback is there?" has no defensible answer.
+-- This column stores the value's verbatim scalar text (`true`, `false`, `0`, `-1`) beside the
+-- normalized one, which separates the two forms because `true`/`false` are not numeric text. `rate`
+-- itself is unchanged: its type, its mapping and every consumer of it behave exactly as before.
+--
+-- Existing parts read NULL, and that NULL is load-bearing: the raw form was never captured for those
+-- rows and MUST NOT be inferred from `rate`, since that inference is precisely the ambiguity this
+-- column exists to remove. A NULL that says "not captured" is more useful than a value that says
+-- "probably". Repopulating history would need a data-sync-backfill re-ingest of the blob range, which
+-- is contingent on those blobs still being retained (earliest event 2026-07-02).
+--
+-- LowCardinality because the domain is a handful of short tokens, which makes the column near-free and
+-- keeps GROUP BY rate_raw fast; Nullable because absent must stay distinguishable from a sentinel.
+-- SchemaValidator looks through both wrappers in either nesting order, so the mapping's
+-- `kind: string, nullable: true` reconciles against this declaration.
+--
+-- No AES_256_GCM_SIV codec, unlike `comment`: this holds a rating scalar, never user-authored text. So
+-- it adds no server-side-encryption-key prerequisite, and it is registered non-sensitive in the catalog
+-- (paired PostgreSQL migration V31) rather than gated behind FULL_ADMIN.
+--
+-- This complements the CREATE TABLE in V2 rather than editing it (an applied migration's checksum is
+-- fixed): a fresh install runs V2 then this file, and an operator applying the DDL out of band does
+-- the same in that order.
+--
+-- Version 8 is the next free slot on development. Note that the unmerged feat/storage-pressure-guards
+-- branch also carries a V8 (ttl_only_drop_parts): whichever lands second must renumber. Taking 8 here
+-- rather than skipping to 9 is deliberate — Flyway runs with outOfOrder=false, so leaving a gap would
+-- let this apply as V9 in an environment and then reject the other branch's V8 at startup as an
+-- out-of-order migration, a failure that a fresh CI database would not reproduce. A duplicate version,
+-- by contrast, fails at resolve time everywhere, including on an empty database.
+--
+-- Cost: ADD COLUMN is metadata-only. It schedules no mutation and rewrites no part, and the sort key is
+-- untouched, so dedup behavior is unchanged.
+--
+-- Ordering invariant: SchemaValidator refuses at startup a mapping declaring a column the physical
+-- table lacks, so this file and the mapping entry in mapping/rate-analytics.yaml ship together. An
+-- operator running with clickhouse.migrations.enabled=false applies this DDL BEFORE the new build, or
+-- the service will not start.
+ALTER TABLE rate_analytics
+    ADD COLUMN IF NOT EXISTS rate_raw LowCardinality(Nullable(String)) CODEC(ZSTD(1)) AFTER rate;
