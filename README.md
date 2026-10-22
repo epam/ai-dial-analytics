@@ -75,7 +75,7 @@ python local_env/seed/seed_dial_usage_log.py                  # synthetic usage 
 Check that it works:
 
 ```bash
-curl -s localhost:5000/actuator/health
+curl -s localhost:9464/actuator/health
 # {"status":"UP"}
 
 curl -s localhost:5000/v1/queries/execute-sql -H 'Content-Type: application/json' \
@@ -158,8 +158,21 @@ The OpenAPI document is served at `/v3/api-docs`.
 
 ## Monitoring
 
-- **Health:** `/actuator/health`
-- **Metrics:** Prometheus format at `/actuator/prometheus`. The main families are `sync_*` (daily
+The actuator serves on its own management port, **9464** (`MANAGEMENT_SERVER_PORT`), separate from the API on
+5000. Its endpoints need no credential in any security mode.
+
+| Endpoint | Use | Checks | Answers |
+|---|---|---|---|
+| `GET /actuator/health/liveness` | Liveness probe, Docker `HEALTHCHECK` | Application state only, no dependency | `200 {"status":"UP"}`, else `503` |
+| `GET /actuator/health/readiness` | Readiness probe | Startup (migrations included) complete, PostgreSQL catalog reachable | `200 {"status":"UP",...}`, else `503` |
+| `GET /actuator/health` | Diagnostics | All contributors, with details | `200` / `503` |
+| `GET /actuator/prometheus` | Prometheus scrape (pull) | — | Prometheus text format |
+
+ClickHouse is not a health contributor: an unreachable ClickHouse surfaces per request as `503
+clickhouse_unavailable` rather than taking the pod out of rotation. Probe, metric and OTLP export behaviour is
+specified in [observability](openspec/specs/observability/spec.md).
+
+- **Metrics:** the main families are `sync_*` (daily
   sweep), `poll_*` (poller, including `poll_watermark_lag_seconds`), `clickhouse_inserts_total` /
   `clickhouse_insert_failures_total`, and `aggregate_*` (pipelines).
 - **OpenTelemetry:** OTLP export of metrics, traces and logs is off by default. Turn it on with

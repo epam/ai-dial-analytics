@@ -29,9 +29,9 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER appuser
 
-EXPOSE 5000 32010
+EXPOSE 5000 9464 32010
 
 HEALTHCHECK --start-period=30s --interval=1m --timeout=3s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/actuator/health/liveness || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:9464/actuator/health/liveness || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]

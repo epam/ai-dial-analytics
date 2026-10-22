@@ -38,7 +38,7 @@ twin; capability `catalog-export-import`) promote user tables and pipelines (nev
 Smoke test a running instance:
 
 ```bash
-curl -s localhost:5000/actuator/health      # {"status":"UP"}
+curl -s localhost:9464/actuator/health      # {"status":"UP"} (management port)
 curl -s localhost:5000/v1/does-not-exist    # stable ErrorView JSON (404 not_found)
 ```
 
