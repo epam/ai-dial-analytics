@@ -5,7 +5,7 @@ import com.epam.aidial.analytics.blob.TestBlobSpans;
 import com.epam.aidial.analytics.configuration.BlobProperties;
 import com.epam.aidial.analytics.configuration.SyncProperties;
 import com.epam.aidial.analytics.sync.LogParser;
-import com.epam.aidial.analytics.sync.inline.InlineFilesMode;
+import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import com.epam.aidial.analytics.sync.mapping.DeriverRegistry;
 import com.epam.aidial.analytics.sync.mapping.MappingConfig;
 import com.epam.aidial.analytics.sync.mapping.MappingEngine;
@@ -31,7 +31,7 @@ import java.util.zip.GZIPOutputStream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * End to end through {@link BlobIngestor} under {@code sync.inline-files-mode=drop}: a gzip NDJSON blob written the
+ * End to end through {@link BlobIngestor} under {@code sync.inline-files-max-size=0}: a gzip NDJSON blob written the
  * way DIAL Core writes the usage log (each body a JSON string inside the line) is parsed, fanned out to the usage-log
  * and payload targets, and the payload rows carry the bodies without their inline files — for chat, Anthropic, MCP,
  * embeddings and a body Core cut at 4 MiB — while the usage-log rows still describe the bodies as sent.
@@ -69,7 +69,7 @@ class InlineFileIngestTest {
         writeGzip(blob, String.join("\n", lines));
 
         RecordingWriter writer = new RecordingWriter();
-        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(InlineFilesMode.DROP),
+        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(InlineFilesPolicy.dropAll()),
                 IngestFlushOrder.NONE);
         RunSink sink = ingestor.newRunSink(writer, 1000, 268_435_456L);
         ingestor.ingest(BLOB_KEY, sink);
@@ -100,7 +100,7 @@ class InlineFileIngestTest {
         writeGzip(blob, line("t1", "/openai/deployments/gpt-5/chat/completions", CHAT, null));
 
         RecordingWriter writer = new RecordingWriter();
-        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(InlineFilesMode.KEEP),
+        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(InlineFilesPolicy.keep()),
                 IngestFlushOrder.NONE);
         RunSink sink = ingestor.newRunSink(writer, 1000, 268_435_456L);
         ingestor.ingest(BLOB_KEY, sink);
@@ -112,7 +112,7 @@ class InlineFileIngestTest {
 
     /**
      * An {@code assembled_response} that is not JSON (an SSE transcript) is stored verbatim only under {@code keep}, or
-     * when it holds no inline file; under {@code drop} its {@code data:} events are scanned and their files removed.
+     * when it holds no inline file; with a size limit its {@code data:} events are scanned and their files removed.
      */
     @Test
     void sseAssembledResponseIsStoredAsSentUnderKeepAndScannedUnderDrop(@TempDir Path baseDir) throws Exception {
@@ -126,14 +126,14 @@ class InlineFileIngestTest {
                 line("t1", "/openai/deployments/gpt-5/chat/completions", "{\"messages\":[]}", null, sse),
                 line("t2", "/openai/deployments/gpt-5/chat/completions", "{\"messages\":[]}", null, plainSse)));
 
-        assertThat(assembledResponses(baseDir, InlineFilesMode.KEEP)).containsExactly(sse, plainSse);
-        assertThat(assembledResponses(baseDir, InlineFilesMode.DROP_TRUNCATED)).containsExactly(sse, plainSse);
-        assertThat(assembledResponses(baseDir, InlineFilesMode.DROP)).containsExactly(sse.replace(FILE, ""), plainSse);
+        assertThat(assembledResponses(baseDir, InlineFilesPolicy.keep())).containsExactly(sse, plainSse);
+        assertThat(assembledResponses(baseDir, InlineFilesPolicy.defaults())).containsExactly(sse, plainSse);
+        assertThat(assembledResponses(baseDir, InlineFilesPolicy.dropAll())).containsExactly(sse.replace(FILE, ""), plainSse);
     }
 
-    private List<Object> assembledResponses(Path baseDir, InlineFilesMode mode) throws Exception {
+    private List<Object> assembledResponses(Path baseDir, InlineFilesPolicy policy) throws Exception {
         RecordingWriter writer = new RecordingWriter();
-        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(mode),
+        BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets(policy),
                 IngestFlushOrder.NONE);
         RunSink sink = ingestor.newRunSink(writer, 1000, 268_435_456L);
         ingestor.ingest(BLOB_KEY, sink);
@@ -161,7 +161,7 @@ class InlineFileIngestTest {
         return jsonMapper.writeValueAsString(record);
     }
 
-    private List<SyncTarget> targets(InlineFilesMode mode) {
+    private List<SyncTarget> targets(InlineFilesPolicy policy) {
         TransformRegistry transforms = new TransformRegistry();
         DeriverRegistry derivers = new DeriverRegistry(jsonMapper);
         MappingFileLoader loader = new MappingFileLoader(new DefaultResourceLoader(), transforms, derivers);
@@ -169,9 +169,9 @@ class InlineFileIngestTest {
         MappingConfig payload = loader.load("classpath:mapping/dial-usage-log-payload.yaml");
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         return List.of(
-                new SyncTarget("dial_usage_log", dial, new MappingEngine(dial, transforms, derivers, mode, "dial_usage_log", registry)),
+                new SyncTarget("dial_usage_log", dial, new MappingEngine(dial, transforms, derivers, policy, "dial_usage_log", registry)),
                 new SyncTarget("dial_usage_log_payload", payload,
-                        new MappingEngine(payload, transforms, derivers, mode, "dial_usage_log_payload", registry)));
+                        new MappingEngine(payload, transforms, derivers, policy, "dial_usage_log_payload", registry)));
     }
 
     private static BlobClient blobClient(Path baseDir) {

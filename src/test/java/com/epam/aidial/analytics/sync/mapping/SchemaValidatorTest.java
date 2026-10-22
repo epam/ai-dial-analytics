@@ -25,7 +25,7 @@ class SchemaValidatorTest {
 
     private static final SyncProperties SYNC = new SyncProperties(
             "-", 1, 10, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-            List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null);
+            List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
 
     private static final MappingConfig MAPPING = loadDefaultMapping();
 

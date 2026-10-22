@@ -5,10 +5,10 @@ import io.micrometer.core.instrument.MeterRegistry;
 
 /**
  * The inline-file rewrite of one body column of one target: classifies the record's API from its request URI, applies
- * the mode to the column's value, and counts what was done. One instance per declaring column, built only under
- * {@link InlineFilesMode#DROP} or {@link InlineFilesMode#DROP_TRUNCATED}, so under {@code keep} no counter is
- * registered and nothing is parsed. Under {@code drop-truncated} a body DIAL Core did not cut is returned before it is
- * even classified.
+ * the policy to the column's value, and counts what was done. One instance per declaring column, built only when the
+ * policy {@link InlineFilesPolicy#rewrites() rewrites}, so with the repair off and no size limit no counter is
+ * registered and nothing is parsed. A body the policy cannot change (no longer than the limit, and not one DIAL Core
+ * cut while the repair is on) is returned before it is even classified.
  *
  * <p>The counters are attributed to the table and column rather than to the ingest path, like
  * {@code clickhouse.inserts}: every path (reconciliation run, poller, backfill) writes through the same mapping.
@@ -21,7 +21,7 @@ public final class InlineFileRewrite {
     static final String BODIES_UNSCANNED = "ingest.inline.bodies.unscanned";
 
     private final BodySide side;
-    private final InlineFilesMode mode;
+    private final InlineFilesPolicy policy;
     private final Counter filesRemoved;
     private final Counter bytesRemoved;
     private final Counter bodiesCut;
@@ -31,17 +31,17 @@ public final class InlineFileRewrite {
      * Registers the four counters for a column.
      *
      * @param side     which side of the call the column holds
-     * @param mode     {@code DROP} or {@code DROP_TRUNCATED}
+     * @param policy   a policy that {@link InlineFilesPolicy#rewrites() rewrites}
      * @param table    the target table, a counter tag
      * @param column   the column, a counter tag
      * @param registry where the counters are registered
      */
-    public InlineFileRewrite(BodySide side, InlineFilesMode mode, String table, String column, MeterRegistry registry) {
-        if (mode == InlineFilesMode.KEEP) {
-            throw new IllegalArgumentException("keep needs no rewrite");
+    public InlineFileRewrite(BodySide side, InlineFilesPolicy policy, String table, String column, MeterRegistry registry) {
+        if (!policy.rewrites()) {
+            throw new IllegalArgumentException("a policy that changes nothing needs no rewrite");
         }
         this.side = side;
-        this.mode = mode;
+        this.policy = policy;
         this.filesRemoved = registry.counter(FILES_REMOVED, "table", table, "column", column);
         this.bytesRemoved = registry.counter(BYTES_REMOVED, "table", table, "column", column);
         this.bodiesCut = registry.counter(BODIES_CUT, "table", table, "column", column);
@@ -59,14 +59,14 @@ public final class InlineFileRewrite {
         if (value == null || value.isEmpty()) {
             return value;
         }
-        if (mode == InlineFilesMode.DROP_TRUNCATED && !InlineFileStripper.isTruncated(value)) {
+        if (!InlineFileStripper.mayChange(value, policy)) {
             return value;
         }
         Api api = ApiClassifier.classify(uri);
         if (api == null) {
             return value;
         }
-        InlineFileStripper.Result result = InlineFileStripper.strip(value, api, side, mode);
+        InlineFileStripper.Result result = InlineFileStripper.strip(value, api, side, policy);
         if (result.filesRemoved() > 0) {
             filesRemoved.increment(result.filesRemoved());
         }

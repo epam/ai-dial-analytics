@@ -8,21 +8,24 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Removes the payloads of the inline files in one body (the {@code drop} mode of {@code sync.inline-files-mode}), or
- * only the half file a 4 MiB cut left behind (the {@code drop-truncated} mode).
+ * Removes from one body the payloads of the inline files longer than {@code sync.inline-files-max-size}, and the half
+ * file a 4 MiB cut left behind when {@code sync.inline-files-drop-truncated} is on (see {@link InlineFilesPolicy}).
  *
  * <p>A body whose first non-whitespace character is <code>&#123;</code> or {@code [} is one JSON document; any other body is
  * read as SSE, one single-line {@code data:} event at a time (an event spread over several {@code data:} lines is
- * left alone, since its data is not contiguous in the text). Each file's raw text between its quotes is dropped —
+ * left alone, since its data is not contiguous in the text). A removed file's raw text between its quotes is dropped —
  * a data URL keeps its {@code data:...;base64,} prefix — and every other character, JSON escapes included, is kept.
+ * A file's size is the length of that payload text, read off the positions the scan found. No file can be longer than
+ * its body, so a body no longer than the limit is not parsed unless it needs the truncated repair.
  *
  * <p>A body DIAL Core cut at 4 MiB ends with its {@code >>} marker and is at least {@link #TRUNCATED_MIN_BYTES} UTF-8
  * bytes long: nothing shorter can carry the marker, since Core cuts only bodies over the limit, and a character the
- * cut split became U+FFFD, which only lengthens it. Such a body is scanned without the marker; when the value open
- * at the cut is a file, the body is cut back to just before that value's opening quote, and the marker is put back
+ * cut split became U+FFFD, which only lengthens it. Such a body is scanned without the marker. When the value open at
+ * the cut is a file, the body is cut back to just before that value's opening quote if the repair is on; if it is
+ * off, the half file is measured like any other and, over the limit, loses the payload it has. The marker is put back
  * in every case.
  *
- * <p>Pure and deterministic: the output depends only on the body, the API, the side and the mode. It never throws.
+ * <p>Pure and deterministic: the output depends only on the body, the API, the side and the policy. It never throws.
  */
 public final class InlineFileStripper {
 
@@ -40,7 +43,8 @@ public final class InlineFileStripper {
      * @param body         the body to store
      * @param filesRemoved complete files whose payload was removed (a file cut back over is not counted here)
      * @param bytesRemoved UTF-8 bytes of payload removed, a cut-back file's included
-     * @param cutBack      whether a truncated body was cut back to before a file
+     * @param cutBack      whether a truncated body was shortened at its cut: cut back to before a file, or its half file's
+     *                     payload removed
      * @param unscannable  documents (the body, or SSE events) that did not parse; a truncated body failing at its cut is not one
      */
     public record Result(String body, int filesRemoved, long bytesRemoved, boolean cutBack, int unscannable) {
@@ -54,7 +58,7 @@ public final class InlineFileStripper {
     }
 
     /**
-     * Removes the inline files of a body, as {@link InlineFilesMode#DROP} does.
+     * Removes every inline file of a body, as {@link InlineFilesPolicy#dropAll()} does.
      *
      * @param body the body as the producer sent it; may be {@code null}
      * @param api  the record's API
@@ -62,34 +66,33 @@ public final class InlineFileStripper {
      * @return the body to store, with counts; the input itself when nothing was removed
      */
     public static Result strip(String body, Api api, BodySide side) {
-        return strip(body, api, side, InlineFilesMode.DROP);
+        return strip(body, api, side, InlineFilesPolicy.dropAll());
     }
 
     /**
-     * Applies a mode to a body.
+     * Applies a policy to a body.
      *
      * <ul>
-     *   <li>{@link InlineFilesMode#KEEP}: the body is returned as it is.</li>
-     *   <li>{@link InlineFilesMode#DROP_TRUNCATED}: only a body DIAL Core cut is scanned, and it is only cut back to
-     *       before the file the cut landed in; every complete file is kept. Any other body is returned without being
-     *       parsed.</li>
-     *   <li>{@link InlineFilesMode#DROP}: every complete file is removed as well.</li>
+     *   <li>A complete file whose payload is longer than {@link InlineFilesPolicy#maxFileSize()} has its payload
+     *       removed; every other file is kept.</li>
+     *   <li>In a body DIAL Core cut, the file the cut landed in is cut back over when
+     *       {@link InlineFilesPolicy#dropTruncated()} is on, and measured like any other file when it is off.</li>
+     *   <li>A body that can hold no file over the limit and needs no repair is returned without being parsed.</li>
      * </ul>
      *
-     * @param body the body as the producer sent it; may be {@code null}
-     * @param api  the record's API
-     * @param side which side of the call the body is
-     * @param mode what to remove
+     * @param body   the body as the producer sent it; may be {@code null}
+     * @param api    the record's API
+     * @param side   which side of the call the body is
+     * @param policy what to remove
      * @return the body to store, with counts; the input itself when nothing was removed
      */
-    public static Result strip(String body, Api api, BodySide side, InlineFilesMode mode) {
+    public static Result strip(String body, Api api, BodySide side, InlineFilesPolicy policy) {
         List<Location> locations = InlineFileLocations.of(api, side);
-        if (mode == InlineFilesMode.KEEP || body == null || body.isEmpty() || locations.isEmpty()) {
+        if (!policy.rewrites() || body == null || body.isEmpty() || locations.isEmpty()) {
             return Result.unchanged(body, 0);
         }
         boolean truncated = isTruncated(body);
-        boolean keepCompleteFiles = mode == InlineFilesMode.DROP_TRUNCATED;
-        if (keepCompleteFiles && !truncated) {
+        if (!policy.tooLong(body.length()) && !(truncated && policy.dropTruncated())) {
             return Result.unchanged(body, 0);
         }
         int textEnd = truncated ? body.length() - TRUNCATION_MARKER.length() : body.length();
@@ -116,10 +119,24 @@ public final class InlineFileStripper {
             open = events.open();
             unscannable = events.unscannable();
         }
-        if (keepCompleteFiles) {
-            files.clear(); // located only so the scan reaches the cut; drop-truncated keeps them
+        files.removeIf(file -> !policy.tooLong(file.end() - file.payloadStart()));
+        int cutAt = textEnd;
+        if (truncated && open != null) {
+            if (policy.dropTruncated()) {
+                cutAt = open.quote();
+            } else if (policy.tooLong(textEnd - open.payloadStart())) {
+                cutAt = open.payloadStart();
+            }
         }
-        return assemble(body, textEnd, truncated, files, open, unscannable);
+        return assemble(body, textEnd, truncated, files, open, cutAt, unscannable);
+    }
+
+    /**
+     * Whether a policy could change a body at all: the body is longer than the limit, so a file in it could be, or the
+     * repair is on and DIAL Core cut it. Lets a caller skip a body before classifying its API.
+     */
+    static boolean mayChange(String body, InlineFilesPolicy policy) {
+        return policy.tooLong(body.length()) || policy.dropTruncated() && isTruncated(body);
     }
 
     private record SseEvents(List<Span> files, Span open, int unscannable) {
@@ -184,8 +201,8 @@ public final class InlineFileStripper {
         return scan.parseError() ? 1 : 0;
     }
 
-    private static Result assemble(String body, int textEnd, boolean truncated, List<Span> files, Span open, int unscannable) {
-        int cutAt = truncated && open != null ? open.quote() : textEnd;
+    /** Builds the stored body: the given files' payloads removed, and the text from {@code cutAt} to the marker dropped. */
+    private static Result assemble(String body, int textEnd, boolean truncated, List<Span> files, Span open, int cutAt, int unscannable) {
         if (files.isEmpty() && cutAt == textEnd) {
             return Result.unchanged(body, unscannable);
         }

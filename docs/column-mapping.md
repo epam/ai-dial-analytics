@@ -67,7 +67,7 @@ declaring `derive` without `sources`, is a fatal config error at load.
 | `transform`    | mapped                          | A name from the transform registry below.                                                                                                |
 | `default`      | both                            | Value used when the resolved value is absent or blank.                                                                                   |
 | `nullable`     | both                            | `true` emits a JSON `null` for an absent/blank value with no `default`. The table column must be `Nullable(...)`.                        |
-| `inline-files` | mapped `string`, no `transform` | `{ body: request\|response, uri: <dotted path of the request URI> }` — marks a body whose inline files `SYNC_INLINE_FILES_MODE` governs. |
+| `inline-files` | mapped `string`, no `transform` | `{ body: request\|response, uri: <dotted path of the request URI> }` — marks a body whose inline files `SYNC_INLINE_FILES_DROP_TRUNCATED` and `SYNC_INLINE_FILES_MAX_SIZE` govern. |
 
 `nullable` is what keeps an absent producer field distinguishable from a genuine zero. A
 non-nullable column with no `default` falls back to its kind's zero value, so the insert stays valid
@@ -151,15 +151,22 @@ content for a quarter. Its mapping is match-all, so it shadows the usage log one
 call the raw body is a chunk transcript, while the merged form is the only shape in which an answer
 can be read without reassembling that stream. It remains a deriver source as well (`response_id`,
 `reasoning_tokens`); the two uses are independent. ADAS never reassembles, validates or rejects it,
-so a value that is not JSON is stored rather than rejected — **parse it defensively**. Under `keep` it is
-not parsed at all; under `drop` and `drop-truncated` it is scanned for inline files only (below).
+so a value that is not JSON is stored rather than rejected — **parse it defensively**. It is parsed only
+to find inline files, and only when one of the two settings below can change it.
 
-All three bodies declare `inline-files`. Under `SYNC_INLINE_FILES_MODE=keep` they are stored as sent. Under
-the default, `drop-truncated`, only a body DIAL Core cut at 4 MiB is touched: it is cut back to before the half
-file the cut landed in, which cannot be decoded, and every complete file is kept. Under `drop`, the payloads
-of inline files at the fixed JSON locations of the record's API (images,
-PDFs, audio, MCP tool files, base64 embedding vectors) are removed at ingest and are not kept anywhere; the
-data-sync spec lists the locations. Text is never removed, however it is encoded, and routes are never
+All three bodies declare `inline-files`, which puts them under two independent settings:
+
+- `SYNC_INLINE_FILES_DROP_TRUNCATED` (default `true`): a body DIAL Core cut at 4 MiB is cut back to before
+  the half file the cut landed in, which cannot be decoded. Complete files are kept, and a body that was not
+  cut is not parsed.
+- `SYNC_INLINE_FILES_MAX_SIZE` (default unset): the payload of every inline file longer than the limit is
+  removed at ingest and not kept anywhere; files at or under it are kept, and `0` removes them all. The size
+  is the stored base64 text after a data URL's `data:...;base64,` prefix, so a decoded file is about three
+  quarters of it. A body no longer than the limit is not parsed.
+
+With the first `false` and the second unset, the bodies are stored as sent. Inline files are values at the
+fixed JSON locations of the record's API (images, PDFs, audio, MCP tool files, base64 embedding vectors);
+the data-sync spec lists the locations. Text is never removed, however it is encoded, and routes are never
 scanned.
 
 The service applies no masking. All five are seeded `sensitive`, so only callers holding

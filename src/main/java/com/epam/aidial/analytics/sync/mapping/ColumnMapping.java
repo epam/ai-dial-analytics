@@ -25,7 +25,8 @@ import java.util.Map;
  * @param sources      the ordered source paths feeding the deriver; empty for a mapped column
  * @param args         the deriver's static arguments; empty when none
  * @param inlineFiles  the {@code inline-files} attribute of a mapped {@code string} body column, which puts its inline files
- *                     under {@code sync.inline-files-mode}; {@code null} for every other column
+ *                     under {@code sync.inline-files-drop-truncated} and {@code sync.inline-files-max-size}; {@code null}
+ *                     for every other column
  */
 public record ColumnMapping(
         String column,

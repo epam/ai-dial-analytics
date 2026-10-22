@@ -1,12 +1,13 @@
 package com.epam.aidial.analytics.configuration;
 
-import com.epam.aidial.analytics.sync.inline.InlineFilesMode;
+import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.util.unit.DataSize;
 import org.springframework.validation.annotation.Validated;
 
 import java.util.List;
@@ -35,8 +36,11 @@ import java.util.List;
  *                              file name. Also validated at startup by {@code BlobPrefixResolver}
  * @param validateSchema        whether to reconcile each target's mapping against its live table schema at startup (fail-fast)
  * @param targets               the ingest targets (table + mapping file); MUST declare at least one
- * @param inlineFilesMode       what ingest does with inline files in the body columns whose mapping declares {@code inline-files};
- *                              {@code null} (unset) means {@link InlineFilesMode#DROP_TRUNCATED}. An unknown value fails binding, and so startup
+ * @param inlineFilesDropTruncated whether a body column declaring {@code inline-files} that DIAL Core cut at 4 MiB is cut back
+ *                              to before the inline file the cut landed in; {@code null} (unset) means {@code true}
+ * @param inlineFilesMaxSize    the longest inline-file payload a body column declaring {@code inline-files} keeps, measured in
+ *                              characters (bytes, for base64) of its stored text; a longer one is removed. {@code null}
+ *                              (unset or blank) means no limit, and a negative value fails binding, and so startup
  */
 @Validated
 @ConfigurationProperties(prefix = "sync")
@@ -51,7 +55,8 @@ public record SyncProperties(
         String fileNamePrefixPattern,
         boolean validateSchema,
         @NotEmpty List<@Valid Target> targets,
-        InlineFilesMode inlineFilesMode) {
+        Boolean inlineFilesDropTruncated,
+        DataSize inlineFilesMaxSize) {
 
     /** The {@code sync.max-line-bytes} default that {@code application.yml} ships (64 MiB). */
     public static final int DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
@@ -66,7 +71,16 @@ public record SyncProperties(
         // Same reasoning for the file-name head, plus: it is legitimately blank (the epoch begins the file name), so
         // trimming must not turn a configured-but-blank value into anything other than blank.
         fileNamePrefixPattern = fileNamePrefixPattern == null ? null : fileNamePrefixPattern.trim();
-        inlineFilesMode = inlineFilesMode == null ? InlineFilesMode.DROP_TRUNCATED : inlineFilesMode;
+        inlineFilesDropTruncated = inlineFilesDropTruncated == null || inlineFilesDropTruncated;
+        if (inlineFilesMaxSize != null && inlineFilesMaxSize.isNegative()) {
+            throw new IllegalArgumentException("sync.inline-files-max-size must not be negative: " + inlineFilesMaxSize);
+        }
+    }
+
+    /** The inline-files settings as one policy; an unset size is {@link InlineFilesPolicy#NO_LIMIT}. */
+    public InlineFilesPolicy inlineFilesPolicy() {
+        return new InlineFilesPolicy(inlineFilesDropTruncated,
+                inlineFilesMaxSize == null ? InlineFilesPolicy.NO_LIMIT : inlineFilesMaxSize.toBytes());
     }
 
     /**

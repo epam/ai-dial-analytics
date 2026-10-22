@@ -88,7 +88,7 @@ class DataSyncServiceTest {
                 Map.of("jclouds.filesystem.basedir", baseDir.toString()));
         syncProps = new SyncProperties(
                 "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy/MM/dd", "'date='yyyy-MM-dd", false,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
 
         TransformRegistry registry = new TransformRegistry();
         DeriverRegistry derivers = new DeriverRegistry(jsonMapper);
@@ -322,7 +322,7 @@ class DataSyncServiceTest {
                 """);
 
         SyncProperties flatProps = new SyncProperties(
-                "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", "'date='yyyy-MM-dd", false, syncProps.targets(), null);
+                "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", "'date='yyyy-MM-dd", false, syncProps.targets(), null, null);
         DataSyncService flatService = new DataSyncService(
                 blobClient, ingestor, writer, flatProps, new BlobPrefixResolver(flatProps, new SimpleMeterRegistry()),
                 new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
@@ -384,7 +384,7 @@ class DataSyncServiceTest {
      */
     private DataSyncService flatServiceReporting(String head, SimpleMeterRegistry registry) {
         SyncProperties props = new SyncProperties(
-                "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", head, false, syncProps.targets(), null);
+                "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", head, false, syncProps.targets(), null, null);
         return new DataSyncService(blobClient, ingestor, writer, props, new BlobPrefixResolver(props, registry),
                 new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
     }
