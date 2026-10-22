@@ -1,11 +1,11 @@
-# Analytics Data Access Service (ADAS)
+# AI DIAL Analytics
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Java](https://img.shields.io/badge/Java-25-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.x-brightgreen)
 
-ADAS is the runtime gateway between analytics consumers and the underlying data stores —
-primarily ClickHouse.
+This repository hosts the Analytics Data Access Service (ADAS), the runtime gateway between
+analytics consumers and the underlying data stores — primarily ClickHouse.
 
 This repository is a runnable Spring Boot application with configuration loading, a stable JSON
 error contract, logging, health and metrics endpoints, and container packaging. Its functional
@@ -442,10 +442,10 @@ stage's Gradle step and never reach an image layer:
 
 ```bash
 docker build --secret id=GPR_USERNAME,env=GPR_USERNAME --secret id=GPR_PASSWORD,env=GPR_PASSWORD \
-  -t analytics-data-access-service .
+  -t ai-dial-analytics .
 docker run --rm -p 5000:5000 \
   -e CLICKHOUSE_HOST=<clickhouse-host> -e POSTGRES_HOST=<postgres-host> \
-  analytics-data-access-service
+  ai-dial-analytics
 ```
 
 The defaults point at `localhost`, which inside the container is the container itself; set the

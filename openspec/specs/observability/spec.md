@@ -178,7 +178,7 @@ than lost. Console log output SHALL include `trace_id` and `span_id` fields.
 
 ### Requirement: Service identity and env-var parity with DIAL services
 Telemetry SHALL carry the resource attribute `service.name`, defaulting to
-`analytics-data-access-service` and overridable via `OTEL_SERVICE_NAME`. Additional resource
+`ai-dial-analytics` and overridable via `OTEL_SERVICE_NAME`. Additional resource
 attributes SHALL be settable via `OTEL_RESOURCE_ATTRIBUTES`. The environment-variable surface
 (`OTEL_EXPORT_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
 per-signal flags and endpoints, `OTEL_TRACES_SAMPLING_PROBABILITY`) SHALL match the conventions
@@ -186,7 +186,7 @@ used by the other DIAL admin services.
 
 #### Scenario: Default service name
 - **WHEN** telemetry is exported without `OTEL_SERVICE_NAME` set
-- **THEN** its `service.name` resource attribute is `analytics-data-access-service`
+- **THEN** its `service.name` resource attribute is `ai-dial-analytics`
 
 ### Requirement: Trace sampling configuration
 When tracing is enabled, the service SHALL use a parent-based ratio sampler with probability

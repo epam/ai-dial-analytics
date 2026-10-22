@@ -1,8 +1,8 @@
 # Configuration
 
-Property reference for the Analytics Data Access Service (ADAS). Every operationally relevant
-property is bound to an environment variable in `src/main/resources/application.yml` using the
-`${ENV_VAR:default}` convention.
+Property reference for AI DIAL Analytics, the Analytics Data Access Service (ADAS). Every
+operationally relevant property is bound to an environment variable in
+`src/main/resources/application.yml` using the `${ENV_VAR:default}` convention.
 
 This file says **what each variable is and what to set it to**. Why a limit exists, what a subsystem
 does with it, and what a refusal means are specified in `openspec/specs/<capability>/spec.md`.
@@ -115,7 +115,7 @@ overrides it for its signal. The base endpoint is fanned out to the per-signal U
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `management.otlp.metrics.export.url`                              | base + `/v1/metrics`            | No                    | Full metrics URL; overrides the base for this signal.                                                                                           |
 | `OTEL_EXPORTER_OTLP_PROTOCOL`         | `management.opentelemetry.*.export.otlp.transport`                | `http`                          | No                    | Transport for traces and logs: `http` or `grpc`. Metrics are always sent over HTTP.                                                             |
 | `OTEL_TRACES_SAMPLING_PROBABILITY`    | `management.tracing.sampling.probability`                         | `1.0`                           | No                    | Probability (0.0–1.0) that a new trace is sampled; parent-based, so upstream decisions are honoured.                                            |
-| `OTEL_SERVICE_NAME`                   | `management.opentelemetry.resource-attributes.service.name`       | `analytics-data-access-service` | No                    | `service.name` resource attribute.                                                                                                              |
+| `OTEL_SERVICE_NAME`                   | `management.opentelemetry.resource-attributes.service.name`       | `ai-dial-analytics`             | No                    | `service.name` resource attribute.                                                                                                              |
 | `OTEL_RESOURCE_ATTRIBUTES`            | _(read by the OTel SDK, not bound in `application.yml`)_          | _(empty)_                       | No                    | Extra resource attributes as `key=value,key=value`; a `service.name` entry here always loses to the property above, so use `OTEL_SERVICE_NAME`. |
 
 Not configurable: the actuator endpoints exposed under `/actuator` are fixed to

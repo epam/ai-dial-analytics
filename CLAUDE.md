@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-The **Analytics Data Access Service (ADAS)** — the runtime gateway between analytics consumers
-and the underlying data stores (primarily ClickHouse). Functional surface is added incrementally
-as spec-driven changes. The querying surface is the structured query DSL at
+**AI DIAL Analytics** hosts the **Analytics Data Access Service (ADAS)** — the runtime gateway
+between analytics consumers and the underlying data stores (primarily ClickHouse). Functional
+surface is added incrementally as spec-driven changes. The querying surface is the structured query DSL at
 `POST /v1/queries/execute` with schema discovery under `/v1/queries` (capabilities
 `structured-query` and `query-schema-discovery`), plus ad-hoc SQL over REST at
 `POST /v1/queries/execute-sql` (capability `rest-sql-endpoint`, same governed pipeline), their CSV-download twins `execute-csv` /

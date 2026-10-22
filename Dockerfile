@@ -22,7 +22,7 @@ RUN adduser -u 1001 --disabled-password --gecos "" appuser && \
 
 RUN apk upgrade --no-cache && apk add --no-cache bash
 
-COPY --from=builder --chown=appuser:appuser /build-workspace/build/libs/analytics-data-access-service*.jar ./app.jar
+COPY --from=builder --chown=appuser:appuser /build-workspace/build/libs/ai-dial-analytics*.jar ./app.jar
 COPY --chown=appuser:appuser docker-entrypoint.sh /usr/local/bin/
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
