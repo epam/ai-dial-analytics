@@ -1,0 +1,190 @@
+{
+  "id": null,
+  "uid": "adas-dial-usage",
+  "title": "ADAS — DIAL usage",
+  "description": "Every panel is served by ADAS POST /v1/queries/execute-sql via the Infinity datasource — never by connecting Grafana to ClickHouse. Installation and configuration: docs/grafana-dashboards.md.",
+  "tags": [
+    "adas",
+    "usage"
+  ],
+  "editable": false,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "time_options": [
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "utc",
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Requests over time (hourly)",
+      "description": "Hourly request counts from dial_usage_log, aggregated server-side by ADAS: date_bin is in the DSL function catalog and renders to ClickHouse toStartOfInterval (epoch-aligned). Aggregation is not cosmetic - a single day of moderate traffic can easily exceed 100k rows, far past the 1000-row maximum. One row is one DIAL Core proxy hop, counted after ADAS's implicit FINAL deduplication (raw rows read somewhat higher). The dashboard time range is pushed into the SQL as TIMESTAMP literals via Grafana's $__from/$__to, which Infinity interpolates; ADAS accepts only the 'yyyy-MM-dd HH:mm:ss' spelling (an ISO literal is rejected with 400), and Grafana renders ':date:' formats from the viewer's clock - the dashboard is pinned to UTC to make that the UTC wall clock, but grafana/grafana#106452 (open, reproduced on 11.6.x) reports the dashboard timezone being ignored for these variables, so a non-UTC browser can silently shift the window.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, count(*) AS requests FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY ts ORDER BY ts LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "requests",
+              "text": "requests",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Top deployments by requests",
+      "description": "Top 10 deployments by request count in the dashboard time range, with the tokens each consumed. Demonstrates the aggregate + ORDER BY-alias-DESC shape through POST /v1/queries/execute-sql, with the time range pushed into the SQL as TIMESTAMP literals exactly as in the graph above. Read it carefully: the ranking is by requests, so the tokens column is NOT sorted (the request leader can be an embedding model with few tokens while a chat model further down carries far more). One row of dial_usage_log is one hop, so an application and the model it calls are counted separately, and 'requests' means requests this deployment served. tokens is empty for deployments that report no token usage (applications and toolsets) - sum() of an all-NULL group is NULL in both ADAS and ClickHouse, not zero. Only the top 10 deployments are shown.",
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT deployment, count(*) AS requests, sum(total_tokens) AS tokens FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY deployment ORDER BY requests DESC LIMIT 10\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "deployment",
+              "text": "deployment",
+              "type": "string"
+            },
+            {
+              "selector": "requests",
+              "text": "requests",
+              "type": "number"
+            },
+            {
+              "selector": "tokens",
+              "text": "tokens",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "text",
+      "title": "Read this before editing panels",
+      "gridPos": {
+        "h": 14,
+        "w": 10,
+        "x": 14,
+        "y": 9
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Data comes from **ADAS**, not ClickHouse — `POST /v1/queries/execute-sql`.\n\nADAS's SQL is a narrow subset, so a panel that works against ClickHouse may be rejected here:\n\n- **Max 1000 rows.** A bigger `LIMIT` is *rejected*, not clamped — so **aggregate server-side**.\n- Arithmetic, `CASE`, `HAVING`, joins, CTEs, derived tables and `IN (SELECT …)` all work\n  — the six analytics dashboards beside this one are built on them. Enrichment tables\n  still need no join: they are read as dotted columns on their source entity. `CAST`\n  only within a type family; see `docs/sql-reference.md` for the dialect in full.\n- `ORDER BY … DESC` puts NULLs **first**, where ClickHouse puts them last — spell\n  `DESC NULLS LAST` on any nullable sort key.\n- Time bucketing is `date_bin(amount, 'unit', ts)` — units `second`…`week` only.\n- `execution_path` (array) and `jwt_claims` / `request_tags` (object) are near-projection-only: an array may be projected or passed as argument 0 of `array_length` / `array_join` / `array_has*` / `array_to_string` / `array_slice`, an object projected, passed to `json_extract_*`, or compared to a literal on the left of `=` / `<>` / `IN` / `LIKE`. Nothing else on the column itself — but the scalar *result* of those functions is unrestricted and can be grouped and sorted.\n\n**The time picker does drive the query.** ADAS understands no Grafana macro, so the range is\ninjected as ordinary SQL literals — `TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}'` — which\nInfinity interpolates before the request. That formats in **UTC**, which is why this dashboard is\npinned to UTC; on a browser-timezone dashboard the window would silently shift.\n\n⚠️ The graph buckets hourly under `LIMIT 1000`, so **a range wider than ~41 days silently shows only\nits oldest 1000 hours** (ADAS returns the first 1000 of an ascending `ORDER BY ts`, with no error).\nThe picker offers up to 30d for that reason — widen the `date_bin` unit before widening the range.\n\n**REST only.** Every panel uses `execute-sql` over the Infinity datasource, the one datasource\nprovisioned here. ADAS also serves SQL over Arrow Flight, which no dashboard uses: both Grafana\nFlight plugins are third-party and one of them silently misreads the Arrow time unit, plotting\nevery timestamp in 1970.\n\nInstalling and configuring these dashboards: `docs/grafana-dashboards.md`."
+      }
+    }
+  ]
+}

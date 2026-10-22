@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse server-side encryption key for the AES_256_GCM_SIV column codec used by the
+  dial_usage_log body columns (request_body, response_body, assembled_response). Without this the
+  hardened CREATE TABLE fails ("encryption codec ... is not configured").
+
+  THROWAWAY TEST KEY — non-secret, for the Testcontainers integration tests only. Never use in any
+  real deployment; production keys come from the deployment's secret store. AES-256 needs a 32-byte
+  key = 64 hex chars. GCM-SIV is nonce-misuse-resistant, so no <nonce_hex> is needed.
+
+  Copied into /etc/clickhouse-server/config.d/ by AbstractClickHouseIntegrationTest.
+-->
+<clickhouse>
+    <encryption_codecs>
+        <aes_256_gcm_siv>
+            <key_hex>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</key_hex>
+        </aes_256_gcm_siv>
+    </encryption_codecs>
+</clickhouse>

@@ -1,0 +1,1965 @@
+{
+  "uid": "adas-session-insights",
+  "title": "ADAS — What the AI is actually used for",
+  "description": "Session-grain view of DIAL traffic with its LLM-derived labels: what kind of work each session was, who handled it, whether it finished, what it cost, and whether anything needs review. Reads `sessions` joined to its own `session_insights` enrichment — one spine, never joined to `conversations`. Activity and risk columns are filled only on fully labelled rows; the Label coverage stat is the guard. Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side.",
+  "tags": [
+    "adas",
+    "enrichment",
+    "sessions"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "client_type",
+        "label": "Client",
+        "type": "custom",
+        "query": "chat,claudecode,opencode",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "chat",
+            "value": "chat"
+          },
+          {
+            "selected": false,
+            "text": "claudecode",
+            "value": "claudecode"
+          },
+          {
+            "selected": false,
+            "text": "opencode",
+            "value": "opencode"
+          }
+        ],
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**One spine: `sessions`.** Every panel reads the session rollup joined to its own same-grain enrichment `session_insights`. That is a parent-to-its-own-child join, not a cross-spine one. **Never join this to `conversations`** — the two count different hop populations for the same id.\n\n**The labels cover part of the spine, and the panels say so.** `activity`, `activity_detail`, `handled_by` and the four `risk` columns are filled **only on fully labelled rows**. Rows labelled before those columns were added carry only title/summary/topic/sentiment/resolution and `usage_scope`. Coverage therefore depends entirely on the window you pick — it can be high over a recently enriched window, and it is near zero over any range the full label set never reached. The **Label coverage** stat is the honesty guard: read it before reading anything else on this dashboard, and narrow the range until it is high enough to mean something. Every panel filters `activity IS NOT NULL`, so an unlabelled session is **absent**, not counted as zero.\n\n**These numbers move while you watch.** Enrichment re-labels rows as its pipeline's prompt improves, and a re-enriched row collapses over its older version, so a labelled population can shift noticeably within an hour. Re-read the coverage stat before quoting any figure from this dashboard.\n\n**`risk_*` is a review queue, not a metric.** The base rate is near zero, so at any realistic accuracy most non-`none` values are false positives. Read it as work to triage. Note the queue lists `risk_level`/`prohibited_request` flags only — a session the assistant *refused* but labelled `risk_level = none` is not in it. Never publish the count, never treat it as a verdict on a person.\n\n**`truncated` is not a quality signal.** The rule selects one chain-entry hop per session by design, so every multi-hop session reads `truncated = true`. It does not mean content was cut.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and these panels use none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values.\n\n**Three panel choices worth knowing.** The `—` placeholder is an ASCII `-` (a non-Latin-1 literal is answered with HTTP 500). *Activity mix over time* buckets in **3-hour** steps rather than hourly, to keep a long-format result under the 1,000-row cap. And the `Client` variable is a **fixed list snapshotted from the `sessions` spine**, not a live query: an Infinity query-variable does not resolve in a provisioned dashboard — it fails silently, and Grafana renders no panel at all until every variable resolves, leaving a working toolbar above an empty canvas. A new client type appears only once the list is regenerated; the SQL for that is in `docs/grafana-dashboards.md`."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "The session spine in one line",
+      "description": "One statement, six numbers, one snapshot (the six tiles used to be six separate queries and could straddle a re-enrichment). Sessions is the whole spine in the range: every session whose first request falls in the window, for the selected clients. Label coverage is the honesty guard - the share of those sessions carrying the full label set (a non-null activity). The four stats after it are computed over that labelled subset only, so an unlabelled session is absent from them rather than counted as zero: Spend $ is the subset's total_price (the session rollup of per-hop deployment_price, priced at execution time); Real work % is the share of labelled sessions whose activity is not platform_evaluation; Spend on eng % is the money-weighted share of labelled spend on software_engineering (data_analysis and document_processing are not included); Risk queue is the number of labelled sessions with any risk_level or prohibited_request other than none - the depth of the triage table below, not a metric to publish.",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS \\\"Sessions\\\", round(100.0 * count(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL THEN 1 END) / count(*), 1) AS \\\"Label coverage %\\\", round(sum(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL THEN total_price ELSE 0 END), 2) AS \\\"Spend $\\\", round(100.0 * count(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL AND \\\"session_insights.activity\\\" <> 'platform_evaluation' THEN 1 END) / count(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL THEN 1 END), 1) AS \\\"Real work %\\\", round(100.0 * sum(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL AND \\\"session_insights.activity\\\" = 'software_engineering' THEN total_price ELSE 0 END) / sum(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL THEN total_price ELSE 0 END), 1) AS \\\"Spend on eng %\\\", count(CASE WHEN \\\"session_insights.activity\\\" IS NOT NULL AND (coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') <> 'none' OR coalesce(to_string(\\\"session_insights.prohibited_request\\\"), 'none') <> 'none') THEN 1 END) AS \\\"Risk queue\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND client_type IN (${client_type:singlequote})\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Label coverage %",
+              "text": "Label coverage %",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Real work %",
+              "text": "Real work %",
+              "type": "number"
+            },
+            {
+              "selector": "Spend on eng %",
+              "text": "Spend on eng %",
+              "type": "number"
+            },
+            {
+              "selector": "Risk queue",
+              "text": "Risk queue",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Label coverage %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 40
+                    },
+                    {
+                      "color": "green",
+                      "value": 80
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Real work %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend on eng %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Risk queue"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "piechart",
+      "title": "Sessions by purpose",
+      "description": "Session count by activity. Counts only sessions with an activity label (activity is NULL on older labels), so the percentages are shares of labelled sessions, not of all sessions in the range - check the Label coverage stat above. platform_evaluation is echo tests, bare greetings and capability probes - judged from content only, never from deployment names.",
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT to_string(\\\"session_insights.activity\\\") AS activity, count(*) AS sessions FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 20\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "activity",
+              "text": "activity",
+              "type": "string"
+            },
+            {
+              "selector": "sessions",
+              "text": "sessions",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "activity": 0,
+              "sessions": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Spend by session purpose",
+      "description": "Sessions, turns and spend per activity, sorted by spend, highest first. Counts only sessions carrying an activity label, so an unlabelled session is absent rather than zero. 'Spend $' is the session rollup total_price (each hop's own deployment_price, summed, priced at request time). Read 'Dollar per session' together with 'Sessions': the cheapest bucket can also be the biggest one.",
+      "gridPos": {
+        "h": 10,
+        "w": 16,
+        "x": 8,
+        "y": 13
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT to_string(\\\"session_insights.activity\\\") AS \\\"Activity\\\", count(*) AS \\\"Sessions\\\", sum(turn_count) AS \\\"Turns\\\", round(sum(turn_count) * 1.0 / count(*), 1) AS \\\"Turns/session\\\", round(sum(total_price), 2) AS \\\"Spend $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per session\\\", round(100.0 * count(CASE WHEN \\\"session_insights.resolution_status\\\" = 'resolved' THEN 1 END) / count(*), 1) AS \\\"Resolved %\\\", round(100.0 * count(CASE WHEN \\\"session_insights.handled_by\\\" = 'application' THEN 1 END) / count(*), 1) AS \\\"App-handled %\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1 ORDER BY 5 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Turns/session",
+              "text": "Turns/session",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per session",
+              "text": "Dollar per session",
+              "type": "number"
+            },
+            {
+              "selector": "Resolved %",
+              "text": "Resolved %",
+              "type": "number"
+            },
+            {
+              "selector": "App-handled %",
+              "text": "App-handled %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per session"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Resolved %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "App-handled %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Activity": 0,
+              "Sessions": 1,
+              "Turns": 2,
+              "Turns/session": 3,
+              "Spend $": 4,
+              "Dollar per session": 5,
+              "Resolved %": 6,
+              "App-handled %": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "What the work actually is",
+      "description": "activity × activity_detail for fully labelled sessions only (an unlabelled session is absent, not zero), ordered by session count, top 200 pairs. The detail value set is per-activity, so a pair that does not belong together (software_engineering / research, say) is a visible classifier leak, not a panel bug. Spend $ sums the session rollup's own total_price; a session with no recorded price counts as $0, and a large share of them may have none, so Dollar per session is the average over every session in the pair, not over billed ones.",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT to_string(\\\"session_insights.activity\\\") AS \\\"Activity\\\", coalesce(\\\"session_insights.activity_detail\\\", '-') AS \\\"Detail\\\", count(*) AS \\\"Sessions\\\", round(sum(total_price), 2) AS \\\"Spend $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per session\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1, 2 ORDER BY 3 DESC NULLS LAST, 1, 2 LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Detail",
+              "text": "Detail",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per session",
+              "text": "Dollar per session",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per session"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Activity": 0,
+              "Detail": 1,
+              "Sessions": 2,
+              "Spend $": 3,
+              "Dollar per session": 4
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Activity mix over time",
+      "description": "Sessions by activity, in fixed 3-hour buckets - ADAS has no $__interval macro, and hourly buckets blow the 1,000-row cap on a wide range (over 30 days hourly buckets can exceed it where 3-hour buckets fit). activity is filled on fully labelled rows only, so an unlabelled session is absent, not zero: an empty stretch is missing coverage, not a quiet period. Stacked bars; the stack total per bucket is the labelled session count for the selected Client types.",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(3, 'hour', first_request_time) AS ts, to_string(\\\"session_insights.activity\\\") AS activity, count(*) AS sessions FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1, 2 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "activity",
+              "text": "activity",
+              "type": "string"
+            },
+            {
+              "selector": "sessions",
+              "text": "sessions",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 70,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "activity"
+            ],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Spend by handler kind",
+      "description": "Who handled the session, from session_insights.handled_by: an app, agent or toolset deployment (application) or only bare model deployments (model), judged from deployment names - routers and coding harnesses are plumbing and do not count. Read it beside client_type, which carries the harness fact deterministically. Fully labelled sessions only (an unlabelled session is absent, not zero), sorted by Spend $ descending. Dollar per session divides the row's spend by every session in it, including those (often a large share) that carry no price at all, so it is spend per session and not the price of a priced one. Actors is distinct user_ref - identity-provider users on token calls, DIAL projects on key calls - among sessions only, so it is a floor, and the two rows overlap.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"session_insights.handled_by\\\"), 'unclear') AS \\\"Handled by\\\", count(*) AS \\\"Sessions\\\", round(sum(turn_count) * 1.0 / count(*), 1) AS \\\"Turns/session\\\", round(sum(total_price), 2) AS \\\"Spend $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per session\\\", count(DISTINCT user_ref) AS \\\"Actors\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 20\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Handled by",
+              "text": "Handled by",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Turns/session",
+              "text": "Turns/session",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per session",
+              "text": "Dollar per session",
+              "type": "number"
+            },
+            {
+              "selector": "Actors",
+              "text": "Actors",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per session"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Handled by": 0,
+              "Sessions": 1,
+              "Turns/session": 2,
+              "Spend $": 3,
+              "Dollar per session": 4,
+              "Actors": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Cost of unfinished sessions",
+      "description": "Cost per outcome at session grain: the `sessions` rollup with its own same-grain `session_insights` read as a dotted column (a left join on `client_session_id`), sessions whose `first_request_time` falls in the window, `activity IS NOT NULL` only, sorted by unit cost descending. `Spend $` is the rollup's `total_price`, which already sums per-hop `deployment_price`, so a routed chain is not double-counted.\n\nREAD THE DENOMINATOR. A large share of sessions can carry no `total_price` at all (unpriced deployments, negligible tokens) and count in `Dollar per session` as $0 - and the unpriced share can differ sharply by outcome, so the blended column can exaggerate the gap. `Dollar per priced session` divides the same spend by only the sessions that have one; read that for the ratio and `Priced %` for how much of the row it speaks for; the table stays sorted on the blended column so it ranks the same way as the sibling tables. Same convention, and the same caveat, as the conversation-grain tables on `adas-unit-economics`.\n\nDOES THE SESSION GRAIN AGREE? Check whether the unfinished classes (`partially_resolved`, `unresolved`) sit above `resolved` here on both the blended and the priced-only measure, as against the conversation-grain table. Compare like with like: the conversation-grain twin's own default range is a different population.\n\nTWO THINGS THAT NEVER APPEAR. `abandoned` is an enum value the labeller rarely if ever uses, and `unlabelled` is unreachable - every `session_insights` row carries a `resolution_status` on every labelled row - so the `coalesce` is a defensive default, not a bucket. The `activity IS NOT NULL` filter is this dashboard's uniform policy for the activity/risk columns; `resolution_status` is filled on older rows too, so here it drops the sessions labelled before the full label set.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 34
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"session_insights.resolution_status\\\"), 'unlabelled') AS \\\"Outcome\\\", count(*) AS \\\"Sessions\\\", round(100.0 * count(CASE WHEN total_price IS NOT NULL THEN 1 END) / count(*), 1) AS \\\"Priced %\\\", round(sum(turn_count) * 1.0 / count(*), 1) AS \\\"Turns/session\\\", round(sum(total_price), 2) AS \\\"Spend $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per session\\\", round(sum(total_price) / nullif(count(CASE WHEN total_price IS NOT NULL THEN 1 END), 0), 4) AS \\\"Dollar per priced session\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1 ORDER BY 6 DESC NULLS LAST LIMIT 20\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Outcome",
+              "text": "Outcome",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Priced %",
+              "text": "Priced %",
+              "type": "number"
+            },
+            {
+              "selector": "Turns/session",
+              "text": "Turns/session",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per session",
+              "text": "Dollar per session",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per priced session",
+              "text": "Dollar per priced session",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per session"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per priced session"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Priced %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Outcome": 0,
+              "Sessions": 1,
+              "Priced %": 2,
+              "Turns/session": 3,
+              "Spend $": 4,
+              "Dollar per session": 5,
+              "Dollar per priced session": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Is the traffic what this platform is for?",
+      "description": "usage_scope x client, sorted by spend. Fully labelled sessions only (non-null activity) - sessions labelled before the full label set are absent, not 'unlabelled'. Read it as a rate over a period, never as a verdict on one session. trivial = greeting, ping, smoke test or capability probe.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 34
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"session_insights.usage_scope\\\"), 'unlabelled') AS \\\"Scope\\\", client_type AS \\\"Client\\\", count(*) AS \\\"Sessions\\\", sum(turn_count) AS \\\"Turns\\\", round(sum(total_price), 2) AS \\\"Spend $\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1, 2 ORDER BY 5 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Scope",
+              "text": "Scope",
+              "type": "string"
+            },
+            {
+              "selector": "Client",
+              "text": "Client",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Scope": 0,
+              "Client": 1,
+              "Sessions": 2,
+              "Turns": 3,
+              "Spend $": 4
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Risk review queue — triage this, do not count it",
+      "description": "Sessions in the range that the enrichment flagged: risk_level not 'none', or prohibited_request not 'none' (which includes 'unclear' - the labeller was unsure, not a confirmed forbidden ask). Sessions without the full label set are absent, not shown as risk-free, so this is a queue over the labelled part of the spine only. Sorted highest level first, then newest session first; capped at 200 rows. 'Data in' and 'Cost $' are context columns, not filters. risk_outcome says what the assistant did about it - 'refused' is the guardrail holding; note that a session refused but labelled risk_level 'none' does not appear here. Expect false positives at this base rate; that is what a queue is for - triage it, never count it.",
+      "gridPos": {
+        "h": 10,
+        "w": 15,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') AS \\\"Level\\\", coalesce(to_string(\\\"session_insights.data_exposure\\\"), 'none') AS \\\"Data in\\\", coalesce(to_string(\\\"session_insights.prohibited_request\\\"), 'none') AS \\\"Asked for\\\", coalesce(to_string(\\\"session_insights.risk_outcome\\\"), 'unclear') AS \\\"Outcome\\\", first_request_time AS \\\"When\\\", \\\"session_insights.title\\\" AS \\\"Session\\\", to_string(\\\"session_insights.activity\\\") AS \\\"Activity\\\", client_type AS \\\"Client\\\", round(total_price, 4) AS \\\"Cost $\\\", client_session_id AS \\\"Session id\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) AND (coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') <> 'none' OR coalesce(to_string(\\\"session_insights.prohibited_request\\\"), 'none') <> 'none') ORDER BY CASE WHEN coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') = 'high' THEN 3 WHEN coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') = 'medium' THEN 2 WHEN coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') = 'low' THEN 1 ELSE 0 END DESC NULLS LAST, first_request_time DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Level",
+              "text": "Level",
+              "type": "string"
+            },
+            {
+              "selector": "Data in",
+              "text": "Data in",
+              "type": "string"
+            },
+            {
+              "selector": "Asked for",
+              "text": "Asked for",
+              "type": "string"
+            },
+            {
+              "selector": "Outcome",
+              "text": "Outcome",
+              "type": "string"
+            },
+            {
+              "selector": "When",
+              "text": "When",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Session",
+              "text": "Session",
+              "type": "string"
+            },
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Client",
+              "text": "Client",
+              "type": "string"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Session id",
+              "text": "Session id",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Level"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "high": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "medium": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "low": {
+                        "color": "yellow",
+                        "index": 2
+                      },
+                      "none": {
+                        "color": "text",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Session"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "refused": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "answered": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Level": 0,
+              "Data in": 1,
+              "Asked for": 2,
+              "Outcome": 3,
+              "When": 4,
+              "Session": 5,
+              "Activity": 6,
+              "Client": 7,
+              "Cost $": 8,
+              "Session id": 9
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "What went in, and what came back",
+      "description": "data_exposure x risk_outcome over every fully labelled session in the range, so the review queue to the left can be read against its denominator - the rows sum to the whole labelled population, and 'none' is usually the large majority of it. 'none' means the labeller saw no sensitive data in the chain-entry hop it was given; on a multi-hop session that hop is not the whole session. Spend is the session's own total_price, summed per cell.",
+      "gridPos": {
+        "h": 10,
+        "w": 9,
+        "x": 15,
+        "y": 45
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"session_insights.data_exposure\\\"), 'unlabelled') AS \\\"Data in\\\", coalesce(to_string(\\\"session_insights.risk_outcome\\\"), 'unclear') AS \\\"Assistant did\\\", count(*) AS \\\"Sessions\\\", round(sum(total_price), 2) AS \\\"Spend $\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) GROUP BY 1, 2 ORDER BY 3 DESC NULLS LAST LIMIT 50\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Data in",
+              "text": "Data in",
+              "type": "string"
+            },
+            {
+              "selector": "Assistant did",
+              "text": "Assistant did",
+              "type": "string"
+            },
+            {
+              "selector": "Sessions",
+              "text": "Sessions",
+              "type": "number"
+            },
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sessions"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Data in": 0,
+              "Assistant did": 1,
+              "Sessions": 2,
+              "Spend $": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Session explorer — the 500 costliest labelled sessions",
+      "description": "One row per session: the machine-written title and summary beside every structured label and the session's own cost. Only fully labelled sessions appear — older and unlabelled sessions are absent, not zero. Ordered by session cost, highest first, and cut to the 500 costliest, so sorting a column reorders those 500 rows rather than reaching the rest of the labelled population; sessions with no cost at all (often a large share of the labelled `chat` sessions) never appear. The risk-review queue normally fits inside the 500. Personal data is omitted by the labelling prompt.",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT first_request_time AS \\\"Started\\\", \\\"session_insights.title\\\" AS \\\"Title\\\", \\\"session_insights.summary\\\" AS \\\"Summary\\\", to_string(\\\"session_insights.activity\\\") AS \\\"Activity\\\", coalesce(\\\"session_insights.activity_detail\\\", '-') AS \\\"Detail\\\", coalesce(to_string(\\\"session_insights.handled_by\\\"), 'unclear') AS \\\"Handled by\\\", coalesce(to_string(\\\"session_insights.usage_scope\\\"), '-') AS \\\"Scope\\\", coalesce(to_string(\\\"session_insights.resolution_status\\\"), '-') AS \\\"Outcome\\\", coalesce(to_string(\\\"session_insights.sentiment\\\"), '-') AS \\\"Sentiment\\\", coalesce(to_string(\\\"session_insights.risk_level\\\"), 'none') AS \\\"Risk\\\", \\\"session_insights.language\\\" AS \\\"Lang\\\", client_type AS \\\"Client\\\", turn_count AS \\\"Turns\\\", round(total_price, 4) AS \\\"Cost $\\\", client_session_id AS \\\"Session id\\\" FROM sessions WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND \\\"session_insights.activity\\\" IS NOT NULL AND client_type IN (${client_type:singlequote}) ORDER BY total_price DESC NULLS LAST, client_session_id LIMIT 500\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Started",
+              "text": "Started",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Title",
+              "text": "Title",
+              "type": "string"
+            },
+            {
+              "selector": "Summary",
+              "text": "Summary",
+              "type": "string"
+            },
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Detail",
+              "text": "Detail",
+              "type": "string"
+            },
+            {
+              "selector": "Handled by",
+              "text": "Handled by",
+              "type": "string"
+            },
+            {
+              "selector": "Scope",
+              "text": "Scope",
+              "type": "string"
+            },
+            {
+              "selector": "Outcome",
+              "text": "Outcome",
+              "type": "string"
+            },
+            {
+              "selector": "Sentiment",
+              "text": "Sentiment",
+              "type": "string"
+            },
+            {
+              "selector": "Risk",
+              "text": "Risk",
+              "type": "string"
+            },
+            {
+              "selector": "Lang",
+              "text": "Lang",
+              "type": "string"
+            },
+            {
+              "selector": "Client",
+              "text": "Client",
+              "type": "string"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Session id",
+              "text": "Session id",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Risk"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "high": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "medium": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "low": {
+                        "color": "yellow",
+                        "index": 2
+                      },
+                      "none": {
+                        "color": "text",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Summary"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto",
+                  "wrapText": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Title"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Session id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Started": 0,
+              "Title": 1,
+              "Summary": 2,
+              "Activity": 3,
+              "Detail": 4,
+              "Handled by": 5,
+              "Scope": 6,
+              "Outcome": 7,
+              "Sentiment": 8,
+              "Risk": 9,
+              "Lang": 10,
+              "Client": 11,
+              "Turns": 12,
+              "Cost $": 13,
+              "Session id": 14
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

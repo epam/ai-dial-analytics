@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse server-side encryption key for the AES_256_GCM_SIV column codec used by the
+  dial_usage_log_payload body columns (request_body, response_body, assembled_response). The Flyway
+  migrations ADAS runs on startup create those columns with the AES codec, which fails unless this
+  key is configured — so this file is mounted into config.d for local dev. V1 creates dial_usage_log
+  with the same codec on its own body columns before V11 drops them, so the key is needed to
+  provision from scratch even though those columns do not survive the migration set.
+
+  THROWAWAY LOCAL-DEV KEY — non-secret, for local development only. Never use in any real
+  deployment; production keys come from the deployment's secret store. AES-256 needs a 32-byte
+  key = 64 hex chars. GCM-SIV is nonce-misuse-resistant, so no <nonce_hex> is needed.
+-->
+<clickhouse>
+    <encryption_codecs>
+        <aes_256_gcm_siv>
+            <key_hex>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</key_hex>
+        </aes_256_gcm_siv>
+    </encryption_codecs>
+</clickhouse>

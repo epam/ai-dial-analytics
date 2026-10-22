@@ -1,0 +1,321 @@
+schema: spec-driven
+
+context: |
+  # ADAS — project conventions
+
+  Durable conventions only. `openspec/specs/<capability>/spec.md` owns shipped behavior — if a
+  statement would go stale when a capability ships, it belongs in a spec, not here.
+
+  ADAS is the runtime gateway between analytics consumers and the data stores: ClickHouse holds the
+  data, PostgreSQL the catalog. Surface grows incrementally as spec-driven changes; the specs are
+  the endpoint inventory.
+
+  ## Stack and build
+
+  Java 25, Spring Boot 4 (Web MVC), Gradle. Versions live in `build.gradle` — read it rather than a
+  copy here. `-Werror` on every `JavaCompile`, so an unused import or an unhandled deprecation fails
+  the build. Checkstyle is Google Java Style with **180-char** lines, not 100.
+
+  - **Jackson 3**: runtime types are `tools.jackson` (configured in `JsonMapperConfiguration`), but
+    annotations stay `com.fasterxml.jackson.annotation`. Don't harmonize the two — a stray Jackson 2
+    `ObjectMapper` diverges from the configured mapper silently.
+  - **Log4j2**: Boot's Logback starter is excluded from all configurations, so a `logback-spring.xml`
+    would be dead config with no error.
+  - **MapStruct**: set `componentModel = "spring"` on every `@Mapper` — there is no global default,
+    and omitting it surfaces as a puzzling `NoSuchBeanDefinitionException` at startup. Some
+    `web/mapper/` classes are deliberately hand-written `@Component`s; leave them.
+  - **ClickHouse over HTTP**: `ClickHouseClientWrapper` reads, `ClickHouseWriterClient` writes/DDL,
+    `clickhouse-jdbc` only for the Flyway runner. `client-v2` and `clickhouse-jdbc` must move in
+    lockstep — a mismatch compiles and mostly tests fine, then throws `NoSuchMethodError` on the
+    migration path.
+  - **jOOQ renders SQL only** (no `DataSource`); Calcite `core` + `babel` parses inbound SQL. Never
+    execute through jOOQ: it bypasses both the credential split and the sensitive-column chokepoint.
+  - **Dependencies**: prefer Boot BOM versions; pin only when unmanaged or for a CVE, naming it. One
+    artifact goes in `constraints {}`; a transitive family needs a newer `platform(...)` BOM imported
+    ahead of Boot's — a bare `implementation` pin loses to the BOM and silently does nothing.
+
+  Prerequisites, each failing with a symptom that points away from its cause: JDK 25, a running
+  **Docker daemon** (integration tests start real ClickHouse and PostgreSQL), **GitHub Packages
+  credentials** (`gpr.user`/`gpr.key` or `GPR_USERNAME`/`GPR_PASSWORD`) or EPAM's jclouds fork won't
+  resolve, and a reachable **PostgreSQL** for `bootRun` (the JPA `DataSource` and Flyway run at
+  startup). `./gradlew clean build` — compile + checkstyle + tests — is the completion gate.
+
+  Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+  --enable-native-access=ALL-UNNAMED`. `build.gradle` sets these on `test` and `bootRun` only; IDE
+  run configurations and `java -jar` must set them too, or Arrow allocation fails at runtime as a
+  bare "internal error".
+
+  ## Layout
+
+  Base package `com.epam.aidial.analytics`: `web/{controller,dto,mapper,handler,security,flight}`,
+  `service/`, `clickhouse/`, `blob/`, `sync/`, `configuration/`, `observability/`, `exception/`.
+
+  `service/` holds business logic **and** the JPA layer — `@Entity` classes and Spring Data
+  repositories sit with the service that owns them (`service/table/`, `service/pipeline/`,
+  `service/enrichment/`, `service/query/saved/`). There is no `repository/` or `entity/` package;
+  don't create one.
+
+  **Flight SQL is not a servlet path** — `web/flight/` runs a gRPC listener on `flight.port`
+  (default `32010`), disabled by default. Anything cross-cutting applied over HTTP must be applied
+  there separately, or it silently doesn't cover Flight.
+
+  ## API conventions
+
+  - Functional endpoints under `/v1`; operational under `/actuator/*`.
+  - **Responses and list entries are objects, never bare arrays** (`{"rows": [...]}`, `{name, type}`)
+    so counts, cursors and metadata can be added without breaking clients. Exactly two pre-existing
+    endpoints still return bare arrays and are frozen: `GET /v1/queries/entities` and
+    `/v1/queries/functions`. They are the visible counter-precedent — do not copy them.
+  - **`ErrorView` is the only failure shape**:
+    `{"status": 503, "error": "clickhouse_unavailable", "message": "...", "path": "/v1/...", "method": "GET"}`.
+    `error` is a stable machine code; never leak stack traces or upstream internals. Map a new
+    failure mode by adding an `@ExceptionHandler` to `DefaultExceptionHandler`.
+  - **A query param or path variable that will not convert to its declared type is `400`**, not `500`:
+    `MethodArgumentTypeMismatchException` is mapped in `DefaultExceptionHandler`'s bad-request handler,
+    ahead of the `Exception` catch-all that would otherwise make an input error look like a server
+    fault and invite a retry that cannot succeed. This is service-wide, so it also covers typed path
+    variables (no current route declares one; revision ids are bound as `String` and parsed by
+    `AuditSnapshotGuards`).
+  - **Spring's own conversion is lenient where a filter must not be.** A `Boolean` request param
+    accepts `1`/`yes`/`on` and maps an *empty* value to `null` — for a parameter that selects which
+    subset is returned, that silently answers with a different set than was asked for. Bind such a
+    param strictly (an `@InitBinder` editor, as `PipelineController` does for `?enabled=`) so anything but
+    `true`/`false` is a `400`.
+  - **An unrecognized field in a request body is a `400` naming the field**, not a silent drop. Request
+    bodies are read by a strict copy of the primary `JsonMapper`, installed on the web converter alone by
+    `StrictRequestJsonConfiguration`. The primary mapper stays lenient because it also reads *persisted*
+    JSON (a pipeline `spec`, a saved-query body) and a third party's (DIAL Core's introspection response),
+    where an unknown member must not be fatal — `V36__fold_rule_into_pipeline.sql` depends on that. Most
+    request records are all-optional members, so validation cannot catch a misspelling: without strictness
+    `{"order": …}` for `member_select.order_by` was stored as no ordering at all, and a `PATCH .../schema`
+    naming `columns` instead of `add` answered `200` having changed nothing. The unknown field's **name** is
+    the one Jackson detail safe to echo — it came from the caller's own body — and the rest of the exception
+    is still withheld.
+  - **Auth errors render in two independent places.** `401` comes from the security filter chain
+    (`RestAuthenticationEntryPoint`); the endpoint-level `403` from `@RequiresPrivilege` escapes the
+    chain and is mapped by the `AccessDeniedException` handler (`RestAccessDeniedHandler` still covers
+    the chain's own `denyAll`). Change both, or one path silently drops the contract. Token-decode
+    detail is deliberately not surfaced — every auth failure collapses to `401`.
+  - **Where a `403` would itself leak a row's existence**, the answer is `404`. Two mechanisms, by
+    resource shape: enforce visibility in the repository lookup predicate where the rule is a row
+    predicate (`SavedQueryRepository.findVisible`), and answer `404` from the authorization gate where
+    it is a privilege check — `PrivilegeAuthorizationManager` throws `TableNotFoundException` when a
+    **read-side** table privilege (`TABLE_LIST/GET/READ`) is missing, because a table a
+    caller may not list must not be distinguishable from one that does not exist. A third shape is
+    neither: a sensitive **column** is elided from the schema and rejected as an unknown field, not
+    refused — the `TABLE_SENSITIVE` clearance is never an endpoint gate and never hides a table. Post-fetch `403` is for the denials that admit the resource exists — `TABLE_WRITE`,
+    `TABLE_MODIFY`, the administrative privileges, and `PipelineAuthorizer`, which runs behind an
+    endpoint gate that has already established the caller may see the pipeline. Don't cross the
+    patterns.
+  - **DTO properties are snake_case, declared per field with `@JsonProperty`** — there is no global
+    naming strategy, and enums serialize lowercase (`WRITE_ENUMS_TO_LOWERCASE` in
+    `JsonMapperConfiguration`). The `audit-trail` capability is the one deliberate exception on both
+    counts: it serves camelCase and PascalCase enum values because it adopts the sibling DIAL control
+    planes' contract verbatim, pinned with `@JsonValue`. The `data-sync-backfill` DTOs
+    (`web/dto/backfill/`) are a second, undeliberate exception: they shipped camelCase with no
+    `@JsonProperty` and stay so for compatibility, so a member added to them follows the DTO it
+    joins. Copy the convention, not the exceptions.
+  - **The Enrichment Runner contract is a cross-service invariant with a half in another repo.**
+    `RunnerContract.VERSION` (a code constant, never configuration) is echoed as the
+    `Adas-Contract-Version` response header on every response under `/v1/pipelines` — set by a servlet
+    filter at `HIGHEST_PRECEDENCE`, ahead of the security chain, so a `401`/`403`/`404` carries it and only
+    a build predating the contract answers without one. It is *required* on the four runner-only data-plane
+    POSTs (`/scan`, `/group-rows`, `/materialize`, `/rows`) by a deny-by-default `HandlerInterceptor`, with
+    operator surfaces opting out via `@RunnerContractExempt`. Three consequences for anyone changing this
+    area. The interceptor's pattern is `/v1/pipelines/*/**` — a Spring `/**` matches zero segments, so
+    `/v1/pipelines/**` would refuse registration with a `409`. A **new runner-facing endpoint outside the
+    `/v1/pipelines` prefix gets no echo and reads to the runner as a version skew**, so it means extending
+    the filter in the same window. And a breaking change to the compiled projection or to any of those four
+    endpoints' request/response shapes must raise `VERSION` **in both repos at once** —
+    `RunnerContractShapeTest` fails the build naming the constant, and the runner's `AdasContract.VERSION`
+    must move with it.
+
+  ## Auditing
+
+  `table_definition`, `column_mapping`, `pipeline` (both kinds) and `saved_query` are `@Audited`
+  (Hibernate Envers): every insert/update/delete writes a full-state snapshot plus a feed entry, inside
+  the caller's transaction. Three consequences for anyone touching an audited write path. A removal that
+  bypasses the persistence context (a database `ON DELETE CASCADE`, a `@Modifying` bulk delete) is
+  **invisible** to the trail and silently corrupts point-in-time reads, so delete children through
+  their repository — see `PipelineTargetCascade` for the pattern when the two sides sit in packages with
+  a one-directional dependency rule. Adding `@Audited` to a new entity requires a matching `*_aud`
+  migration and an `AuditResourceMapper` case, or its changes are stored but never explained — and
+  widening an already-audited entity requires widening its mirror in the same change, or the first write
+  of the new column fails at commit. And a JSON-mapped value class on an audited entity **must** carry
+  `@EqualsAndHashCode`: Hibernate dirty-checks it by comparing a deep copy with `equals()`, so without
+  one, merely loading the entity in a read-write transaction records a phantom `Update`.
+
+  If `AuditResourceMapper` needs a repository to resolve a parent activity (as `Pipeline`'s effective
+  read source lookup does), the parameter **must** be `@Lazy` — the mapper sits on the same bean chain
+  Hibernate resolves while building `entityManagerFactory`, and an eager JPA-repository dependency there
+  is a circular-dependency startup failure, not a style issue. That lookup must also be a **scalar
+  projection**, never an entity load: it runs inside Envers' before-commit hook, where loading the row
+  that is being written back is what the `PipelineDeclaration` hazard warns about.
+
+  An enrichment's definition is authored on its pipeline as `spec.transform`, which `pipeline_aud`
+  mirrors — so a revision carries the declaration, prompt included, that produced a row, with full
+  attribution. A revision recorded before the fold carries no transform, and the fold migration itself
+  created no revision. The activity feed and the
+  single-activity read require `AUDIT_READ` — the feed's own privilege, not a derivation from each
+  resource's live read, because a `table` activity's live read is now one of four rungs *on a named
+  table* and a feed that pages in SQL cannot apply a per-row predicate unless the predicate is in the
+  query. `saved_query` reads stay owner/`common`-scoped (`SavedQueryRepository.findVisible`), applied as
+  a content filter in `AuditActivityService` and as an explicit check in the snapshot route, resolved
+  against the resource's **current** state rather than its historical one; the unconditional bypass is
+  `SAVED_QUERY_PUBLISH`. The pipeline snapshot route requires `REGISTRY_READ`, matching its live read.
+  **The feed is not filtered by table visibility** — a caller holding `AUDIT_READ` sees that a table it
+  cannot read changed. That is a stated trade-off with a named follow-up, not an oversight. Re-check
+  this bar before auditing a new entity whose own read authorization is not a single global privilege.
+
+  ## Configuration
+
+  Environment-driven `application.yml`. **Property descriptions live ONLY in
+  `docs/configuration.md`** (one table per config group): keep `application.yml` to bare
+  `key: ${ENV:default}` lines with no explanatory comments, and add no env-var tables to
+  `README.md` — an inline mention plus a link is fine.
+
+  **`docs/configuration.md` is a property reference, not a design document.** One row per variable
+  (`Variable | Property | Default | Required | Description`), and **one line per description** — what
+  the value selects or bounds, its validated range, the error code a violation produces. `Required`
+  is `Yes`/`No` or the short condition under which it is required, decided by whether a real
+  deployment can work on the default. Keep the table cells aligned.
+
+  Behaviour, rationale, cost, and failure semantics belong in `openspec/specs/<capability>/spec.md`
+  and never in a `Description` cell. A change that adds **no** config property adds **nothing** to
+  `docs/configuration.md` — that is what turned it into a 148 KB essay once already. Operator
+  knowledge that is neither a property nor capability behaviour gets its own topic doc under `docs/`
+  (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
+
+  ## Testing
+
+  `@WebMvcTest` slices for controller-only work; anything touching ClickHouse or the catalog is a
+  `@SpringBootTest` + `@AutoConfigureMockMvc` test under `.../integration/`, extending
+  `AbstractClickHouseIntegrationTest` / `AbstractPostgresIntegrationTest` (singleton Testcontainers
+  via `@DynamicPropertySource`). **Each test owns its data — truncate + insert, never a shared
+  fixture** — or you get order-dependent flakes against the shared container.
+
+  ## Operational invariants
+
+  - **The credential split is load-bearing.** Every ClickHouse *read* goes through the single
+    read-only client — `/v1/queries`, Flight SQL, and the scan / group-rows / preview / window-probe
+    reads under `/v1/pipelines`. Every write and every runtime DDL goes on
+    `clickhouse.writer.*`. New reads join the read client; new writes join the writer.
+  - **Writer grants to provision**, three of them counterintuitive: `INSERT`;
+    `CREATE`/`ALTER`/`DROP TABLE` — `DROP` even where nothing calls `DELETE /v1/tables/{name}`, for
+    best-effort compensation after a failed materialize; `DESCRIBE` on every sync target, for
+    startup schema reconciliation, even in an INSERT-only deployment; and `SELECT` on scan/input
+    sources, because the Class-1 and aggregate `INSERT … SELECT` read what they derive from — plus
+    `SELECT` on any **enrichment** table an aggregate pipeline references, since such a refresh joins
+    it through the grain join and so reads it too, not only its input source.
+  - **Keep Class-1 derivation inside the database.** That server-side `INSERT … SELECT` is what
+    stops sensitive body columns from crossing the wire; rewriting it as read-then-write through the
+    application passes every test and is a security regression. `POST /v1/tables/{name}/rows` and
+    `/v1/pipelines/{name}/rows` are the deliberate exception, carrying caller payloads by design.
+  - **The PostgreSQL catalog decides what is queryable** and how columns are exposed. A ClickHouse
+    table absent from the catalog will not appear under `/v1/queries` — that is not a discovery bug.
+  - **Authorization is a privilege, held globally or granted per table.** Sixteen `Privilege` values;
+    six are table-scoped (`TABLE_LIST`/`GET`/`READ`/`SENSITIVE`/`WRITE`/`MODIFY`) and a caller's
+    effective access is the union of what it holds globally and what a table's `access` lists grant its
+    raw provider roles — five keys, since `TABLE_LIST` is global-or-implied and has none. The three read
+    rungs form a ladder, derived at check time and never written into
+    a stored list; `TABLE_WRITE` implies nothing. `TABLE_SENSITIVE` is a **clearance, not a rung**: it
+    implies nothing and extends `GET`/`READ`/`MODIFY` on the same table to its sensitive columns, so a
+    sensitive column needs the verb *and* the clearance. Where the surface has already enforced its verb
+    bar, `SensitiveColumnAccess.maySeeSensitive` (clearance alone) is right; a path with no verb bar of
+    its own (pipeline authoring, runner guards) must use `mayReadSensitive` (read and clearance). `FULL_ADMIN` and the other three bundles exist only in
+    `roles-mapping` and are expanded at parse time — **no gate may branch on a bundle name**.
+  - **Read exposure is decided per owning table, at one chokepoint.** `CatalogQueryService.buildModel`
+    applies both the read bar and the `sensitive` filter where each column's owning table is in hand, so
+    discovery, DSL, SQL, translation and Flight agree and a flattened entity can legitimately expose a
+    source's sensitive columns and hide an enrichment's. **Route every new read surface through it**, or
+    it bypasses both filters with nothing failing. The bar is an explicit parameter
+    (`findModel(entity, bar)`): `TABLE_READ` to execute, `TABLE_GET` to translate or validate,
+    `TABLE_LIST` to list.
+  - **Row policies are enforced by ClickHouse, at a second chokepoint.** Every user read must execute
+    through `StructuredQueryExecutor.execute`/`executeComposite`, which hand their merged settings to
+    `RowPolicyFilter.apply` last, adding `additional_table_filters` with an entry for every table the
+    caller is confined on (keyed `ClickHouseProperties.sessionDatabase()` + table). A read surface that
+    reaches ClickHouse any other way is unfiltered with nothing failing. Two invariants keep the setting
+    authoritative: callers can set no query settings (a future passthrough must be an allow-list without
+    it — a query-text `SETTINGS` replaces the client value), and no surface admits table functions
+    (`merge()` bypasses it). Pipeline reads never carry it; paths that would read a confined table on a
+    confined caller's behalf refuse `403 row_policy_confined` instead.
+  - **Every `/v1` request mapping declares exactly one requirement**, `@RequiresPrivilege` or
+    `@AuthenticatedOnly`. The URL layer only authenticates, so a missing annotation would be an open
+    endpoint — `EndpointAuthorizationCoverageTest` fails the build instead, and the chain's default is
+    `denyAll`. A table-scoped privilege must name the handler parameter carrying the table or mark the
+    check `deferred`, meaning enforced downstream where the discriminator is in hand — every resolved
+    table for a query or listing, or the `scope` in the request body for a saved-query write, which is
+    why `deferred` is legal on a global-only privilege too. A `deferred` gate requires authentication
+    only, so its chokepoint must be total.
+  - **A missing read privilege answers `404`, never `403`.** Non-disclosure applies wherever the caller
+    *named* the table; the pipeline data plane is the one carve-out (the table comes from a stored
+    declaration the caller is already entitled to read) and answers `403 pipeline_access_denied` — or
+    `403 row_policy_confined`, which the registry's arm/preview/refresh endpoints also answer, when a row
+    policy confines the caller on a table the pipeline reads.
+  - **Two migration roots**, each scoped so neither sees the other's: `db/migration/postgres` (Boot
+    Flyway, catalog `DataSource`) and `db/migration/clickhouse` (programmatic
+    `ClickHouseMigrationRunner`, writer credential). A file in the wrong folder silently never runs.
+    Gated by `clickhouse.migrations.enabled`, default `true` **including when the property is
+    absent**; a failure aborts startup.
+  - **`security.mode` is `oidc` or `none`, default `none`.** In `none` every authorization check
+    fails open — the endpoint gates, per-table grants, pipeline authorization, saved-query ownership,
+    sensitive-column masking, row policies — and the Flight port is unauthenticated; only the
+    `system`-table guard (and the validation of stored grants and row policies) still holds. An authorization test run in the default profile passes for the wrong reason.
+  - **The mode is resolved once, by `SecurityMode`.** It matches case-insensitively and **fails startup**
+    on any other value; bean conditions go through `@ConditionalOnSecurityMode` and runtime gates through
+    `SecurityModeResolver`, so nothing re-derives it from the raw property. Do not add a bean condition
+    that reads `security.mode` directly: the reason this exists is that nine independent derivations in
+    four semantics once let `SECURITY_MODE=OIDC` enforce over HTTP while leaving the Flight port
+    unauthenticated and the sensitive-column filter failing open.
+
+  ## Public-repo hygiene
+
+  The repository is open source, and every proposal, design, task list and spec is published with
+  it, archive included. Follow the "Public-repo hygiene" rules in `CLAUDE.md`:
+  - no environment attribution (dev/UAT/prod, "reference deployment");
+  - no operational history (incident dates, MR numbers, branch chatter, people or teams);
+  - no figures measured on real data — use order-of-magnitude wording, and invent scenario numbers;
+  - real entity names may appear, but described by function, never as live or deployed;
+  - no references to untracked `*.local.md` files or to design ids that resolve nowhere;
+  - no machine-specific commands.
+
+rules:
+  proposal:
+    - Name the capability the change touches, using the existing `openspec/specs/<capability>/` id
+      when one fits rather than inventing a near-duplicate.
+    - State which surfaces change (`/v1` endpoints, catalog schema, config keys) so the delta specs
+      and tasks can be derived from it.
+  specs:
+    - Delta specs carry only what changes for the capability; the merged
+      `openspec/specs/<capability>/spec.md` stays the source of truth for shipped behavior.
+    - A MODIFIED requirement must carry every scenario it keeps — dropping one silently loses
+      shipped behavior at archive.
+    - Do not restate conventions from the project context in a spec; specify the capability's
+      observable behavior, including its `ErrorView` `error` codes and status mapping.
+  design:
+    - Record the decision and the alternatives rejected, not a restatement of the requirements.
+    - Call out any new credential, migration, or config key, since those carry operational
+      invariants.
+  tasks:
+    - Include a task that updates `docs/configuration.md` whenever a config property is added or
+      renamed — one table row, one line of description. A change that adds no property adds nothing
+      to that file; behavioural notes go to the capability's spec instead.
+    - End with a verification task for `./gradlew clean build`.
+
+operations:
+  apply:
+    guidance:
+      - A change is done only when `./gradlew clean build` passes (compile + checkstyle + tests).
+        Do not report completion on a partial build.
+      - Update the relevant `openspec/specs/<capability>/` delta spec in the same change whenever
+        behavior, contracts, or invariants change — it is not optional polish. If no spec update is
+        needed, say so explicitly.
+      - Check for a Flyway version collision before numbering a new migration — in-flight branches
+        may already have claimed the next number.
+  archive:
+    guidance:
+      - Confirm the merged spec matches the shipped behavior before archiving; the spec, not the
+        change, is what the next change reads.
+      - "A change that ships no behavior change (pure refactor or docs) can declare
+        `skip_specs: true` rather than inventing an empty delta."

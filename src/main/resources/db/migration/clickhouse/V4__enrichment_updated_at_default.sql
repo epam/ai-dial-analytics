@@ -1,0 +1,15 @@
+-- B3(b) (enrichment-runtime): enrichment tables are ReplacingMergeTree(_updated_at); the version
+-- column now carries a server-side default so every write lands with an increasing version and
+-- duplicate writes per grain collapse to the latest on a final=1 read.
+--
+-- NEW enrichment tables receive `_updated_at DateTime64(3) DEFAULT now64(3)` from TableDdlRenderer
+-- at create time (see service/table/TableDdlRenderer.java). This migration exists to ALTER any
+-- PRE-EXISTING enrichment tables to the same default:
+--
+--   ALTER TABLE <enrichment> MODIFY COLUMN _updated_at DateTime64(3) DEFAULT now64(3);
+--
+-- Enrichments are runtime-created and none are seeded via ClickHouse migrations, so there is
+-- nothing to alter in this environment and this migration intentionally performs no DDL. If a
+-- deployment has pre-existing enrichment tables, add their MODIFY COLUMN statements above this line
+-- before applying.
+SELECT 1;

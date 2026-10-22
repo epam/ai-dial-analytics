@@ -1,0 +1,22 @@
+# File-provisioned dashboards. allowUiUpdates=false on purpose: a dashboard is a reviewable artifact
+# in this repository, not container state — Grafana shows it read-only and it cannot drift from the
+# file. Drop allowUiUpdates (or import the JSONs through the HTTP API instead) if editing in the UI
+# is what you want; see docs/grafana-dashboards.md.
+#
+# `path` is where the dashboard JSONs are mounted, which is NOT this directory: the JSONs live in
+# ../../dashboards so that they read as the artifact rather than as configuration of one Grafana.
+# The local preview stack mounts them at /etc/adas-dashboards (see ../../docker-compose.yml);
+# change this path to wherever you mount them.
+apiVersion: 1
+
+providers:
+  - name: adas
+    orgId: 1
+    folder: ADAS
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/adas-dashboards
+      foldersFromFilesStructure: false

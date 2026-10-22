@@ -1,0 +1,93 @@
+# Local ClickHouse + PostgreSQL for running ADAS against real data stores.
+#
+# Run from the repo root:
+#   docker compose -f local_env/docker-compose.yml up -d      # start in the background
+#   docker compose -f local_env/docker-compose.yml down       # stop (data survives in the volume)
+#   docker compose -f local_env/docker-compose.yml down -v    # stop and wipe the data volumes
+# ...or `cd local_env` first and drop the -f flag.
+#
+# Data stores only. The Grafana stack that dashboards ADAS is separate, under grafana/: it reaches
+# ADAS over the network and shares no network or volume with this file, so it can be started,
+# stopped and deleted without disturbing the data stores.
+#
+# Defaults below line up with application.yml so `./gradlew bootRun` connects with no extra config:
+#   - ClickHouse: default user, no password, HTTP 8123 (the read/sync query path).
+#   - PostgreSQL: db testdb, user/password postgres/postgres, port 5432 (the metadata store).
+# There is no blob store here, so data-sync ingests nothing against this stack and the poller logs a
+# failed cycle every minute; set POLL_ENABLED=false locally unless you point BLOB_* at a real store.
+# On first start ADAS runs the Flyway migrations for both stores: db/migration/clickhouse
+# (ClickHouse: dial_usage_log and its companions) and db/migration/postgres (PostgreSQL: the table
+# catalog, pipelines, grants and audit history).
+#
+# Images are pinned to match the versions the integration tests run (ClickHouse 26.8, PostgreSQL 16;
+# see ClickHouseContainerSupport / PostgresContainerSupport). ClickHouse 26.8 is the newest verified
+# version, not the floor — ADAS supports 25.3 LTS or newer, and 26.8 is the floor only for the AI query
+# functions (see docs/clickhouse-server.md). Override any value via the shell or a .env file.
+
+# Pinned so the project name doesn't default to the folder name ("local_env"), which is too generic
+# to be unique on a developer machine.
+name: adas
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    container_name: adas-clickhouse
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"   # HTTP interface — what ADAS uses
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"  # native TCP — for clickhouse-client / tooling
+    # No CLICKHOUSE_USER/CLICKHOUSE_PASSWORD here on purpose. The image already ships a built-in
+    # `default` user with no password that works over HTTP — which is exactly what ADAS uses by
+    # default (application.yml: user=default, password empty). Setting CLICKHOUSE_USER=default
+    # makes the entrypoint generate a users.d file that *redefines* the default user and breaks
+    # HTTP auth for it (native protocol keeps working, HTTP returns AUTHENTICATION_FAILED). If you
+    # need a custom user, give it a NON-`default` name via CLICKHOUSE_USER and point the app at it.
+    ulimits:
+      # ClickHouse recommends a high open-file limit; without this it logs a startup warning.
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # The image restricts the built-in `default` user to localhost, which makes it unreachable
+      # through Docker's port mapping. This override opens its allowed networks for local dev so
+      # ADAS can connect from the host with no password. See the file header for details.
+      - ./clickhouse/users.d/zzz-local-dev-networks.xml:/etc/clickhouse-server/users.d/zzz-local-dev-networks.xml:ro
+      # AES_256_GCM_SIV encryption key for the dial_usage_log_payload body columns. The startup
+      # Flyway migrations create them with the AES codec, which fails unless this key is configured
+      # (V1 needs it too, for the dial_usage_log copies that V11 later drops).
+      # Throwaway local-dev key — see the file header.
+      - ./clickhouse/config.d/encryption.xml:/etc/clickhouse-server/config.d/encryption.xml:ro
+    healthcheck:
+      # /ping returns 200 "Ok." once the server is accepting HTTP requests.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: adas-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"   # what ADAS's metadata store uses
+    # Defaults match application.yml's PostgreSQL datasource (database testdb, user/password
+    # postgres/postgres). ADAS provisions its catalog schema itself via Boot's Flyway
+    # auto-configuration on startup, so no init scripts are mounted here.
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE:-testdb}
+      POSTGRES_USER: ${POSTGRES_DATASOURCE_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_DATASOURCE_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_DATASOURCE_USERNAME:-postgres} -d ${POSTGRES_DATABASE:-testdb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  clickhouse-data:
+  postgres-data:

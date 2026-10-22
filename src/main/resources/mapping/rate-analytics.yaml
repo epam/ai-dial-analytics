@@ -1,0 +1,86 @@
+# Data-sync column mapping for the rate_analytics table (DIAL feedback/rating events).
+#
+# Emit predicate: this target only produces a row for a record whose request.uri ends with /rate AND
+# whose request.method is POST — the rate request condition. Non-matching records produce no
+# rate_analytics row (they still populate dial_usage_log via its own match-all mapping).
+#
+# response_id is taken from the client-supplied `responseId` in request.body (a rate call carries no
+# response of its own), so a rating joins back to the rated completion's response_id in dial_usage_log.
+# `comment` is user-authored free text captured into an AES-encrypted column (see the V2 ClickHouse
+# migration).
+#
+# The rating is captured TWICE, from the same request.body `rate` node, by two independent derivers:
+#   `rate`     — json-extract-rate: normalized to a signed integer (number as-is, true->1, false->0,
+#                else null). Lossy by design and kept for compatibility -- boolean false and numeric 0
+#                both store 0, so this column alone cannot tell a thumbs-down from a cleared rating.
+#   `rate_raw` — json-extract-string: the value's verbatim scalar text (`true`, `false`, `0`, `-1`),
+#                which resolves that ambiguity because `true`/`false` are not numeric text.
+# The raw column deliberately REUSES the general string extractor rather than adding a rating-specific
+# deriver: that deriver returns the node's scalar text for any scalar kind, so a boolean reads as
+# `true`/`false` and a number as its literal digits, and an object/array yields no value (so the column
+# falls back to null). See DeriverRegistry#jsonExtractString. Neither column reads the other's output.
+# rate_raw is null for every row ingested before it existed; that is never inferred from `rate`.
+#
+# Column order matches db/migration/clickhouse/V2__create_rate_analytics.sql. Unmapped table columns
+# apply their ClickHouse defaults: _ingested_at (DEFAULT now64(3)). The physical trace_id/core_span_id
+# columns are mapped here (they are part of the ReplacingMergeTree dedup key) but are NOT exposed in
+# the query catalog. request_time has NO default on purpose: a record whose request.time is absent is
+# dropped at ingest (see BlobIngestor) rather than defaulted to an epoch timestamp.
+#
+# Override the active targets/mappings via sync.targets (see docs/configuration.md).
+
+match:
+  - path: request.uri
+    op: ends-with
+    value: /rate
+  - path: request.method
+    op: equals
+    value: POST
+    ignore-case: true
+
+columns:
+  - column: request_time
+    source: request.time
+    kind: string
+    transform: iso-to-ch-datetime
+  - column: project_id
+    source: project.id
+    kind: string
+  - column: trace_id
+    source: trace.trace_id
+    kind: string
+  - column: core_span_id
+    source: trace.core_span_id
+    kind: string
+  - column: deployment
+    source: deployment
+    kind: string
+  - column: user_hash
+    source: user.id
+    kind: string
+  - column: chat_id
+    source: chat.id
+    kind: string
+  - column: response_id
+    derive: json-extract-string
+    sources: [request.body]
+    args: { path: responseId }
+    kind: string
+  - column: rate
+    derive: json-extract-rate
+    sources: [request.body]
+    args: { path: rate }
+    kind: long
+    nullable: true
+  - column: rate_raw
+    derive: json-extract-string
+    sources: [request.body]
+    args: { path: rate }
+    kind: string
+    nullable: true
+  - column: comment
+    derive: json-extract-string
+    sources: [request.body]
+    args: { path: comment }
+    kind: string
+    nullable: true

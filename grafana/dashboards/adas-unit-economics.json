@@ -1,0 +1,895 @@
+{
+  "uid": "adas-unit-economics",
+  "title": "ADAS — Unit economics",
+  "description": "What a unit of AI work costs: per turn, per conversation, per resolved conversation, and per client. Answers 'is the gateway paying off' rather than 'what did we spend'. Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side.",
+  "tags": [
+    "adas",
+    "cost"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Read the denominators, not just the dollars.** Total spend answers nothing on its own; cost per unit of delivered work does.\n\n**Read cost by outcome.** Compare what a *partially resolved* conversation costs with a *resolved* and an *unresolved* one: when the partly solved ones are the dearest, users are pushing on, cost accrues and the outcome stays half-finished. The ratio moves with the traffic mix — read it off the outcome table, not off this note.\n\n**Two spines, deliberately.** Per-turn and per-client figures come from the usage log using `deployment_price`. Per-conversation figures come from the `conversations` rollup using its own `total_price` (which sums per-hop costs, so it does not double-count). The two do not add together — conversations cover chat traffic only, since native harness traffic carries no chat id.\n\n**Outcome labels can cover only part of the population.** Only conversations `conversation_insights` has labelled carry a `resolution_status` — whenever it lags or stalls, `unlabelled` dominates both conversations and spend, and many labelled rows can be `truncated` (computed from part of the conversation because it exceeded the assembly caps). A large share of conversations can carry no `total_price` at all (unpriced deployments, negligible tokens) and count as $0 in every per-conversation average. Treat outcome mix as indicative, not exact.\n\n**Client attribution is complete.** Once identity enrichment has backfilled to the oldest usage-log row, the per-client panel keeps its 'unattributed' bucket as a safety net, and it stays empty. What is partial is *pricing*: a large share of hops, chat and Claude Code included, can carry no `deployment_price`, so per-client dollars are a floor.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and these panels use none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values.\n\n**Panel choices worth knowing.** The `—` placeholder in *Cost by kind of work* is an ASCII `-`: a non-Latin-1 string literal is currently rejected with HTTP 500. *Cost per turn over time* buckets **daily** (the original was hourly): unweighted hourly ratios can be dominated by low-volume hours and read well above the window-wide cost per turn shown in the headline row. *Prompt cache hit rate over time* plots the rate over cache-reporting traffic as well as over all prompt tokens, because a large share of calls (embeddings, toolsets, several apps) report no cache field at all and dilute the all-token rate."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cost per unit of work",
+      "description": "Cost per unit of delivered work over the dashboard window, on the usage-log spine with server-side deduplication. 'Dollar per turn' divides all spend by distinct trace_ids (one trace = one interaction, including its deployment-to-deployment fan-out). 'Dollar per conversation' divides only chat-attributed spend (rows with a non-empty chat_id) by the distinct chat_ids in that spend, so it is comparable with the conversations-rollup panels below (the two should agree closely). 'Chat share of spend' says how much of the spend that chat denominator covers: the rest is native-harness traffic that carries no chat id. 'Dollar per Mtok' uses total_tokens (prompt + completion). 'Prompt cache hit' is token-weighted: sum(cached_prompt_tokens) / sum(prompt_tokens). Cost is deployment_price (a hop's own cost), so summing over hops of a routed chain does not double-count.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT round(sum(deployment_price), 2) AS \\\"Spend $\\\", round(sum(deployment_price) / nullif(count(DISTINCT trace_id), 0), 4) AS \\\"Dollar per turn\\\", round(sum(CASE WHEN chat_id <> '' THEN deployment_price END) / nullif(count(DISTINCT CASE WHEN chat_id <> '' THEN chat_id END), 0), 4) AS \\\"Dollar per conversation\\\", round(100.0 * sum(CASE WHEN chat_id <> '' THEN deployment_price END) / nullif(sum(deployment_price), 0), 1) AS \\\"Chat share of spend %\\\", round(sum(deployment_price) / nullif(sum(total_tokens), 0) * 1000000, 2) AS \\\"Dollar per Mtok\\\", round(100.0 * sum(cached_prompt_tokens) / nullif(sum(prompt_tokens), 0), 1) AS \\\"Prompt cache hit %\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}'\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Spend $",
+              "text": "Spend $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per turn",
+              "text": "Dollar per turn",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per conversation",
+              "text": "Dollar per conversation",
+              "type": "number"
+            },
+            {
+              "selector": "Chat share of spend %",
+              "text": "Chat share of spend %",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per Mtok",
+              "text": "Dollar per Mtok",
+              "type": "number"
+            },
+            {
+              "selector": "Prompt cache hit %",
+              "text": "Prompt cache hit %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Spend $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per turn"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per conversation"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per Mtok"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prompt cache hit %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Chat share of spend %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Spend $": 0,
+              "Dollar per turn": 1,
+              "Dollar per conversation": 2,
+              "Chat share of spend %": 3,
+              "Dollar per Mtok": 4,
+              "Prompt cache hit %": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Cost by outcome",
+      "description": "Conversations rollup with its own same-grain insight enrichment read as a dotted column (a left join on chat_id) - not a cross-spine join. Cost is the rollup's own total_price, which already sums per-hop costs. Sorted by Dollar per conversation descending, so the worst unit cost is on top. 'unlabelled' is not an outcome: it is the conversations that have no conversation_insights row yet (it can be the large majority), and it dominates every absolute column. A large share of conversations carry no total_price at all (unpriced deployments such as echo / adapters, negligible tokens) and count in the denominator as $0; that share differs by outcome, so read the unit cost as indicative. Rows are conversations whose first_request_time falls in the window, not spend that landed in the window.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"conversation_insights.resolution_status\\\"), 'unlabelled') AS \\\"Outcome\\\", count(*) AS \\\"Conversations\\\", sum(turn_count) AS \\\"Turns\\\", round(sum(turn_count) * 1.0 / count(*), 1) AS \\\"Turns/conv\\\", round(sum(total_price), 2) AS \\\"Cost $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per conversation\\\" FROM conversations WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 6 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Outcome",
+              "text": "Outcome",
+              "type": "string"
+            },
+            {
+              "selector": "Conversations",
+              "text": "Conversations",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Turns/conv",
+              "text": "Turns/conv",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per conversation",
+              "text": "Dollar per conversation",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per conversation"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Conversations"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Outcome": 0,
+              "Conversations": 1,
+              "Turns": 2,
+              "Turns/conv": 3,
+              "Cost $": 4,
+              "Dollar per conversation": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Cost by kind of work",
+      "description": "Conversation cost split by the enriched activity_type / coding_task_type of each chat (conversations spine + conversation_insights read as a dotted column, 30d on first_request_time), sorted by total cost, top 200 groups. '-' is an ASCII hyphen (a non-Latin-1 literal is answered with HTTP 500, so an em dash cannot be used here): it means coding_task_type is unset, which is the norm for non-coding activities and for chats with no insights row at all. 'unlabelled' = no conversation_insights row; it is often the largest bucket (it can be the large majority of conversations and spend), so the labelled breakdown may speak for only a minority of spend. A large share of conversations carry no total_price (unpriced deployments with negligible tokens) and count in the 'Dollar per conversation' denominator as $0 - the same convention as the outcome table above; the unpriced share differs a lot per group, so read the unit cost as indicative.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(to_string(\\\"conversation_insights.activity_type\\\"), 'unlabelled') AS \\\"Activity\\\", coalesce(to_string(\\\"conversation_insights.coding_task_type\\\"), '-') AS \\\"Coding task\\\", count(*) AS \\\"Conversations\\\", sum(turn_count) AS \\\"Turns\\\", round(sum(total_price), 2) AS \\\"Cost $\\\", round(sum(total_price) / count(*), 4) AS \\\"Dollar per conversation\\\" FROM conversations WHERE first_request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND first_request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1, 2 ORDER BY 5 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Activity",
+              "text": "Activity",
+              "type": "string"
+            },
+            {
+              "selector": "Coding task",
+              "text": "Coding task",
+              "type": "string"
+            },
+            {
+              "selector": "Conversations",
+              "text": "Conversations",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per conversation",
+              "text": "Dollar per conversation",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per conversation"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Activity": 0,
+              "Coding task": 1,
+              "Conversations": 2,
+              "Turns": 3,
+              "Cost $": 4,
+              "Dollar per conversation": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cost per turn over time",
+      "description": "Dollars per turn per UTC day: hop-level `deployment_price` summed and divided by distinct `trace_id` in the same day. Buckets are a fixed 1 day and do not follow panel width, so the first and last points cover a partial day. A fall can mean the same work got cheaper (model mix, caching, routing) OR that cheaper work arrived - read the Turns bars (right axis) before calling it efficiency. Turns with no priced hop count as $0, so the level sits below the cost of priced turns.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'day', request_time) AS ts, sum(deployment_price) / nullif(count(DISTINCT trace_id), 0) AS \\\"Dollar per turn\\\", count(DISTINCT trace_id) AS \\\"Turns\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Dollar per turn",
+              "text": "Dollar per turn",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 25
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "Dollar per turn": 1,
+              "Turns": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Prompt cache hit rate over time",
+      "description": "Cached prompt tokens as a share of prompt tokens, in fixed 1-hour buckets (the bucket does not follow the panel width or the time range). Two denominators, because a large share of calls never report a cached-token figure at all - embeddings, toolsets and RAG applications, plus some model deployments on part of their traffic - and those calls can carry a meaningful share of all prompt tokens. 'Cacheable traffic' divides only by the prompt tokens of calls that do report the field; 'all prompt tokens' is the raw share and is diluted by the rest. The third line is the share of each hour's prompt tokens that came from cache-reporting calls: when it dips, a drop in the raw line is missing telemetry, not a caching regression - the raw line can read near zero in an hour where cacheable traffic was almost fully cached. A gap in the rate lines means no call in that hour reported cached tokens; a gap is never 'no traffic'. Efficiency INDICATOR only: ADAS does not record the per-provider cache discount, so no dollar saving can be derived from this. The legend 'mean' is an unweighted mean of hourly rates, not the token-weighted 30-day rate.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, 100.0 * sum(cached_prompt_tokens) / nullif(sum(CASE WHEN cached_prompt_tokens IS NOT NULL THEN prompt_tokens END), 0) AS \\\"Cache hit % (cacheable traffic)\\\", 100.0 * sum(cached_prompt_tokens) / nullif(sum(prompt_tokens), 0) AS \\\"Cache hit % (all prompt tokens)\\\", 100.0 * coalesce(sum(CASE WHEN cached_prompt_tokens IS NOT NULL THEN prompt_tokens END), 0) / nullif(sum(prompt_tokens), 0) AS \\\"Cache-reporting share of prompt tokens %\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "Cache hit % (cacheable traffic)",
+              "text": "Cache hit % (cacheable traffic)",
+              "type": "number"
+            },
+            {
+              "selector": "Cache hit % (all prompt tokens)",
+              "text": "Cache hit % (all prompt tokens)",
+              "type": "number"
+            },
+            {
+              "selector": "Cache-reporting share of prompt tokens %",
+              "text": "Cache-reporting share of prompt tokens %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "min",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "Cache hit % (cacheable traffic)": 1,
+              "Cache hit % (all prompt tokens)": 2,
+              "Cache-reporting share of prompt tokens %": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Cost per turn by client type",
+      "description": "Is an agent turn cheaper or dearer than a chat turn? One row per `usage_client_identity.client_type`, turns counted as distinct `trace_id`, cost as summed `deployment_price` (a hop's own cost, so routed chains are not double-counted); sorted by total cost, dearest first. Cost and token columns are blank where every hop in the bucket is unpriced (e.g. a client type that makes only unpriced calls), and they cover only the priced hops elsewhere — a large share of hops carry no `deployment_price`, so treat the per-turn dollars as a floor. 'unattributed' would hold hops with no identity enrichment row; once the backfill has caught up, that bucket is empty.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT coalesce(\\\"usage_client_identity.client_type\\\", 'unattributed') AS \\\"Client\\\", count(DISTINCT trace_id) AS \\\"Turns\\\", round(sum(deployment_price), 2) AS \\\"Cost $\\\", round(sum(deployment_price) / nullif(count(DISTINCT trace_id), 0), 4) AS \\\"Dollar per turn\\\", round(sum(total_tokens) * 1.0 / nullif(count(DISTINCT trace_id), 0)) AS \\\"Tokens per turn\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 3 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Client",
+              "text": "Client",
+              "type": "string"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per turn",
+              "text": "Dollar per turn",
+              "type": "number"
+            },
+            {
+              "selector": "Tokens per turn",
+              "text": "Tokens per turn",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per turn"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Client": 0,
+              "Turns": 1,
+              "Cost $": 2,
+              "Dollar per turn": 3,
+              "Tokens per turn": 4
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

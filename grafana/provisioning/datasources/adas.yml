@@ -1,0 +1,50 @@
+# How Grafana reaches ADAS: one datasource, over REST SQL.
+#
+# It does not talk to ClickHouse. Every panel goes through ADAS, so every query is subject to the
+# governed pipeline — entity and field validation, the closed function catalog, per-column
+# visibility and the row maximum. A ClickHouse datasource would draw the same graphs while
+# bypassing all of it.
+#
+# This file is both the local preview stack's datasource and the reference for provisioning the
+# same datasource in another Grafana; see docs/grafana-dashboards.md. $ADAS_BASE_URL and
+# $ADAS_API_KEY are expanded by Grafana from the process environment (the preview stack passes them
+# in ../../docker-compose.yml), so pointing at a different ADAS is two environment variables rather
+# than a file edit.
+#
+# Arrow Flight SQL is deliberately not provisioned here: no dashboard uses it, and both Grafana
+# Flight plugins are third-party (one archived and silently wrong about timestamps).
+apiVersion: 1
+
+datasources:
+  # Infinity is a generic JSON/REST datasource. ADAS's POST /v1/queries/execute-sql fits it almost
+  # exactly: send {"sql": "..."}, read the {"rows": [...]} envelope back. Nothing here needs
+  # anything ADAS does not already specify (rest-sql-endpoint) — no prepared statements, no
+  # metadata RPCs, no driver.
+  #
+  # Per-panel queries supply the method/body/root-selector; see ../../dashboards/.
+  - name: ADAS REST SQL
+    uid: adas-rest-sql
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    url: $ADAS_BASE_URL
+    isDefault: true
+    editable: false
+    jsonData:
+      # Infinity's native API-key auth, sending ADAS's own `Api-Key` header. It is provisioned
+      # unconditionally because a stray header is harmless against a security.mode=none ADAS (which
+      # ignores it) while being mandatory against an oidc deployment — so one file drives both and
+      # switching between them is two env vars, not an edit. The key's principal needs TABLE_READ on
+      # the tables the panels read (the READ_ONLY_ANALYTIC bundle); see docs/grafana-dashboards.md.
+      auth_method: apiKey
+      apiKeyKey: Api-Key
+      apiKeyType: header
+      # Infinity REFUSES to send credentials to an un-allowlisted host, so allowedHosts stops being
+      # optional the moment auth_method is not `none` — an empty list here fails every query with
+      # "URL is not in the allowed list". It holds exactly the one base URL the datasource targets.
+      allowedHosts:
+        - $ADAS_BASE_URL
+      timeoutInSeconds: 60
+    secureJsonData:
+      # Grafana stores this encrypted; it is never read back out of the API. Supply it from the
+      # environment (or your secret manager's injection) rather than writing a key into this file.
+      apiKeyValue: $ADAS_API_KEY

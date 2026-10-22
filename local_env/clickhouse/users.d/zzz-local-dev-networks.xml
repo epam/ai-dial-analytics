@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!--
+  LOCAL DEV ONLY. The clickhouse-server image ships a default-user.xml that restricts the built-in
+  `default` user to localhost (::1, 127.0.0.1), so it is unreachable through Docker's port mapping
+  (connections arrive from the bridge gateway, not localhost) and every HTTP query fails with
+  "authentication failed". This override adds ::/0 (all IPv4 + IPv6) to the default user's allowed
+  networks so ADAS can connect from the host with no password — matching application.yml defaults.
+
+  The filename sorts after default-user.xml so this loads last; ClickHouse merges the <networks>
+  lists, leaving the default user reachable from anywhere. Do NOT use this configuration in any
+  shared or production environment.
+-->
+<clickhouse>
+  <users>
+    <default>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+    </default>
+  </users>
+</clickhouse>

@@ -1,0 +1,780 @@
+{
+  "uid": "adas-agentic-depth",
+  "title": "ADAS — Agentic depth & tool frontier",
+  "description": "How deep agentic work goes, what it costs, how often it fails, and which internal systems it reaches through MCP. Built on dial_usage_log aggregated per trace_id - the turns rollup is deliberately not used, and avoiding it also removes turns' chat-id restriction, which leaves out every trace without a chat id. Served by ADAS (POST /v1/queries/execute-sql) — never by a direct ClickHouse datasource; ReplacingMergeTree deduplication (FINAL) is applied server-side.",
+  "tags": [
+    "adas",
+    "agentic"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this before trusting a number",
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**A turn is one `trace_id`, aggregated from raw `dial_usage_log` hops** — not the `turns` rollup, which no dashboard reads.\n\n**Why not the rollup: coverage.** `turns` is restricted to hops carrying a `chat_id`, and much traffic carries none, so a rollup-based view of this dashboard's questions could describe only a minority of traffic. Counting hops directly also keeps `hop_count` honest: Core's entry row is included rather than filtered away.\n\n**Per turn vs in total.** A deep turn can cost far more *per turn* than a one-hop turn and still be a small slice of total spend, because deep turns are rare. Read 'Dollar per turn' against 'Cost $' in the depth-bands table: where the shallow bands — single-hop turns and the 2-3 hop routed-chain band (a router or app plus the model it calls) — carry most of the spend, optimise the common call, not the spectacular chain. The depth-bands table is the live source and this note is only a reading guide.\n\n**Failure need not be monotonic in depth.** 'Failure %' is per turn, and a turn with more hops has more chances to fail, so multi-hop bands can fail more often than single-hop ones — but the rate need not keep rising with depth, and the deep bands are often too small to read as rates. Do not claim a clean depth-to-failure curve from this.\n\n**Latency is per hop, not per turn.** `operation_duration_ms` is a hop's wall clock and a parent's duration contains its children's, so hop latencies cannot be summed into a turn duration. The tool leaderboard's p95 is therefore per MCP call, which is the honest unit. **'MCP requests' counts every `event_kind = 'mcp'` hop**, protocol traffic (`initialize`, `tools/list`, …) included; only the hops that carry an `mcp_tool_call_name` are what the tool leaderboard's `Calls` counts — so the two figures can differ widely by definition, not by error.\n\n**Served by ADAS, never by a direct ClickHouse datasource.** Every panel on this dashboard goes through `POST /v1/queries/execute-sql`, so it runs inside the governed pipeline: entity and field validation, a closed function catalog, per-column visibility, and a hard **1,000-row cap** per result. **Deduplication is the service's job** — `FINAL` is applied server-side, so there is no raw-read inflation to guard against here. **`deployment_price`, not `total_price`** for usage-log cost: it is a hop's own cost, so summing it over hops does not double-count a routed chain.\n\n**Four properties of ADAS's SQL surface shape every panel's SQL** (the dialect in full: `docs/sql-reference.md`). (1) There are no `$__timeFilter` / `$__timeInterval` macros — the range is interpolated as `TIMESTAMP` literals from Grafana's own `__from` / `__to` globals via their `:date:` formatter, and buckets are fixed-width `date_bin(n, unit, col)`, so **bucket width does not follow panel width**. (2) Enrichment tables are never joined — they are read as dotted columns on the spine (`usage_client_identity.client_type`, `session_insights.activity`), which never drops a spine row: in a plain single-entity statement like every query here, a missing enrichment row reads the column's type default (`''` for a non-nullable string), not NULL — NULL is what an unmatched side yields inside an explicit join, and these panels use none, which is why coverage is tested with `<> ''`. (3) an `enum` column can be *compared* with a string literal directly (`= 'x'`, `<> 'x'`, `IN (…)`), but cannot be *produced* alongside one — `coalesce(enum, 'none')` or a `CASE` returning either is rejected once the result is grouped, so those go through `to_string()` first. (4) `countIf` / `uniqExactIf` / `multiIf` / `quantile` have no direct equivalent; they are `count(CASE WHEN ...)`, `count(DISTINCT CASE WHEN ...)`, `CASE WHEN`, and `percentile_cont(p) WITHIN GROUP (ORDER BY col)` — which renders to the same ClickHouse `quantile()` — a reservoir estimate on both sides, so p95 values match the original exactly while both can sit a few percent off the exact percentile on groups above ~8k values."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Agentic shape",
+      "description": "One turn is one trace_id, aggregated from raw dial_usage_log hops over the dashboard window - no chat-id restriction, so this is the whole population, not the 'turns' rollup's slice. 'Deep' is more than 10 hops. The gap between the average hop count and the deepest turn is the point: a near-1 average against a very deep maximum means the distribution has a very long tail, and the tail is where the per-turn cost lives (see the depth bands below). 'MCP requests' counts every hop with event_kind = 'mcp', protocol traffic such as initialize and tools/list included, so it can run well above the number of real tool invocations; 'Turns using tools' and 'Distinct tools' count only hops that carry an mcp_tool_call_name. 'Turns with a chat id %' is the coverage the retired trace-grain rollup would have limited every number on this dashboard to.",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT count(*) AS \\\"Turns\\\", round(sum(hops) * 1.0 / count(*), 2) AS \\\"Avg hops\\\", max(hops) AS \\\"Deepest turn (hops)\\\", count(CASE WHEN hops > 10 THEN 1 END) AS \\\"Deep turns (>10 hops)\\\", sum(mcp_hops) AS \\\"MCP requests\\\", count(CASE WHEN tool_hops > 0 THEN 1 END) AS \\\"Turns using tools\\\", (SELECT count(DISTINCT mcp_tool_call_name) FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND mcp_tool_call_name <> '') AS \\\"Distinct tools\\\", round(100.0 * count(CASE WHEN chat_hops > 0 THEN 1 END) / count(*), 1) AS \\\"Turns with a chat id %\\\" FROM (SELECT trace_id, count(*) AS hops, count(CASE WHEN event_kind = 'mcp' THEN 1 END) AS mcp_hops, count(CASE WHEN mcp_tool_call_name <> '' THEN 1 END) AS tool_hops, count(CASE WHEN chat_id <> '' THEN 1 END) AS chat_hops FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY trace_id)\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Avg hops",
+              "text": "Avg hops",
+              "type": "number"
+            },
+            {
+              "selector": "Deepest turn (hops)",
+              "text": "Deepest turn (hops)",
+              "type": "number"
+            },
+            {
+              "selector": "Deep turns (>10 hops)",
+              "text": "Deep turns (>10 hops)",
+              "type": "number"
+            },
+            {
+              "selector": "MCP requests",
+              "text": "MCP requests",
+              "type": "number"
+            },
+            {
+              "selector": "Turns using tools",
+              "text": "Turns using tools",
+              "type": "number"
+            },
+            {
+              "selector": "Distinct tools",
+              "text": "Distinct tools",
+              "type": "number"
+            },
+            {
+              "selector": "Turns with a chat id %",
+              "text": "Turns with a chat id %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Avg hops"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns with a chat id %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Turns": 0,
+              "Avg hops": 1,
+              "Deepest turn (hops)": 2,
+              "Deep turns (>10 hops)": 3,
+              "MCP requests": 4,
+              "Turns using tools": 5,
+              "Distinct tools": 6,
+              "Turns with a chat id %": 7
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Depth bands — cost per turn and share of spend",
+      "description": "One row per depth band. A turn is one trace_id, aggregated from raw dial_usage_log hops in the dashboard window; cost is deployment_price (a hop's own cost, so summing over hops does not double-count a routed chain). Sorted by 'Dollar per turn' descending, so the priciest class per turn is on top. Read the two cost columns together: 'Dollar per turn' says deep turns are extravagant, while 'Cost $' says where the budget actually sits, which is often the shallow bands. 'Failure %' is the share of turns with at least one unsuccessful hop, a per-turn rate and not a per-hop one.",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT CASE WHEN hops <= 1 THEN '1 hop' WHEN hops <= 3 THEN '2-3 hops' WHEN hops <= 10 THEN '4-10 hops' WHEN hops <= 50 THEN '11-50 hops' WHEN hops <= 200 THEN '51-200 hops' ELSE '200+ hops' END AS \\\"Depth band\\\", count(*) AS \\\"Turns\\\", sum(llm_calls) AS \\\"LLM calls\\\", sum(mcp_calls) AS \\\"MCP calls\\\", round(sum(cost), 2) AS \\\"Cost $\\\", round(sum(cost) / count(*), 4) AS \\\"Dollar per turn\\\", round(100.0 * count(CASE WHEN failed > 0 THEN 1 END) / count(*), 2) AS \\\"Failure %\\\" FROM (SELECT trace_id, count(*) AS hops, count(CASE WHEN event_kind = 'llm_call' THEN 1 END) AS llm_calls, count(CASE WHEN event_kind = 'mcp' THEN 1 END) AS mcp_calls, count(CASE WHEN success = false THEN 1 END) AS failed, sum(deployment_price) AS cost FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY trace_id) GROUP BY 1 ORDER BY 6 DESC NULLS LAST LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Depth band",
+              "text": "Depth band",
+              "type": "string"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "LLM calls",
+              "text": "LLM calls",
+              "type": "number"
+            },
+            {
+              "selector": "MCP calls",
+              "text": "MCP calls",
+              "type": "number"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            },
+            {
+              "selector": "Dollar per turn",
+              "text": "Dollar per turn",
+              "type": "number"
+            },
+            {
+              "selector": "Failure %",
+              "text": "Failure %",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dollar per turn"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failure %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Turns"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Depth band": 0,
+              "Turns": 1,
+              "LLM calls": 2,
+              "MCP calls": 3,
+              "Cost $": 4,
+              "Dollar per turn": 5,
+              "Failure %": 6
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "MCP tool leaderboard — what AI reaches into",
+      "description": "One row per MCP tool, straight from mcp_tool_call_name at hop grain (every row with a tool name is an event_kind = 'mcp' hop). This is the most direct answer to 'which internal systems is AI using'. 'Calls' counts MCP hops, 'Turns' distinct trace_ids that made at least one such call, 'Servers' the distinct deployments (toolsets) serving that tool name, 'Failed' the hops with success = false. p95 is per tool call, which is the honest unit for latency — a parent hop's duration contains its children's, so these cannot be summed into a turn. Rows arrive sorted by Calls; click the p95 header to find the slow integrations. Capped at 300 tools; if the table shows exactly 300 rows, the tail is hidden.",
+      "gridPos": {
+        "h": 11,
+        "w": 13,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT mcp_tool_call_name AS \\\"Tool\\\", count(*) AS \\\"Calls\\\", count(DISTINCT trace_id) AS \\\"Turns\\\", count(DISTINCT deployment) AS \\\"Servers\\\", round(percentile_cont(0.95) WITHIN GROUP (ORDER BY operation_duration_ms)) AS \\\"p95 ms\\\", count(CASE WHEN success = false THEN 1 END) AS \\\"Failed\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' AND mcp_tool_call_name <> '' AND mcp_tool_call_name IS NOT NULL GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 300\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Tool",
+              "text": "Tool",
+              "type": "string"
+            },
+            {
+              "selector": "Calls",
+              "text": "Calls",
+              "type": "number"
+            },
+            {
+              "selector": "Turns",
+              "text": "Turns",
+              "type": "number"
+            },
+            {
+              "selector": "Servers",
+              "text": "Servers",
+              "type": "number"
+            },
+            {
+              "selector": "p95 ms",
+              "text": "p95 ms",
+              "type": "number"
+            },
+            {
+              "selector": "Failed",
+              "text": "Failed",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Calls"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95 ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Calls",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Tool": 0,
+              "Calls": 1,
+              "Turns": 2,
+              "Servers": 3,
+              "p95 ms": 4,
+              "Failed": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "LLM calls vs MCP calls over time",
+      "description": "LLM-call and MCP hops per hour, stacked. Only two of the five event_kind values are plotted — embedding, blank and route are excluded, so the stack height is a subset of gateway hops, not total traffic. MCP rising relative to LLM is the signal that agentic tool use is growing; 'MCP calls' is every MCP-protocol hop and not all of them carry a tool name, so it is a wider population than the tool leaderboard's Calls. Spiky by nature — one deep turn can contribute hundreds of MCP calls. Fixed 1-hour buckets: ADAS has no $__timeInterval macro, so bucket width follows neither the panel width nor the selected range.",
+      "gridPos": {
+        "h": 11,
+        "w": 11,
+        "x": 13,
+        "y": 23
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "timeseries",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT date_bin(1, 'hour', request_time) AS ts, count(CASE WHEN event_kind = 'llm_call' THEN 1 END) AS \\\"LLM calls\\\", count(CASE WHEN event_kind = 'mcp' THEN 1 END) AS \\\"MCP calls\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 1 LIMIT 1000\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "LLM calls",
+              "text": "LLM calls",
+              "type": "number"
+            },
+            {
+              "selector": "MCP calls",
+              "text": "MCP calls",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "ts": 0,
+              "LLM calls": 1,
+              "MCP calls": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Deepest turns — drill-down",
+      "description": "Top 200 turns by hop count (a turn is one trace_id) over the dashboard window. Hops counts every usage-log hop in the trace — llm_call, mcp, embedding, route and Core's own entry row — so LLM calls + MCP calls is normally less than Hops. Cost $ sums deployment_price, each hop's own cost, so a routed chain is not double-counted. An empty Conversation means no hop of the turn carried a chat id: exactly the population the old turns-based version could not see. Tools used and Models billed list the alphabetically first 6 distinct entries; Tools gives the real distinct-tool count, so you can see when that list is truncated. Sorted by depth, not by cost: the most expensive turn in a window need not be among the deepest, so it may NOT be in this table.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "adas-rest-sql"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "adas-rest-sql"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/v1/queries/execute-sql",
+          "url_options": {
+            "method": "POST",
+            "body_type": "raw",
+            "body_content_type": "application/json",
+            "data": "{\"sql\": \"SELECT trace_id AS \\\"Trace\\\", max(chat_id) AS \\\"Conversation\\\", count(*) AS \\\"Hops\\\", count(CASE WHEN event_kind = 'llm_call' THEN 1 END) AS \\\"LLM calls\\\", count(CASE WHEN event_kind = 'mcp' THEN 1 END) AS \\\"MCP calls\\\", count(CASE WHEN success = false THEN 1 END) AS \\\"Failed hops\\\", count(DISTINCT CASE WHEN mcp_tool_call_name <> '' THEN mcp_tool_call_name END) AS \\\"Tools\\\", array_to_string(array_slice(group_uniq_array(CASE WHEN mcp_tool_call_name <> '' THEN mcp_tool_call_name END), 1, 6), ', ') AS \\\"Tools used\\\", array_to_string(array_slice(group_uniq_array(CASE WHEN deployment_price > 0 THEN deployment END), 1, 6), ', ') AS \\\"Models billed\\\", round(sum(deployment_price), 4) AS \\\"Cost $\\\" FROM dial_usage_log WHERE request_time >= TIMESTAMP '${__from:date:YYYY-MM-DD HH:mm:ss}' AND request_time < TIMESTAMP '${__to:date:YYYY-MM-DD HH:mm:ss}' GROUP BY 1 ORDER BY 3 DESC NULLS LAST, 1 LIMIT 200\"}"
+          },
+          "root_selector": "rows",
+          "columns": [
+            {
+              "selector": "Trace",
+              "text": "Trace",
+              "type": "string"
+            },
+            {
+              "selector": "Conversation",
+              "text": "Conversation",
+              "type": "string"
+            },
+            {
+              "selector": "Hops",
+              "text": "Hops",
+              "type": "number"
+            },
+            {
+              "selector": "LLM calls",
+              "text": "LLM calls",
+              "type": "number"
+            },
+            {
+              "selector": "MCP calls",
+              "text": "MCP calls",
+              "type": "number"
+            },
+            {
+              "selector": "Failed hops",
+              "text": "Failed hops",
+              "type": "number"
+            },
+            {
+              "selector": "Tools",
+              "text": "Tools",
+              "type": "number"
+            },
+            {
+              "selector": "Tools used",
+              "text": "Tools used",
+              "type": "string"
+            },
+            {
+              "selector": "Models billed",
+              "text": "Models billed",
+              "type": "string"
+            },
+            {
+              "selector": "Cost $",
+              "text": "Cost $",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cost $"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hops"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Hops",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "renameByName": {},
+            "indexByName": {
+              "Trace": 0,
+              "Conversation": 1,
+              "Hops": 2,
+              "LLM calls": 3,
+              "MCP calls": 4,
+              "Failed hops": 5,
+              "Tools": 6,
+              "Tools used": 7,
+              "Models billed": 8,
+              "Cost $": 9
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

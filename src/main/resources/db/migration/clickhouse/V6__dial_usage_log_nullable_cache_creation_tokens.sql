@@ -1,0 +1,30 @@
+-- Make dial_usage_log.cache_creation_tokens nullable, so "the producer reported no cache-write count"
+-- stops being stored as the same 0 a measured zero produces.
+--
+-- The column used to be derived from the response payload, and every way that derivation could miss
+-- ended in the non-nullable fallback: a stored 0. It is now mapped from the producer's own accounting
+-- (token_usage.prompt_tokens_details.cache_write_tokens), which is absent on some records — those must
+-- read back as NULL, like the four sibling token columns V1 already declares Nullable.
+--
+-- This complements the CREATE TABLE in V1 rather than editing it (an applied migration's checksum is
+-- fixed): a fresh install runs V1 then this file, and an operator applying the DDL out of band does the
+-- same in that order. An operator running with clickhouse.migrations.enabled=false who skips this file
+-- is stopped at startup by SchemaValidator, which refuses a mapping declaring `nullable: true` against a
+-- bare UInt32 — the intended fail-fast, not a regression.
+--
+-- The CODEC is restated deliberately: MODIFY COLUMN replaces the whole column declaration, so omitting
+-- it would silently drop the column back to default compression. Nullable(UInt32) CODEC(T64, ZSTD(1))
+-- is already proven on this table — cached_prompt_tokens is declared exactly that way in V1.
+--
+-- Changing a column's type schedules a mutation over every existing part, but T -> Nullable(T) is the
+-- cheap end of that: the stored values keep their on-disk representation, so ClickHouse hardlinks the
+-- existing column files and writes only the added null-map subcolumn, which is all-zero and compresses
+-- to almost nothing. Measured on ClickHouse 25.3 against a scratch ReplacingMergeTree of 24M rows in 4
+-- parts (~95 MiB): the ALTER returned in 46 ms wall-clock including the HTTP round trip, the mutation
+-- was already done when queried, part_log reported the MutatePart events at 13 ms total with 0 rows
+-- rewritten, total part size was unchanged, and reads returned Nullable(UInt32) values summing to
+-- exactly the pre-ALTER total with no NULLs invented. Cost still scales with part COUNT, so on a large
+-- deployment this remains a migration to run deliberately rather than blind — but it is not the
+-- full-column rewrite a type change usually implies.
+ALTER TABLE dial_usage_log
+    MODIFY COLUMN cache_creation_tokens Nullable(UInt32) CODEC(T64, ZSTD(1));
