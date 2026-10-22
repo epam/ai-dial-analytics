@@ -47,6 +47,11 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   Kubernetes too (inside a cluster Spring Boot already enabled them). Point liveness at
   `/actuator/health/liveness`, which consults no dependency, so a PostgreSQL outage never restarts the pod.
   The image's Docker `HEALTHCHECK` now calls that path.
+- **Actuator moves to its own port, 9464.** Probes, `/actuator/info` and `/actuator/prometheus` now answer only
+  on the management port (`MANAGEMENT_SERVER_PORT`, default `9464`) and are `404` on the API port 5000. Before
+  deploying, point the liveness and readiness probes and the Prometheus scrape at port 9464 and declare it as a
+  container port: a probe left on 5000 fails and restarts the pod. Set `MANAGEMENT_SERVER_PORT=5000` to keep the
+  old layout. The image's Docker `HEALTHCHECK` already calls 9464.
 - **Default service name is now `ai-dial-analytics`.** The `OTEL_SERVICE_NAME` default changes from
   `analytics-data-access-service`, so a deployment that leaves it unset exports traces, metrics and logs under the
   new `service.name`. Dashboards, alerts and queries that filter on the old name stop matching. To keep the old

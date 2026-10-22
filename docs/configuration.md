@@ -46,9 +46,10 @@ The three JVM flags Arrow's off-heap allocator needs on JDK 24+ are applied by t
 
 ### Server
 
-| Variable    | Property      | Default | Required | Description               |
-|-------------|---------------|---------|----------|---------------------------|
-| `HTTP_PORT` | `server.port` | `5000`  | No       | Port ADAS serves HTTP on. |
+| Variable                 | Property                 | Default | Required | Description                                                         |
+|--------------------------|--------------------------|---------|----------|---------------------------------------------------------------------|
+| `HTTP_PORT`              | `server.port`            | `5000`  | No       | Port ADAS serves the API on.                                        |
+| `MANAGEMENT_SERVER_PORT` | `management.server.port` | `9464`  | No       | Port the `/actuator` endpoints (probes, info, Prometheus) serve on. |
 
 ### Scheduled task execution
 
@@ -118,8 +119,8 @@ overrides it for its signal. The base endpoint is fanned out to the per-signal U
 | `OTEL_SERVICE_NAME`                   | `management.opentelemetry.resource-attributes.service.name`       | `ai-dial-analytics`             | No                    | `service.name` resource attribute.                                                                                                              |
 | `OTEL_RESOURCE_ATTRIBUTES`            | _(read by the OTel SDK, not bound in `application.yml`)_          | _(empty)_                       | No                    | Extra resource attributes as `key=value,key=value`; a `service.name` entry here always loses to the property above, so use `OTEL_SERVICE_NAME`. |
 
-Not configurable: the actuator endpoints exposed under `/actuator` are fixed to
-`health,info,prometheus`, the health endpoint always returns full details, and the liveness and readiness
+Not configurable: the actuator endpoints exposed under `/actuator` on the management port
+(`MANAGEMENT_SERVER_PORT`) are fixed to `health,info,prometheus`, the health endpoint always returns full details, and the liveness and readiness
 probe groups are always served.
 
 ## Data stores
@@ -505,7 +506,7 @@ scheduled jobs.
 
 In `oidc` mode every `/v1` endpoint requires a credential — an OIDC `Bearer` token from a configured
 [identity provider](#identity-providers), or a DIAL [`Api-Key` header](#api-key-authentication) when
-that is enabled; `Bearer` takes precedence when both are sent. The operational paths
+that is enabled; `Bearer` takes precedence when both are sent. The operational paths on the management port
 (`/actuator/health` with its liveness and readiness groups, `/actuator/info`, `/actuator/prometheus`) stay public; the springdoc UI and OpenAPI
 document are public only with [`DISABLE_SWAGGER_AUTHORIZATION=true`](#api-documentation-springdoc--swagger-ui).
 

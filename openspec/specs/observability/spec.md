@@ -76,7 +76,7 @@ metrics regardless of OTLP export flags. OTLP metrics export is additive.
   meters are also pushed over OTLP
 
 ### Requirement: Liveness and readiness probe groups
-ADAS SHALL serve `/actuator/health/liveness` and `/actuator/health/readiness` on the HTTP port whether or not
+ADAS SHALL serve `/actuator/health/liveness` and `/actuator/health/readiness` on the management port whether or not
 it runs in Kubernetes, and both SHALL be reachable without a credential in every security mode. Liveness
 SHALL report the application's liveness state alone, so no dependency outage restarts the service.
 Readiness SHALL report the readiness state, which is out of service until startup (schema migrations
@@ -96,6 +96,21 @@ otherwise. The image's Docker `HEALTHCHECK` calls the liveness path.
 #### Scenario: Readiness includes the catalog database
 - **WHEN** readiness is called on a started instance
 - **THEN** the response reports the readiness state and the `db` component
+
+### Requirement: Actuator on a separate management port
+ADAS SHALL serve its actuator endpoints (`/actuator/health` with its probe groups, `/actuator/info`,
+`/actuator/prometheus`) on a management port, `management.server.port`, default `9464`, separate from the API
+port `server.port`. The API port SHALL NOT serve any actuator path, and the management port SHALL NOT serve any
+API path, so an Ingress that routes the API port never exposes the probes or the metrics scrape. The security
+mode applies on both ports, with the actuator endpoints public as on the API port before.
+
+#### Scenario: Actuator answers only on the management port
+- **WHEN** `/actuator/health/liveness` or `/actuator/prometheus` is requested
+- **THEN** the management port answers `200` without a credential, and the API port answers `404`
+
+#### Scenario: API is not served on the management port
+- **WHEN** a `/v1` path is requested on the management port
+- **THEN** it is not served
 
 ### Requirement: Trace context in HTTP responses
 Every HTTP response processed by the MVC layer SHALL carry a W3C `traceparent` header

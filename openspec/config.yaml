@@ -61,7 +61,8 @@ context: |
 
   ## API conventions
 
-  - Functional endpoints under `/v1`; operational under `/actuator/*`.
+  - Functional endpoints under `/v1`; operational under `/actuator/*` on the management port
+    (`management.server.port`, default `9464`), separate from the API port.
   - **Responses and list entries are objects, never bare arrays** (`{"rows": [...]}`, `{name, type}`)
     so counts, cursors and metadata can be added without breaking clients. Exactly two pre-existing
     endpoints still return bare arrays and are frozen: `GET /v1/queries/entities` and
