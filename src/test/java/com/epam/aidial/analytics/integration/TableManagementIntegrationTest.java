@@ -961,11 +961,12 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     @Test
     void seededSystemTablesExposeColumnDescriptions() throws Exception {
-        // 34 since V38 re-keyed the five verbatim-content columns onto dial_usage_log_payload.
+        // 34 after V38 re-keyed the five verbatim-content columns onto dial_usage_log_payload, plus the two
+        // route columns V49 registered.
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(34)))
-                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(34)))
+                .andExpect(jsonPath("$.columns", hasSize(36)))
+                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(36)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")));
         // The moved rows kept their descriptions: V38 re-keys them rather than re-declaring them.
@@ -984,11 +985,31 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     @Test
+    void seededRouteColumnsAreNullableDeploymentAttributes() throws Exception {
+        // V49 registers the two columns V15 appended. Nullable matches LowCardinality(Nullable(String)) —
+        // NULL is "no route served the request" — and the tag groups them with deployment.
+        mockMvc.perform(get("/v1/tables/dial_usage_log"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name' || @.name=='route_type')].type",
+                        contains("string", "string")))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name' || @.name=='route_type')].nullable",
+                        contains(true, true)))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name' || @.name=='route_type')].tag",
+                        contains("deployment", "deployment")))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name' || @.name=='route_type')].sensitive",
+                        contains(false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name' || @.name=='route_type')].heavy",
+                        contains(false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_name')].display_name", contains("Route name")))
+                .andExpect(jsonPath("$.columns[?(@.name=='route_type')].display_name", contains("Route type")));
+    }
+
+    @Test
     void seededSystemTablesExposeColumnDisplayNames() throws Exception {
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(34)))
-                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(34)))
+                .andExpect(jsonPath("$.columns", hasSize(36)))
+                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(36)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].display_name", contains("Event ID")));
         mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
                 .andExpect(status().isOk())

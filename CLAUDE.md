@@ -113,7 +113,11 @@ project's own neutral engineering record, not as one company's operations log.
 - **No temporary scaffolding.** No "TODO: remove before prod" code or demo pages. Remove it, or make it
   a documented, opt-in feature.
 - **Applied Flyway migrations are frozen.** Their comments are checksummed, so never edit one to
-  reword it. Write new migrations to these rules from the start.
+  reword it. Write new migrations to these rules from the start, and keep their comments minimal: at
+  most a one-line header that names what the migration does and links the owning
+  `openspec/specs/<capability>/spec.md`. Rationale, cost, rejected alternatives and operator ordering
+  belong in that spec or the change's `design.md`, which can still be corrected later. A stale
+  multi-paragraph header can't be.
 - **Verify with PCRE.** `git grep -E` on macOS ignores `\b`, so a sweep built on it silently misses
   hits. Use `git grep -nP`, for example:
   `git grep -nIP '\b(dev|UAT|prod)\b|reference[- ]deployment|in production|DevOps|MR ?!\d+|\.local\.md'`.

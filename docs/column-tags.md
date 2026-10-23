@@ -89,7 +89,7 @@ clears it).
 | tag | answers | covers |
 |---|---|---|
 | `principal` | Who made the request? | `project_id`, `user_hash` |
-| `deployment` | What did they call? | `deployment`, `parent_deployment`, `execution_path` (the deployment that handled the hop, its caller, and the routing path) |
+| `deployment` | What did they call? | `deployment`, `parent_deployment`, `execution_path`, `route_name`, `route_type` (the deployment that handled the hop, its caller, the routing path, and the route that served the request — NULL when no route did) |
 
 On `rate_analytics`, which exposes only a subset, `principal` covers `project_id`/`user_hash` and
 `deployment` covers `deployment`.

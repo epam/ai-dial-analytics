@@ -366,6 +366,47 @@ class MappingEngineTest {
     }
 
     @Test
+    void carriesTheReportedRouteAndNullWhenNoRouteServedTheRequest() {
+        // SAMPLE is a chat completion, which no route serves: the producer omits both fields, and NULL is
+        // the "not a route request" signal rather than an empty string.
+        Map<String, Object> noRoute = engine.toRow(jsonMapper.readTree(SAMPLE), "f");
+        assertThat(noRoute).containsEntry("route_name", null).containsEntry("route_type", null);
+
+        String globalRoute = SAMPLE.replace("\"deployment\":\"gpt-4\",",
+                "\"route_name\":\"vector-store\",\"route_type\":\"global\",");
+        assertThat(engine.toRow(jsonMapper.readTree(globalRoute), "f"))
+                .containsEntry("route_name", "vector-store")
+                .containsEntry("route_type", "global");
+
+        String applicationRoute = SAMPLE.replace("\"deployment\":\"gpt-4\",",
+                "\"deployment\":\"my-app\",\"route_name\":\"index-search\",\"route_type\":\"application\",");
+        assertThat(engine.toRow(jsonMapper.readTree(applicationRoute), "f"))
+                .containsEntry("deployment", "my-app")
+                .containsEntry("route_name", "index-search")
+                .containsEntry("route_type", "application");
+
+        // The two fields are independent: one reported, the other absent, stores the value and NULL.
+        String nameOnly = SAMPLE.replace("\"deployment\":\"gpt-4\",", "\"route_name\":\"vector-store\",");
+        assertThat(engine.toRow(jsonMapper.readTree(nameOnly), "f"))
+                .containsEntry("route_name", "vector-store")
+                .containsEntry("route_type", null);
+
+        // A blank value is absent, not a route named ''.
+        String blankName = SAMPLE.replace("\"deployment\":\"gpt-4\",", "\"route_name\":\"\",");
+        assertThat(engine.toRow(jsonMapper.readTree(blankName), "f")).containsEntry("route_name", null);
+
+        // The producer owns the route-kind domain, so a kind this service has never seen is stored as
+        // reported rather than rejected.
+        String unknownKind = SAMPLE.replace("\"deployment\":\"gpt-4\",",
+                "\"route_name\":\"vector-store\",\"route_type\":\"interceptor\",");
+        assertThat(engine.toRow(jsonMapper.readTree(unknownKind), "f")).containsEntry("route_type", "interceptor");
+
+        // The route columns never feed event_kind, which stays derived from the request URI alone.
+        assertThat(engine.toRow(jsonMapper.readTree(globalRoute), "f").get("event_kind"))
+                .isEqualTo(noRoute.get("event_kind"));
+    }
+
+    @Test
     void parsesResponseStatusAsNumber() {
         Map<String, Object> row = engine.toRow(jsonMapper.readTree(SAMPLE), "f");
 
@@ -520,7 +561,7 @@ class MappingEngineTest {
                 "total_tokens", "cached_prompt_tokens", "cache_creation_tokens", "reasoning_tokens",
                 "number_request_messages", "total_price", "deployment_price", "operation_duration_ms",
                 "response_status", "success", "request_method", "request_uri", "mcp_method", "mcp_tool_call_name",
-                "request_body_bytes", "response_body_bytes");
+                "request_body_bytes", "response_body_bytes", "route_name", "route_type");
     }
 
     @Test

@@ -314,6 +314,9 @@ operations:
         needed, say so explicitly.
       - Check for a Flyway version collision before numbering a new migration — in-flight branches
         may already have claimed the next number.
+      - Keep a new migration's comments to a one-line header that links the owning spec. Flyway
+        checksums the whole file, so a comment can never be corrected once applied; rationale goes to
+        the spec or `design.md`.
   archive:
     guidance:
       - Confirm the merged spec matches the shipped behavior before archiving; the spec, not the

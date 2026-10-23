@@ -1,0 +1,71 @@
+## MODIFIED Requirements
+
+### Requirement: Seeded column nullability matches the physical table
+
+The catalog's `nullable` flag on a built-in table SHALL agree with the column's physical
+ClickHouse type: a column materialized as `Nullable(T)` SHALL be seeded `nullable = true`, and one
+materialized as a bare `T` SHALL be seeded `nullable = false`.
+
+The `dial_usage_log` seed SHALL therefore record as nullable exactly the columns its DDL declares
+`Nullable(...)`: `core_parent_span_id`, `parent_deployment`, `response_upstream_uri`, `prompt_tokens`,
+`completion_tokens`, `total_tokens`, `cached_prompt_tokens`, `cache_creation_tokens`, `total_price`,
+`deployment_price`, `route_name`, and `route_type`.
+
+The `dial_usage_log_payload` seed SHALL record all three of its columns as nullable — they are
+`Nullable(String)`, so that "the producer sent nothing" stays distinguishable from "the producer sent
+empty". Their nullability is also what makes them readable by a pipeline through the grain join, which
+a non-nullable enrichment column is not.
+
+The agreement holds against the table's *current* physical type, not the type it was created with: when
+a migration changes a column's nullability, a paired catalog update SHALL follow it in the same change,
+so the two never disagree between releases. Moving a column's catalog row between tables SHALL likewise
+preserve the flag, since the physical type it describes is unchanged.
+
+The agreement is a requirement rather than a data detail because two independent consumers read the flag
+and neither can detect that it is wrong:
+
+- **Discovery publishes it.** A consumer told a column cannot be null, which then returns null, holds a
+  schema its own data contradicts.
+- **Governance reasons from it.** A rule that decides anything from a column's nullability — such as the
+  aggregate pipeline's requirement that a nullable measure land in a nullable target column, or the
+  enrichment-read rule that refuses a non-nullable enrichment column — is inert on precisely the
+  columns that need it if the catalog understates nullability. That is the quiet direction of the
+  error: nothing is rejected, and nothing reports that nothing was checked.
+
+The flag defaults to `FALSE`, so a column seeded without an explicit value claims non-nullability it may
+not have. A seed SHALL therefore set it from the DDL rather than relying on the default.
+
+Nullability is fixed at DDL, so aligning the catalog SHALL be a `column_mapping` update only and SHALL
+NOT materialize as an `ALTER`. This is the same shape as the seeded `sensitive` flag, and unlike it, the
+value is not an operator's to choose — the physical column decides it.
+
+#### Scenario: The seeded flag agrees with the physical column
+
+- **WHEN** the catalog is read after the table-catalog migrations run
+- **THEN** `dial_usage_log` reports `total_tokens`, `total_price` and the other physically-`Nullable`
+  columns with `nullable: true`, and its non-nullable columns with `nullable: false`
+
+#### Scenario: The moved body columns keep their nullability
+
+- **WHEN** the catalog is read after the payload-split migrations run
+- **THEN** `dial_usage_log_payload` reports all three of its columns with `nullable: true`, and
+  `dial_usage_log` reports none of them at all
+
+#### Scenario: A column made nullable by a later migration
+
+- **WHEN** a ClickHouse migration changes a `dial_usage_log` column from `T` to `Nullable(T)`
+- **THEN** the catalog reports that column as `nullable: true` once the catalog migrations of the same
+  release have run, without any `ALTER` being issued from the catalog side
+
+#### Scenario: Columns added nullable by a later migration are seeded nullable
+
+- **WHEN** the catalog is read after the migrations that add `route_name` and `route_type` run
+- **THEN** `dial_usage_log` reports both columns with `nullable: true`, matching their
+  `LowCardinality(Nullable(String))` physical type
+
+#### Scenario: A governance rule keyed on nullability sees the true value
+
+- **WHEN** an aggregate pipeline declares a `sum` over `dial_usage_log.total_tokens` into a non-nullable
+  target column
+- **THEN** it is rejected, because the catalog reports the input column as nullable — the refusal the
+  rule exists for, which an understated flag would have skipped silently

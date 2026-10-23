@@ -18,7 +18,8 @@
 # all read them off the parsed record), which is a read of the incoming record and persists nothing.
 #
 # Column order matches the physical table: db/migration/clickhouse/V1__create_dial_usage_log.sql,
-# less the five columns this mapping stopped capturing (see below). _ingested_at (DEFAULT
+# less the five columns this mapping stopped capturing (see below), followed by route_name and
+# route_type, which V15__dial_usage_log_route.sql appended. _ingested_at (DEFAULT
 # now64(3)) is the only table column left unmapped, so it applies its ClickHouse default.
 # operation_duration_ms is the producer's own measurement, copied as reported and never recomputed here:
 # DIAL measures from accepting the request to having the full response body (for a background job, to
@@ -188,3 +189,14 @@ columns:
     derive: byte-length
     sources: [response.body]
     kind: long
+  # The route that served the request, copied as reported. The producer omits both fields when no route
+  # served it, so NULL is the "not a route request" signal; route_type stays a free string so a new route
+  # kind ingests without a mapping change.
+  - column: route_name
+    source: route_name
+    kind: string
+    nullable: true
+  - column: route_type
+    source: route_type
+    kind: string
+    nullable: true
