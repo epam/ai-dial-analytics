@@ -39,7 +39,7 @@ class BlobPrefixResolverTest {
             String pathPrefix, String datePathPattern, String fileNamePrefixPattern, MeterRegistry meterRegistry) {
         return new BlobPrefixResolver(new SyncProperties(
                 "-", 1, 10, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, pathPrefix, datePathPattern, fileNamePrefixPattern, false,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null),
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null),
                 meterRegistry);
     }
 

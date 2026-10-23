@@ -1,7 +1,7 @@
 package com.epam.aidial.analytics.sync.mapping;
 
 import com.epam.aidial.analytics.sync.inline.InlineFileRewrite;
-import com.epam.aidial.analytics.sync.inline.InlineFilesMode;
+import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import io.micrometer.core.instrument.MeterRegistry;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
@@ -29,11 +29,12 @@ import java.util.Map;
  * {@code null} if the column is {@code nullable}; else to the kind's zero value (so a non-nullable
  * column without a producer value still inserts safely).
  *
- * <p>A mapped column declaring {@code inline-files} is a body whose inline files {@code sync.inline-files-mode}
- * governs. Under {@link InlineFilesMode#DROP} or {@link InlineFilesMode#DROP_TRUNCATED} its coerced value is rewritten
- * by an {@link InlineFileRewrite} before the fallback applies; the rewrite replaces only the value written to that column, so every other column — derived
+ * <p>A mapped column declaring {@code inline-files} is a body whose inline files the {@link InlineFilesPolicy}
+ * ({@code sync.inline-files-drop-truncated} and {@code sync.inline-files-max-size}) governs. When the policy
+ * {@link InlineFilesPolicy#rewrites() rewrites}, its coerced value is rewritten by an {@link InlineFileRewrite} before
+ * the fallback applies; the rewrite replaces only the value written to that column, so every other column — derived
  * ones reading the same source path included — still sees the record as the producer sent it. Under
- * {@link InlineFilesMode#KEEP} the attribute is inert and no body is parsed.
+ * {@link InlineFilesPolicy#keep()} the attribute is inert and no body is parsed.
  *
  * <p>Not a Spring bean: one instance is compiled per {@link SyncTarget} (see {@code MappingConfiguration}),
  * so a run can drive several mappings — one per target table — from the shared registries.
@@ -51,22 +52,22 @@ public class MappingEngine {
      * per-row NPE.
      */
     public MappingEngine(MappingConfig config, TransformRegistry transforms, DeriverRegistry derivers) {
-        this(config, transforms, derivers, InlineFilesMode.KEEP, null, null);
+        this(config, transforms, derivers, InlineFilesPolicy.keep(), null, null);
     }
 
     /**
      * Compiles the mapping for a target, with its inline-file handling.
      *
-     * @param mode     the {@code sync.inline-files-mode}; under {@code DROP} or {@code DROP_TRUNCATED} each {@code inline-files} column gets a rewrite
-     * @param table    the target table, tagging the inline-file counters; unused under {@code KEEP}
-     * @param registry where the inline-file counters are registered; unused under {@code KEEP}, required otherwise
+     * @param policy   the inline-files settings; when it {@link InlineFilesPolicy#rewrites() rewrites}, each {@code inline-files} column gets a rewrite
+     * @param table    the target table, tagging the inline-file counters; unused when the policy does not rewrite
+     * @param registry where the inline-file counters are registered; unused when the policy does not rewrite, required otherwise
      */
     public MappingEngine(MappingConfig config, TransformRegistry transforms, DeriverRegistry derivers,
-                         InlineFilesMode mode, String table, MeterRegistry registry) {
+                         InlineFilesPolicy policy, String table, MeterRegistry registry) {
         List<CompiledColumn> compiled = new ArrayList<>(config.columns().size());
         for (ColumnMapping column : config.columns()) {
-            InlineFileRewrite rewrite = mode != InlineFilesMode.KEEP && column.inlineFiles() != null
-                    ? new InlineFileRewrite(column.inlineFiles().body(), mode, table, column.column(), registry)
+            InlineFileRewrite rewrite = policy.rewrites() && column.inlineFiles() != null
+                    ? new InlineFileRewrite(column.inlineFiles().body(), policy, table, column.column(), registry)
                     : null;
             compiled.add(CompiledColumn.of(column, transforms, derivers, rewrite));
         }
@@ -123,7 +124,7 @@ public class MappingEngine {
      * @param transform   the resolved transform for a mapped column; {@code null} when none
      * @param deriver     the resolved deriver for a derived column; {@code null} for a mapped column
      * @param sourcePaths the pre-compiled deriver source paths; empty for a mapped or source-file column
-     * @param inlineFiles the inline-file rewrite of a body column under {@code drop} or {@code drop-truncated}; {@code null} otherwise
+     * @param inlineFiles the inline-file rewrite of a body column under a policy that rewrites; {@code null} otherwise
      * @param uriPath     the pre-compiled request-URI path the rewrite reads; {@code null} when there is no rewrite
      */
     private record CompiledColumn(

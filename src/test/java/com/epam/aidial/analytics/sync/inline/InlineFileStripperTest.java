@@ -435,7 +435,7 @@ class InlineFileStripperTest {
             String head = "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64," + B64 + "\"}},"
                     + "{\"type\":\"text\",\"text\":\"look\"},{\"image_url\":{\"url\":\"";
             Result result = InlineFileStripper.strip(cutInside(head + "data:image/png;base64,"), CHAT_COMPLETIONS, REQUEST,
-                    InlineFilesMode.DROP_TRUNCATED);
+                    InlineFilesPolicy.defaults());
 
             assertThat(result.body()).isEqualTo(head.substring(0, head.length() - 1) + ">>");
             assertThat(copiesOf(result.body())).isEqualTo(1); // the complete image is kept byte for byte
@@ -448,41 +448,124 @@ class InlineFileStripperTest {
         void dropTruncatedLeavesBodyCutInsideTextAsCut() {
             String body = cutInside("{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64," + B64 + "\"}},"
                     + "{\"type\":\"text\",\"text\":\"");
-            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesMode.DROP_TRUNCATED).body()).isSameAs(body);
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesPolicy.defaults()).body()).isSameAs(body);
         }
 
         @Test
         void dropTruncatedKeepsEarlierEventsOfCutStream() {
             String first = "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"" + B64 + "\"}}}]}\n\n";
             String open = "data: {\"choices\":[{\"delta\":{\"audio\":{\"data\":\"";
-            Result result = InlineFileStripper.strip(cutInside(first + open), CHAT_COMPLETIONS, RESPONSE, InlineFilesMode.DROP_TRUNCATED);
+            Result result = InlineFileStripper.strip(cutInside(first + open), CHAT_COMPLETIONS, RESPONSE, InlineFilesPolicy.defaults());
 
             assertThat(result.body()).isEqualTo(first + open.substring(0, open.length() - 1) + ">>");
             assertThat(result.cutBack()).isTrue();
         }
+
+        @Test
+        void withTheRepairOffTheHalfFileOverTheLimitLosesItsPayload() {
+            String head = "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64,";
+            Result result = InlineFileStripper.strip(cutInside(head), CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 1024 * 1024));
+
+            assertThat(result.body()).isEqualTo(head + ">>");
+            assertThat(result.cutBack()).isTrue();
+            assertThat(result.filesRemoved()).isZero();
+            assertThat(result.bytesRemoved()).isEqualTo(4 * 1024 * 1024 - head.length());
+        }
+
+        @Test
+        void withTheRepairOffTheHalfFileWithinTheLimitIsLeftAsCut() {
+            String body = cutInside("{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64,");
+            Result result = InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 8 * 1024 * 1024));
+            assertThat(result.body()).isSameAs(body);
+            assertThat(result.cutBack()).isFalse();
+        }
+
+        @Test
+        void withTheRepairOnLimitStillKeepsSmallCompleteFiles() {
+            String head = "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64," + B64 + "\"}},"
+                    + "{\"image_url\":{\"url\":\"";
+            Result result = InlineFileStripper.strip(cutInside(head + "data:image/png;base64,"), CHAT_COMPLETIONS, REQUEST,
+                    new InlineFilesPolicy(true, B64.length()));
+
+            assertThat(result.body()).isEqualTo(head.substring(0, head.length() - 1) + ">>");
+            assertThat(copiesOf(result.body())).isEqualTo(1);
+            assertThat(result.filesRemoved()).isZero();
+        }
     }
 
     @Nested
-    class Modes {
+    class SizeLimit {
+
+        private static String image(String payload) {
+            return "{\"image_url\":{\"url\":\"data:image/png;base64," + payload + "\"}}";
+        }
+
+        @Test
+        void fileOverTheLimitIsRemovedAndOneAtTheLimitKept() {
+            String over = "A".repeat(1025);
+            String at = "B".repeat(1024);
+            String body = "{\"messages\":[{\"content\":[" + image(over) + "," + image(at) + "]}]}";
+            Result result = InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 1024));
+
+            assertThat(result.body()).isEqualTo("{\"messages\":[{\"content\":[" + image("") + "," + image(at) + "]}]}");
+            assertThat(result.filesRemoved()).isEqualTo(1);
+            assertThat(result.bytesRemoved()).isEqualTo(1025);
+        }
+
+        @Test
+        void theSizeIsThePayloadAfterTheDataUrlPrefix() {
+            // 1,024 payload characters: the prefix would push it over a limit of 1,024 if it were counted.
+            String body = "{\"messages\":[{\"content\":[" + image("C".repeat(1024)) + "]}]}";
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 1024)).body()).isSameAs(body);
+        }
+
+        @Test
+        void jsonEscapeCountsWithItsBackslash() {
+            String payload = "A".repeat(1022) + "\\/";   // 1,024 characters as stored
+            String body = "{\"messages\":[{\"content\":[" + image(payload) + "]}]}";
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 1024)).body()).isSameAs(body);
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, 1023)).filesRemoved()).isEqualTo(1);
+        }
+
+        @Test
+        void bodyNoLongerThanTheLimitIsNotParsed() {
+            // Malformed: a scan would count it as unscannable, so a zero count shows it was never parsed.
+            String body = "{\"messages\":[{\"content\":[" + image(B64) + ",oops";
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, body.length())))
+                    .isEqualTo(new Result(body, 0, 0, false, 0));
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, new InlineFilesPolicy(false, body.length() - 1)).unscannable())
+                    .isEqualTo(1);
+        }
+
+        @Test
+        void mayChangeOnlyBodyLongerThanTheLimitOrCutUnderTheRepair() {
+            assertThat(InlineFileStripper.mayChange("x".repeat(10), new InlineFilesPolicy(false, 10))).isFalse();
+            assertThat(InlineFileStripper.mayChange("x".repeat(11), new InlineFilesPolicy(false, 10))).isTrue();
+            assertThat(InlineFileStripper.mayChange("x".repeat(11), InlineFilesPolicy.defaults())).isFalse();
+        }
+    }
+
+    @Nested
+    class Policies {
 
         private final String body = "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64," + B64 + "\"}}]}]}";
 
         @Test
         void dropTruncatedReturnsBodyThatWasNotCutUntouched() {
-            Result result = InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesMode.DROP_TRUNCATED);
+            Result result = InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesPolicy.defaults());
             assertThat(result.body()).isSameAs(body);
             assertThat(result.filesRemoved()).isZero();
         }
 
         @Test
         void keepReturnsEveryBodyUntouched() {
-            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesMode.KEEP).body()).isSameAs(body);
+            assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesPolicy.keep()).body()).isSameAs(body);
         }
 
         @Test
-        void dropIsTheDefaultOfTheThreeArgumentForm() {
+        void dropAllIsTheDefaultOfTheThreeArgumentForm() {
             assertThat(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST))
-                    .isEqualTo(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesMode.DROP));
+                    .isEqualTo(InlineFileStripper.strip(body, CHAT_COMPLETIONS, REQUEST, InlineFilesPolicy.dropAll()));
         }
     }
 

@@ -1005,9 +1005,9 @@ implementation detail of the (overridable) default column mapping and are not pi
 The service SHALL persist the producer's merged streaming response, `assembled_response`, to a column
 of `dial_usage_log_payload` when the configured mapping declares one, storing the producer's value
 verbatim with no reassembly, parsing, or normalization of its own. There is one exception: when
-`sync.inline-files-mode` is `drop`, the payloads of inline files are removed from the value, and when it is
-`drop-truncated`, a value DIAL Core cut at 4 MiB inside a file is cut back to before that file (see "Inline
-files are removed from payload bodies in drop mode"). That parse locates files only and never validates,
+`sync.inline-files-max-size` is set, the payloads of inline files longer than it are removed from the value,
+and when `sync.inline-files-drop-truncated` is on, a value DIAL Core cut at 4 MiB inside a file is cut back to
+before that file (see "Inline files are removed from payload bodies in drop mode"). That parse locates files only and never validates,
 rejects or repairs the value. A value that does not parse is handled by that requirement's "Body formats" and
 "Truncated bodies" rules: removals found before the parse error are kept, and a truncated body is cut back to
 before the file the cut landed in; nothing else in such a value is changed. The column SHALL be nullable, so a
@@ -1037,12 +1037,12 @@ deriver reads the parsed record rather than a stored column.
 #### Scenario: The assembled response is stored when the mapping declares it
 
 - **WHEN** a record carries `assembled_response`, the payload mapping declares the corresponding column,
-  and `sync.inline-files-mode` is `keep`
+  `sync.inline-files-drop-truncated` is off and `sync.inline-files-max-size` is unset
 - **THEN** the inserted `dial_usage_log_payload` row stores the producer's value verbatim
 
 #### Scenario: Drop mode removes files from the assembled response
 
-- **WHEN** `sync.inline-files-mode` is `drop` and a chat record's `assembled_response` carries
+- **WHEN** `sync.inline-files-max-size` is `0` and a chat record's `assembled_response` carries
   `choices[0].message.audio.data`
 - **THEN** the stored `assembled_response` carries that value as `""` and is otherwise the producer's
   value verbatim
@@ -1055,8 +1055,8 @@ deriver reads the parsed record rather than a stored column.
 #### Scenario: A value that is not JSON is stored unchanged
 
 - **WHEN** a record's `assembled_response` is not a JSON document (for example an SSE transcript), and
-  `sync.inline-files-mode` is `keep`, or DIAL Core did not cut the value and the mode is `drop-truncated`
-  or the value holds no inline file at a location of the record's API
+  neither inline-files setting is in effect, or DIAL Core did not cut the value and no size limit is set,
+  or the value holds no inline file longer than the limit at a location of the record's API
 - **THEN** the inserted row stores that value verbatim, and ingest neither fails, skips, nor empties the
   column (otherwise an SSE transcript is scanned event by event, as the inline-files requirement says)
 
@@ -1077,11 +1077,11 @@ all ARE persisted to ClickHouse. Whether heavy content is captured is therefore 
 that mapping (removing those columns from it, or removing the payload target itself, stops capturing
 them). When captured, access to those columns and their retention MUST be governed
 operationally — column-level access controls plus a retention/TTL policy — because the service applies
-no masking or redaction of its own. Removing inline files under `sync.inline-files-mode=drop` or
-`drop-truncated` (see "Inline
-files are removed from payload bodies in drop mode") is not redaction: it removes file payloads at fixed
-locations only, and every text value is still stored as captured. Personal data in prompt text or file
-names, and in any file kept under `keep`, remains covered only by those operational controls.
+no masking or redaction of its own. Removing inline files under `sync.inline-files-max-size` or
+`sync.inline-files-drop-truncated` (see "Inline files are removed from payload bodies in drop mode") is not redaction:
+it removes file payloads at fixed locations only, and every text value is still stored as captured.
+Personal data in prompt text or file names, and in any file kept because it is within the limit or no limit
+is set, remains covered only by those operational controls.
 
 `assembled_response` is captured **in addition to** `response_body` rather than instead of it, and the
 two overlap: for a streamed call the raw body is a chunk transcript while the merged response is the
@@ -1097,8 +1097,8 @@ the other two.
 - **WHEN** a record contains `request.body`, `response.body`, and/or `assembled_response` and the
   payload mapping declares the corresponding columns
 - **THEN** the inserted `dial_usage_log_payload` row contains those fields' values, less the payloads of
-  inline files when `sync.inline-files-mode` is `drop`, and cut back before the file the cut landed in
-  for a body DIAL Core cut at 4 MiB when it is `drop` or `drop-truncated`
+  inline files longer than `sync.inline-files-max-size` when it is set, and cut back before the file the
+  cut landed in for a body DIAL Core cut at 4 MiB when `sync.inline-files-drop-truncated` is on
 
 #### Scenario: An undeclared payload column is not captured
 
@@ -1293,29 +1293,31 @@ row counts above: the store's part pressure is a property of the table, and ever
 through the same write path. The ledger's own inserts SHALL be counted the same way, under the ledger
 table's name, so the parts the ledger adds are observable beside those of the target tables.
 
-Under `sync.inline-files-mode=drop` or `drop-truncated`, the service SHALL additionally expose four
-counters, each tagged by target table and column:
+When `sync.inline-files-drop-truncated` is on or `sync.inline-files-max-size` is set, the service SHALL
+additionally expose four counters, each tagged by target table and column:
 - the inline files it removed;
 - the bytes of file payload it removed;
-- the truncated bodies it cut back before a file;
+- the truncated bodies it shortened at the cut, by cutting back before a file or by removing the payload
+  of the half file the cut left;
 - the bodies, or SSE events, it could not scan because they do not parse.
 
 A truncated body that fails to parse at its cut counts as a scanned body, not as an unscannable one.
 These counters are attributed to the table and column rather than to the ingest path, like the
-batch-insert counts, because every ingest path writes through the same mapping. Under `keep` they SHALL
-NOT be incremented. Under `drop-truncated` no complete file is removed, so the removed-files count SHALL
-stay at zero; the removed bytes are those of the half files cut back over.
+batch-insert counts, because every ingest path writes through the same mapping. With the truncated repair
+off and no size limit they SHALL NOT be incremented. The removed-files count covers complete files only, so
+with no size limit it SHALL stay at zero; the removed bytes include those of the half files at the cut.
 
 #### Scenario: Removed inline files are counted
 
-- **WHEN** a run under `drop` ingests a record whose `request_body` holds two inline images totalling
-  1 MB of payload
+- **WHEN** a run with `sync.inline-files-max-size=0` ingests a record whose `request_body` holds two inline
+  images totalling 1 MB of payload
 - **THEN** the removed-files count for `dial_usage_log_payload` / `request_body` is incremented by 2, and
   its removed-bytes count by the size of the two removed payloads
 
 #### Scenario: An unscannable body is counted and stored unchanged
 
-- **WHEN** a run under `drop` ingests a record whose `response_body` is not JSON and has no `data:` events
+- **WHEN** a run with `sync.inline-files-max-size=0` ingests a record whose `response_body` is not JSON and
+  has no `data:` events
 - **THEN** the unscannable-bodies count for that table and column is incremented by 1, and the body is
   stored unchanged
 
@@ -1638,8 +1640,8 @@ to the originating blob name; any other `$`-prefixed source token MUST be reject
 error at load time. The shipped default mapping SHALL produce the `events` column set.
 
 A mapped column of kind `string` MAY declare an `inline-files` attribute, which marks the column as a
-body whose inline files `sync.inline-files-mode` governs (see "Inline files are removed from payload
-bodies in drop mode"). The attribute SHALL carry:
+body whose inline files `sync.inline-files-drop-truncated` and `sync.inline-files-max-size` govern (see
+"Inline files are removed from payload bodies in drop mode"). The attribute SHALL carry:
 - `body`, either `request` or `response`, which selects the location set the column is scanned against;
 - `uri`, the dotted source path of the record's request URI, from which the API is inferred.
 
@@ -1678,7 +1680,8 @@ mapping SHALL declare `inline-files` on `request_body` (`body: request`) and on 
 #### Scenario: An inline-files body column is loaded
 
 - **WHEN** a mapped `string` column declares `inline-files: { body: request, uri: request.uri }`
-- **THEN** the service loads it as a request body column whose inline files the configured mode governs
+- **THEN** the service loads it as a request body column whose inline files the configured inline-files
+  settings govern
 
 #### Scenario: A misplaced inline-files attribute is rejected
 
@@ -2012,9 +2015,9 @@ The three unbounded body columns — `request_body`, `response_body`, `assembled
 persisted to their own ClickHouse table, `dial_usage_log_payload`, and SHALL NOT be persisted to
 `dial_usage_log`. This is enforced at both levels: no mapping targeting `dial_usage_log` captures a
 value for any of them, and `V11` has dropped the columns from that table, so there is nothing there to
-write to. The bodies are stored as the producer sent them, except that `sync.inline-files-mode=drop`
-removes the payloads of their inline files and `drop-truncated` cuts a body truncated inside a file back to
-before it (see "Inline files are removed from payload bodies in drop mode").
+write to. The bodies are stored as the producer sent them, except that `sync.inline-files-max-size`
+removes the payloads of their inline files longer than it and `sync.inline-files-drop-truncated` cuts a body
+truncated inside a file back to before it (see "Inline files are removed from payload bodies in drop mode").
 
 The table SHALL be provisioned by a versioned ClickHouse migration (never by the `/v1/tables` API) and
 SHALL declare:
@@ -2063,9 +2066,10 @@ specifically, since no accessor can distinguish `{}` from a present document lac
 - **WHEN** a run ingests a record carrying `request.body`, `response.body`, `assembled_response`,
   `claims` and `headers`
 - **THEN** `dial_usage_log` receives a row with the analytic columns, and `dial_usage_log_payload`
-  receives a row keyed on the same `event_id` carrying all five verbatim values. Under
-  `sync.inline-files-mode=drop` the three bodies lack the payloads of their inline files, and under `drop` or
-  `drop-truncated` a body DIAL Core cut inside a file is cut back before it; they are otherwise verbatim.
+  receives a row keyed on the same `event_id` carrying all five verbatim values. With
+  `sync.inline-files-max-size` set the three bodies lack the payloads of their inline files longer than it,
+  and with `sync.inline-files-drop-truncated` on a body DIAL Core cut inside a file is cut back before it;
+  they are otherwise verbatim.
 
 #### Scenario: The payload row keys on the parent's event id
 
@@ -2503,22 +2507,38 @@ surface.
 
 ### Requirement: Inline files are removed from payload bodies in drop mode
 
-The service SHALL accept an ingest setting `sync.inline-files-mode` (`SYNC_INLINE_FILES_MODE`), set to
-`keep`, `drop-truncated` or `drop`, with default `drop-truncated`. Any other value SHALL fail startup.
-The default removes only what no reader can use, the half file at Core's 4 MiB cut; `keep` stores every
-body exactly as sent.
+The service SHALL accept two independent ingest settings:
+- `sync.inline-files-drop-truncated` (`SYNC_INLINE_FILES_DROP_TRUNCATED`), a boolean with default `true`.
+  When on, a truncated body (see below) SHALL be cut back to before the inline file the cut landed in. That
+  half file cannot be decoded, so removing it loses nothing a reader could use.
+- `sync.inline-files-max-size` (`SYNC_INLINE_FILES_MAX_SIZE`), a data size with a unit (`B`, `KB`, `MB`,
+  `GB`, binary multiples, so `1KB` is 1,024 bytes); a bare number is bytes. It is unset by default. When
+  set, the payload of every **inline file** whose size (see "Size" below) is greater than the limit SHALL be
+  removed; a file whose size is at or under the limit SHALL be kept. `0` therefore removes every non-empty
+  file. A negative value, or one that is not a data size, SHALL fail startup.
 
-The setting applies only to the columns whose mapping entry declares the `inline-files` attribute (see
+The previous setting `sync.inline-files-mode` (`SYNC_INLINE_FILES_MODE`) no longer exists, and a value
+left in the environment for it SHALL have no effect. Its values map onto the two settings: `keep` is the
+repair off with no limit, `drop-truncated` is the defaults, and `drop` is the repair on with a limit of `0`.
+
+The settings apply only to the columns whose mapping entry declares the `inline-files` attribute (see
 "Configurable column mapping"). The shipped payload mapping declares it on `request_body` as a request
 body, and on `response_body` and `assembled_response` as response bodies.
-- **Under `keep`,** such a column SHALL be stored exactly as it is without the attribute: the body is
-  not parsed, and the value is byte for byte what the producer sent.
-- **Under `drop-truncated`,** only a column value that is a truncated body (see below) SHALL be scanned. It
-  SHALL be cut back to before the inline file the cut landed in, and every complete inline file SHALL be
-  kept. That half file cannot be decoded, so removing it loses nothing a reader could use. Any other value
-  SHALL be stored exactly as under `keep`, without being parsed.
-- **Under `drop`,** the service SHALL remove the payload of every **inline file** in the column's value
-  before the row is written, and leave every other character of the value unchanged.
+- **With the repair off and no limit,** such a column SHALL be stored exactly as it is without the
+  attribute: the body is not parsed, and the value is byte for byte what the producer sent.
+- **With the repair on and no limit** (the defaults), only a column value that is a truncated body SHALL be
+  scanned, and every complete inline file SHALL be kept. Any other value SHALL be stored byte for byte as
+  sent, without being parsed.
+- **With a limit,** the service SHALL remove the payload of every inline file over the limit in the
+  column's value before the row is written, and leave every other character of the value unchanged. A
+  value whose length in characters is not greater than the limit SHALL be stored unchanged without being
+  parsed, unless it is a truncated body and the repair is on, since no file inside it can exceed the limit.
+
+**Size.** The size of an inline file SHALL be the number of characters of its payload, which is its raw
+text between the quotes as it stands in the body, without a data URL's `data:...;base64,` prefix. Base64
+text is ASCII, so for a base64 file this is its stored size in bytes; the decoded file is about three
+quarters of it. A JSON escape counts with its backslash, so `\/` is two characters. The size SHALL be
+read off the positions the scan already found, without decoding or re-reading the payload.
 
 **The API of a record** SHALL be inferred from the path of its request URI, read from the source path that
 the attribute names, with the query string ignored. The whole path SHALL match one of the patterns below,
@@ -2608,134 +2628,181 @@ The rest of the body, its JSON escapes included, SHALL stay as it was.
 **Truncated bodies.** A value is a truncated body when it ends with `>>` and its UTF-8 length is at least
 4,194,306 bytes: DIAL Core cut it at 4 MiB and appended that marker.
 
-Under `drop` and `drop-truncated`, a truncated body SHALL be handled as follows:
-- under `drop`, every inline file that ends before the cut SHALL be removed as above; under
-  `drop-truncated`, every such file SHALL be kept;
-- when the value that is open at the cut is an inline file, the body SHALL be cut back to just before
-  that value's opening quote and the `>>` marker kept;
-- when the open value is not an inline file, the body SHALL be left as it is. That includes a value
-  whose condition sibling lies after the cut, and a data URL whose prefix was itself cut.
+When either setting is in effect, a truncated body SHALL be handled as follows:
+- every inline file that ends before the cut SHALL be removed when it is over the limit, and kept
+  otherwise;
+- when the value that is open at the cut is an inline file and the repair is on, the body SHALL be cut
+  back to just before that value's opening quote and the `>>` marker kept;
+- when the open value is an inline file and the repair is off, it SHALL be treated like any other inline
+  file: its size is that of its payload up to the cut, and when that is over the limit its payload SHALL be
+  removed, leaving the body to end with the value's opening quote (and a data URL's prefix) followed by
+  `>>`; otherwise the body SHALL be left as cut;
+- when the open value is not an inline file, the body SHALL be left as it is at the cut. That includes a
+  value whose condition sibling lies after the cut, and a data URL whose prefix was itself cut.
 
 **Isolation from other columns.** The removal SHALL apply to the value written to the declaring column
 only. Every other column of every target, derived columns reading the same source path included, SHALL
 see the record as the producer sent it. `request_body_bytes` and `response_body_bytes` on
 `dial_usage_log` therefore keep recording the original sizes.
 
-**Determinism.** The output SHALL depend only on the value, the request URI and the mode. So ingesting
-a record again under the same mode writes an identical row, while ingesting it again under a different
-mode replaces the stored row with that mode's result.
+**Determinism.** The output SHALL depend only on the value, the request URI and the two settings. So
+ingesting a record again under the same settings writes an identical row, while ingesting it again under
+different settings replaces the stored row with their result.
 
 #### Scenario: Keep mode stores bodies unchanged
 
-- **WHEN** `sync.inline-files-mode` is `keep` and a record's request body holds an image data URL
-- **THEN** `request_body` is stored byte for byte as the producer sent it
+- **WHEN** `sync.inline-files-drop-truncated` is `false`, `sync.inline-files-max-size` is unset, and a
+  record's request body holds an image data URL, or is a truncated body cut inside one
+- **THEN** `request_body` is stored byte for byte as the producer sent it, and the body is not parsed
+
+#### Scenario: Files over the limit are removed and files within it kept
+
+- **WHEN** `sync.inline-files-max-size` is `1KB` and a chat request carries one `image_url` data URL whose
+  payload after `data:image/png;base64,` is 1,025 characters and a second whose payload is 1,024
+- **THEN** the stored `request_body` carries `"url":"data:image/png;base64,"` for the first and the
+  second byte for byte
+
+#### Scenario: A body no longer than the limit is not parsed
+
+- **WHEN** `sync.inline-files-max-size` is `1MB` and a request body of 900,000 characters that is not a
+  truncated body holds inline files
+- **THEN** `request_body` is stored byte for byte as the producer sent it, without being parsed
+
+#### Scenario: A bare number is bytes
+
+- **WHEN** `SYNC_INLINE_FILES_MAX_SIZE` is `2048`
+- **THEN** the limit is 2,048 bytes, the same as `2KB`
+
+#### Scenario: A negative limit fails startup
+
+- **WHEN** `SYNC_INLINE_FILES_MAX_SIZE` is `-1`, or is not a data size
+- **THEN** the service fails to start
+
+#### Scenario: The removed setting has no effect
+
+- **WHEN** `SYNC_INLINE_FILES_MODE` is `drop` and neither new setting is set
+- **THEN** ingest behaves as under the defaults: complete inline files are kept and only truncated bodies
+  are cut back
 
 #### Scenario: A chat image is removed and its media type kept
 
-- **WHEN** the mode is `drop` and a record to `/openai/deployments/m/chat/completions` carries
+- **WHEN** the size limit is `0` and a record to `/openai/deployments/m/chat/completions` carries
   `messages[0].content[1].image_url.url = "data:image/png;base64,iVBOR..."`
 - **THEN** the stored `request_body` carries `"url":"data:image/png;base64,"` at that position and every
   other character of the body unchanged
 
 #### Scenario: Base64 text outside a file location is kept
 
-- **WHEN** the mode is `drop` and a chat request carries a 10 KB base64 string as a text `content` part
+- **WHEN** the size limit is `0` and a chat request carries a 10 KB base64 string as a text `content` part
 - **THEN** that string is stored unchanged
 
 #### Scenario: A DIAL attachment of a text type is kept
 
-- **WHEN** the mode is `drop` and a chat message carries `custom_content.attachments[0]` with
+- **WHEN** the size limit is `0` and a chat message carries `custom_content.attachments[0]` with
   `type: "text/markdown"` and inline `data`
 - **THEN** the attachment's `data` is stored unchanged
 
 #### Scenario: A DIAL attachment of a binary type is removed even when its type follows the data
 
-- **WHEN** the mode is `drop` and a chat message carries an attachment object whose `data` comes before
+- **WHEN** the size limit is `0` and a chat message carries an attachment object whose `data` comes before
   `"type": "application/pdf"`
 - **THEN** the attachment's `data` is stored as `""`
 
 #### Scenario: An Anthropic text document is kept
 
-- **WHEN** the mode is `drop` and an Anthropic Messages request carries a document block whose
+- **WHEN** the size limit is `0` and an Anthropic Messages request carries a document block whose
   `source.type` is `text`
 - **THEN** its `source.data` is stored unchanged, while a block whose `source.type` is `base64` has its
   `source.data` stored as `""`
 
 #### Scenario: An MCP image and a binary resource are removed
 
-- **WHEN** the mode is `drop` and an MCP response carries `result.content[0]` with `type: "image"` and
+- **WHEN** the size limit is `0` and an MCP response carries `result.content[0]` with `type: "image"` and
   `data`, and `result.content[1].resource` with `mimeType: "application/pdf"` and `blob`
 - **THEN** both values are stored as `""`
 
 #### Scenario: An MCP text resource is kept
 
-- **WHEN** the mode is `drop` and an MCP response carries `result.content[0].resource` with
+- **WHEN** the size limit is `0` and an MCP response carries `result.content[0].resource` with
   `mimeType: "text/plain"` and `blob`
 - **THEN** the `blob` is stored unchanged
 
 #### Scenario: A base64 embedding vector is removed
 
-- **WHEN** the mode is `drop` and an embeddings response carries `data[0].embedding` as a string
+- **WHEN** the size limit is `0` and an embeddings response carries `data[0].embedding` as a string
 - **THEN** that value is stored as `""`, while an embedding given as a number array is stored unchanged
 
 #### Scenario: A route with an API-like path is never scanned
 
-- **WHEN** the mode is `drop` and a record's request URI is `/claude_code_router/v1/messages?beta=true`,
+- **WHEN** the size limit is `0` and a record's request URI is `/claude_code_router/v1/messages?beta=true`,
   or `/v1/deployments/app/route/v1/messages`, and its request body is shaped like an Anthropic Messages
   request with a `base64` image source
 - **THEN** its bodies are stored unchanged, because neither path is one on which DIAL Core serves an API
 
 #### Scenario: An application's chat path is scanned whatever its name
 
-- **WHEN** the mode is `drop` and a record's request URI is
+- **WHEN** the size limit is `0` and a record's request URI is
   `/openai/deployments/public/pg/test/agent__1.0.0/chat/completions?api-version=2024-10-21`
 - **THEN** its bodies are scanned against the Chat Completions locations
 
 #### Scenario: A streamed response has its files removed event by event
 
-- **WHEN** the mode is `drop` and a streamed chat response body holds `data:` events whose
+- **WHEN** the size limit is `0` and a streamed chat response body holds `data:` events whose
   `choices[0].delta.custom_content.attachments[0]` carries a binary `type` and `data`
 - **THEN** each such `data` value is stored as `""`, and every other line of the transcript is stored
   unchanged
 
 #### Scenario: A body cut inside a file is cut back before it
 
-- **WHEN** the mode is `drop` and a request body ends with `>>`, is 4,194,306 bytes long, and was cut
-  inside a `messages/*/content/*/image_url/url` data URL
+- **WHEN** the repair is on, the size limit is `0`, and a request body ends with `>>`, is 4,194,306 bytes
+  long, and was cut inside a `messages/*/content/*/image_url/url` data URL
 - **THEN** the stored `request_body` ends just before that value's opening quote followed by `>>`, and
   every complete inline file before it is removed
 
 #### Scenario: Drop-truncated cuts back the half file and keeps the complete ones
 
-- **WHEN** the mode is `drop-truncated` and a request body ends with `>>`, is 4,194,306 bytes long, holds
+- **WHEN** the settings are the defaults and a request body ends with `>>`, is 4,194,306 bytes long, holds
   one complete `image_url` data URL, and was cut inside a second one
 - **THEN** the stored `request_body` keeps the first image byte for byte and ends just before the second
   value's opening quote followed by `>>`
 
 #### Scenario: Drop-truncated leaves a body that was not cut untouched
 
-- **WHEN** the mode is `drop-truncated` and a request body under 4 MiB holds an image data URL
+- **WHEN** the settings are the defaults and a request body under 4 MiB holds an image data URL
 - **THEN** `request_body` is stored byte for byte as the producer sent it, and the body is not parsed
+
+#### Scenario: With the repair off, the half file is measured against the limit
+
+- **WHEN** `sync.inline-files-drop-truncated` is `false`, `sync.inline-files-max-size` is `1MB`, and a
+  truncated request body was cut inside an `image_url` data URL 3 MB into its payload
+- **THEN** the stored `request_body` ends with that value's opening quote and `data:image/png;base64,`
+  prefix followed by `>>`, and the half file counts toward the removed bytes but not the removed files
+
+#### Scenario: With the repair off, a half file within the limit is left as cut
+
+- **WHEN** `sync.inline-files-drop-truncated` is `false`, `sync.inline-files-max-size` is `8MB`, and a
+  truncated request body was cut inside an `image_url` data URL
+- **THEN** the stored `request_body` keeps the half file as cut, followed by `>>`
 
 #### Scenario: A body cut inside text is left as cut
 
-- **WHEN** the mode is `drop` and a truncated request body was cut inside a text `content` string
+- **WHEN** the size limit is `0` and a truncated request body was cut inside a text `content` string
 - **THEN** the body keeps its cut text and the `>>` marker, with only the complete inline files before
   the cut removed
 
 #### Scenario: A body that does not parse is stored unchanged
 
-- **WHEN** the mode is `drop` and a response body is neither JSON nor SSE with `data:` events
+- **WHEN** the size limit is `0` and a response body is neither JSON nor SSE with `data:` events
 - **THEN** the body is stored unchanged and the record is ingested normally
 
 #### Scenario: Body sizes on the usage log are unaffected
 
-- **WHEN** the mode is `drop` and a record's request body holds a 2 MB image
+- **WHEN** the size limit is `0` and a record's request body holds a 2 MB image
 - **THEN** the record's `dial_usage_log.request_body_bytes` is the size of the body as the producer sent
   it, not the size stored in `request_body`
 
 #### Scenario: Re-ingesting under the same mode gives the same row
 
-- **WHEN** the same record is ingested twice under `drop`
+- **WHEN** the same record is ingested twice with `sync.inline-files-max-size=0`
 - **THEN** both writes carry identical body values
 

@@ -80,7 +80,7 @@ class DataBackfillServiceFilesystemTest {
                 Map.of("jclouds.filesystem.basedir", baseDir.toString()));
         SyncProperties syncProps = new SyncProperties(
                 "-", 0, 10, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, datePathPattern, "'date='yyyy-MM-dd", false,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
 
         TransformRegistry registry = new TransformRegistry();
         DeriverRegistry derivers = new DeriverRegistry(jsonMapper);

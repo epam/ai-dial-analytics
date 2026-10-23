@@ -1,6 +1,6 @@
 package com.epam.aidial.analytics.configuration;
 
-import com.epam.aidial.analytics.sync.inline.InlineFilesMode;
+import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -87,42 +87,61 @@ class SyncPropertiesTest {
     }
 
     @Test
-    void inlineFilesModeDefaultsToDropTruncated() {
+    void inlineFilesSettingsDefaultToTheRepairWithNoLimit() {
         contextRunner.run(context ->
-                assertThat(context.getBean(SyncProperties.class).inlineFilesMode()).isEqualTo(InlineFilesMode.DROP_TRUNCATED));
+                assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy()).isEqualTo(InlineFilesPolicy.defaults()));
     }
 
     @Test
-    void inlineFilesModeBindsKeepFromTheEnvironment() {
-        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MODE=keep")
+    void inlineFilesRepairCanBeTurnedOff() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_DROP_TRUNCATED=false")
                 .run(context ->
-                        assertThat(context.getBean(SyncProperties.class).inlineFilesMode()).isEqualTo(InlineFilesMode.KEEP));
+                        assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy()).isEqualTo(InlineFilesPolicy.keep()));
     }
 
     @Test
-    void inlineFilesModeBindsDropFromTheEnvironment() {
-        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MODE=drop")
+    void inlineFilesMaxSizeBindsDataSizeWithBinaryUnits() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MAX_SIZE=256KB")
+                .run(context -> assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy())
+                        .isEqualTo(new InlineFilesPolicy(true, 256 * 1024)));
+    }
+
+    @Test
+    void inlineFilesMaxSizeReadsBareNumberAsBytes() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MAX_SIZE=2048")
+                .run(context -> assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy().maxFileSize()).isEqualTo(2048));
+    }
+
+    @Test
+    void inlineFilesMaxSizeOfZeroRemovesEveryFile() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MAX_SIZE=0")
                 .run(context ->
-                        assertThat(context.getBean(SyncProperties.class).inlineFilesMode()).isEqualTo(InlineFilesMode.DROP));
+                        assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy()).isEqualTo(InlineFilesPolicy.dropAll()));
     }
 
     @Test
-    void inlineFilesModeBindsDropTruncatedFromTheEnvironment() {
-        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MODE=drop-truncated")
-                .run(context ->
-                        assertThat(context.getBean(SyncProperties.class).inlineFilesMode()).isEqualTo(InlineFilesMode.DROP_TRUNCATED));
-    }
-
-    @Test
-    void unknownInlineFilesModeFailsStartup() {
-        // A typo must not silently mean the default (or drop): the context refuses to start.
-        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MODE=extract")
+    void negativeInlineFilesMaxSizeFailsStartup() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MAX_SIZE=-1")
                 .run(context -> assertThat(context).hasFailed());
     }
 
     @Test
-    void unsetInlineFilesModeIsDropTruncated() {
-        assertThat(properties(10000, 134_217_728L).inlineFilesMode()).isEqualTo(InlineFilesMode.DROP_TRUNCATED);
+    void inlineFilesMaxSizeThatIsNotSizeFailsStartup() {
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MAX_SIZE=big")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void removedInlineFilesModeVariableHasNoEffect() {
+        // The old three-valued setting is gone: a value left in the environment binds to nothing.
+        contextRunner.withSystemProperties("SYNC_INLINE_FILES_MODE=drop")
+                .run(context ->
+                        assertThat(context.getBean(SyncProperties.class).inlineFilesPolicy()).isEqualTo(InlineFilesPolicy.defaults()));
+    }
+
+    @Test
+    void unsetInlineFilesSettingsAreTheDefaults() {
+        assertThat(properties(10000, 134_217_728L).inlineFilesPolicy()).isEqualTo(InlineFilesPolicy.defaults());
     }
 
     @EnableConfigurationProperties(SyncProperties.class)
@@ -140,7 +159,7 @@ class SyncPropertiesTest {
     private static SyncProperties properties(int batchSize, long maxBatchBytes, int maxLineBytes) {
         return new SyncProperties(
                 "0 0 1 * * *", 1, batchSize, maxBatchBytes, maxLineBytes, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
     }
 
     private static Set<ConstraintViolation<SyncProperties>> violationsFor(long maxBatchBytes) {
@@ -196,12 +215,12 @@ class SyncPropertiesTest {
     @Test
     void rejectsEmptyOrBlankTargets() {
         SyncProperties noTargets = new SyncProperties(
-                "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true, List.of(), null);
+                "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true, List.of(), null, null);
         assertThat(validator.validate(noTargets)).isNotEmpty();  // at least one target is required
 
         SyncProperties blankTable = new SyncProperties(
                 "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-                List.of(new SyncProperties.Target("", "classpath:mapping/dial-usage-log.yaml")), null);
+                List.of(new SyncProperties.Target("", "classpath:mapping/dial-usage-log.yaml")), null, null);
         assertThat(validator.validate(blankTable)).isNotEmpty();  // a target's table must be non-blank
     }
 }

@@ -1,6 +1,6 @@
 package com.epam.aidial.analytics.sync.mapping;
 
-import com.epam.aidial.analytics.sync.inline.InlineFilesMode;
+import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Nested;
@@ -735,9 +735,9 @@ class MappingEngineTest {
 
         private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
-        private MappingEngine payload(InlineFilesMode mode) {
+        private MappingEngine payload(InlineFilesPolicy policy) {
             return new MappingEngine(loadMapping("classpath:mapping/dial-usage-log-payload.yaml"),
-                    new TransformRegistry(), new DeriverRegistry(jsonMapper), mode, "dial_usage_log_payload", registry);
+                    new TransformRegistry(), new DeriverRegistry(jsonMapper), policy, "dial_usage_log_payload", registry);
         }
 
         private JsonNode record(String uri, String requestBody, String responseBody, String assembled) {
@@ -764,7 +764,7 @@ class MappingEngineTest {
         @Test
         void keepStoresTheBodiesByteForByteAndRegistersNoCounter() {
             JsonNode record = record("/openai/deployments/gpt-5/chat/completions", REQUEST_BODY, RESPONSE_BODY, RESPONSE_BODY);
-            Map<String, Object> row = payload(InlineFilesMode.KEEP).toRow(record, "f");
+            Map<String, Object> row = payload(InlineFilesPolicy.keep()).toRow(record, "f");
 
             assertThat(row.get("request_body")).isEqualTo(REQUEST_BODY);
             assertThat(row.get("response_body")).isEqualTo(RESPONSE_BODY);
@@ -776,7 +776,7 @@ class MappingEngineTest {
         void dropRemovesTheFilesFromAllThreeBodiesAndCountsThem() {
             JsonNode record = record("/openai/deployments/gpt-5/chat/completions?api-version=2024-10-21",
                     REQUEST_BODY, RESPONSE_BODY, RESPONSE_BODY);
-            Map<String, Object> row = payload(InlineFilesMode.DROP).toRow(record, "f");
+            Map<String, Object> row = payload(InlineFilesPolicy.dropAll()).toRow(record, "f");
 
             assertThat(row.get("request_body")).isEqualTo(REQUEST_BODY.replace(IMAGE, ""));
             assertThat((String) row.get("request_body")).contains("\"url\":\"data:image/png;base64,\"", "what is this?");
@@ -792,7 +792,7 @@ class MappingEngineTest {
         void theRequestBodyIsScannedAsRequestAndTheResponseAsResponse() {
             // A response-only location in the request body, and a request-only location in the response body: neither is a file there.
             JsonNode record = record("/openai/deployments/gpt-5/chat/completions", RESPONSE_BODY, REQUEST_BODY, null);
-            Map<String, Object> row = payload(InlineFilesMode.DROP).toRow(record, "f");
+            Map<String, Object> row = payload(InlineFilesPolicy.dropAll()).toRow(record, "f");
 
             assertThat(row.get("request_body")).isEqualTo(RESPONSE_BODY);
             assertThat(row.get("response_body")).isEqualTo(REQUEST_BODY);
@@ -802,9 +802,9 @@ class MappingEngineTest {
         void routeIsNeverScanned() {
             String anthropic = "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":"
                     + "{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" + IMAGE + "\"}}]}]}";
-            Map<String, Object> routed = payload(InlineFilesMode.DROP)
+            Map<String, Object> routed = payload(InlineFilesPolicy.dropAll())
                     .toRow(record("/claude_code_router/v1/messages?beta=true", anthropic, null, null), "f");
-            Map<String, Object> direct = payload(InlineFilesMode.DROP)
+            Map<String, Object> direct = payload(InlineFilesPolicy.dropAll())
                     .toRow(record("/anthropic/v1/messages?beta=true", anthropic, null, null), "f");
 
             assertThat(routed.get("request_body")).isEqualTo(anthropic);
@@ -813,7 +813,7 @@ class MappingEngineTest {
 
         @Test
         void absentBodiesStayNullUnderDrop() {
-            Map<String, Object> row = payload(InlineFilesMode.DROP)
+            Map<String, Object> row = payload(InlineFilesPolicy.dropAll())
                     .toRow(record("/openai/deployments/gpt-5/chat/completions", REQUEST_BODY, null, null), "f");
 
             assertThat(row.get("response_body")).isNull();
@@ -823,7 +823,7 @@ class MappingEngineTest {
         @Test
         void bodySizesOnTheUsageLogStayTheOriginalOnes() {
             JsonNode record = record("/openai/deployments/gpt-5/chat/completions", REQUEST_BODY, RESPONSE_BODY, null);
-            payload(InlineFilesMode.DROP).toRow(record, "f");
+            payload(InlineFilesPolicy.dropAll()).toRow(record, "f");
             Map<String, Object> usageLog = engine.toRow(record, "f");
 
             // The rewrite replaces only the value written to the payload column; the record is untouched.
@@ -836,7 +836,7 @@ class MappingEngineTest {
         void dropTruncatedOnlyCutsBackTheHalfFileOfBodyCoreCut() {
             String head = REQUEST_BODY.substring(0, REQUEST_BODY.length() - 4) + ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"";
             String cut = head + "data:image/png;base64," + "A".repeat(4 * 1024 * 1024 - head.length() - 22) + ">>";
-            MappingEngine dropTruncated = payload(InlineFilesMode.DROP_TRUNCATED);
+            MappingEngine dropTruncated = payload(InlineFilesPolicy.defaults());
 
             Map<String, Object> truncated = dropTruncated.toRow(record("/openai/deployments/gpt-5/chat/completions", cut, RESPONSE_BODY, null), "f");
             Map<String, Object> whole = dropTruncated.toRow(record("/openai/deployments/gpt-5/chat/completions", REQUEST_BODY, RESPONSE_BODY, null), "f");
@@ -854,7 +854,7 @@ class MappingEngineTest {
 
         @Test
         void anUnscannableResponseIsCountedAndStoredUnchanged() {
-            Map<String, Object> row = payload(InlineFilesMode.DROP)
+            Map<String, Object> row = payload(InlineFilesPolicy.dropAll())
                     .toRow(record("/openai/deployments/gpt-5/chat/completions", REQUEST_BODY, "upstream timeout", null), "f");
 
             assertThat(row.get("response_body")).isEqualTo("upstream timeout");
