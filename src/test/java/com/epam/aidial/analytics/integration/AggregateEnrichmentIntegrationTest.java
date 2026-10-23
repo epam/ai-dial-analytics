@@ -10,7 +10,9 @@ import org.springframework.test.web.servlet.ResultActions;
 import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.containsStringIgnoringCase;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -264,10 +266,16 @@ class AggregateEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTe
         seedOwner("e2", "ada");
         seedOwner("e3", "grace");
 
-        mockMvc.perform(post(PIPELINES + "/" + PIPELINE + "/preview"))
+        // Its statement names the enrichment column as the entity exposes it and leaves the join to the query path,
+        // which answers the same groups.
+        final String preview = mockMvc.perform(post(PIPELINES + "/" + PIPELINE + "/preview"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.statement", containsString("gadget_owner")))
-                .andExpect(jsonPath("$.rows", hasSize(2)));
+                .andExpect(jsonPath("$.statement", containsString("\"gadget_owner.")))
+                .andExpect(jsonPath("$.statement", not(containsStringIgnoringCase("join"))))
+                .andExpect(jsonPath("$.rows", hasSize(2)))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(PreviewStatements.runStatement(mockMvc, preview))
+                .containsExactlyInAnyOrderElementsOf(PreviewStatements.body(preview).get("rows"));
 
         enable();
         assertThat(mockMvc.perform(post(PIPELINES + "/" + PIPELINE + "/refresh"))

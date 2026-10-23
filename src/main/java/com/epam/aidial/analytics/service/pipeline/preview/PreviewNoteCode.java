@@ -17,7 +17,8 @@ public enum PreviewNoteCode {
     GROUP_CUT_BY_FETCH_LIMIT("group_cut_by_fetch_limit", PreviewNoteSeverity.WARNING),
     OUTPUT_WITHOUT_DESCRIPTION("output_without_description", PreviewNoteSeverity.INFO),
     UNCONSTRAINED_RESPONSE("unconstrained_response", PreviewNoteSeverity.WARNING),
-    VALUES_TRUNCATED("values_truncated", PreviewNoteSeverity.INFO);
+    VALUES_TRUNCATED("values_truncated", PreviewNoteSeverity.INFO),
+    STATEMENT_NOT_PORTABLE("statement_not_portable", PreviewNoteSeverity.INFO);
 
     private final String code;
     private final PreviewNoteSeverity severity;

@@ -52,9 +52,12 @@ import org.springframework.test.web.servlet.MockMvc;
         // `granter` manages grant lists and nothing else, which no bundle expresses either.
         // `exporter` and `importer` hold only the catalog transfer endpoints' own gates, so every per-table and
         // repeated check behind them is decided by grants or refused.
+        // `drafter` may author pipelines and see a table's schema but not read its rows: the persona a copied
+        // preview statement must not let through.
         "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"],"
                 + "\"registry\":[\"REGISTRY_ADMIN\",\"TABLE_READ\"],\"granter\":[\"TABLE_GRANT\"],"
-                + "\"exporter\":[\"REGISTRY_READ\"],\"importer\":[\"TABLE_CREATE\"]}",
+                + "\"exporter\":[\"REGISTRY_READ\"],\"importer\":[\"TABLE_CREATE\"],"
+                + "\"drafter\":[\"REGISTRY_ADMIN\",\"TABLE_GET\"]}",
         "providers.readonly.issuer=" + AbstractOidcAuthIntegrationTest.READONLY_ISSUER,
         "providers.readonly.jwk-set-uri=https://issuer.test/readonly/jwks",
         "providers.readonly.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,

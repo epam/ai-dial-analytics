@@ -11,6 +11,7 @@ import com.epam.aidial.analytics.exception.PipelineReadBudgetExceededException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.TableRelayoutInProgressException;
+import com.epam.aidial.analytics.observability.SqlLog;
 import com.epam.aidial.analytics.observability.trace.LogExecution;
 import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
 import com.epam.aidial.analytics.service.enrichment.model.MaterializePage;
@@ -42,7 +43,14 @@ import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
+import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.model.OffsetPage;
+import com.epam.aidial.analytics.service.query.model.OutputColumn;
+import com.epam.aidial.analytics.service.query.model.QueryMode;
+import com.epam.aidial.analytics.service.query.model.SortDir;
+import com.epam.aidial.analytics.service.query.model.SortItem;
+import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.repository.StructuredQueryExecutor;
 import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
@@ -483,13 +491,17 @@ public class MaterializeService {
     private static final String PREVIEW_IDENTITY = "__preview_id";
 
     /**
-     * A Class-1 dry run: the sample's statement, its typed columns and rows, with nothing written and no position
-     * recorded — and the freshness bound a materialize would clamp to, computed for the preview's notes only.
+     * A Class-1 dry run: the declaration as a query for the caller to run, the sample's typed columns and rows, with
+     * nothing written and no position recorded — and the freshness bound a materialize would clamp to, computed for
+     * the preview's notes only.
      *
+     * @param portable the declaration as a structured query over the read source: the grain key and every output
+     *               under its target column, the filter, ordered by the grain key — not yet rendered or validated
+     *               for the caller, which the preview does
      * @param bound  the bound a materialize of this declaration would clamp to; null when it joins no enrichment
      * @param newest the newest sampled position; null for an empty sample
      */
-    public record Class1Preview(String statement, List<PreviewColumn> columns, List<Map<String, Object>> rows,
+    public record Class1Preview(StructuredQuery portable, List<PreviewColumn> columns, List<Map<String, Object>> rows,
             EnrichmentFreshness.Bound bound, SampledPosition newest) {}
 
     /**
@@ -563,7 +575,7 @@ public class MaterializeService {
         WindowSpec spec = new WindowSpec(model, filter.filter(), cursorColumns, null, from, to,
                 referenced, filter.columns(), null);
         SelectQuery<Record> sample = sampleQuery(spec, grainKey, expressions);
-        String statement = PipelineReadBudget.render(sample, model, readBudget);
+        SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", pipelineName, PipelineReadBudget.render(sample, model, readBudget));
         List<Map<String, Object>> sampled = PipelineReadBudget.run(executor, sample, model,
                 "Class-1 preview sample", readBudget, new StatementTag(pipelineName, "preview"));
         SampledPosition newest = SampledPosition.newest(sampled, PREVIEW_VERSION, PREVIEW_IDENTITY);
@@ -574,8 +586,23 @@ public class MaterializeService {
             stripped.remove(PREVIEW_IDENTITY);
             rows.add(stripped);
         }
-        return new Class1Preview(statement, previewColumns(declaration, grainKey, expressions, model.bindings()),
+        return new Class1Preview(portableQuery(source, grainKey, expressions, filter.filter()), previewColumns(declaration, grainKey, expressions, model.bindings()),
                 rows, bound.orElse(null), newest);
+    }
+
+    /**
+     * The Class-1 declaration as a row query over its read source: the grain key, each output's expression under its
+     * target column, and the filter. Nothing of the sample's window survives — its newest-first order, safety lag and
+     * {@code from}/{@code to} all read the version column, which the entity does not expose — so it is ordered by the
+     * grain key instead, and an enrichment column is named as the entity exposes it, for the query path to join.
+     */
+    private static StructuredQuery portableQuery(String source, String grainKey,
+            Map<String, ExprSqlValidator.ExprAnalysis> expressions, FilterNode filter) {
+        List<OutputColumn> select = new ArrayList<>(expressions.size() + 1);
+        select.add(new OutputColumn(new FieldExpr(grainKey), null));
+        expressions.forEach((column, analysis) -> select.add(new OutputColumn(analysis.expr(), column)));
+        return new StructuredQuery(source, filter, QueryMode.ROW, false, select, null, null,
+                List.of(new SortItem(grainKey, SortDir.ASC, null)), new OffsetPage(0L, EnrichPreviewService.SAMPLE_ROWS, false));
     }
 
     /**

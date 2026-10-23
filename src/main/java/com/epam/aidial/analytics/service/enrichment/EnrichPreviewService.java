@@ -22,6 +22,7 @@ import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteCode;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNotes;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewValueCapper;
 import com.epam.aidial.analytics.service.pipeline.preview.TargetCoercion;
+import com.epam.aidial.analytics.service.query.PortableQueryRenderer;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import lombok.RequiredArgsConstructor;
@@ -104,6 +105,7 @@ public class EnrichPreviewService {
     private final GroupFetchService groups;
     private final MaterializeService materialize;
     private final PreviewValueCapper capper;
+    private final PortableQueryRenderer portable;
 
     /** A sample before its values are capped: its columns, rows, the group it describes, and its notes. */
     private record Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey,
@@ -170,7 +172,8 @@ public class EnrichPreviewService {
     }
 
     /**
-     * The Class-1 arm: a sample of the values the declaration computes, with their statement, delegated to
+     * The Class-1 arm: a sample of the values the declaration computes, with the declaration as a query the caller
+     * can run through the query API (rendered against the caller's own view of the source), delegated to
      * {@link MaterializeService} so the expressions previewed are analyzed by the same code that renders the
      * write. The sample is unclamped; the bound a materialize would clamp to is reported, not applied.
      */
@@ -189,7 +192,7 @@ public class EnrichPreviewService {
             notes.add(noMatchingRows());
         }
         notes.addAll(TargetCoercion.notes(preview.columns(), preview.rows(), Set.of()));
-        return finish(preview.statement(), new Sample(preview.columns(), preview.rows(), null, notes));
+        return finish(portable.tryRender(preview.portable()), new Sample(preview.columns(), preview.rows(), null, notes));
     }
 
     /**
@@ -300,12 +303,20 @@ public class EnrichPreviewService {
         return new Sample(members.columns(), members.rows(), key, notes);
     }
 
-    /** Caps the sample's values last, after every note that needs the full values, and assembles the response. */
-    private PipelinePreview finish(String statement, Sample sample) {
+    /**
+     * Caps the sample's values last, after every note that needs the full values, and assembles the response.
+     *
+     * @param rendered the declaration's portable query, rendered or refused; null on an arm that has none ({@code llm})
+     */
+    private PipelinePreview finish(PortableQueryRenderer.Portable rendered, Sample sample) {
         final PreviewValueCapper.Capped capped = capper.cap(sample.columns(), sample.rows());
         final List<PreviewNote> notes = new ArrayList<>(sample.notes());
         notes.addAll(capped.notes());
-        return new PipelinePreview(statement, capped.columns(), capped.rows(), null, sample.groupKey(), notes);
+        if (rendered != null && !rendered.rendered()) {
+            notes.add(PreviewNotes.statementNotPortable(rendered.subject(), rendered.refusal()));
+        }
+        return new PipelinePreview(rendered == null ? null : rendered.sql(), rendered == null ? null : rendered.query(),
+                capped.columns(), capped.rows(), null, sample.groupKey(), notes);
     }
 
     private static PreviewNote noMatchingRows() {

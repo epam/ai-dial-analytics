@@ -4,7 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 
 /**
- * The enrichment notes every arm reports, worded once so the same condition reads the same on either kind.
+ * The notes more than one arm reports, worded once so the same condition reads the same on either kind.
  */
 public final class PreviewNotes {
 
@@ -54,6 +54,16 @@ public final class PreviewNotes {
                 : humanize(newestMillis - boundMillis) + " past " + position;
         return PreviewNote.about(PreviewNoteCode.ENRICHMENT_BEHIND, enrichment, "matching input reaches "
                 + Instant.ofEpochMilli(newestMillis) + ", " + distance + "; " + consequence);
+    }
+
+    /**
+     * The declaration has no statement the query API would run, so the preview carries none; the sample is
+     * unaffected. {@code reason} is the query path's own refusal; {@code subject} is the column it is about, or null.
+     */
+    public static PreviewNote statementNotPortable(String subject, String reason) {
+        return PreviewNote.about(PreviewNoteCode.STATEMENT_NOT_PORTABLE, subject, "this declaration has no statement "
+                + "the query API would run, so the preview returns no `statement` or `query`; the sample is unaffected. "
+                + "The query path refuses it: " + reason);
     }
 
     /** {@code millis} as hours, minutes and seconds — the gap an author compares with the enrichment's cadence. */

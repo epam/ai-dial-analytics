@@ -10,9 +10,18 @@ import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
+import com.epam.aidial.analytics.service.query.model.OffsetPage;
+import com.epam.aidial.analytics.service.query.model.OutputColumn;
+import com.epam.aidial.analytics.service.query.model.QueryMode;
+import com.epam.aidial.analytics.service.query.model.SortDir;
+import com.epam.aidial.analytics.service.query.model.SortItem;
+import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
@@ -105,11 +114,17 @@ public class AggregateCompiler {
      * @param condition the rendered predicate, or null for "all rows"
      * @param columns the flat entity field names it reads, qualified {@code "<enrichment>.<column>"} for a
      *     column reached through the grain join
+     * @param node the parsed predicate {@code condition} was translated from, for the preview's portable query;
+     *     null for "all rows", and where only the condition is at hand
      */
-    public record CompiledFilter(Condition condition, Set<String> columns) {
+    public record CompiledFilter(Condition condition, Set<String> columns, FilterNode node) {
 
         /** No predicate: renders nothing, references nothing, joins nothing. */
-        public static final CompiledFilter NONE = new CompiledFilter(null, Set.of());
+        public static final CompiledFilter NONE = new CompiledFilter(null, Set.of(), null);
+
+        public CompiledFilter(Condition condition, Set<String> columns) {
+            this(condition, columns, null);
+        }
     }
 
     /**
@@ -261,6 +276,62 @@ public class AggregateCompiler {
         groupFields.forEach(field -> select.addOrderBy(field.asc()));
         select.addLimit(limit);
         return select;
+    }
+
+    /**
+     * The declaration as a structured query over its input entity — what the preview returns for a caller to run
+     * through the query API, built from the same keys, measures and predicates {@link #compilePreview} compiles.
+     *
+     * <p>It carries the declaration and none of the sample's mechanics. The latest-row ordering and the group count
+     * read the input's version column, which the entity does not expose, so it orders by the keys instead and counts
+     * nothing; an enrichment column is named as the entity exposes it and the query path joins for it.
+     *
+     * <p>A measure's own {@code where} is the same {@code CASE} operand {@link #measureField} compiles, so it narrows
+     * that aggregate alone. Each predicate must have been translated with its parsed node at hand: a filter carrying
+     * a condition but no node is a caller that cannot have one rendered, and is refused rather than dropped.
+     */
+    public StructuredQuery portablePreview(AggregateSpec spec, String entity, CompiledFilter filter,
+            Map<String, CompiledFilter> measureFilters, int limit) {
+        final List<OutputColumn> select = new ArrayList<>();
+        final List<String> groupBy = new ArrayList<>();
+        final List<SortItem> sort = new ArrayList<>();
+        for (final GroupKey key : spec.getGroupBy()) {
+            select.add(new OutputColumn(groupExpr(key), key.outputName()));
+            // A plain key groups by its field; a bucket by its output, the one name the DSL has for an expression.
+            final String grouped = key.isBucket() ? key.outputName() : key.getColumn();
+            groupBy.add(grouped);
+            sort.add(new SortItem(grouped, SortDir.ASC, null));
+        }
+        for (final Measure measure : spec.getMeasures()) {
+            select.add(new OutputColumn(portableMeasure(measure, measureFilters.get(measure.getName())), measure.getName()));
+        }
+        return new StructuredQuery(entity, node(filter), QueryMode.AGGREGATE, false, select, groupBy, null, sort,
+                new OffsetPage(0L, limit, false));
+    }
+
+    private static Expr portableMeasure(Measure measure, CompiledFilter where) {
+        final FilterNode predicate = node(where);
+        if (predicate == null) {
+            final List<Expr> args = StringUtils.isBlank(measure.getColumn())
+                    ? List.of()
+                    : List.of(new FieldExpr(measure.getColumn()));
+            return new FnExpr(measure.getFn(), measure.isDistinct(), args);
+        }
+        final Expr operand = StringUtils.isBlank(measure.getColumn())
+                ? new ValueExpr(ValueType.INTEGER, "1")
+                : new FieldExpr(measure.getColumn());
+        return new FnExpr(measure.getFn(), measure.isDistinct(),
+                List.of(new CaseExpr(List.of(new CaseBranch(predicate, operand)), null)));
+    }
+
+    private static FilterNode node(CompiledFilter filter) {
+        if (filter == null || filter.condition() == null) {
+            return null;
+        }
+        if (filter.node() == null) {
+            throw new IllegalStateException("a predicate reached the portable preview without its parsed form");
+        }
+        return filter.node();
     }
 
     /**

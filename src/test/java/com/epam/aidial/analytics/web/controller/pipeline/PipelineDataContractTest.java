@@ -245,7 +245,7 @@ class PipelineDataContractTest {
         pipeline.setName("daily-rollup");
         pipeline.setKind(PipelineKind.AGGREGATE);
         given(pipelines.get("daily-rollup")).willReturn(pipeline);
-        given(refreshService.preview("daily-rollup")).willReturn(new PipelinePreview("SELECT 1",
+        given(refreshService.preview("daily-rollup")).willReturn(new PipelinePreview("SELECT 1", null,
                 List.of(new PreviewColumn("deployment", PreviewColumnRole.KEY, QueryFieldType.STRING,
                         QueryFieldType.STRING)),
                 List.of(Map.of("deployment", "gpt-4")), 1L, null,
@@ -275,7 +275,7 @@ class PipelineDataContractTest {
         pipeline.setName("daily-rollup");
         pipeline.setKind(PipelineKind.AGGREGATE);
         given(pipelines.get("daily-rollup")).willReturn(pipeline);
-        given(refreshService.preview("daily-rollup")).willReturn(new PipelinePreview(null,
+        given(refreshService.preview("daily-rollup")).willReturn(new PipelinePreview(null, null,
                 List.of(new PreviewColumn("deployment", PreviewColumnRole.KEY, QueryFieldType.STRING, null)),
                 List.of(), 0L, null, List.of()));
         given(mapper.toPreviewDto(any())).willCallRealMethod();
@@ -286,6 +286,7 @@ class PipelineDataContractTest {
                 .andExpect(jsonPath("$.rows").isEmpty())
                 .andExpect(jsonPath("$.notes").isEmpty())
                 .andExpect(jsonPath("$.statement").doesNotExist())
+                .andExpect(jsonPath("$.query").doesNotExist())
                 .andExpect(jsonPath("$.columns[0].target_type").doesNotExist())
                 .andExpect(jsonPath("$.columns[0].max_bytes").doesNotExist());
     }
