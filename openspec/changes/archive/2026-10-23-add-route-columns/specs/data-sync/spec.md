@@ -15,8 +15,8 @@ The service SHALL persist the route a producer reports as having served a reques
 Both columns are `Nullable`. A record that carries neither field, which the producer emits for every
 request that no route served, SHALL store NULL in both columns and SHALL be ingested normally rather than
 dropped. The two fields are independent: a record that reports one and omits the other SHALL store the
-reported value and NULL for the other. NULL is therefore the "not served by a route" signal, so it never
-collides with a reported value.
+reported value and NULL for the other. A blank value is stored as NULL, like an absent one. NULL is
+therefore the "not served by a route" signal, so it never collides with a reported value.
 
 A route name is unique only within its kind and, for an application route, within its application. The
 service SHALL NOT combine the two columns, or the route columns with `deployment`, into a derived key; a
@@ -50,6 +50,11 @@ implementation detail of the (overridable) default column mapping and are not pi
 
 - **WHEN** a record reports `route_name` `vector-store` and carries no `route_type`
 - **THEN** the ingested row's `route_name` is `vector-store` and its `route_type` is NULL
+
+#### Scenario: A blank route field reads as absent
+
+- **WHEN** a record reports `route_name` as an empty string
+- **THEN** the ingested row's `route_name` is NULL
 
 #### Scenario: An unrecognized route kind
 

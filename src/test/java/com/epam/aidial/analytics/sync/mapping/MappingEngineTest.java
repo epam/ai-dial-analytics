@@ -391,6 +391,10 @@ class MappingEngineTest {
                 .containsEntry("route_name", "vector-store")
                 .containsEntry("route_type", null);
 
+        // A blank value is absent, not a route named ''.
+        String blankName = SAMPLE.replace("\"deployment\":\"gpt-4\",", "\"route_name\":\"\",");
+        assertThat(engine.toRow(jsonMapper.readTree(blankName), "f")).containsEntry("route_name", null);
+
         // The producer owns the route-kind domain, so a kind this service has never seen is stored as
         // reported rather than rejected.
         String unknownKind = SAMPLE.replace("\"deployment\":\"gpt-4\",",

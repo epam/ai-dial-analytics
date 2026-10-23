@@ -3,11 +3,9 @@
 - [x] 1.1 Add `src/main/resources/db/migration/clickhouse/V15__dial_usage_log_route.sql`. It runs a single
   `ALTER TABLE dial_usage_log` with `ADD COLUMN IF NOT EXISTS route_name LowCardinality(Nullable(String))`
   and `ADD COLUMN IF NOT EXISTS route_type LowCardinality(Nullable(String))`, appended in that order.
-  - Model the header comment on `V7__dial_usage_log_assembled_response.sql`. It covers why the columns
-    exist (the producer's route fields), why they are nullable strings rather than an enum, and the cost
-    (metadata-only, existing rows read NULL until re-ingested, sort key untouched).
-  - It also states the ordering invariant with the mapping: `SchemaValidator` refuses the mapping until
-    this DDL is applied, so operators with `clickhouse.migrations.enabled=false` apply it first.
+  - The header is one line that points at the `data-sync` spec. The rationale (nullable strings rather
+    than an enum, metadata-only cost, the ordering invariant with the mapping) lives in the spec and
+    `design.md`, not in the checksummed file.
 - [x] 1.2 Confirm that no in-flight branch claims ClickHouse `V15` or PostgreSQL `V49` before the files
   are committed.
 
@@ -25,8 +23,8 @@
     the description says it is unique only together with `route_type` and, for application routes,
     `deployment`. For `route_type`, it gives the current values `global` and `application` and says that
     other values are stored as reported.
-  - The header comment explains the ordinal choice. It also explains why `deployment` needs no
-    `tag_order` change: the tag is already listed in `V10`.
+  - The header is one line. The ordinal choice and the reason `deployment` needs no `tag_order` change
+    (the tag is already listed in `V10`) are recorded in `design.md`.
 
 ## 3. Mapping
 

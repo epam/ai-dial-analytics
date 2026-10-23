@@ -85,14 +85,14 @@ transform is added.
 
 The ClickHouse migration is `V15__dial_usage_log_route.sql`. The catalog migration is
 `V49__seed_route_columns.sql`. Both versions are the next free number in their folder, and no other
-branch claims them. Their header comments follow the public-repo hygiene rules, because applied
-migrations are frozen.
+branch claims them. Each carries a one-line header that points at the spec. The rationale lives here
+and in the spec, because an applied migration is checksummed and its comments can never be corrected.
 
 ## Risks / Trade-offs
 
 - **An operator runs with migrations disabled.** In that case `SchemaValidator` refuses to start until
-  `V15` is applied. → This is intended fail-fast behavior. It is stated in the migration header and in the
-  `data-sync` provisioning requirement, which already requires operators to apply every later migration.
+  `V15` is applied. → This is intended fail-fast behavior. It is stated in the `data-sync` provisioning
+  requirement, which already requires operators to apply every later migration.
 - **ADAS is upgraded before DIAL Core.** → Both columns stay NULL. This is indistinguishable from
   "no route", but harmless, and it corrects itself when Core is upgraded.
 - **Route names collide across kinds and applications.** → This is documented in the catalog
