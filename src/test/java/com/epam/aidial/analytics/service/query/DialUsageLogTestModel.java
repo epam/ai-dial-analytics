@@ -90,6 +90,8 @@ public final class DialUsageLogTestModel {
         add(bindings, schema, "mcp_tool_call_name", QueryFieldType.STRING);
         add(bindings, schema, "request_body_bytes", QueryFieldType.LONG);
         add(bindings, schema, "response_body_bytes", QueryFieldType.LONG);
+        add(bindings, schema, "route_name", QueryFieldType.STRING);
+        add(bindings, schema, "route_type", QueryFieldType.STRING);
         // None of the five verbatim-content columns is a source column: the mapping split stopped
         // capturing them on dial_usage_log (V11 then dropped the physical columns) and V38
         // re-keyed their catalog rows onto the dial_usage_log_payload

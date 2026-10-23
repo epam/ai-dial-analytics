@@ -42,7 +42,7 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 // It was already so; provenance injection merely made the dependency visible by adding
                 // five columns to every enrichment created through the API. That is why this filters
                 // rather than asserting the 39-field total the pre-split test could safely assert.
-                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(34)))
+                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(36)))
                 // The five that moved, under the qualified names the grain join publishes them at.
                 .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(5)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].type", contains("uuid")))
@@ -91,8 +91,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='total_tokens')].tag", contains("token-usage")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].tag", contains("cost")))
                 // Column descriptions backfilled by the migration are surfaced on the flat schema, and
-                // every one of the 39 columns carries a non-empty description.
-                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(39)))
+                // every one of the 41 columns carries a non-empty description.
+                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(41)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].description",
@@ -133,7 +133,7 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.tag=='principal')].name", containsInAnyOrder(
                         "project_id", "user_hash")))
                 .andExpect(jsonPath("$.fields[?(@.tag=='deployment')].name", containsInAnyOrder(
-                        "deployment", "parent_deployment", "execution_path")))
+                        "deployment", "parent_deployment", "execution_path", "route_name", "route_type")))
                 .andExpect(jsonPath("$.fields[?(@.tag=='identifier')].name", containsInAnyOrder(
                         "chat_id", "trace_id", "core_span_id", "core_parent_span_id", "event_id",
                         "response_id")))

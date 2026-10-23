@@ -1769,7 +1769,7 @@ materialized as a bare `T` SHALL be seeded `nullable = false`.
 The `dial_usage_log` seed SHALL therefore record as nullable exactly the columns its DDL declares
 `Nullable(...)`: `core_parent_span_id`, `parent_deployment`, `response_upstream_uri`, `prompt_tokens`,
 `completion_tokens`, `total_tokens`, `cached_prompt_tokens`, `cache_creation_tokens`, `total_price`,
-and `deployment_price`.
+`deployment_price`, `route_name`, and `route_type`.
 
 The `dial_usage_log_payload` seed SHALL record all three of its columns as nullable — they are
 `Nullable(String)`, so that "the producer sent nothing" stays distinguishable from "the producer sent
@@ -1816,6 +1816,12 @@ value is not an operator's to choose — the physical column decides it.
 - **WHEN** a ClickHouse migration changes a `dial_usage_log` column from `T` to `Nullable(T)`
 - **THEN** the catalog reports that column as `nullable: true` once the catalog migrations of the same
   release have run, without any `ALTER` being issued from the catalog side
+
+#### Scenario: Columns added nullable by a later migration are seeded nullable
+
+- **WHEN** the catalog is read after the migrations that add `route_name` and `route_type` run
+- **THEN** `dial_usage_log` reports both columns with `nullable: true`, matching their
+  `LowCardinality(Nullable(String))` physical type
 
 #### Scenario: A governance rule keyed on nullability sees the true value
 

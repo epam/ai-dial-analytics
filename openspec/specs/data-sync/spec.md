@@ -927,6 +927,74 @@ implementation detail of the (overridable) default column mapping and is not pin
 - **THEN** the ingested row's `operation_duration_ms` is `0` (the non-nullable fallback), and the record is
   ingested normally rather than dropped
 
+### Requirement: Reported route is persisted
+
+The service SHALL persist the route a producer reports as having served a request in two columns of
+`dial_usage_log`:
+
+- `route_name` holds the route's name as reported. The service SHALL store it verbatim and SHALL NOT
+  normalize, lower-case or resolve it against any configuration.
+- `route_type` holds the kind of route as reported. The current producer reports `global` (a route
+  configured in its `routes` section) or `application` (a route configured under an application). The
+  service SHALL store the reported value verbatim and SHALL NOT reject a value outside that pair, so that
+  a new route kind ingests without a service change.
+
+Both columns are `Nullable`. A record that carries neither field, which the producer emits for every
+request that no route served, SHALL store NULL in both columns and SHALL be ingested normally rather than
+dropped. The two fields are independent: a record that reports one and omits the other SHALL store the
+reported value and NULL for the other. NULL is therefore the "not served by a route" signal, so it never
+collides with a reported value.
+
+A route name is unique only within its kind and, for an application route, within its application. The
+service SHALL NOT combine the two columns, or the route columns with `deployment`, into a derived key; a
+consumer that needs a unique route identity groups on the columns it needs.
+
+The route columns SHALL NOT change how `event_kind` is classified. `event_kind` stays derived from the
+request URI.
+
+This is a behavioral guarantee about the ingested values. The specific JSON source paths remain an
+implementation detail of the (overridable) default column mapping and are not pinned here.
+
+#### Scenario: A request served by a global route
+
+- **WHEN** a record reports `route_name` `vector-store` and `route_type` `global`
+- **THEN** the ingested row's `route_name` is `vector-store` and its `route_type` is `global`
+
+#### Scenario: A request served by an application route
+
+- **WHEN** a record reports `deployment` `my-app`, `route_name` `index-search` and `route_type`
+  `application`
+- **THEN** the ingested row's `deployment` is `my-app`, its `route_name` is `index-search` and its
+  `route_type` is `application`
+
+#### Scenario: A request no route served
+
+- **WHEN** a record carries neither `route_name` nor `route_type`
+- **THEN** the ingested row's `route_name` and `route_type` are both NULL, and the row is ingested
+  normally
+
+#### Scenario: Only one of the two fields is reported
+
+- **WHEN** a record reports `route_name` `vector-store` and carries no `route_type`
+- **THEN** the ingested row's `route_name` is `vector-store` and its `route_type` is NULL
+
+#### Scenario: An unrecognized route kind
+
+- **WHEN** a record reports a `route_type` other than `global` or `application`
+- **THEN** the ingested row stores that value as reported, and the record is not rejected
+
+#### Scenario: Rows ingested before the columns existed
+
+- **WHEN** the route columns are added to a table that already holds rows
+- **THEN** those rows read NULL in both columns until their source blobs are re-ingested
+
+#### Scenario: Route columns do not reclassify the event
+
+- **WHEN** a record reports `route_type` `global` for a request URI that the `event_kind` classifier does
+  not recognize as a route
+- **THEN** the ingested row's `event_kind` is whatever the URI classifier yields, regardless of the route
+  columns
+
 ### Requirement: The merged assembled response is persisted
 
 The service SHALL persist the producer's merged streaming response, `assembled_response`, to a column
@@ -1411,8 +1479,8 @@ migration does not start.
 Whether applied by Flyway or by an operator, the `dial_usage_log` definition SHALL declare the `events`
 column set: a synthetic `event_id UUID` and an `event_kind` classifier; the direct columns carried from
 the source (timestamps, ids, `user_hash`, tokens — including the producer's reported cache-write count
-in `cache_creation_tokens` — prices, the producer's reported `operation_duration_ms`, etc.); and the
-calculated columns (`response_id`, `reasoning_tokens`, `number_request_messages`, `success`,
+in `cache_creation_tokens` — prices, the producer's reported `operation_duration_ms`, the producer's
+reported route in `route_name` and `route_type`, etc.); and the calculated columns (`response_id`, `reasoning_tokens`, `number_request_messages`, `success`,
 `mcp_method`, `mcp_tool_call_name`, `request_body_bytes`, `response_body_bytes`). It SHALL NOT declare
 the five verbatim-content columns — the three bodies and the two JSON documents. They were created by
 `V1`/`V7`, moved to `dial_usage_log_payload` by `V10` and the mapping cutover, and dropped from
@@ -1430,7 +1498,7 @@ columns under the same codec before `V11` drops them. For record-level deduplica
 (`ORDER BY`) ending in the deduplication key columns `trace_id` and `core_span_id`, partitioned by
 `toYYYYMMDD(request_time)`. The definition SHALL also pin UTC on its timestamp columns, store monetary
 columns as `Decimal`, store `response_status` as `UInt16`, declare the producer-optional columns as
-`Nullable` — including every producer-reported token count — and apply a row-level retention `TTL`.
+`Nullable` — including every producer-reported token count and the two route columns — and apply a row-level retention `TTL`.
 
 Each table SHALL leave exactly one column to a table-side `DEFAULT` and populate every other column its
 mapping declares: `_ingested_at` on `dial_usage_log`, `_updated_at` on `dial_usage_log_payload`.

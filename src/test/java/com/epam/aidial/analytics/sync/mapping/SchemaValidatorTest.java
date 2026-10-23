@@ -226,6 +226,9 @@ class SchemaValidatorTest {
         // one, and must outlive the payload it describes.
         table.put("request_body_bytes", "UInt32");
         table.put("response_body_bytes", "UInt32");
+        // Appended by V15__dial_usage_log_route.sql.
+        table.put("route_name", "LowCardinality(Nullable(String))");
+        table.put("route_type", "LowCardinality(Nullable(String))");
         return table;
     }
 

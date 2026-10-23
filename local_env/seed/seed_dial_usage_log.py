@@ -158,6 +158,9 @@ def build_rows(anchor: datetime, hours: int, rows_per_hour: int, seed: int) -> l
                     "mcp_tool_call_name": "",
                     "request_body_bytes": prompt_tokens * 4,
                     "response_body_bytes": completion_tokens * 4,
+                    # Model and embedding calls are never served by a route, so both read NULL.
+                    "route_name": None,
+                    "route_type": None,
                 }
             )
 
