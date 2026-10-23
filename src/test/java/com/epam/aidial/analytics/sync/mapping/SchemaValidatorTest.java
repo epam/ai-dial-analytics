@@ -25,7 +25,7 @@ class SchemaValidatorTest {
 
     private static final SyncProperties SYNC = new SyncProperties(
             "-", 1, 10, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-            List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
+            List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null);
 
     private static final MappingConfig MAPPING = loadDefaultMapping();
 
@@ -102,7 +102,7 @@ class SchemaValidatorTest {
 
     /**
      * The live dial_usage_log_payload schema (matches
-     * db/migration/clickhouse/V10__create_dial_usage_log_payload.sql, codecs stripped).
+     * db/migration/clickhouse/V10__create_dial_usage_log_payload.sql, codecs stripped, plus the request_scope V15 adds).
      */
     private static Map<String, String> payloadLiveSchema() {
         Map<String, String> table = new LinkedHashMap<>();
@@ -118,6 +118,7 @@ class SchemaValidatorTest {
         table.put("request_body", "Nullable(String)");
         table.put("response_body", "Nullable(String)");
         table.put("assembled_response", "Nullable(String)");
+        table.put("request_scope", "UUID");
         return table;
     }
 

@@ -36,9 +36,12 @@
 #                  hashes to a constant event_id and would collapse every such payload into one row.
 #                  rate-analytics.yaml maps the same pair for the same reason.
 #
-# Column order matches the physical table. _updated_at (DEFAULT now64(3)) is the only table column left
-# unmapped, so it applies its ClickHouse default: the caller never sets the ReplacingMergeTree version,
-# and duplicate writes per event_id collapse to the latest on a final=1 read.
+# Column order matches the physical table. _updated_at (DEFAULT now64(3)) is left unmapped, so it applies its
+# ClickHouse default: the caller never sets the ReplacingMergeTree version, and duplicate writes per event_id
+# collapse to the latest on a final=1 read. The other unmapped columns are the request-delta columns of V15, which
+# the payload sink fills at flush under sync.request-body-mode=delta (RequestDeltaEncoder) and which otherwise keep
+# their defaults. request_body is the one mapped column that sink rewrites: for a chat request in delta form it is
+# written NULL, its content moved to request_envelope / request_delta / request_cache_markers.
 #
 # Override the active targets/mappings via sync.targets (see docs/configuration.md).
 
@@ -72,8 +75,9 @@ columns:
     kind: object
     transform: lowercase-json-keys
   # Nullable so "the producer sent nothing" stays distinguishable from "the producer sent empty".
-  # Stored verbatim with sync.inline-files-drop-truncated off and no sync.inline-files-max-size: ingest
-  # then never parses, validates or reshapes a payload. A minority of records carry an assembled_response
+  # Stored verbatim with sync.inline-files-drop-truncated off and no sync.inline-files-max-size: the
+  # mapping then never parses, validates or reshapes a payload (the payload sink may still split request_body,
+  # under sync.request-body-mode=delta). A minority of records carry an assembled_response
   # that is not JSON (some an SSE transcript); those are stored as-is unless a setting applies, when an
   # SSE transcript is scanned event by event like a streamed response body.
   # inline-files marks the three as bodies whose inline files the sync.inline-files-* settings govern.
@@ -96,3 +100,11 @@ columns:
     kind: string
     nullable: true
     inline-files: { body: response, uri: request.uri }
+  # The chain scope of the request body (ClickHouse V15): a hash of the record's project, deployment and user —
+  # the same three values its dial_usage_log row carries. Under sync.request-body-mode=delta a request's parent is
+  # looked up only within this scope and the request's UTC day, so a chain never links two users' histories. Written
+  # on every row, whatever the mode, so the scope never depends on configuration.
+  - column: request_scope
+    derive: hash-uuid
+    sources: [project.id, deployment, user.id]
+    kind: string

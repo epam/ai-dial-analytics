@@ -31,6 +31,9 @@ import java.util.Map;
  * {@link #flush()} throws {@link IllegalStateException}, so a caller that swallows the exception cannot
  * retry or double-count it.
  *
+ * <p>A sink may carry a {@link FlushStage}, which rewrites each batch right before the insert and learns once it
+ * succeeded. A failure in the stage fails the flush exactly as a failed insert does.
+ *
  * <p>Not thread-safe: a sink belongs to one run, driven by the single-threaded scheduler.
  */
 class RowBatchSink {
@@ -39,16 +42,22 @@ class RowBatchSink {
     private final String table;
     private final int batchSize;
     private final long maxBatchBytes;
+    private final FlushStage stage;
     private final List<Map<String, Object>> buffer = new ArrayList<>();
     private long bufferedBytes;
     private long totalInserted;
     private boolean failed;
 
     RowBatchSink(UsageLogWriter writer, String table, int batchSize, long maxBatchBytes) {
+        this(writer, table, batchSize, maxBatchBytes, FlushStage.NONE);
+    }
+
+    RowBatchSink(UsageLogWriter writer, String table, int batchSize, long maxBatchBytes, FlushStage stage) {
         this.writer = writer;
         this.table = table;
         this.batchSize = batchSize;
         this.maxBatchBytes = maxBatchBytes;
+        this.stage = stage;
     }
 
     /** Appends a row, flushing the buffer if it has reached the batch size or the byte bound. */
@@ -76,7 +85,9 @@ class RowBatchSink {
         if (buffer.isEmpty()) {
             return;
         }
+        Runnable written;
         try {
+            written = stage.prepare(buffer);
             writer.insert(table, buffer);
             totalInserted += buffer.size();
         } catch (Exception ex) {
@@ -88,6 +99,7 @@ class RowBatchSink {
             buffer.clear();
             bufferedBytes = 0;
         }
+        written.run();
     }
 
     /**
