@@ -55,9 +55,10 @@ The sample SHALL depend on the transform:
   each output's expression under its target column name, applies the pipeline's `filter` as its `WHERE`,
   orders by the grain key ascending and is limited to the sample's row cap. An enrichment column an
   expression or the filter reads is named by its exposed name, with no join. It reproduces what each
-  output computes for a source row, not which rows the preview sampled: the newest-first order, the
-  safety lag and a `from`/`to` window all read the source's version column, which is not exposed to
-  queries, so its rows need not be the sampled ones. An output the dialect cannot express SHALL leave
+  output computes for a source row, not which rows the preview sampled. It carries none of the sample's
+  window (the newest-first order, the safety lag, a `from`/`to` bound), all of which read the source's
+  version column: ordered by the grain key, two runs of it agree while the source is still being written,
+  and it needs no version column exposed to queries. Its rows therefore need not be the sampled ones. An output the dialect cannot express SHALL leave
   `statement` and `query` absent and carry `statement_not_portable` whose `subject` names that output.
 - **A row-grain `llm` pipeline** SHALL sample the grain key and each column a `transform.inputs` binding
   reads (`input`), keyed by the source column name the binding names. It SHALL NOT return the

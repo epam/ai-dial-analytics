@@ -18,9 +18,9 @@ statement by hand against a physical schema the governed query surface otherwise
   document, accepted as is by `POST /v1/queries/execute`, so the query builder can open a preview without
   a `translate-sql` round trip.
 - The portable statement reproduces the declaration (its keys, measures, filter, and each measure's
-  `where` as a `CASE`), not the preview's sampling mechanics. The newest-first ordering reads the source's
-  physical version column and `total_rows` comes from a window count, so it orders by the group keys (or,
-  for Class-1, the grain key) and is limited to the preview row count instead. The spec states where its
+  `where` as a `CASE`), not the preview's sampling mechanics. It orders by the group keys (or, for Class-1, the grain key)
+  rather than newest first, so two runs of it agree on a source that is still being written, and is limited
+  to the preview row count; it carries no window count, so it does not reproduce `total_rows`. The spec states where its
   rows can differ from `rows`.
 - When the declaration cannot be expressed in the ADAS dialect, `statement` and `query` are absent and the
   preview carries a new note **`statement_not_portable`** whose message gives the reason. The main case is

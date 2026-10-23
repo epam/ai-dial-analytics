@@ -34,7 +34,7 @@ Most of what a portable statement needs already exists:
 **Non-Goals:**
 
 - Reproducing the sample's newest-first order, `total_rows`, or a Class-1 `from`/`to` window. All three
-  read the physical version column, which the catalog doesn't expose.
+  read the source's version column; see "Order by keys" for why the statement does not.
 - Exposing the version column to queries.
 - Making a computed key whose output name matches an input field expressible in the DSL. That is a
   `structured-query` / `sql-query-translation` change of its own.
@@ -97,11 +97,20 @@ from the front end, and the spec requires the query path's own check.
 
 ### Order by keys, limit to the preview rows
 
-The sample's newest-first order reads the version column (`_ingested_at` on the seeded sources), which the
-catalog doesn't expose. Ordering the portable statement by the group keys (or the grain key) makes it
-deterministic, and when `total_rows ≤ preview-rows` it returns exactly the sampled groups.
+The sample's newest-first order reads the version column (`_ingested_at` on the seeded sources). Ordering
+the portable statement by the group keys (or the grain key) makes it deterministic, and when
+`total_rows ≤ preview-rows` it returns exactly the sampled groups. A statement that differs from `rows` is
+the accepted cost.
 
 **Alternatives rejected:**
+
+- *Newest first, as the sample orders* (`ORDER BY max(<version>) DESC` for an aggregate, `<version> DESC`
+  plus the safety lag for Class-1). The seeded sources expose `_ingested_at` as a catalog field and the
+  query path accepts both forms, so this would match `rows` when run right after the preview. But over a
+  source that is still being written the newest groups change between runs, so the statement would stop
+  matching `rows` within minutes and two runs of it would disagree with each other. It also works only
+  where the version column is a catalog field, which a user-defined source need not declare, so the
+  ordering would depend on the source.
 
 - *Omitting the ORDER BY.* The execute path's default ordering would make two runs of the statement
   disagree.

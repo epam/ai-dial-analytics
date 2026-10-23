@@ -1949,8 +1949,10 @@ entity that:
 The portable statement reproduces what the declaration computes, not how the preview samples it. It
 differs from the sampling statement in three ways, and the response SHALL NOT claim otherwise:
 
-- **Order.** The sample is ordered by each group's latest input row, which reads the input's version
-  column, and that column is not exposed to queries. The portable statement orders by the keys. Its rows
+- **Order.** The sample is ordered by each group's latest input row, read from the input's version
+  column. The portable statement orders by the keys instead, so that two runs of it agree: newest first
+  over an input that is still being written returns a different set of groups on every run, and not every
+  input exposes its version column to queries. Its rows
   are therefore the same groups as `rows` only when `total_rows` is at most `aggregate.preview-rows`.
   Each group it returns carries the same key and measure values as the sample would for that group.
 - **Counting.** It carries no window count, so running it does not reproduce `total_rows`.

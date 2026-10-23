@@ -282,9 +282,9 @@ public class AggregateCompiler {
      * The declaration as a structured query over its input entity — what the preview returns for a caller to run
      * through the query API, built from the same keys, measures and predicates {@link #compilePreview} compiles.
      *
-     * <p>It carries the declaration and none of the sample's mechanics. The latest-row ordering and the group count
-     * read the input's version column, which the entity does not expose, so it orders by the keys instead and counts
-     * nothing; an enrichment column is named as the entity exposes it and the query path joins for it.
+     * <p>It carries the declaration and none of the sample's mechanics. It orders by the keys rather than by each
+     * group's latest row, so two runs agree while the input is still being written, and counts nothing; an
+     * enrichment column is named as the entity exposes it and the query path joins for it.
      *
      * <p>A measure's own {@code where} is the same {@code CASE} operand {@link #measureField} compiles, so it narrows
      * that aggregate alone. Each predicate must have been translated with its parsed node at hand: a filter carrying

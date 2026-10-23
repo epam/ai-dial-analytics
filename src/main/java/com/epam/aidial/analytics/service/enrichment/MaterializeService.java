@@ -594,9 +594,9 @@ public class MaterializeService {
 
     /**
      * The Class-1 declaration as a row query over its read source: the grain key, each output's expression under its
-     * target column, and the filter. Nothing of the sample's window survives — its newest-first order, safety lag and
-     * {@code from}/{@code to} all read the version column, which the entity does not expose — so it is ordered by the
-     * grain key instead, and an enrichment column is named as the entity exposes it, for the query path to join.
+     * target column, and the filter. Nothing of the sample's window survives (its newest-first order, safety lag and
+     * {@code from}/{@code to}): it is ordered by the grain key instead, so two runs agree while the source is still
+     * being written, and an enrichment column is named as the entity exposes it, for the query path to join.
      */
     private static StructuredQuery portableQuery(String source, String grainKey,
             Map<String, ExprSqlValidator.ExprAnalysis> expressions, FilterNode filter) {
