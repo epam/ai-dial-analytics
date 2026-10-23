@@ -21,8 +21,8 @@ import java.util.List;
  * operator) prevents the context from starting.
  *
  * <p>Targets come from {@code sync.targets}, which is validated non-empty at startup. Each engine is compiled under
- * {@code sync.inline-files-mode}, so its {@code inline-files} body columns are rewritten (and counted) only under
- * {@code drop} or {@code drop-truncated}.
+ * {@code sync.inline-files-drop-truncated} and {@code sync.inline-files-max-size}, so its {@code inline-files} body
+ * columns are rewritten (and counted) only when the repair is on or a size limit is set.
  */
 @Configuration
 public class MappingConfiguration {
@@ -40,7 +40,7 @@ public class MappingConfiguration {
         for (SyncProperties.Target target : syncProperties.targets()) {
             MappingConfig mapping = loader.load(target.mappingFile());
             MappingEngine engine = new MappingEngine(mapping, transformRegistry, deriverRegistry,
-                    syncProperties.inlineFilesMode(), target.table(), meterRegistry);
+                    syncProperties.inlineFilesPolicy(), target.table(), meterRegistry);
             targets.add(new SyncTarget(target.table(), mapping, engine));
         }
         return List.copyOf(targets);

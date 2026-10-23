@@ -170,7 +170,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | API description in `oidc` mode needs a credential | `401` on `/v3/api-docs` and the Swagger UI | Send a credential, or set `DISABLE_SWAGGER_AUTHORIZATION=true` (§1) |
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
-| Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_MODE=drop-truncated` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_MODE=keep` to store bodies as sent (§7) |
+| Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
@@ -179,7 +179,10 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 
 - `DISABLE_SWAGGER_AUTHORIZATION` (default `false`) — serve the API description without a credential in `oidc`
   mode; see [`configuration.md`](configuration.md#api-documentation-springdoc--swagger-ui).
-- `SYNC_INLINE_FILES_MODE` (default `drop-truncated`) — `keep`, `drop-truncated` or `drop`: how ingest treats inline files
-  inside payload bodies; see [`column-mapping.md`](column-mapping.md).
+- `SYNC_INLINE_FILES_DROP_TRUNCATED` (default `true`) — cut a payload body truncated at 4 MiB back to before its half
+  inline file; see [`column-mapping.md`](column-mapping.md).
+- `SYNC_INLINE_FILES_MAX_SIZE` (default unset) — remove inline files whose stored base64 is longer than this size
+  (`256KB`, `1MB`; `0` removes all). An earlier `SYNC_INLINE_FILES_MODE` no longer exists and is ignored if left set:
+  replace `keep` with `SYNC_INLINE_FILES_DROP_TRUNCATED=false` and `drop` with `SYNC_INLINE_FILES_MAX_SIZE=0`.
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.

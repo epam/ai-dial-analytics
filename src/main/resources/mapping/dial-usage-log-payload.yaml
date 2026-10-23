@@ -72,16 +72,15 @@ columns:
     kind: object
     transform: lowercase-json-keys
   # Nullable so "the producer sent nothing" stays distinguishable from "the producer sent empty".
-  # Stored verbatim under sync.inline-files-mode=keep: ingest then never parses, validates or
-  # reshapes a payload. A minority of records carry an assembled_response that is not JSON (some an SSE
-  # transcript); under keep those are stored as-is, and under drop/drop-truncated an SSE transcript is
-  # scanned event by event like a streamed response body.
-  # inline-files marks the three as bodies whose inline files sync.inline-files-mode governs. Under
-  # drop-truncated, only a body Core cut at 4 MiB is touched: it is cut back to before the half file the
-  # cut landed in, and complete files are kept. Under drop,
-  # the payloads of files at the fixed JSON locations of the record's API (inferred from request.uri the
-  # way DIAL Core routes it) are removed, and nothing else is changed. assembled_response is the merged
-  # response, so it is scanned as a response body.
+  # Stored verbatim with sync.inline-files-drop-truncated off and no sync.inline-files-max-size: ingest
+  # then never parses, validates or reshapes a payload. A minority of records carry an assembled_response
+  # that is not JSON (some an SSE transcript); those are stored as-is unless a setting applies, when an
+  # SSE transcript is scanned event by event like a streamed response body.
+  # inline-files marks the three as bodies whose inline files the sync.inline-files-* settings govern.
+  # With drop-truncated on, a body Core cut at 4 MiB is cut back to before the half file the cut landed
+  # in. With a max size, the payloads of files longer than it at the fixed JSON locations of the record's
+  # API (inferred from request.uri the way DIAL Core routes it) are removed, and nothing else is changed.
+  # assembled_response is the merged response, so it is scanned as a response body.
   - column: request_body
     source: request.body
     kind: string

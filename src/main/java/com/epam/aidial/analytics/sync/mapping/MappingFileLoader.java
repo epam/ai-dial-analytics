@@ -46,7 +46,7 @@ import java.util.Map;
  *   - column: request_body
  *     source: request.body
  *     kind: string
- *     inline-files: { body: request, uri: request.uri }   # optional; a body governed by sync.inline-files-mode
+ *     inline-files: { body: request, uri: request.uri }   # optional; a body governed by sync.inline-files-*
  *   - column: event_id
  *     derive: hash-uuid               # named deriver from the closed registry
  *     sources: [trace.trace_id, trace.core_span_id]
