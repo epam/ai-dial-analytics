@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.web.dto.pipeline;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteCode;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteSeverity;
+import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -29,19 +30,24 @@ public final class PipelineResponses {
      * read serves is echoed — no group keys, measures, transform, schema, inputs or outputs — because a client
      * reaching preview already holds the declaration, and every echo is one more place two answers can disagree.
      *
-     * <p>{@code NON_NULL}: {@code statement}, {@code total_rows} and {@code group_key} are absent where they do not
+     * <p>{@code NON_NULL}: {@code statement}, {@code query}, {@code total_rows} and {@code group_key} are absent where they do not
      * apply; {@code columns}, {@code rows} and {@code notes} are always present.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PreviewDto(
-            @Schema(description = "The one SELECT that produced `rows`, with its values inlined and ending in a "
-                    + "SETTINGS clause naming every server setting ADAS set on it (the read deduplication and the "
-                    + "budget's ceilings), so run by hand it reads the same rows under the same limits. It does "
-                    + "not name the client-side query id, nor settings a server profile applies, and run by hand "
-                    + "it also returns the helper columns `rows` omits. Present for an `aggregate` and a Class-1 "
-                    + "`sql` pipeline; absent for `llm`, whose sample is read through the governed scan or group "
-                    + "assembly and has no single statement.")
+            @Schema(description = "The declaration as one SELECT in the ADAS SQL dialect, accepted unchanged by "
+                    + "POST /v1/queries/execute-sql: it reads the catalog entity and its exposed fields (an "
+                    + "enrichment column by its exposed name, with no join) and names each output by its target "
+                    + "column, with no SETTINGS, helper column or physical name. It computes what the declaration "
+                    + "computes, ordered by the keys (aggregate) or the grain key (Class-1) rather than newest first, "
+                    + "so its rows need not be the sampled ones; running it does not reproduce `total_rows`. The "
+                    + "physical statement that produced `rows` is not returned. Present for an `aggregate` and a "
+                    + "Class-1 `sql` pipeline unless `notes` carries `statement_not_portable`; absent for `llm`.")
             String statement,
+
+            @Schema(description = "The same query as a structured query DSL document, accepted verbatim by "
+                    + "POST /v1/queries/execute. Present exactly when `statement` is.")
+            StructuredQuery query,
 
             @Schema(description = "One entry per key of a row, in row order; present even when `rows` is empty")
             List<PreviewColumnDto> columns,
@@ -56,7 +62,7 @@ public final class PipelineResponses {
 
             @Schema(description = "The number of groups the declaration produces over the whole input, which is "
                     + "the number of rows the target holds once caught up (`aggregate` only; `0` when there is "
-                    + "none). Counted by `statement` itself, before its LIMIT.", example = "412")
+                    + "none). Counted by the sampling statement itself, before its LIMIT; the portable `statement` does not reproduce it.", example = "412")
             @JsonProperty("total_rows") Long totalRows,
 
             @Schema(description = "The group the sample describes (`group` trigger only), whether named in the "

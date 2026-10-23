@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -228,39 +229,38 @@ class EnrichPreviewIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     /**
      * A Class-1 preview answers with the values it computes, typed and with their target's type, and the
-     * statement that computed them — and writes nothing. The mapping and the translated expressions are the
-     * compiled read's; the statement shows each output's translated SQL.
+     * declaration as a statement the query API runs — and writes nothing. The mapping and the translated expressions
+     * are the compiled read's; the statement shows each output's expression under its target column.
      */
     @Test
     void class1PreviewReturnsTypedValuesAndTheirStatement() throws Exception {
         final String id = createSqlPipeline();
         seedRow("11111111-1111-1111-1111-111111111111", "chat-1", "GPT-4o");
 
-        // A window the row lies inside, so the statement carries the window's predicates too.
-        mockMvc.perform(post("/v1/pipelines/" + id + "/preview")
+        // A window the row lies inside: it narrows the sample, and reads the version column the statement cannot name.
+        final String preview = mockMvc.perform(post("/v1/pipelines/" + id + "/preview")
                         .contentType(MediaType.APPLICATION_JSON).content("{\"from\":\"2025-01-01T00:00:00Z\"}"))
                 .andExpect(status().isOk())
-                // The source's version column is qualified wherever the sample names it — select list, order,
-                // safety lag and window — since its joins are unkeyed and an enrichment may share the name.
-                .andExpect(jsonPath("$.statement", containsString("\"dial_usage_log\".\"_ingested_at\" <= now64(3)")))
-                .andExpect(jsonPath("$.statement", containsString("\"dial_usage_log\".\"_ingested_at\" > fromUnixTimestamp64Milli(")))
-                .andExpect(jsonPath("$.statement", containsString("desc, toString(\"dial_usage_log\".\"event_id\") desc")))
                 // The value itself, computed by ClickHouse over a real row.
                 .andExpect(jsonPath("$.rows[0].deployment_lower").value("gpt-4o"))
                 .andExpect(jsonPath("$.columns[*].name", contains("event_id", "deployment_lower")))
                 .andExpect(jsonPath("$.columns[*].role", contains("grain_key", "output")))
                 .andExpect(jsonPath("$.columns[1].type").value("string"))
                 .andExpect(jsonPath("$.columns[1].target_type").value("string"))
-                .andExpect(jsonPath("$.statement", startsWith("select")))
-                .andExpect(jsonPath("$.statement", containsString("lower(")))
-                .andExpect(jsonPath("$.statement", containsString(" SETTINGS ")))
+                .andExpect(jsonPath("$.statement", startsWith("SELECT \"event_id\", lower(\"deployment\") AS \"deployment_lower\"")))
+                .andExpect(jsonPath("$.statement", containsString("ORDER BY \"event_id\" ASC LIMIT 5")))
+                .andExpect(jsonPath("$.statement", not(containsString("SETTINGS"))))
+                .andExpect(jsonPath("$.statement", not(containsString("_ingested_at"))))
                 // No helper column and no declaration echo, and no count on this kind.
                 .andExpect(jsonPath("$.rows[0].__preview_v").doesNotExist())
                 .andExpect(jsonPath("$.rows[0].__preview_id").doesNotExist())
                 .andExpect(jsonPath("$.total_rows").doesNotExist())
                 .andExpect(jsonPath("$.enrich").doesNotExist())
                 .andExpect(jsonPath("$.outputs").doesNotExist())
-                .andExpect(jsonPath("$.notes", hasSize(0)));
+                .andExpect(jsonPath("$.notes", hasSize(0)))
+                .andReturn().getResponse().getContentAsString();
+        // Copied out, it computes the same value for the row through the query API.
+        assertThat(PreviewStatements.runStatement(mockMvc, preview)).isEqualTo(PreviewStatements.body(preview).get("rows"));
 
         // Nothing was written. The pipeline is disabled and the preview computed values from real rows,
         // which is exactly the combination that would be a silent write if the arm shared the
@@ -358,6 +358,7 @@ class EnrichPreviewIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.rows[0].event_kind").doesNotExist())
                 .andExpect(jsonPath("$.rows[0]._ingested_at").doesNotExist())
                 .andExpect(jsonPath("$.statement").doesNotExist())
+                .andExpect(jsonPath("$.query").doesNotExist())
                 .andExpect(jsonPath("$.response_schema").doesNotExist())
                 .andExpect(jsonPath("$.inputs").doesNotExist())
                 .andExpect(jsonPath("$.outputs").doesNotExist());

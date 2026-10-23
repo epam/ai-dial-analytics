@@ -18,6 +18,8 @@ import com.epam.aidial.analytics.service.pipeline.preview.PipelinePreview;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNote;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteCode;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewValueCapper;
+import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
+import com.epam.aidial.analytics.service.query.PortableRenderers;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -74,7 +76,8 @@ class EnrichPreviewServiceTest {
     @BeforeEach
     void setUp() {
         service = new EnrichPreviewService(pipelines, authorizer, resolver, validator, columns, scans, groups,
-                materialize, new PreviewValueCapper(new JsonMapperConfiguration().jsonMapper()));
+                materialize, new PreviewValueCapper(new JsonMapperConfiguration().jsonMapper()),
+                PortableRenderers.over(DialUsageLogTestModel.model()));
         given(resolver.composeSchema(any(), any())).willReturn(Map.of("type", "object"));
     }
 

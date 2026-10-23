@@ -2,11 +2,9 @@ package com.epam.aidial.analytics.service.query;
 
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
-import com.epam.aidial.analytics.service.query.sql.StructuredQueryToSqlRenderer;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
-import org.jooq.DSLContext;
 import org.springframework.stereotype.Component;
 
 /**
@@ -28,9 +26,7 @@ import org.springframework.stereotype.Component;
 public class QueryTranslationService {
 
     private final CatalogQueryService catalog;
-    private final StructuredQueryBuilder queryBuilder;
-    private final DSLContext renderContext;
-    private final StructuredQueryToSqlRenderer renderer;
+    private final PortableQueryRenderer renderer;
 
     /** Validates {@code query} against the catalog and renders it as external-dialect SQL. */
     public String toSql(StructuredQuery query) {
@@ -41,8 +37,6 @@ public class QueryTranslationService {
                 .orElseThrow(() -> new QueryValidationException("entity '" + query.entity()
                         + "' is not queryable; supported entities: "
                         + catalog.queryableEntityNames(Privilege.TABLE_GET)));
-        // Validation pass only — the jOOQ model (internal ClickHouse SQL) is deliberately discarded.
-        queryBuilder.build(renderContext, model, query);
         return renderer.render(query, model);
     }
 }
