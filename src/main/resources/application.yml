@@ -125,6 +125,7 @@ sync:
   validate-schema: ${SYNC_VALIDATE_SCHEMA:true}
   inline-files-drop-truncated: ${SYNC_INLINE_FILES_DROP_TRUNCATED:true}
   inline-files-max-size: ${SYNC_INLINE_FILES_MAX_SIZE:}
+  request-body-mode: ${SYNC_REQUEST_BODY_MODE:whole}
   payload:
     ttl-days: ${SYNC_PAYLOAD_TTL_DAYS:}
     table: ${SYNC_PAYLOAD_TABLE:dial_usage_log_payload}

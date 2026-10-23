@@ -53,12 +53,13 @@ class MappingFileLoaderTest {
         MappingConfig config = loader.load("classpath:mapping/dial-usage-log-payload.yaml");
 
         // The five verbatim-content columns plus the four the table needs to key, partition, expire
-        // and pass the dedup-key drop rule; only _updated_at (a table-side default) is unmapped.
-        // The order matches V10's physical column order.
+        // and pass the dedup-key drop rule, then V16's request_scope (the request-delta chain scope). Unmapped:
+        // _updated_at (a table-side default) and the request-delta columns the payload sink fills at flush.
+        // The order matches the physical column order.
         assertThat(config.columns().stream().map(ColumnMapping::column)).containsExactly(
                 "event_id", "request_time", "trace_id", "core_span_id",
                 "jwt_claims", "request_tags",
-                "request_body", "response_body", "assembled_response");
+                "request_body", "response_body", "assembled_response", "request_scope");
         // Match-all, exactly like dial-usage-log.yaml: the payload table shadows the usage log
         // one-for-one, so it must emit for every record the parent emits for.
         assertThat(config.matcher().conditions()).isEmpty();

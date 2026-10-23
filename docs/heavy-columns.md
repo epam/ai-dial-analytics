@@ -106,17 +106,20 @@ grain, or ordering-key column — the mutability restrictions apply to `drop`/`r
 
 ## Seeded heavy columns
 
-The catalog migrations seed exactly three:
+The catalog migrations seed six:
 
 | Column | Why |
 |---|---|
 | `dial_usage_log_payload.request_body` | verbatim LLM request body, unbounded per row |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
+| `dial_usage_log_payload.request_envelope` | a chat request without its message history, under `SYNC_REQUEST_BODY_MODE=delta` |
+| `dial_usage_log_payload.request_delta` | the history elements a chat request added to its parent, under `delta` |
+| `dial_usage_log_payload.request_cache_markers` | the `cache_control` markers taken out of that history, under `delta` |
 
 Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header
-documents), the `*_body_bytes` size columns, and `rate_analytics.comment`. All three heavy columns are
+documents), the `*_body_bytes` size columns, and `rate_analytics.comment`. All six heavy columns are
 also `sensitive`, so the wildcard change is observable only to callers holding the `TABLE_SENSITIVE` clearance on
 the owning table and to deployments
 running `security.mode=none`.
@@ -131,9 +134,30 @@ the payload before fetching it — name it on a query that is already narrowed b
 projecting it across an unbounded window is what the [query execution
 budget](configuration.md#query-execution-budget) refuses.
 
+## Request bodies in delta form
+
+Under `SYNC_REQUEST_BODY_MODE=delta` (default `whole`; see [configuration](configuration.md)) a chat request is
+not stored whole. Every turn of a conversation re-sends the history before it, so ingest keeps the envelope
+(model, parameters, tools) in `request_envelope`, only the history elements this turn added in `request_delta`,
+and a hidden link to the earlier request that holds the rest. `request_body` is `NULL` on such a row and still
+holds every other body (MCP, embeddings, anything that does not parse). What that means for a query:
+
+```sql
+-- envelope fields read the same way, from the envelope
+SELECT json_extract_string("dial_usage_log_payload.request_envelope", 'model') AS model FROM dial_usage_log
+WHERE request_time >= now() - INTERVAL 1 HOUR LIMIT 10;
+
+-- this turn's new messages, as a JSON array (for a chat turn, the latest user message comes last)
+SELECT "dial_usage_log_payload.request_delta" FROM dial_usage_log WHERE request_time >= now() - INTERVAL 1 HOUR LIMIT 10;
+```
+
+A query that needs a request's whole history from `request_body` finds `NULL` on delta rows; no single column
+holds it. The behaviour is specified in `openspec/specs/data-sync/spec.md` ("A chat request body is stored as an
+envelope, a delta and a parent link").
+
 ## The payload columns live on their own table
 
-The three heavy columns — `request_body`, `response_body`, `assembled_response` — are **not** columns of
+The heavy payload columns — `request_body`, `response_body`, `assembled_response` and the three request-delta columns — are **not** columns of
 `dial_usage_log`, neither in the catalog nor physically (`V11` dropped them from it). They live on
 `dial_usage_log_payload`, a system **enrichment** of it keyed on `event_id`, so that they can carry a
 shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's (a year by default,

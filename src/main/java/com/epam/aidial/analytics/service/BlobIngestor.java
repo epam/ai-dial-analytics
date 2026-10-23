@@ -5,8 +5,8 @@ import com.epam.aidial.analytics.blob.BlobListing;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import com.epam.aidial.analytics.sync.LogParser;
 import com.epam.aidial.analytics.sync.mapping.SyncTarget;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -46,10 +46,12 @@ import java.util.function.Consumer;
  * <p>Targets that enrich other targets flush in dependency order — see {@link RunSink} — so a source row
  * never becomes visible before the enrichment row written beside it. Which targets those are is the
  * catalog's answer ({@link IngestFlushOrder}), asked once per run.
+ *
+ * <p>Under {@code sync.request-body-mode=delta} the payload target's sink rewrites chat request bodies at flush
+ * ({@link RequestDeltaStages}); this component hands each run sink those stages and is otherwise unaware of them.
  */
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class BlobIngestor {
 
     /**
@@ -65,6 +67,22 @@ public class BlobIngestor {
     private final LogParser logParser;
     private final List<SyncTarget> targets;
     private final IngestFlushOrder flushOrder;
+    private final RequestDeltaStages deltaStages;
+
+    /** Without request-delta stages: every body is stored whole. */
+    public BlobIngestor(BlobClient blobClient, LogParser logParser, List<SyncTarget> targets, IngestFlushOrder flushOrder) {
+        this(blobClient, logParser, targets, flushOrder, RequestDeltaStages.none());
+    }
+
+    @Autowired
+    public BlobIngestor(BlobClient blobClient, LogParser logParser, List<SyncTarget> targets, IngestFlushOrder flushOrder,
+                        RequestDeltaStages deltaStages) {
+        this.blobClient = blobClient;
+        this.logParser = logParser;
+        this.targets = targets;
+        this.flushOrder = flushOrder;
+        this.deltaStages = deltaStages;
+    }
 
     /**
      * Creates a run-scoped {@link RunSink} covering every configured target table, sharing the given
@@ -89,7 +107,7 @@ public class BlobIngestor {
      */
     public RunSink newRunSink(UsageLogWriter writer, int batchSize, long maxBatchBytes, Consumer<List<BlobListing>> onBlobsWritten) {
         final List<String> tables = targets.stream().map(SyncTarget::table).toList();
-        return new RunSink(writer, tables, flushOrder.sourceOf(tables), batchSize, maxBatchBytes, onBlobsWritten);
+        return new RunSink(writer, tables, flushOrder.sourceOf(tables), deltaStages.byTable(), batchSize, maxBatchBytes, onBlobsWritten);
     }
 
     /**

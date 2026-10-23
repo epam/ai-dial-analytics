@@ -69,7 +69,7 @@ class RouteColumnsIngestIntegrationTest extends AbstractClickHouseIntegrationTes
         BlobClient blobClient = new BlobClient(new BlobProperties("filesystem", null, null, BUCKET, null,
                 Map.of("jclouds.filesystem.basedir", baseDir.toString())), TestBlobSpans.noop());
         SyncProperties syncProps = new SyncProperties("-", 0, 1000, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX,
-                "yyyy/MM/dd", "'date='yyyy-MM-dd", false, List.of(), null, null);
+                "yyyy/MM/dd", "'date='yyyy-MM-dd", false, List.of(), null, null, null);
         BlobIngestor ingestor = new BlobIngestor(blobClient,
                 new LogParser(JsonMapper.builder().build(), SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, flushOrder);
         PollProperties pollProps = new PollProperties(true, "-", Duration.ofMinutes(1), Duration.ofMinutes(10), Duration.ZERO,

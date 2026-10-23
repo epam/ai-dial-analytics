@@ -628,7 +628,11 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[?(@.name == 'jwt_claims')].heavy").value(false))
                 .andExpect(jsonPath("$.columns[?(@.name == 'jwt_claims')].sensitive").value(true))
                 .andExpect(jsonPath("$.columns[?(@.name == 'request_tags')].sensitive").value(true))
-                .andExpect(jsonPath("$.columns", hasSize(5)))
+                // The three request-delta columns (V50) hold a chat request's content in parts: heavy and sensitive like it.
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_envelope')].heavy").value(true))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_delta')].heavy").value(true))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].sensitive").value(true))
+                .andExpect(jsonPath("$.columns", hasSize(8)))
                 // The catalog mirrors the physical shape: ORDER BY (event_id), recorded by V38 exactly as
                 // CatalogSchemaWriter records it for an API-created enrichment. Left at the column default
                 // this would read [] — the catalog-versus-physical divergence V22 had to retrofit for write_mode.
@@ -972,8 +976,8 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
         // The moved rows kept their descriptions: V38 re-keys them rather than re-declaring them.
         mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(5)))
-                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(5)))
+                .andExpect(jsonPath("$.columns", hasSize(8)))
+                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(8)))
                 .andExpect(jsonPath("$.columns[?(@.name=='request_body')].description",
                         contains("Raw request body payload.")));
         mockMvc.perform(get("/v1/tables/rate_analytics"))
@@ -1013,8 +1017,8 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].display_name", contains("Event ID")));
         mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(5)))
-                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(5)))
+                .andExpect(jsonPath("$.columns", hasSize(8)))
+                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(8)))
                 .andExpect(jsonPath("$.columns[?(@.name=='request_body')].display_name",
                         contains("Request body")));
         mockMvc.perform(get("/v1/tables/rate_analytics"))
