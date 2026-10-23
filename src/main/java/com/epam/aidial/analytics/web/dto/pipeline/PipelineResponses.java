@@ -39,8 +39,8 @@ public final class PipelineResponses {
                     + "POST /v1/queries/execute-sql: it reads the catalog entity and its exposed fields (an "
                     + "enrichment column by its exposed name, with no join) and names each output by its target "
                     + "column, with no SETTINGS, helper column or physical name. It computes what the declaration "
-                    + "computes, ordered by the keys rather than newest first, so its rows are the sampled ones "
-                    + "only when every group fits the sample; running it does not reproduce `total_rows`. The "
+                    + "computes, ordered by the keys (aggregate) or the grain key (Class-1) rather than newest first, "
+                    + "so its rows need not be the sampled ones; running it does not reproduce `total_rows`. The "
                     + "physical statement that produced `rows` is not returned. Present for an `aggregate` and a "
                     + "Class-1 `sql` pipeline unless `notes` carries `statement_not_portable`; absent for `llm`.")
             String statement,

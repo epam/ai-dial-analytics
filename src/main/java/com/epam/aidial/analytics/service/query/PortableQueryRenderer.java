@@ -49,8 +49,11 @@ public class PortableQueryRenderer {
      */
     public record Portable(String sql, StructuredQuery query, String refusal, String subject) {
 
-        public boolean rendered() {
-            return sql != null;
+        /** No portable query was asked for (an arm with no single statement): neither rendered nor refused. */
+        public static final Portable NONE = new Portable(null, null, null, null);
+
+        public boolean refused() {
+            return refusal != null;
         }
     }
 

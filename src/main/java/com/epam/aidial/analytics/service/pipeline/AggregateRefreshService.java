@@ -37,6 +37,7 @@ import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.repository.StructuredQueryExecutor;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
+import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import io.opentelemetry.api.common.AttributeKey;
@@ -436,11 +437,14 @@ public class AggregateRefreshService {
         final QuerySettings settings = PreviewBudget.settings(properties.preview());
         // The physical sample is for whoever reads the log, rendered through the same merge the executor applies so
         // it carries the settings it ran under; the response carries the declaration as the query API runs it.
-        SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", name,
-                FinalSettings.render(sample.getSQL(ParamType.INLINED), settings, model.partitionLocal()));
-        final PortableQueryRenderer.Portable rendered =
-                portable.tryRender(declaration.portableQuery(input, properties.previewRows()));
+        if (SqlLog.LOG.isDebugEnabled()) {
+            SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", name,
+                    FinalSettings.render(sample.getSQL(ParamType.INLINED), settings, model.partitionLocal()));
+        }
         final List<Map<String, Object>> sampled = runSample(name, sample, settings, model);
+        // Capped at the query API's own row ceiling, so a preview-rows above it still yields a statement it runs.
+        final PortableQueryRenderer.Portable rendered = portable.tryRender(
+                declaration.portableQuery(input, Math.min(properties.previewRows(), StructuredQueryBuilder.MAX_LIMIT)));
 
         final long totalRows = sampled.isEmpty() ? 0L : ((Number) sampled.getFirst().get(AggregateCompiler.TOTAL_GROUPS)).longValue();
         final SampledPosition newest =
@@ -476,9 +480,7 @@ public class AggregateRefreshService {
         notes.addAll(TargetCoercion.notes(columns, rows, declaration.valuePreservingMeasures()));
         final PreviewValueCapper.Capped capped = capper.cap(columns, rows);
         notes.addAll(capped.notes());
-        if (!rendered.rendered()) {
-            notes.add(PreviewNotes.statementNotPortable(rendered.subject(), rendered.refusal()));
-        }
+        notes.addAll(PreviewNotes.statementNotPortable(rendered));
         return new PipelinePreview(rendered.sql(), rendered.query(), capped.columns(), capped.rows(), totalRows, null,
                 notes);
     }

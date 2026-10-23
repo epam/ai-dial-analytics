@@ -2008,8 +2008,8 @@ The response SHALL carry these members:
   The statement ADAS executes to produce `rows` is a different, physical statement. It is not returned,
   and it is logged at `DEBUG` on the SQL log as a refresh statement is. Each kind states which parts of
   the sample the portable statement reproduces and where its rows can differ from `rows`.
-  - Present for an `aggregate` pipeline and a Class-1 `sql` one, unless the declaration cannot be
-    expressed in the ADAS dialect (see `statement_not_portable`).
+  - Present for an `aggregate` pipeline and a Class-1 `sql` one, unless the query path refuses the
+    rendered query (see `statement_not_portable`).
   - Absent for an `llm` pipeline, whose sample is read through the governed scan or group assembly and
     has no single statement.
 - **`query`**: the same query as a structured-query DSL document, accepted as is by
@@ -2065,7 +2065,7 @@ The note codes SHALL be the closed set below. A new code SHALL be added only by 
 | `output_without_description` | info | `llm` | An output composed no `description`; `subject` names the output |
 | `unconstrained_response` | warning | `llm` | The declaration composes no response schema, so the model's answer is held to none |
 | `values_truncated` | info | all | One or more of a column's sampled values exceeded the value cap and were shortened in `rows`; the message gives how many and the cap; `subject` names the column |
-| `statement_not_portable` | info | `aggregate`, Class-1 | The declaration cannot be expressed in the ADAS SQL dialect or the structured-query DSL, so `statement` and `query` are absent; the sample is unaffected, and the message gives the reason; `subject` names the column at fault where there is one |
+| `statement_not_portable` | info | `aggregate`, Class-1 | The declaration has no statement the query API would run for this caller (inexpressible in the ADAS SQL dialect or structured-query DSL, or refused by the query path's validation), so `statement` and `query` are absent; the sample is unaffected, and the message gives the query path's reason; `subject` names an output whose target name shadows an input field, where there is one |
 
 **Samples SHALL be newest first.** Ordering by key or by oldest input put test traffic and months-old
 rows in front of the author. Most of a

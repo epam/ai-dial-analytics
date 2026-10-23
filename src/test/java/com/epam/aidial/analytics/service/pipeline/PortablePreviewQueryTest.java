@@ -171,7 +171,7 @@ class PortablePreviewQueryTest {
 
         final PortableQueryRenderer.Portable portable = form(spec, AggregateCompiler.CompiledFilter.NONE, Map.of());
 
-        assertThat(portable.rendered()).isFalse();
+        assertThat(portable.refused()).isTrue();
         assertThat(portable.query()).isNull();
         assertThat(portable.subject()).isEqualTo("request_time");
         assertThat(portable.refusal()).contains("request_time");

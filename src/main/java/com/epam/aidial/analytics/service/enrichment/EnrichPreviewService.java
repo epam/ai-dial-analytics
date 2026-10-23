@@ -225,7 +225,7 @@ public class EnrichPreviewService {
                         + "`description`: neither its `prose` nor the target column's `description` carries one, so "
                         + "the model is told nothing about what the field means. Declare prose on the output, or a "
                         + "description on the column")));
-        return finish(null, new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes));
+        return finish(PortableQueryRenderer.Portable.NONE, new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes));
     }
 
     /**
@@ -306,17 +306,16 @@ public class EnrichPreviewService {
     /**
      * Caps the sample's values last, after every note that needs the full values, and assembles the response.
      *
-     * @param rendered the declaration's portable query, rendered or refused; null on an arm that has none ({@code llm})
+     * @param rendered the declaration's portable query, rendered or refused; {@link PortableQueryRenderer.Portable#NONE}
+     *                 on an arm that has none ({@code llm})
      */
     private PipelinePreview finish(PortableQueryRenderer.Portable rendered, Sample sample) {
         final PreviewValueCapper.Capped capped = capper.cap(sample.columns(), sample.rows());
         final List<PreviewNote> notes = new ArrayList<>(sample.notes());
         notes.addAll(capped.notes());
-        if (rendered != null && !rendered.rendered()) {
-            notes.add(PreviewNotes.statementNotPortable(rendered.subject(), rendered.refusal()));
-        }
-        return new PipelinePreview(rendered == null ? null : rendered.sql(), rendered == null ? null : rendered.query(),
-                capped.columns(), capped.rows(), null, sample.groupKey(), notes);
+        notes.addAll(PreviewNotes.statementNotPortable(rendered));
+        return new PipelinePreview(rendered.sql(), rendered.query(), capped.columns(), capped.rows(), null,
+                sample.groupKey(), notes);
     }
 
     private static PreviewNote noMatchingRows() {

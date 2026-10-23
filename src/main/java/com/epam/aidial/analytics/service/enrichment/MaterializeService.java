@@ -575,7 +575,9 @@ public class MaterializeService {
         WindowSpec spec = new WindowSpec(model, filter.filter(), cursorColumns, null, from, to,
                 referenced, filter.columns(), null);
         SelectQuery<Record> sample = sampleQuery(spec, grainKey, expressions);
-        SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", pipelineName, PipelineReadBudget.render(sample, model, readBudget));
+        if (SqlLog.LOG.isDebugEnabled()) {
+            SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", pipelineName, PipelineReadBudget.render(sample, model, readBudget));
+        }
         List<Map<String, Object>> sampled = PipelineReadBudget.run(executor, sample, model,
                 "Class-1 preview sample", readBudget, new StatementTag(pipelineName, "preview"));
         SampledPosition newest = SampledPosition.newest(sampled, PREVIEW_VERSION, PREVIEW_IDENTITY);
@@ -586,8 +588,8 @@ public class MaterializeService {
             stripped.remove(PREVIEW_IDENTITY);
             rows.add(stripped);
         }
-        return new Class1Preview(portableQuery(source, grainKey, expressions, filter.filter()), previewColumns(declaration, grainKey, expressions, model.bindings()),
-                rows, bound.orElse(null), newest);
+        return new Class1Preview(portableQuery(source, grainKey, expressions, filter.filter()),
+                previewColumns(declaration, grainKey, expressions, model.bindings()), rows, bound.orElse(null), newest);
     }
 
     /**

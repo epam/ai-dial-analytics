@@ -1,7 +1,10 @@
 package com.epam.aidial.analytics.service.pipeline.preview;
 
+import com.epam.aidial.analytics.service.query.PortableQueryRenderer;
+
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 
 /**
  * The notes more than one arm reports, worded once so the same condition reads the same on either kind.
@@ -58,12 +61,16 @@ public final class PreviewNotes {
 
     /**
      * The declaration has no statement the query API would run, so the preview carries none; the sample is
-     * unaffected. {@code reason} is the query path's own refusal; {@code subject} is the column it is about, or null.
+     * unaffected. The message carries the query path's own refusal, and the subject the column it is about, or null.
+     * Empty unless {@code portable} was refused.
      */
-    public static PreviewNote statementNotPortable(String subject, String reason) {
-        return PreviewNote.about(PreviewNoteCode.STATEMENT_NOT_PORTABLE, subject, "this declaration has no statement "
-                + "the query API would run, so the preview returns no `statement` or `query`; the sample is unaffected. "
-                + "The query path refuses it: " + reason);
+    public static List<PreviewNote> statementNotPortable(PortableQueryRenderer.Portable portable) {
+        if (!portable.refused()) {
+            return List.of();
+        }
+        return List.of(PreviewNote.about(PreviewNoteCode.STATEMENT_NOT_PORTABLE, portable.subject(), "this declaration "
+                + "has no statement the query API would run, so the preview returns no `statement` or `query`; the "
+                + "sample is unaffected. The query path refuses it: " + portable.refusal()));
     }
 
     /** {@code millis} as hours, minutes and seconds — the gap an author compares with the enrichment's cadence. */

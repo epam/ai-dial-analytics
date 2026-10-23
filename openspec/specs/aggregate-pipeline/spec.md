@@ -78,8 +78,8 @@ declaration has zero group keys.
 Derivation matches by **name**, and cannot detect a name that means something else: an input column
 sharing the ordering key's name but not what the author meant would group the wrong thing silently.
 The derived key SHALL therefore be **echoed expanded** on the pipeline read, where an author sees it
-before the pipeline is armed. The preview does not echo it, and shows instead the expression it compiled
-to in its `statement` (see "Dry-run preview of an aggregate declaration").
+before the pipeline is armed. The preview does not echo it, and shows instead the column it resolved
+to in its portable `statement` (see "Dry-run preview of an aggregate declaration").
 
 **At most one** time bucket SHALL appear in a `trigger.group_by`. A `unit` outside the supported set SHALL be
 rejected with HTTP 422 stating the supported units. The set is narrower than the truncation function the
@@ -923,7 +923,7 @@ configuration that sizes it.
 
 The dry-run preview SHALL execute its sample query under an explicit, configured **resource budget** —
 a wall-clock limit, a memory ceiling, and a spill-to-disk threshold — carried to ClickHouse as query
-settings on the preview statement alone.
+settings on the sampling statement alone.
 
 The budget is required because preview is deliberately **not** window-restricted: the sample answers "are
 these the right numbers", which a window would obscure, so the compiled sample aggregates the pipeline's
@@ -1943,7 +1943,8 @@ entity that:
 - renders a measure's own `where` as a `CASE WHEN <where> THEN <column> END` operand, or `THEN 1` for a
   column-less `count`, so the predicate narrows that aggregate alone, as the refresh applies it;
 - applies the pipeline's `filter` as its `WHERE`;
-- groups by the keys, orders by the keys ascending, and is limited to `aggregate.preview-rows`.
+- groups by the keys, orders by the keys ascending, and is limited to `aggregate.preview-rows`, capped at
+  the query API's row ceiling (1000) so a larger setting still yields a statement the API runs.
 
 The portable statement reproduces what the declaration computes, not how the preview samples it. It
 differs from the sampling statement in three ways, and the response SHALL NOT claim otherwise:
@@ -1964,8 +1965,9 @@ A declaration the dialect cannot express SHALL preview with `statement` and `que
 is such a declaration: the structured-query DSL resolves a `group_by` name against the entity's fields
 first, so the SQL front end refuses the shape as ambiguous. So is any other output the governed query
 path would not run with the declaration's meaning. The check SHALL be the query path's own validation
-of the rendered query, not a separate list kept beside it. The note's `subject` SHALL name the column
-at fault where there is one.
+of the rendered query, not a separate list kept beside it. The note's `subject` SHALL name an output whose
+target name shadows an input field, where there is one; it is an attribution, and the message gives the
+query path's own reason.
 
 A column's `type` SHALL be the type the engine produces for it, which the gate derives from the measure's
 function and its input binding:
@@ -3238,7 +3240,7 @@ target column's temporal type when the bucket's unit allows it, and `timestamp` 
 
 `statement` SHALL be the block's portable `SELECT`, as the form path's is: the parsed block's select
 list with each item aliased by its target column (the `INSERT` column at its position), its `WHERE`,
-its `GROUP BY`, ordered by the keys ascending and limited to `aggregate.preview-rows`. It differs from
+its `GROUP BY`, ordered by the keys ascending and limited as the form path's is. It differs from
 the sample in order, count and `date` cells exactly as the form path's does. Preview SHALL NOT return the
 refresh `INSERT`, neither the authored text nor ADAS's rendering of it.
 

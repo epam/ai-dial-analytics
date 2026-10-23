@@ -2404,7 +2404,9 @@ The sample SHALL depend on the transform:
   output computes for a source row, not which rows the preview sampled: the newest-first order, the
   safety lag and a `from`/`to` window all read the source's version column, which is not exposed to
   queries, so its rows need not be the sampled ones. An output the dialect cannot express SHALL leave
-  `statement` and `query` absent and carry `statement_not_portable` whose `subject` names that output.
+  `statement` and `query` absent and carry `statement_not_portable`; its `subject` names the output where
+  the refusal can be attributed to one (an output named like a source field it does not project), and is
+  absent otherwise.
 - **A row-grain `llm` pipeline** SHALL sample the grain key and each column a `transform.inputs` binding
   reads (`input`), keyed by the source column name the binding names. It SHALL NOT return the
   pipeline's filter or cursor columns. Leaving them out of the projection SHALL NOT take them out of the
