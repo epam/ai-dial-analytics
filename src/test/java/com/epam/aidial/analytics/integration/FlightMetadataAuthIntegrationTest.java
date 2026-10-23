@@ -102,8 +102,8 @@ class FlightMetadataAuthIntegrationTest {
     /**
      * Every column reachable from {@code dial_usage_log} that is marked {@code sensitive} — seeded by
      * migrations V3 ({@code jwt_claims}, {@code request_body}, {@code response_body}), V12
-     * ({@code request_tags}) and V29 ({@code assembled_response}), and all five re-keyed onto the
-     * payload enrichment by V38. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
+     * ({@code request_tags}) and V29 ({@code assembled_response}), all five re-keyed onto the
+     * payload enrichment by V38, and the three request-delta columns V49 seeds there. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
      * which enumerates the entity's full binding list rather than its wildcard expansion, so the
      * payload columns ARE visible to an admin there — which is what makes this the channel that can
      * still prove the filtering the wildcard schema no longer can.
@@ -113,7 +113,10 @@ class FlightMetadataAuthIntegrationTest {
             "dial_usage_log_payload.request_tags",
             "dial_usage_log_payload.request_body",
             "dial_usage_log_payload.response_body",
-            "dial_usage_log_payload.assembled_response");
+            "dial_usage_log_payload.assembled_response",
+            "dial_usage_log_payload.request_envelope",
+            "dial_usage_log_payload.request_delta",
+            "dial_usage_log_payload.request_cache_markers");
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;

@@ -33,6 +33,11 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
 
   Without them the relayout logs `ACCESS_DENIED … SELECT ON system.parts` and fails before the exchange.
   The table stays unchanged and in service; grant, then restart the pod — it retries only on start.
+- **Writer reads the payload table.** Ingest now looks up earlier requests in `dial_usage_log_payload` on the writer
+  account (request-delta storage, §7). The full grant in [`clickhouse-server.md`](clickhouse-server.md) covers it; a
+  writer narrowed per table needs `SELECT` on `dial_usage_log_payload`, and `ALTER` on it for the ClickHouse `V15`
+  migration. Without `SELECT` every lookup fails with a WARN and `ingest.request.delta.lookup.failures`, and requests
+  are stored as chain roots: ingest goes on, the saving is smaller.
 - **Writer hold.** `PIPELINE_BUDGET_TIMEOUT` sets the hold: it waits this plus 15 s. Raising it lengthens the
   window of `503`s (§3).
 - **API description needs a credential in `oidc` mode.** `/v3/api-docs`, `/swagger-ui.html` and `/swagger-ui/**`
@@ -139,7 +144,9 @@ then read only the days the value occurs on instead of all of history.
 | Migration | Effect |
 |---|---|
 | Postgres `V47` | Adds `enrichment_relayout`: the progress and writer hold of the automatic relayout (§3). |
+| ClickHouse `V15` | Adds the request-delta columns and the `idx_request_path` skip index to `dial_usage_log_payload`. Metadata-only; existing rows read the defaults. |
 | Postgres `V48` | Drops the evaluator archive (`evaluator`, `evaluator_version`), `pipeline.evaluator_name` / `evaluator_version` and their `pipeline_aud` mirrors, and `rule_legacy` / `rule_legacy_aud`. Keeps `pipeline.legacy_rule_id`, which 0.3 still maps; the next release drops it. |
+| Postgres `V49` | Registers `request_envelope`, `request_delta` and `request_cache_markers` on `dial_usage_log_payload`, sensitive and heavy. |
 
 The relayout itself is runtime DDL, not a migration: it runs after startup, off the probe path.
 
@@ -171,6 +178,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
+| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A chat request's `request_body` reads `NULL`; its envelope and new messages are in `request_envelope` / `request_delta` | Only when you set `delta`: move readers of the message history to the new columns (§7) |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
@@ -184,5 +192,12 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 - `SYNC_INLINE_FILES_MAX_SIZE` (default unset) — remove inline files whose stored base64 is longer than this size
   (`256KB`, `1MB`; `0` removes all). An earlier `SYNC_INLINE_FILES_MODE` no longer exists and is ignored if left set:
   replace `keep` with `SYNC_INLINE_FILES_DROP_TRUNCATED=false` and `drop` with `SYNC_INLINE_FILES_MAX_SIZE=0`.
+- `SYNC_REQUEST_BODY_MODE` (default `whole`) — `whole` or `delta`. `delta` stores a chat request as its envelope, the
+  messages its previous turn did not have, and a link to that turn, so repeated conversation history is not stored again;
+  `request_body` is then `NULL` for it. See [`heavy-columns.md`](heavy-columns.md#request-bodies-in-delta-form). Under
+  `whole` nothing changes for readers. **Once `delta` has been on, do not re-ingest those days with a build older than
+  0.4:** it writes rows without the hidden chain columns, and the later turns that link to them can no longer be
+  rebuilt. For the same reason, set `delta` only once no pre-0.4 pod is left ingesting. Switching back to `whole` on 0.4
+  is safe.
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
