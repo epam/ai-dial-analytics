@@ -8,9 +8,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * The prefix hashes that identify a request's place in a chain: {@code p0 = H(scope, day)} and
- * {@code pk = H(p(k-1), canonical(hk))}. Each hash folds in every history element before it and the scope, so two
- * requests share {@code pk} only when their first {@code k} elements are identical and they share project, user and UTC day.
+ * The prefix hashes that identify a request's place in a chain: {@code p0 = H(scope, day, tools)} and
+ * {@code pk = H(p(k-1), canonical(hk))}. Each hash folds in every history element before it, the scope and the tools,
+ * so two requests share {@code pk} only when their first {@code k} elements are identical, they share project, user and
+ * UTC day, and their {@code tools} are equal JSON or both absent. A child therefore always has its parent's tools.
  * {@code H} is SHA-256 truncated to 128 bits and carried as a {@link UUID}, the type the chain columns store. Element
  * text is hashed as its UTF-16 code units rather than encoded to UTF-8 first, because the UTF-8 encoder replaces a lone
  * surrogate with {@code ?}: two different elements would hash alike, and one could link to the other's history.
@@ -28,10 +29,11 @@ final class PathHash {
      *
      * @param scope   the row's chain scope (project and user)
      * @param day     the row's UTC day ({@code yyyy-MM-dd})
+     * @param tools   the request's {@code tools} as canonical JSON, or {@code null} when it carries none
      * @param history the canonical history elements
      * @return {@code n + 1} hashes; element {@code k} covers the first {@code k} history elements
      */
-    static UUID[] prefixes(String scope, String day, List<String> history) {
+    static UUID[] prefixes(String scope, String day, String tools, List<String> history) {
         UUID[] prefixes = new UUID[history.size() + 1];
         MessageDigest digest = sha256();
         digest.update(SEED);
@@ -39,6 +41,12 @@ final class PathHash {
         updateChars(digest, scope);
         digest.update((byte) 0);
         digest.update(day.getBytes(StandardCharsets.UTF_8));
+        // Absent tools hash apart from every value, "null" and "[]" included; the length keeps the field self-delimiting.
+        digest.update((byte) (tools == null ? 0 : 1));
+        if (tools != null) {
+            digest.update(ByteBuffer.allocate(4).putInt(tools.length()).array());
+            updateChars(digest, tools);
+        }
         prefixes[0] = truncate(digest.digest());
         for (int k = 1; k <= history.size(); k++) {
             digest.update(bytes(prefixes[k - 1]));
@@ -46,23 +54,6 @@ final class PathHash {
             prefixes[k] = truncate(digest.digest());
         }
         return prefixes;
-    }
-
-    /**
-     * The hash of a canonical top-level value, such as a request's {@code tools}: what a child compares with its parent
-     * to inherit the value, and what a rebuild looks the stored value up by.
-     *
-     * @param key  the top-level key the value sits under
-     * @param text the value as canonical JSON
-     */
-    static UUID value(String key, String text) {
-        MessageDigest digest = sha256();
-        digest.update(SEED);
-        digest.update((byte) 1);
-        updateChars(digest, key);
-        digest.update((byte) 0);
-        updateChars(digest, text);
-        return truncate(digest.digest());
     }
 
     /** Feeds every UTF-16 code unit of {@code text}, big-endian, lone surrogates included. */

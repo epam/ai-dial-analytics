@@ -54,7 +54,7 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         assertThat(showCreateTable(PAYLOAD))
                 .contains("`project_id` LowCardinality(String)", "`deployment` LowCardinality(String)", "`user_hash` String",
                         "`session_id` Nullable(String)", "`request_path` UUID", "`request_parent` UUID", "`request_depth` UInt32",
-                        "`request_ancestors` Array(UUID)", "`request_tools_hash` UUID", "`request_inherited` Array(LowCardinality(String))",
+                        "`request_ancestors` Array(UUID)", "`request_inherited` Array(LowCardinality(String))",
                         "`request_cache_markers` Nullable(String)", "INDEX idx_request_path request_path TYPE bloom_filter(0.001) GRANULARITY 1");
     }
 
@@ -85,8 +85,7 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         ClickHouseParentLookup lookup = new ClickHouseParentLookup(writer, PAYLOAD);
 
         assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path, UUID.randomUUID()))).containsOnlyKeys(path);
-        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path).ancestors()).isEmpty();
-        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path).toolsHashes()).containsExactly(new UUID(0, 0));
+        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path)).isEmpty();
         assertThat(lookup.find(List.of("2001-01-01"), List.of(path))).isEmpty();
     }
 
@@ -199,7 +198,7 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         }
     }
 
-    /** A cold encoder finds the parent's tools hash in the table, leaves the tools out, and the rebuild finds them again. */
+    /** A cold encoder finds the parent in the table, leaves the tools out, and the rebuild takes them from the root. */
     @Test
     void toolsAreInheritedThroughTheTable() {
         String tools = ",\"tools\":[{\"name\":\"search\"}]";
@@ -253,14 +252,11 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     /** Every payload row of the test, as a deduplicated read sees it, keyed by trace id. */
     private Map<String, Map<String, Object>> storedRows() {
-        List<String> columns = List.of("request_path", "request_parent", "request_body", "request_cache_markers", "request_tools_hash",
-                "project_id", "user_hash", "request_time");
+        List<String> columns = List.of("request_path", "request_parent", "request_body", "request_cache_markers");
         Map<String, Map<String, Object>> rows = new HashMap<>();
         for (GenericRecord record : writer.query("SELECT trace_id, toString(request_path) AS request_path,"
                 + " toString(request_parent) AS request_parent, ifNull(request_body, '" + NULL + "') AS request_body,"
                 + " ifNull(request_cache_markers, '" + NULL + "') AS request_cache_markers,"
-                + " toString(request_tools_hash) AS request_tools_hash, project_id, user_hash,"
-                + " formatDateTime(request_time, '%Y-%m-%d %H:%i:%s') AS request_time,"
                 + " arrayStringConcat(request_inherited, ',') AS request_inherited"
                 + " FROM " + PAYLOAD + " SETTINGS final = 1", Map.of())) {
             Map<String, Object> row = new HashMap<>();

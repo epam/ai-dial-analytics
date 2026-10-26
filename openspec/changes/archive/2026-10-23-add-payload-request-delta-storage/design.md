@@ -45,10 +45,10 @@ A per-message node table shares more in raw bytes. Measured after compression, t
 than per-event, and it writes more rows and changes the row model. Per-event keeps exactly one payload row
 per `dial_usage_log` row, so the grain join, the flush order and the drop rule are untouched.
 
-### D2. Chain identity is a chained hash with the scope and the day in the seed
+### D2. Chain identity is a chained hash with the scope, the day and the tools in the seed
 
-`p0 = H(project_id, user_hash, day)`, `pk = H(p(k-1), canonical(hk))`. Putting the scope and the UTC day into `p0`
-makes the "never cross a user or a day" rule structural: there is nothing to filter, because a hash from
+`p0 = H(project_id, user_hash, day, tools)`, `pk = H(p(k-1), canonical(hk))`; D9 says why `tools` is there. Putting
+the scope and the UTC day into `p0` makes the "never cross a user or a day" rule structural: there is nothing to filter, because a hash from
 another scope or day cannot match.
 - The payload row carries the record's `project_id`, `deployment`, `user_hash` and `session_id` as plain mapped
   columns. The encoder hashes `project_id` and `user_hash` into `p0`; the lookup needs no scope filter, since the scope
@@ -162,7 +162,7 @@ as the operator's to avoid.
     - `request_path` and `request_parent`, both `UUID`, so they travel as plain strings in `JSONEachRow`;
     - `request_depth UInt32`;
     - `request_ancestors Array(UUID)`;
-    - `request_tools_hash UUID` and `request_inherited Array(LowCardinality(String))` (D9);
+    - `request_inherited Array(LowCardinality(String))` (D9);
     - `request_cache_markers Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV)`.
   - `ADD INDEX idx_request_path request_path TYPE bloom_filter(0.001) GRANULARITY 1`. An `IN` set keeps a
     granule when any of its values may match, so pruning weakens with the number of candidates: hence the low
@@ -187,19 +187,23 @@ keeps top-level fields where readers already look and lets a text search find ea
 
 - The system keys lead the history, so a parent always covers them (`k` at least their count) and a child's body
   leaves them out; `request_inherited` names them, so the rebuild puts each value back under the child's own key.
-- `tools` is left out when it hashes the same (`request_tools_hash`) as a row carrying the parent's path, whether that
-  row stored or inherited it, so the tools are stored once per change along a chain. Compared with the direct
-  parent only, which would store them on every other turn, it costs the rebuild little: the rebuild loads the
-  chain's rows anyway and usually finds the tools on the nearest one that stored them. Rows sharing a path can differ
-  in their tools, so the chain it follows may miss them; it then looks them up by hash within the scope and day,
-  which scans that partition's `request_tools_hash`.
+- `tools` is part of the chain seed `p0`, so every row carrying a path has the same tools, and a child always leaves
+  them out. The rebuild takes them from the chain's root, which it reads anyway. A request whose tools changed finds
+  no parent and is a root, re-storing its history once. Rejected: comparing a separate tools hash with the rows
+  carrying the parent's path. It keeps a chain across a tools change, but rows sharing a path can then differ in
+  their tools, so a rebuild must look them up by hash across the day's partition, and the lookup, the chain nodes
+  and the table each carry tools hashes. Tools rarely change within a conversation, so re-storing a history at
+  each change costs little.
 - The left-out keys are listed rather than written as `null`: a client can send `"tools": null`, absent `tools`, or
   `"tools": []`, and each must rebuild as sent.
-- The parent lookup returns the tools hashes of the rows carrying a path, since rows sharing a path share their
-  history but not necessarily their tools.
 
 ## Risks / Trade-offs
 
+- **[Unstable `tools` re-root every turn]** → `tools` is in `p0` as canonical JSON, with object keys sorted but
+  array order and any `cache_control` member inside it kept, so a client that reorders its tool list or moves a
+  tool's marker on every turn makes every turn a root, and stores whole histories as `whole` would. Accepted:
+  clients send the same tools along a conversation, and the cost is space only. Should one not, moving tool-level
+  markers into `request_cache_markers` is the fix.
 - **[Readers of `request_body` break under `delta`]** → Opt-in mode (D7). The breaking note goes into the
   specs and the proposal; top-level fields stay readable from `request_body`, and a text search finds each
   message once, in the turn that first sent it.

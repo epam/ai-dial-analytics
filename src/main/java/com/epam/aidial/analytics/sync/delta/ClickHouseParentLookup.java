@@ -20,17 +20,12 @@ import java.util.UUID;
  * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_path} skip index (ClickHouse
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
- * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do. The
- * rows carrying a path can differ in their tools, so up to {@value #TOOLS_HASHES} distinct tools hashes come back per
- * path; a child whose tools match none of them stores its own.
+ * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
 
     /** Candidate paths per query: about 37 URI bytes each, so a chunk stays well inside common URI limits. */
     static final int CHUNK = 1000;
-
-    /** Distinct tools hashes returned per path. */
-    static final int TOOLS_HASHES = 8;
 
     private final UsageLogWriter writer;
     private final String sql;
@@ -47,8 +42,7 @@ public final class ClickHouseParentLookup implements ParentLookup {
      */
     public static String statement(String table) {
         return "SELECT toString(request_path) AS path,"
-                + " arrayStringConcat(arrayMap(x -> toString(x), any(request_ancestors)), ',') AS ancestors,"
-                + " arrayStringConcat(arrayMap(x -> toString(x), groupUniqArray(" + TOOLS_HASHES + ")(request_tools_hash)), ',') AS tools"
+                + " arrayStringConcat(arrayMap(x -> toString(x), any(request_ancestors)), ',') AS ancestors"
                 + " FROM `" + table.replace("`", "``") + "`"
                 + " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
                 + " AND toYYYYMMDD(request_time) IN (SELECT toUInt32(arrayJoin(splitByChar(',', {days:String}))))"
@@ -57,7 +51,7 @@ public final class ClickHouseParentLookup implements ParentLookup {
     }
 
     @Override
-    public Map<UUID, Found> find(Collection<String> days, Collection<UUID> paths) {
+    public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
         if (days.isEmpty() || paths.isEmpty()) {
             return Map.of();
         }
@@ -72,7 +66,7 @@ public final class ClickHouseParentLookup implements ParentLookup {
         }
         List<String> candidates = new ArrayList<>(paths.size());
         paths.forEach(path -> candidates.add(path.toString()));
-        Map<UUID, Found> found = new HashMap<>();
+        Map<UUID, List<UUID>> found = new HashMap<>();
         for (int start = 0; start < candidates.size(); start += CHUNK) {
             Map<String, Object> params = Map.of(
                     "from", first + " 00:00:00.000",
@@ -80,19 +74,16 @@ public final class ClickHouseParentLookup implements ParentLookup {
                     "days", String.join(",", partitions),
                     "paths", String.join(",", candidates.subList(start, Math.min(candidates.size(), start + CHUNK))));
             for (GenericRecord row : writer.query(sql, params)) {
-                found.put(UUID.fromString(row.getString("path")), new Found(uuids(row.getString("ancestors")), uuids(row.getString("tools"))));
+                String ancestors = row.getString("ancestors");
+                List<UUID> lineage = new ArrayList<>();
+                if (ancestors != null && !ancestors.isEmpty()) {
+                    for (String ancestor : ancestors.split(",")) {
+                        lineage.add(UUID.fromString(ancestor));
+                    }
+                }
+                found.put(UUID.fromString(row.getString("path")), lineage);
             }
         }
         return found;
-    }
-
-    private static List<UUID> uuids(String joined) {
-        List<UUID> uuids = new ArrayList<>();
-        if (joined != null && !joined.isEmpty()) {
-            for (String uuid : joined.split(",")) {
-                uuids.add(UUID.fromString(uuid));
-            }
-        }
-        return uuids;
     }
 }

@@ -2041,9 +2041,8 @@ SHALL declare:
   carry the values the record's `dial_usage_log` row carries, while `session_id` is held only here, unencrypted like
   the other identifiers; the chain columns `request_path` and
   `request_parent` (128-bit hashes, all-zero when absent), `request_depth` (the number of history elements of
-  the full request, `0` when absent), `request_ancestors` (an array of path hashes, empty when absent) and
-  `request_tools_hash` (a 128-bit hash, all-zero when absent); `request_inherited` (an array of top-level key
-  names, empty when absent); and a
+  the full request, `0` when absent), `request_ancestors` (an array of path hashes, empty when absent);
+  `request_inherited` (an array of top-level key names, empty when absent); and a
   skip index on `request_path` (a low false-positive bloom filter), so a parent lookup asking about a few paths
   within one daily partition can skip granules instead of reading the partition's `request_path` whole;
 - the `ReplacingMergeTree` engine versioned by a table-side `_updated_at` default, so a re-ingested
@@ -2051,7 +2050,7 @@ SHALL declare:
 
 `_updated_at` SHALL be the only column of this table left to its ClickHouse default on every row. The
 request-delta columns other than the identity columns are filled by ingest's request-body stage, not by the mapping;
-under `sync.request-body-mode=whole` only a chat request's `request_path`, `request_depth` and `request_tools_hash` are set, and for a
+under `sync.request-body-mode=whole` only a chat request's `request_path` and `request_depth` are set, and for a
 body that is not a chat request every one keeps its default.
 
 One parsed record SHALL produce a `dial_usage_log` row **and** a `dial_usage_log_payload` row, from two
@@ -3006,7 +3005,7 @@ The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUE
 `whole` or `delta`, with default `whole`. Any other value SHALL fail startup.
 
 - **Under `whole`,** `request_body` SHALL be stored as it is today. A chat request's row SHALL also carry its
-  `request_path`, `request_depth` and `request_tools_hash`, so that a row stored whole can be a parent (see
+  `request_path` and `request_depth`, so that a row stored whole can be a parent (see
   "Rebuild equivalence"); every other request-delta column except the identity columns SHALL keep its default.
 - **Under `delta`,** a chat request body (see "A chat request body is stored as its new history and a parent
   link") SHALL be stored in `request_body` cut to what its parent does not supply, and every other body SHALL be
@@ -3029,9 +3028,8 @@ warning that the setting has no effect.
 #### Scenario: The default stores request bodies whole
 
 - **WHEN** the service starts without `SYNC_REQUEST_BODY_MODE` and ingests a chat request
-- **THEN** the payload row carries the body as received in `request_body` and its `request_path`, `request_depth`
-  and `request_tools_hash`, an all-zero `request_parent`, an empty `request_inherited`, and a `NULL`
-  `request_cache_markers`
+- **THEN** the payload row carries the body as received in `request_body` and its `request_path` and
+  `request_depth`, an all-zero `request_parent`, an empty `request_inherited`, and a `NULL` `request_cache_markers`
 
 #### Scenario: A table without the request-delta columns keeps its bodies
 
@@ -3074,12 +3072,13 @@ array. No other key SHALL be treated as history. Each history element SHALL be n
 insignificant whitespace.
 
 For a history `h1..hn`, ingest SHALL compute the **prefix hashes**
-`p0 = H(project_id, user_hash, UTC day of request_time)` and `pk = H(p(k-1), canonical(hk))`,
+`p0 = H(project_id, user_hash, UTC day of request_time, tools)` and `pk = H(p(k-1), canonical(hk))`,
 where `H` is a 128-bit hash and the two scope values are those the record's `dial_usage_log` row
-carries. `pn` is the request's **path**. Because each prefix hash folds in every element
-before it and the scope, two requests SHALL have an equal `pk` only when their first `k` history elements
-are identical and they share project, user and UTC day. Equal message text under a
-different history or scope SHALL never yield an equal hash.
+carries, and `tools` is the canonical JSON of the request's top-level `tools`, hashed apart from every value when
+the request carries none, so `null`, `[]` and an absent `tools` never match. `pn` is the request's **path**. Because
+each prefix hash folds in every element before it, the scope and the tools, two requests SHALL have an equal `pk`
+only when their first `k` history elements are identical and they share project, user, UTC day and `tools`. Equal
+message text under a different history or scope SHALL never yield an equal hash.
 
 The request's **parent** SHALL be a stored or same-flush chat request whose path equals the deepest `pk`
 of this request with `max(1, s) ≤ k < n`, where `s` is the number of its top-level system keys, among the sources
@@ -3095,12 +3094,10 @@ carries all of its system keys or inherits all of them. The stored row SHALL car
   (see rebuild below);
 - `request_body` = the canonical JSON of the body with its `cache_control` markers removed from the history,
   its message array holding only the elements of `h(k+1)..hn` that are messages, and, when it has a parent, without
-  its top-level system keys (their values are `h1..hs`, within the parent's history) and without `tools` when
-  inherited (see "A request inherits its parent's tools"). A root's `request_body` is therefore the whole request;
-- `request_inherited` = the top-level keys `request_body` leaves out for a rebuild to put back: the system keys
-  when the request has a parent, then `tools` when inherited; empty for a root;
-- `request_tools_hash` = the 128-bit hash of the request's `tools` as canonical JSON, or all-zero when it has
-  none.
+  its top-level system keys (their values are `h1..hs`, within the parent's history) and without
+  `tools` (see "A request inherits its parent's tools"). A root's `request_body` is therefore the whole request;
+- `request_inherited` = the top-level keys `request_body` leaves out for a rebuild to put back: when the request
+  has a parent, the system keys and then `tools`, those of them it carries; empty for a root.
 
 **Rebuild equivalence.** A row's history SHALL be its parent path's history followed by the message array
 elements of its own `request_body`, where a path's history is that of **any** stored row carrying that path, and
@@ -3110,7 +3107,7 @@ Rows carrying the same path MAY differ in parent and stored body (a re-ingested 
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
 history, so following `request_parent` through whichever row is found always terminates — each parent is
 strictly shallower — and always yields the row's exact canonical history. While a row exists, a row carrying
-its parent's path SHALL exist: a path depends only on the stored history, so replacing a row under the
+its parent's path SHALL exist: a path depends only on the stored history and tools, so replacing a row under the
 `ReplacingMergeTree` keeps it whichever mode wrote the copy, and parent and child share a daily partition, so
 they expire together — up to the part granularity of the TTL: with `ttl_only_drop_parts`, a day still split
 across parts can lose an earlier part before a later one, so in the last day of a day's retention a child MAY
@@ -3186,21 +3183,16 @@ itself expose a rebuilt body.
 
 ### Requirement: A request inherits its parent's tools
 
-Under `sync.request-body-mode=delta`, a chat request with a parent SHALL leave `tools` out of its stored body, and
-name it in `request_inherited`, when a stored or same-flush row carrying its parent's path has an equal
-`request_tools_hash`; otherwise it SHALL store its own `tools`. A request without `tools` inherits nothing, and a
-`tools` member that is `null` or an empty array is a value like any other, stored or inherited as such. The tools
-hashes compared SHALL be those of the rows carrying the parent's path, so a request inherits the tools its
-parent effectively had, whether that row stored them or inherited them in turn: the tools are stored once per
-change along a chain.
+Under `sync.request-body-mode=delta`, a chat request with a parent SHALL leave `tools` out of its stored body and
+name it in `request_inherited` when it carries `tools`. Because `tools` is part of `p0`, every row carrying the
+parent's path has the child's `tools`, as equal JSON or absent in both, so nothing is compared at ingest. A request
+whose `tools` differ from those of every stored request its history extends finds no parent and SHALL be a root,
+storing its whole history and its `tools`: a change of tools mid-conversation costs one full history, and the turns
+after it link to that root. A `tools` member that is `null` or an empty array is a value like any other.
 
-A rebuild SHALL take inherited `tools` from a row of the same `(project_id, user_hash)` scope and UTC day whose
-`request_tools_hash` equals the row's and whose stored body carries `tools`; the nearest ancestor that stored them is
-one. Such a row SHALL exist while the inheriting row does, under the same exceptions as for its history (see
-"Rebuild equivalence"): the inheriting row's parent path is carried by a row with the same hash, which stored the
-tools or inherited them from its own ancestors in turn, and all of them share the day's partition. Rows carrying
-one path can differ in their tools, so the chain a rebuild follows need not pass through that row; the scope and day
-lookup by hash always finds it.
+A rebuild SHALL take inherited `tools` from the root its `request_parent` chain ends at, which stores the request
+whole. Every row on the chain has the same `tools`, so the chain supplies them under the same exceptions as its
+history (see "Rebuild equivalence").
 
 #### Scenario: Unchanged tools are stored once
 
@@ -3208,15 +3200,16 @@ lookup by hash always finds it.
 - **THEN** turn 1's `request_body` carries `tools`, and turns 2 and 3 leave it out and name it in
   `request_inherited`
 
-#### Scenario: Changed tools are stored again
+#### Scenario: Changed tools start a new chain
 
-- **WHEN** turn 2 carries different `tools` than turn 1
-- **THEN** turn 2's `request_body` carries its own `tools`, and a turn 3 with those tools inherits them
+- **WHEN** turn 2 extends turn 1's history but carries different `tools`
+- **THEN** turn 2 is a root whose `request_body` carries its whole history and its own `tools`, and a turn 3 with
+  those tools links to turn 2 and inherits them
 
 #### Scenario: Explicit null tools are not taken for inherited ones
 
 - **WHEN** turn 1 carries `"tools": [...]` and turn 2 carries `"tools": null`
-- **THEN** turn 2 stores `"tools": null`, and its rebuild yields `null`, not turn 1's tools
+- **THEN** turn 2 is a root that stores `"tools": null`, and its rebuild yields `null`, not turn 1's tools
 
 #### Scenario: Inherited tools rebuild exactly
 

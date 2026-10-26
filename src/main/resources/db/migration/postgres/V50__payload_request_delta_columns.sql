@@ -10,8 +10,8 @@
 --
 -- ONLY THE MARKERS ARE EXPOSED. The identity columns (project_id, deployment, user_hash, session_id) serve ingest and
 -- a future sort key; the first three repeat what dial_usage_log already exposes. The chain columns (request_path,
--- request_parent, request_depth, request_ancestors, request_tools_hash) and request_inherited stay hidden physical
--- columns, like event_id and request_time: they exist for ingest's parent lookup and for a later full-body rebuild.
+-- request_parent, request_depth, request_ancestors) and request_inherited stay hidden physical columns, like event_id
+-- and request_time: they exist for ingest's parent lookup and for a later full-body rebuild.
 --
 -- Sensitive and heavy on the same grounds as request_body (V3, V18): the markers are verbatim request content and
 -- unbounded per row, so a wildcard projection leaves them out and a caller without the TABLE_SENSITIVE clearance never

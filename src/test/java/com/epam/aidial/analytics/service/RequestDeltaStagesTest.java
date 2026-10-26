@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RequestDeltaStagesTest {
 
     private static final String[] TABLE_COLUMNS = {"request_path", "request_parent", "request_depth", "request_ancestors",
-        "request_tools_hash", "request_inherited", "request_cache_markers"};
+        "request_inherited", "request_cache_markers"};
 
     private final TransformRegistry transforms = new TransformRegistry();
     private final DeriverRegistry derivers = new DeriverRegistry(JsonMapper.builder().build());

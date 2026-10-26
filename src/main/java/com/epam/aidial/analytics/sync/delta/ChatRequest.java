@@ -10,7 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.UUID;
 
 /**
  * A request body as delta storage sees it: its <b>history</b> (the elements that repeat from turn to turn), its
@@ -41,7 +40,7 @@ public final class ChatRequest {
     /** The top-level keys whose values open the history, in this order, when present. */
     static final List<String> SYSTEM_KEYS = List.of("system", "instructions", "system_instruction", "systemInstruction");
 
-    /** The top-level key a request may inherit from its parent when the values are equal. */
+    /** The top-level key a request inherits from its parent: the prefix hashes cover it, so a parent's is always equal. */
     static final String TOOLS = "tools";
 
     private static final String CACHE_CONTROL = "cache_control";
@@ -49,19 +48,19 @@ public final class ChatRequest {
     private final List<String> canonicalHistory;
     private final List<Marker> markers;
     private final int systemCount;
-    private final UUID toolsHash;
+    private final String tools;
     /** The body without its history keys, kept only when the request was parsed for storing. */
     private final ObjectNode rest;
     private final String arrayKey;
     private final List<String> systemKeys;
 
-    private ChatRequest(List<String> canonicalHistory, List<Marker> markers, List<String> systemKeys, UUID toolsHash,
+    private ChatRequest(List<String> canonicalHistory, List<Marker> markers, List<String> systemKeys, String tools,
                         ObjectNode rest, String arrayKey) {
         this.canonicalHistory = canonicalHistory;
         this.markers = markers;
         this.systemKeys = systemKeys;
         this.systemCount = systemKeys.size();
-        this.toolsHash = toolsHash;
+        this.tools = tools;
         this.rest = rest;
         this.arrayKey = arrayKey;
     }
@@ -80,7 +79,7 @@ public final class ChatRequest {
 
     /**
      * As {@link #parse(JsonMapper, String)}, keeping what {@link #stored} needs only when asked: hashing a request needs
-     * its history and its tools hash alone.
+     * its history and its tools alone.
      *
      * @param forStoring whether {@link #stored} will be called
      */
@@ -133,8 +132,8 @@ public final class ChatRequest {
             JsonNode element = stripMarkers(history.get(i), i, "", markers);
             canonical.add(canonical(element));
         }
-        UUID toolsHash = rest.has(TOOLS) ? PathHash.value(TOOLS, canonical(rest.get(TOOLS))) : null;
-        return new ChatRequest(List.copyOf(canonical), List.copyOf(markers), List.copyOf(systemKeys), toolsHash,
+        String tools = rest.has(TOOLS) ? canonical(rest.get(TOOLS)) : null;
+        return new ChatRequest(List.copyOf(canonical), List.copyOf(markers), List.copyOf(systemKeys), tools,
                 forStoring ? rest : null, forStoring ? arrayKey : null);
     }
 
@@ -148,9 +147,9 @@ public final class ChatRequest {
         return systemCount;
     }
 
-    /** The hash of the request's {@code tools} as canonical JSON, or {@code null} when it carries none. */
-    UUID toolsHash() {
-        return toolsHash;
+    /** The request's {@code tools} as canonical JSON, or {@code null} when it carries none. */
+    String tools() {
+        return tools;
     }
 
     /** The removed {@code cache_control} members, in document order. */
@@ -160,13 +159,12 @@ public final class ChatRequest {
 
     /**
      * The body to store, as canonical JSON: the request with its history cut to the elements from {@code from} on and
-     * its {@code cache_control} markers removed, without the system keys when they are inherited ({@code from > 0}),
-     * and without {@code tools} when {@code omitTools}. Only for a request parsed for storing.
+     * its {@code cache_control} markers removed, and, when it has a parent ({@code from > 0}), without the system keys
+     * and {@code tools} it inherits. Only for a request parsed for storing.
      *
-     * @param from      the parent's depth: 0 for a root, else at least {@link #systemCount()}
-     * @param omitTools whether {@code tools} is inherited from the parent
+     * @param from the parent's depth: 0 for a root, else at least {@link #systemCount()}
      */
-    String stored(int from, boolean omitTools) {
+    String stored(int from) {
         if (from > 0 && from < systemCount) {
             throw new IllegalArgumentException("a parent must cover the whole system part of the history");
         }
@@ -174,10 +172,9 @@ public final class ChatRequest {
         // in as text rather than parsed again.
         Map<String, String> members = new TreeMap<>();
         rest.properties().forEach(entry -> members.put(entry.getKey(), canonical(entry.getValue())));
-        if (omitTools) {
+        if (from > 0) {
             members.remove(TOOLS);
-        }
-        if (from == 0) {
+        } else {
             for (int i = 0; i < systemCount; i++) {
                 members.put(systemKeys.get(i), canonicalHistory.get(i));
             }
@@ -191,12 +188,12 @@ public final class ChatRequest {
     }
 
     /**
-     * The top-level keys {@link #stored} leaves out for a rebuild to put back: the system keys when the parent covers
-     * them, and {@code tools} when inherited.
+     * The top-level keys {@link #stored} leaves out for a rebuild to put back: none for a root ({@code from == 0}),
+     * else the system keys and {@code tools} the request carries.
      */
-    List<String> inherited(int from, boolean omitTools) {
+    List<String> inherited(int from) {
         List<String> keys = new ArrayList<>(from > 0 ? systemKeys : List.of());
-        if (omitTools) {
+        if (from > 0 && tools != null) {
             keys.add(TOOLS);
         }
         return keys;

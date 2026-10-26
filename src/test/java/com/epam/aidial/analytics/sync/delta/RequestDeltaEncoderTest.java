@@ -199,7 +199,7 @@ class RequestDeltaEncoderTest {
 
         flush(mcp, truncated, none);
 
-        assertThat(mcp).doesNotContainKeys("request_path", "request_inherited", "request_tools_hash").containsKey("request_body");
+        assertThat(mcp).doesNotContainKeys("request_path", "request_inherited").containsKey("request_body");
         assertThat(truncated.get("request_body")).isEqualTo("{\"messages\":[{\"role\":\"user\",\"content\":\"cut");
         assertThat(none.get("request_body")).isNull();
         assertThat(outcomes()).containsEntry("whole", 3.0);
@@ -327,8 +327,7 @@ class RequestDeltaEncoderTest {
 
         assertThat(row.get("request_body")).isEqualTo(body);
         assertThat(row.get("request_depth")).isEqualTo(2L);
-        assertThat(row).containsKeys("request_path", "request_tools_hash").doesNotContainKeys("request_parent", "request_inherited");
-        assertThat(row.get("request_tools_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(row).containsKey("request_path").doesNotContainKeys("request_parent", "request_inherited");
         assertThat(table.lookups).hasValue(0);
         assertThat(outcomes()).containsEntry("whole_with_path", 1.0);
     }
@@ -443,13 +442,14 @@ class RequestDeltaEncoderTest {
         assertThat(t2.get("request_inherited")).isEqualTo(List.of("tools"));
         assertThat((String) t2.get("request_body")).doesNotContain("\"tools\"");
         assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
-        assertThat(t3.get("request_tools_hash")).isEqualTo(t1.get("request_tools_hash"));
+        assertThat(t3.get("request_parent")).isEqualTo(t2.get("request_path"));
         assertRebuilds(t2);
         assertRebuilds(t3);
     }
 
+    /** Tools are part of the path: a turn whose tools changed starts a new chain, which later turns link to. */
     @Test
-    void changedToolsAreStoredAgainAndThenInherited() {
+    void changedToolsStartNewChain() {
         Map<String, Object> t1 = row("e1", "10:00:00.000", chat(",\"tools\":[{\"name\":\"a\"}]", "[" + msg("user", "u1") + "]"));
         Map<String, Object> t2 = row("e2", "10:01:00.000", chat(",\"tools\":[{\"name\":\"b\"}]",
                 "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
@@ -460,9 +460,13 @@ class RequestDeltaEncoderTest {
         flush(t2);
         flush(t3);
 
+        assertThat(t2.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(t2.get("request_inherited")).isEqualTo(List.of());
         assertThat((String) t2.get("request_body")).contains("\"name\":\"b\"");
+        assertThat(messages(t2)).hasSize(3);
+        assertThat(t3.get("request_parent")).isEqualTo(t2.get("request_path"));
         assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertRebuilds(t2);
         assertRebuilds(t3);
     }
 
@@ -475,7 +479,7 @@ class RequestDeltaEncoderTest {
         flush(t1);
         flush(t2);
 
-        assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
+        assertThat(t2.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(t2.get("request_inherited")).isEqualTo(List.of());
         assertThat((String) t2.get("request_body")).contains("\"tools\":null");
         assertRebuilds(t2);
@@ -598,11 +602,11 @@ class RequestDeltaEncoderTest {
         for (int i = 0; i < 128; i++) {
             hint.add(new UUID(1, i));
         }
-        ChainNode stored = ChainNode.stored(new UUID(2, 0), new ParentLookup.Found(hint, List.of()));
+        ChainNode stored = ChainNode.stored(new UUID(2, 0), hint);
         ChainNode node = stored;
         List<UUID> written = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
-            node = ChainNode.written(new UUID(3, i), node, null);
+            node = ChainNode.written(new UUID(3, i), node);
             written.add(new UUID(3, i));
         }
 
@@ -612,7 +616,7 @@ class RequestDeltaEncoderTest {
         assertThat(node.lineage(128)).containsExactlyElementsOf(expected);
 
         for (int i = 5; i < 300; i++) {
-            node = ChainNode.written(new UUID(3, i), node, null);
+            node = ChainNode.written(new UUID(3, i), node);
         }
         List<UUID> nearest = node.lineage(128);
         assertThat(nearest).hasSize(128).first().isEqualTo(new UUID(3, 172));
@@ -715,24 +719,19 @@ class RequestDeltaEncoderTest {
         }
 
         @Override
-        public Map<UUID, Found> find(Collection<String> days, Collection<UUID> paths) {
+        public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
             lookups.incrementAndGet();
             Map<UUID, List<UUID>> ancestorsByPath = new HashMap<>();
-            Map<UUID, List<UUID>> toolsByPath = new HashMap<>();
             for (Map<String, Object> row : byEvent.values()) {
                 Object path = row.get("request_path");
                 if (path != null && paths.contains(UUID.fromString((String) path))
                         && days.contains(((String) row.get("request_time")).substring(0, 10))) {
-                    UUID key = UUID.fromString((String) path);
                     @SuppressWarnings("unchecked")
                     List<String> ancestors = (List<String>) row.getOrDefault("request_ancestors", List.of());
-                    ancestorsByPath.put(key, ancestors.stream().map(UUID::fromString).toList());
-                    toolsByPath.computeIfAbsent(key, k -> new ArrayList<>()).add(UUID.fromString((String) row.get("request_tools_hash")));
+                    ancestorsByPath.put(UUID.fromString((String) path), ancestors.stream().map(UUID::fromString).toList());
                 }
             }
-            Map<UUID, Found> found = new HashMap<>();
-            ancestorsByPath.forEach((path, ancestors) -> found.put(path, new Found(ancestors, toolsByPath.get(path))));
-            return found;
+            return ancestorsByPath;
         }
     }
 }

@@ -26,8 +26,8 @@ import java.util.UUID;
  * chat request is stored whole".
  *
  * <p>Runs once per flush of the payload sink, on the batch about to be inserted, after the mapping (and so after the
- * inline-file rewrite). Under {@link RequestBodyMode#WHOLE} it only stamps each chat request with its path, depth and
- * tools hash and keeps the body: a row stored whole then still supplies its path's history, so a delta row that names it as parent
+ * inline-file rewrite). Under {@link RequestBodyMode#WHOLE} it only stamps each chat request with its path and depth
+ * and keeps the body: a row stored whole then still supplies its path's history, so a delta row that names it as parent
  * stays rebuildable when its parent is re-ingested under {@code whole}, and a switch to {@code delta} links onto rows
  * written before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
  * parent the deepest prefix {@code pk}, {@code k < n}, that some stored request carries as its path, looking in order
@@ -39,9 +39,9 @@ import java.util.UUID;
  * parent ever end inside the system part of the history ({@code k} at least the request's system element count), so
  * a stored body either carries all of its system keys or inherits all of them.
  *
- * <p>The stored body is the request with its history cut to the elements after the parent's. Its {@code tools} are
- * left out too when they hash the same as those of a stored row carrying the parent's path; {@code request_inherited}
- * names every key left out, and {@code request_tools_hash} lets a rebuild find the tools again.
+ * <p>The stored body is the request with its history cut to the elements after the parent's. The prefix hashes cover
+ * the {@code tools} too, so a parent always has the child's tools and the child leaves them out; a request whose tools
+ * changed finds no parent and is a root. {@code request_inherited} names every key left out.
  *
  * <p>Finding no parent is not an error: the request is a chain root and costs space only. That includes a table lookup
  * that fails — it is logged and counted, and the requests it would have resolved become roots, so a read problem never
@@ -84,11 +84,10 @@ public final class RequestDeltaEncoder {
     static final String REQUEST_PARENT = "request_parent";
     static final String REQUEST_DEPTH = "request_depth";
     static final String REQUEST_ANCESTORS = "request_ancestors";
-    static final String REQUEST_TOOLS_HASH = "request_tools_hash";
     static final String REQUEST_INHERITED = "request_inherited";
     static final String REQUEST_CACHE_MARKERS = "request_cache_markers";
 
-    /** The all-zero hash: a root's (and a whole body's) parent, and the tools hash of a request without tools. */
+    /** The all-zero hash: a root's (and a whole body's) parent. */
     static final UUID NO_PARENT = new UUID(0L, 0L);
 
     private static final String METER = "ingest.request.delta.rows";
@@ -162,7 +161,7 @@ public final class RequestDeltaEncoder {
             }
             // A row left whole carries its path and supplies its history from the body: a parent like any other, with no
             // parent of its own.
-            ChainNode node = ChainNode.written(item.path(), split ? resolution.parent() : null, item.toolsHash());
+            ChainNode node = ChainNode.written(item.path(), split ? resolution.parent() : null);
             if (written.putIfAbsent(item.path(), node) == null) {
                 learned.add(node);
             }
@@ -195,7 +194,7 @@ public final class RequestDeltaEncoder {
         if (candidates.isEmpty()) {
             return Map.of();
         }
-        Map<UUID, ParentLookup.Found> found;
+        Map<UUID, List<UUID>> found;
         try {
             found = lookup.find(days, candidates);
         } catch (RuntimeException ex) {
@@ -205,7 +204,7 @@ public final class RequestDeltaEncoder {
             return Map.of();
         }
         Map<UUID, ChainNode> stored = new HashMap<>();
-        found.forEach((path, row) -> stored.put(path, ChainNode.stored(path, row)));
+        found.forEach((path, ancestors) -> stored.put(path, ChainNode.stored(path, ancestors)));
         return stored;
     }
 
@@ -266,13 +265,11 @@ public final class RequestDeltaEncoder {
         /** {@code p0..pn}, two longs each, so a hash costs 16 bytes rather than a {@link UUID} object and its slot. */
         private final long[] prefixes;
         private final int systemCount;
-        private final UUID toolsHash;
 
-        private Item(Map<String, Object> row, String time, UUID[] prefixes, int systemCount, UUID toolsHash) {
+        private Item(Map<String, Object> row, String time, UUID[] prefixes, int systemCount) {
             this.row = row;
             this.time = time;
             this.systemCount = systemCount;
-            this.toolsHash = toolsHash;
             this.prefixes = new long[prefixes.length * 2];
             for (int k = 0; k < prefixes.length; k++) {
                 this.prefixes[2 * k] = prefixes[k].getMostSignificantBits();
@@ -290,8 +287,8 @@ public final class RequestDeltaEncoder {
                 return null;
             }
             String scope = scope(row);
-            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.canonicalHistory()),
-                    request.systemCount(), request.toolsHash());
+            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.tools(), request.canonicalHistory()),
+                    request.systemCount());
         }
 
         /**
@@ -340,11 +337,6 @@ public final class RequestDeltaEncoder {
             return prefix(depth());
         }
 
-        /** The request's tools hash, or {@code null} when it carries no tools. */
-        UUID toolsHash() {
-            return toolsHash;
-        }
-
         /** The shallowest depth a parent may have: past the first element, and past the system part of the history. */
         int shallowestParent() {
             return Math.max(1, systemCount);
@@ -361,11 +353,10 @@ public final class RequestDeltaEncoder {
             return false;
         }
 
-        /** Under {@code whole}: the row keeps its body and carries its path, depth and tools hash, and is never linked. */
+        /** Under {@code whole}: the row keeps its body and carries its path and depth, and is never linked. */
         void stampPath() {
             row.put(REQUEST_PATH, path().toString());
             row.put(REQUEST_DEPTH, (long) depth());
-            row.put(REQUEST_TOOLS_HASH, (toolsHash == null ? NO_PARENT : toolsHash).toString());
         }
 
         /**
@@ -386,13 +377,12 @@ public final class RequestDeltaEncoder {
                 }
                 return false;
             }
-            boolean inheritTools = parent != null && toolsHash != null && parent.carriesTools(toolsHash);
             stampPath();
             row.put(REQUEST_PARENT, (parent == null ? NO_PARENT : parent.path()).toString());
             List<UUID> lineage = parent == null ? List.of() : parent.lineage(ANCESTORS_HINT);
             row.put(REQUEST_ANCESTORS, lineage.stream().map(UUID::toString).toList());
-            row.put(REQUEST_BODY, request.stored(parentDepth, inheritTools));
-            row.put(REQUEST_INHERITED, request.inherited(parentDepth, inheritTools));
+            row.put(REQUEST_BODY, request.stored(parentDepth));
+            row.put(REQUEST_INHERITED, request.inherited(parentDepth));
             row.put(REQUEST_CACHE_MARKERS, markers(request));
             return true;
         }

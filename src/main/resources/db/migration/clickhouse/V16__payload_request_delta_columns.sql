@@ -22,17 +22,16 @@
 --     chain scope: a client-supplied id can change or vanish mid-conversation, and would only cut links.
 --
 -- THE CHAIN COLUMNS are 128-bit hashes stored as UUID, so they travel as plain strings in JSONEachRow:
---   * request_path       — hash over the scope, the UTC day and every history element in order; written for every
---                          chat request, whole or not, so a row stored whole can still be a parent;
+--   * request_path       — hash over the scope, the UTC day, the tools and every history element in order; written
+--                          for every chat request, whole or not, so a row stored whole can still be a parent. The
+--                          tools are in it, so a parent always has its child's tools;
 --   * request_parent     — the parent's request_path; all-zero for a chain root and for a body stored whole, whose
 --                          request_body is then the whole request;
 --   * request_depth      — number of history elements of the full request;
 --   * request_ancestors  — the nearest ancestors' paths, root side first: a read hint that lets a rebuild usually read
---                          its chain in one query. The chain itself is request_parent, followed row by row;
---   * request_tools_hash — hash of the request's tools, all-zero when it has none; what a child compares to inherit
---                          them, and what a rebuild looks them up by.
+--                          its chain in one query. The chain itself is request_parent, followed row by row.
 -- request_inherited names the top-level keys request_body leaves out for a rebuild to put back: the system keys, whose
--- values open the parent's history, and tools when equal to the parent's.
+-- values open the parent's history, and tools, which the chain's root stores.
 -- These are hidden from the catalog; it exposes request_cache_markers only (Postgres migration of this change).
 --
 -- THE SKIP INDEX serves the parent lookup, which asks for request_path values within one daily partition. The
@@ -60,7 +59,6 @@ ALTER TABLE dial_usage_log_payload
     ADD COLUMN IF NOT EXISTS request_parent UUID,
     ADD COLUMN IF NOT EXISTS request_depth UInt32,
     ADD COLUMN IF NOT EXISTS request_ancestors Array(UUID) CODEC(ZSTD(3)),
-    ADD COLUMN IF NOT EXISTS request_tools_hash UUID,
     ADD COLUMN IF NOT EXISTS request_inherited Array(LowCardinality(String)),
     ADD COLUMN IF NOT EXISTS request_cache_markers Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV),
     ADD INDEX IF NOT EXISTS idx_request_path request_path TYPE bloom_filter(0.001) GRANULARITY 1;
