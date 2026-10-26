@@ -14,11 +14,22 @@ public interface ParentLookup {
 
     /**
      * Returns, for each of {@code paths} stored on one of {@code days}, the {@code request_ancestors} of one row
-     * carrying it. Any row is as good as another: every row carrying a path rebuilds to the same history.
+     * carrying it and the {@code request_tools_hash} values of the rows carrying it. Any row is as good as another for
+     * the history: every row carrying a path rebuilds to the same one. The tools may differ between such rows, so all
+     * their hashes are returned.
      *
      * @param days  the UTC days ({@code yyyy-MM-dd}) the candidates were hashed under
      * @param paths the candidate paths
-     * @return the paths found, each with its stored ancestors (root first)
+     * @return the paths found
      */
-    Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths);
+    Map<UUID, Found> find(Collection<String> days, Collection<UUID> paths);
+
+    /**
+     * A stored path.
+     *
+     * @param ancestors  the stored ancestors of one row carrying it, root first
+     * @param toolsHashes the tools hashes of the rows carrying it; the all-zero hash stands for a row without tools
+     */
+    record Found(List<UUID> ancestors, List<UUID> toolsHashes) {
+    }
 }

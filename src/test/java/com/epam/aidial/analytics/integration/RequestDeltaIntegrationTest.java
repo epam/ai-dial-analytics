@@ -30,13 +30,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Request-delta storage against a real ClickHouse: the {@code V16} columns and skip index, the parent lookup
  * {@link ClickHouseParentLookup} issues (chunked, pruned to the day, through the path index), cold encoders — a
  * restart, or another instance — linking to parents they only find in the table, re-ingest and mode switches leaving
- * every row rebuildable under a deduplicated read, and the catalog exposing the three content columns while hiding the
- * chain columns.
+ * every row rebuildable under a deduplicated read, tools inherited through the table, and the catalog exposing the
+ * cache markers while hiding the chain columns.
  */
 class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     private static final String PAYLOAD = "dial_usage_log_payload";
-    private static final String SCOPE = "00000000-0000-4000-8000-0000000000aa";
+    private static final String USER = "user-aa";
 
     /** Stands for SQL NULL in a read, since the rows come back as strings. */
     private static final String NULL = "<null>";
@@ -52,8 +52,9 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void theMigrationAddsTheColumnsAndThePathIndex() {
         assertThat(showCreateTable(PAYLOAD))
-                .contains("`request_scope` UUID", "`request_path` UUID", "`request_parent` UUID", "`request_depth` UInt32",
-                        "`request_ancestors` Array(UUID)", "`request_envelope` Nullable(String)", "`request_delta` Nullable(String)",
+                .contains("`project_id` LowCardinality(String)", "`deployment` LowCardinality(String)", "`user_hash` String",
+                        "`session_id` Nullable(String)", "`request_path` UUID", "`request_parent` UUID", "`request_depth` UInt32",
+                        "`request_ancestors` Array(UUID)", "`request_tools_hash` UUID", "`request_inherited` Array(LowCardinality(String))",
                         "`request_cache_markers` Nullable(String)", "INDEX idx_request_path request_path TYPE bloom_filter(0.001) GRANULARITY 1");
     }
 
@@ -70,9 +71,8 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         assertThat(second.get("request_parent")).isEqualTo(first.get("request_path"));
         assertThat(third.get("request_parent")).isEqualTo(second.get("request_path"));
         assertThat(third.get("request_ancestors")).isEqualTo(List.of(first.get("request_path"), second.get("request_path")));
-        assertThat(queryScalar("SELECT request_delta FROM " + PAYLOAD + " WHERE trace_id = 't3' SETTINGS final = 1", "request_delta"))
-                .isEqualTo("[{\"content\":\"a2\",\"role\":\"assistant\"},{\"content\":\"u3\",\"role\":\"user\"}]");
-        assertThat(queryScalar("SELECT toString(request_body IS NULL) AS n FROM " + PAYLOAD + " WHERE trace_id = 't3'", "n")).isEqualTo("1");
+        assertThat(queryScalar("SELECT request_body FROM " + PAYLOAD + " WHERE trace_id = 't3' SETTINGS final = 1", "request_body"))
+                .isEqualTo("{\"messages\":[{\"content\":\"a2\",\"role\":\"assistant\"},{\"content\":\"u3\",\"role\":\"user\"}],\"model\":\"m\"}");
         assertThat(queryScalar("SELECT arrayStringConcat(arrayMap(x -> toString(x), request_ancestors), ',') AS a FROM " + PAYLOAD
                 + " WHERE trace_id = 't3'", "a")).isEqualTo(first.get("request_path") + "," + second.get("request_path"));
     }
@@ -85,7 +85,8 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         ClickHouseParentLookup lookup = new ClickHouseParentLookup(writer, PAYLOAD);
 
         assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path, UUID.randomUUID()))).containsOnlyKeys(path);
-        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path)).isEmpty();
+        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path).ancestors()).isEmpty();
+        assertThat(lookup.find(List.of(FIXTURE_DATE), List.of(path)).get(path).toolsHashes()).containsExactly(new UUID(0, 0));
         assertThat(lookup.find(List.of("2001-01-01"), List.of(path))).isEmpty();
     }
 
@@ -147,14 +148,14 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         lateYesterday.put("request_time", LocalDate.parse(FIXTURE_DATE).minusDays(1) + " 23:58:00.000");
         write(newEncoder(), lateYesterday);
         Map<String, Object> otherUser = row("t2", "00:01:00.000", first);
-        otherUser.put("request_scope", "00000000-0000-4000-8000-0000000000bb");
+        otherUser.put("user_hash", "user-bb");
         write(newEncoder(), otherUser);
 
         Map<String, Object> earlyToday = row("t3", "00:03:00.000", messages("user:u1", "assistant:a1", "user:u2"));
         write(newEncoder(), earlyToday);
 
         assertThat(earlyToday.get("request_parent")).isEqualTo(new UUID(0, 0).toString());
-        assertThat(Rebuild.MAPPER.readTree((String) earlyToday.get("request_delta"))).hasSize(3);
+        assertThat(Rebuild.MAPPER.readTree((String) earlyToday.get("request_body")).get("messages")).hasSize(3);
     }
 
     @Test
@@ -171,7 +172,6 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
 
         assertThat(rows.get("t1").get("request_body")).isNotNull();
         assertThat(rows.get("t2").get("request_body")).isNotNull();
-        assertThat(rows.get("t3").get("request_body")).isNull();
         assertThat(rows.get("t3").get("request_parent")).isEqualTo(rows.get("t2").get("request_path"));
         assertRebuilds(rows, "t3", historyC);
     }
@@ -199,18 +199,35 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         }
     }
 
+    /** A cold encoder finds the parent's tools hash in the table, leaves the tools out, and the rebuild finds them again. */
     @Test
-    void theCatalogExposesTheContentColumnsAsSensitiveAndHeavyAndHidesTheChain() throws Exception {
+    void toolsAreInheritedThroughTheTable() {
+        String tools = ",\"tools\":[{\"name\":\"search\"}]";
+        write(newEncoder(), row("t1", "10:00:00.000", messages("user:u1"), tools));
+        Map<String, Object> second = row("t2", "10:01:00.000", messages("user:u1", "assistant:a1", "user:u2"), tools);
+        write(newEncoder(), second);
+
+        Map<String, Map<String, Object>> rows = storedRows();
+
+        assertThat(rows.get("t2").get("request_inherited")).isEqualTo(List.of("tools"));
+        assertThat((String) rows.get("t2").get("request_body")).doesNotContain("\"tools\"");
+        assertThat(Rebuild.canonical(Rebuild.body(rows.get("t2"), rows.values())))
+                .isEqualTo(Rebuild.canonical(body(messages("user:u1", "assistant:a1", "user:u2"), tools)));
+    }
+
+    @Test
+    void theCatalogExposesTheCacheMarkersAsSensitiveAndHeavyAndHidesTheChain() throws Exception {
         mockMvc.perform(get("/v1/tables/" + PAYLOAD))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns[?(@.name == 'request_envelope')].sensitive").value(hasItem(true)))
-                .andExpect(jsonPath("$.columns[?(@.name == 'request_delta')].heavy").value(hasItem(true)))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].sensitive").value(hasItem(true)))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].heavy").value(hasItem(true)))
                 .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].nullable").value(hasItem(true)))
                 .andExpect(jsonPath("$.columns[*].name", not(hasItem("request_path"))))
+                .andExpect(jsonPath("$.columns[*].name", not(hasItem("request_inherited"))))
                 .andExpect(jsonPath("$.columns[*].name", not(hasItem("request_ancestors"))));
         mockMvc.perform(get("/v1/queries/entities/schema/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$..name", hasItem("dial_usage_log_payload.request_delta")))
+                .andExpect(jsonPath("$..name", hasItem("dial_usage_log_payload.request_cache_markers")))
                 .andExpect(jsonPath("$..name", not(hasItem("dial_usage_log_payload.request_parent"))));
     }
 
@@ -236,19 +253,23 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     /** Every payload row of the test, as a deduplicated read sees it, keyed by trace id. */
     private Map<String, Map<String, Object>> storedRows() {
-        List<String> columns = List.of("request_path", "request_parent", "request_body", "request_envelope", "request_delta",
-                "request_cache_markers");
+        List<String> columns = List.of("request_path", "request_parent", "request_body", "request_cache_markers", "request_tools_hash",
+                "project_id", "user_hash", "request_time");
         Map<String, Map<String, Object>> rows = new HashMap<>();
         for (GenericRecord record : writer.query("SELECT trace_id, toString(request_path) AS request_path,"
                 + " toString(request_parent) AS request_parent, ifNull(request_body, '" + NULL + "') AS request_body,"
-                + " ifNull(request_envelope, '" + NULL + "') AS request_envelope, ifNull(request_delta, '" + NULL + "') AS request_delta,"
-                + " ifNull(request_cache_markers, '" + NULL + "') AS request_cache_markers"
+                + " ifNull(request_cache_markers, '" + NULL + "') AS request_cache_markers,"
+                + " toString(request_tools_hash) AS request_tools_hash, project_id, user_hash,"
+                + " formatDateTime(request_time, '%Y-%m-%d %H:%i:%s') AS request_time,"
+                + " arrayStringConcat(request_inherited, ',') AS request_inherited"
                 + " FROM " + PAYLOAD + " SETTINGS final = 1", Map.of())) {
             Map<String, Object> row = new HashMap<>();
             for (String column : columns) {
                 String value = record.getString(column);
                 row.put(column, NULL.equals(value) ? null : value);
             }
+            String inherited = record.getString("request_inherited");
+            row.put("request_inherited", inherited.isEmpty() ? List.of() : List.of(inherited.split(",")));
             rows.put(record.getString("trace_id"), row);
         }
         return rows;
@@ -260,18 +281,29 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     private static Map<String, Object> row(String traceId, String timeOfDay, String messages) {
+        return row(traceId, timeOfDay, messages, "");
+    }
+
+    private static Map<String, Object> row(String traceId, String timeOfDay, String messages, String members) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("event_id", eventIdFor(traceId));
         row.put("request_time", fixtureTime(timeOfDay));
         row.put("trace_id", traceId);
         row.put("core_span_id", "s-" + traceId);
-        row.put("request_body", body(messages));
-        row.put("request_scope", SCOPE);
+        row.put("request_body", body(messages, members));
+        row.put("project_id", "project-1");
+        row.put("deployment", "deployment-1");
+        row.put("user_hash", USER);
         return row;
     }
 
     private static String body(String messages) {
-        return "{\"model\":\"m\",\"messages\":" + messages + "}";
+        return body(messages, "");
+    }
+
+    /** A chat body with {@code members} (each with its leading comma) between the model and the messages. */
+    private static String body(String messages, String members) {
+        return "{\"model\":\"m\"" + members + ",\"messages\":" + messages + "}";
     }
 
     /** A JSON message array from {@code role:content} pairs. */

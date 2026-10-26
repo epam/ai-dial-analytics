@@ -146,7 +146,7 @@ then read only the days the value occurs on instead of all of history.
 | Postgres `V47` | Adds `enrichment_relayout`: the progress and writer hold of the automatic relayout (§3). |
 | ClickHouse `V16` | Adds the request-delta columns and the `idx_request_path` skip index to `dial_usage_log_payload`. Metadata-only; existing rows read the defaults. |
 | Postgres `V48` | Drops the evaluator archive (`evaluator`, `evaluator_version`), `pipeline.evaluator_name` / `evaluator_version` and their `pipeline_aud` mirrors, and `rule_legacy` / `rule_legacy_aud`. Keeps `pipeline.legacy_rule_id`, which 0.3 still maps; the next release drops it. |
-| Postgres `V50` | Registers `request_envelope`, `request_delta` and `request_cache_markers` on `dial_usage_log_payload`, sensitive and heavy. |
+| Postgres `V50` | Registers `request_cache_markers` on `dial_usage_log_payload`, sensitive and heavy, and extends the seeded `request_body` description. |
 
 The relayout itself is runtime DDL, not a migration: it runs after startup, off the probe path.
 
@@ -178,7 +178,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
-| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A chat request's `request_body` reads `NULL`; its envelope and new messages are in `request_envelope` / `request_delta` | Only when you set `delta`: move readers of the message history to the new columns (§7) |
+| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's | Only when you set `delta`: check readers that need a later turn's whole history or tools (§7) |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
@@ -192,9 +192,9 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 - `SYNC_INLINE_FILES_MAX_SIZE` (default unset) — remove inline files whose stored base64 is longer than this size
   (`256KB`, `1MB`; `0` removes all). An earlier `SYNC_INLINE_FILES_MODE` no longer exists and is ignored if left set:
   replace `keep` with `SYNC_INLINE_FILES_DROP_TRUNCATED=false` and `drop` with `SYNC_INLINE_FILES_MAX_SIZE=0`.
-- `SYNC_REQUEST_BODY_MODE` (default `whole`) — `whole` or `delta`. `delta` stores a chat request as its envelope, the
-  messages its previous turn did not have, and a link to that turn, so repeated conversation history is not stored again;
-  `request_body` is then `NULL` for it. See [`heavy-columns.md`](heavy-columns.md#request-bodies-in-delta-form). Under
+- `SYNC_REQUEST_BODY_MODE` (default `whole`) — `whole` or `delta`. `delta` stores a chat request with only the
+  messages its previous turn did not have, without the tools that turn has, and a link to that turn, so repeated
+  conversation history is not stored again. See [`heavy-columns.md`](heavy-columns.md#request-bodies-in-delta-form). Under
   `whole` nothing changes for readers. **Once `delta` has been on, do not re-ingest those days with a build older than
   0.4:** it writes rows without the hidden chain columns, and the later turns that link to them can no longer be
   rebuilt. For the same reason, set `delta` only once no pre-0.4 pod is left ingesting. Switching back to `whole` on 0.4

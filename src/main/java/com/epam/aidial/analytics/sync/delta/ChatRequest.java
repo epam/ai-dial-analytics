@@ -10,30 +10,28 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.UUID;
 
 /**
- * A request body split into the parts delta storage keeps apart: its <b>history</b> (the elements that repeat from
- * turn to turn) and its <b>envelope</b> (everything else). Specified in {@code openspec/specs/data-sync/spec.md},
- * "A chat request body is stored as an envelope, a delta and a parent link".
+ * A request body as delta storage sees it: its <b>history</b> (the elements that repeat from turn to turn), its
+ * {@code tools} (which usually repeat too) and the rest. Specified in {@code openspec/specs/data-sync/spec.md}, "A chat
+ * request body is stored as its new history and a parent link".
  *
  * <p>A body is a chat request when it parses as a JSON object carrying a message array — an array whose elements are
- * all JSON objects — under the first present of {@link #MESSAGE_ARRAY_KEYS}, and does not already carry a member named
- * {@link #HISTORY_KEY}. Requiring object elements keeps an embeddings request out: its {@code input} array holds
- * strings or token arrays, not messages. Its history is the value of each present {@link #SYSTEM_KEYS top-level system key},
- * in that order, then the array's elements. Every {@code cache_control} member inside the history is removed and
- * recorded as a {@link #markers() marker}, because clients move that marker to the newest message on each turn: left
- * in, the same earlier message would canonicalize differently on every turn and no turn would find its parent.
+ * all JSON objects — under the first present of {@link #MESSAGE_ARRAY_KEYS}. Requiring object elements keeps an
+ * embeddings request out: its {@code input} array holds strings or token arrays, not messages. Its history is the value
+ * of each present {@link #SYSTEM_KEYS top-level system key}, in that order, then the array's elements. Every
+ * {@code cache_control} member inside the history is removed and recorded as a {@link #markers() marker}, because
+ * clients move that marker to the newest message on each turn: left in, the same earlier message would canonicalize
+ * differently on every turn and no turn would find its parent.
  *
- * <p>Each history element and the envelope are rendered as <b>canonical JSON</b>: object members sorted by name, no
+ * <p>Each history element and the stored body are rendered as <b>canonical JSON</b>: object members sorted by name, no
  * insignificant whitespace, numbers as parsed (floats kept exact as decimals), and an unpaired surrogate written as its
  * backslash-u escape. That last rule is load-bearing: a client that cuts a string inside an emoji sends a lone
  * surrogate escape, parsing turns it into a lone {@code char}, and written back raw it would reach ClickHouse as an
- * escape the server refuses, failing the insert on every retry, or as bytes that are not UTF-8. The canonical form is what the prefix
- * hashes cover, so it is only required to be stable within a release: a different form after an upgrade makes the
- * first request of each conversation a chain root, and breaks nothing.
- *
- * <p>The envelope records under {@link #HISTORY_KEY} which keys the history came from, so the body can be reassembled
- * with each part under its original key.
+ * escape the server refuses, failing the insert on every retry, or as bytes that are not UTF-8. The canonical form is
+ * what the prefix hashes cover, so it is only required to be stable within a release: a different form after an upgrade
+ * makes the first request of each conversation a chain root, and breaks nothing.
  */
 public final class ChatRequest {
 
@@ -43,42 +41,50 @@ public final class ChatRequest {
     /** The top-level keys whose values open the history, in this order, when present. */
     static final List<String> SYSTEM_KEYS = List.of("system", "instructions", "system_instruction", "systemInstruction");
 
-    /** The envelope member recording where the history came from. */
-    static final String HISTORY_KEY = "__adas_history";
+    /** The top-level key a request may inherit from its parent when the values are equal. */
+    static final String TOOLS = "tools";
 
     private static final String CACHE_CONTROL = "cache_control";
 
     private final List<String> canonicalHistory;
-    private final String canonicalEnvelope;
     private final List<Marker> markers;
+    private final int systemCount;
+    private final UUID toolsHash;
+    /** The body without its history keys, kept only when the request was parsed for storing. */
+    private final ObjectNode rest;
+    private final String arrayKey;
+    private final List<String> systemKeys;
 
-    private ChatRequest(List<String> canonicalHistory, String canonicalEnvelope, List<Marker> markers) {
+    private ChatRequest(List<String> canonicalHistory, List<Marker> markers, List<String> systemKeys, UUID toolsHash,
+                        ObjectNode rest, String arrayKey) {
         this.canonicalHistory = canonicalHistory;
-        this.canonicalEnvelope = canonicalEnvelope;
         this.markers = markers;
+        this.systemKeys = systemKeys;
+        this.systemCount = systemKeys.size();
+        this.toolsHash = toolsHash;
+        this.rest = rest;
+        this.arrayKey = arrayKey;
     }
 
     /**
      * Splits a request body, or returns {@code null} when it is not a chat request — not JSON (a body truncated at
-     * 4 MiB included), not an object, carrying no message array, or already carrying {@link #HISTORY_KEY} — and is
-     * therefore stored whole.
+     * 4 MiB included), not an object, or carrying no message array — and is therefore stored whole.
      *
      * @param mapper a mapper that reads floats as {@code BigDecimal}, so canonical numbers are exact
      * @param body   the request body as ingest is about to store it
-     * @return the split request, envelope rendered, or {@code null}
+     * @return the split request, ready for {@link #stored}, or {@code null}
      */
     static ChatRequest parse(JsonMapper mapper, String body) {
         return parse(mapper, body, true);
     }
 
     /**
-     * As {@link #parse(JsonMapper, String)}, rendering the envelope only when asked: hashing a request needs its
-     * history alone. The envelope is rendered to its canonical string here, never kept as a tree, so a split request
-     * holds text only.
+     * As {@link #parse(JsonMapper, String)}, keeping what {@link #stored} needs only when asked: hashing a request needs
+     * its history and its tools hash alone.
      *
-     * @param renderEnvelope whether {@link #canonicalEnvelope()} is wanted; when not, it returns {@code null}
+     * @param forStoring whether {@link #stored} will be called
      */
-    static ChatRequest parse(JsonMapper mapper, String body, boolean renderEnvelope) {
+    static ChatRequest parse(JsonMapper mapper, String body, boolean forStoring) {
         if (body == null || body.isBlank()) {
             return null;
         }
@@ -98,7 +104,7 @@ public final class ChatRequest {
                 break;
             }
         }
-        if (arrayKey == null || object.has(HISTORY_KEY)) {
+        if (arrayKey == null) {
             return null;
         }
         for (JsonNode element : (ArrayNode) object.get(arrayKey)) {
@@ -107,23 +113,19 @@ public final class ChatRequest {
             }
         }
         // A shallow copy: the history keys are taken off it, and no child node is ever modified.
-        ObjectNode envelope = JsonNodeFactory.instance.objectNode();
-        envelope.setAll(object);
+        ObjectNode rest = JsonNodeFactory.instance.objectNode();
+        rest.setAll(object);
         List<JsonNode> history = new ArrayList<>();
-        ArrayNode systemKeys = JsonNodeFactory.instance.arrayNode();
+        List<String> systemKeys = new ArrayList<>();
         for (String key : SYSTEM_KEYS) {
-            if (envelope.has(key)) {
-                history.add(envelope.remove(key));
+            if (rest.has(key)) {
+                history.add(rest.remove(key));
                 systemKeys.add(key);
             }
         }
-        for (JsonNode element : (ArrayNode) envelope.remove(arrayKey)) {
+        for (JsonNode element : (ArrayNode) rest.remove(arrayKey)) {
             history.add(element);
         }
-        ObjectNode source = JsonNodeFactory.instance.objectNode();
-        source.put("array", arrayKey);
-        source.set("system", systemKeys);
-        envelope.set(HISTORY_KEY, source);
 
         List<Marker> markers = new ArrayList<>();
         List<String> canonical = new ArrayList<>(history.size());
@@ -131,7 +133,9 @@ public final class ChatRequest {
             JsonNode element = stripMarkers(history.get(i), i, "", markers);
             canonical.add(canonical(element));
         }
-        return new ChatRequest(List.copyOf(canonical), renderEnvelope ? canonical(envelope) : null, List.copyOf(markers));
+        UUID toolsHash = rest.has(TOOLS) ? PathHash.value(TOOLS, canonical(rest.get(TOOLS))) : null;
+        return new ChatRequest(List.copyOf(canonical), List.copyOf(markers), List.copyOf(systemKeys), toolsHash,
+                forStoring ? rest : null, forStoring ? arrayKey : null);
     }
 
     /** The history elements, each as canonical JSON with its {@code cache_control} members removed. */
@@ -139,17 +143,63 @@ public final class ChatRequest {
         return canonicalHistory;
     }
 
-    /**
-     * The envelope as canonical JSON: the body without its history keys, plus {@link #HISTORY_KEY}; {@code null} when
-     * the request was parsed without it.
-     */
-    String canonicalEnvelope() {
-        return canonicalEnvelope;
+    /** How many history elements come from top-level system keys; they open the history. */
+    int systemCount() {
+        return systemCount;
+    }
+
+    /** The hash of the request's {@code tools} as canonical JSON, or {@code null} when it carries none. */
+    UUID toolsHash() {
+        return toolsHash;
     }
 
     /** The removed {@code cache_control} members, in document order. */
     List<Marker> markers() {
         return markers;
+    }
+
+    /**
+     * The body to store, as canonical JSON: the request with its history cut to the elements from {@code from} on and
+     * its {@code cache_control} markers removed, without the system keys when they are inherited ({@code from > 0}),
+     * and without {@code tools} when {@code omitTools}. Only for a request parsed for storing.
+     *
+     * @param from      the parent's depth: 0 for a root, else at least {@link #systemCount()}
+     * @param omitTools whether {@code tools} is inherited from the parent
+     */
+    String stored(int from, boolean omitTools) {
+        if (from > 0 && from < systemCount) {
+            throw new IllegalArgumentException("a parent must cover the whole system part of the history");
+        }
+        // Member name -> canonical value text. The history elements are canonical text already, so they are spliced
+        // in as text rather than parsed again.
+        Map<String, String> members = new TreeMap<>();
+        rest.properties().forEach(entry -> members.put(entry.getKey(), canonical(entry.getValue())));
+        if (omitTools) {
+            members.remove(TOOLS);
+        }
+        if (from == 0) {
+            for (int i = 0; i < systemCount; i++) {
+                members.put(systemKeys.get(i), canonicalHistory.get(i));
+            }
+        }
+        int first = Math.max(from, systemCount);
+        members.put(arrayKey, "[" + String.join(",", canonicalHistory.subList(first, canonicalHistory.size())) + "]");
+        StringBuilder out = new StringBuilder("{");
+        members.forEach((name, value) -> out.append(out.length() > 1 ? "," : "")
+                .append(canonical(JsonNodeFactory.instance.stringNode(name))).append(':').append(value));
+        return out.append('}').toString();
+    }
+
+    /**
+     * The top-level keys {@link #stored} leaves out for a rebuild to put back: the system keys when the parent covers
+     * them, and {@code tools} when inherited.
+     */
+    List<String> inherited(int from, boolean omitTools) {
+        List<String> keys = new ArrayList<>(from > 0 ? systemKeys : List.of());
+        if (omitTools) {
+            keys.add(TOOLS);
+        }
+        return keys;
     }
 
     /**

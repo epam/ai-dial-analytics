@@ -41,7 +41,8 @@
 # collapse to the latest on a final=1 read. The other unmapped columns are the request-delta columns of V16, which
 # the payload sink fills at flush under sync.request-body-mode=delta (RequestDeltaEncoder) and which otherwise keep
 # their defaults. request_body is the one mapped column that sink rewrites: for a chat request in delta form it is
-# written NULL, its content moved to request_envelope / request_delta / request_cache_markers.
+# cut to the history its parent did not have, without the tools it shares with it, and its cache_control markers move
+# to request_cache_markers.
 #
 # Override the active targets/mappings via sync.targets (see docs/configuration.md).
 
@@ -100,11 +101,23 @@ columns:
     kind: string
     nullable: true
     inline-files: { body: response, uri: request.uri }
-  # The chain scope of the request body (ClickHouse V16): a hash of the record's project, deployment and user —
-  # the same three values its dial_usage_log row carries. Under sync.request-body-mode=delta a request's parent is
-  # looked up only within this scope and the request's UTC day, so a chain never links two users' histories. Written
-  # on every row, whatever the mode, so the scope never depends on configuration.
-  - column: request_scope
-    derive: hash-uuid
-    sources: [project.id, deployment, user.id]
+  # Who and where (ClickHouse V16), the same values the record's dial_usage_log row carries. project_id and user_hash
+  # are the chain scope of the request body: under sync.request-body-mode=delta a request's parent is looked up only
+  # among the same project's and user's requests of its UTC day, so a chain never links two users' histories. With
+  # deployment and session_id they are also what a session-ordered sort key of this table would be built from.
+  # Written on every row, whatever the mode.
+  - column: project_id
+    source: project.id
     kind: string
+  - column: deployment
+    source: deployment
+    kind: string
+  - column: user_hash
+    source: user.id
+    kind: string
+  # The client's session id, as DIAL Core resolves it from its configured conversation-id headers. Absent from older
+  # logs and whenever no such header was sent, hence nullable. A client-supplied value: never a scope on its own.
+  - column: session_id
+    source: session.id
+    kind: string
+    nullable: true

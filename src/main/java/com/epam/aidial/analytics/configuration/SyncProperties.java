@@ -42,7 +42,7 @@ import java.util.List;
  * @param inlineFilesMaxSize    the longest inline-file payload a body column declaring {@code inline-files} keeps, measured in
  *                              characters (bytes, for base64) of its stored text; a longer one is removed. {@code null}
  *                              (unset or blank) means no limit, and a negative value fails binding, and so startup
- * @param requestBodyMode       how a payload row's request body is stored: whole, or as envelope + delta + parent link for a chat
+ * @param requestBodyMode       how a payload row's request body is stored: whole, or cut to its new history + parent link for a chat
  *                              request; {@code null} (unset) means {@link RequestBodyMode#WHOLE}. An unknown value fails binding, and so startup
  */
 @Validated

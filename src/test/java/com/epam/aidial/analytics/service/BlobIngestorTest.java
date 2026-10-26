@@ -144,8 +144,11 @@ class BlobIngestorTest {
                 assertThat(dial).as("dial." + column).doesNotContainKey(column);
             }
         }
-        // The payload row carries only what the payload table declares — no analytic columns leak in.
-        assertThat(payloadRows.getFirst()).doesNotContainKeys("project_id", "deployment", "total_tokens");
+        // The payload row carries only what the payload table declares — no analytic columns leak in. The identity
+        // columns it does declare carry the usage-log row's values.
+        assertThat(payloadRows.getFirst()).doesNotContainKeys("chat_id", "total_tokens", "total_price");
+        assertThat(payloadRows.getFirst().get("project_id")).isEqualTo(dialRows.getFirst().get("project_id"));
+        assertThat(payloadRows.getFirst().get("deployment")).isEqualTo(dialRows.getFirst().get("deployment"));
     }
 
     /**

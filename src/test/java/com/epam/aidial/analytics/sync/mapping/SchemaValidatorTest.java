@@ -102,7 +102,7 @@ class SchemaValidatorTest {
 
     /**
      * The live dial_usage_log_payload schema (matches
-     * db/migration/clickhouse/V10__create_dial_usage_log_payload.sql, codecs stripped, plus the request_scope V16 adds).
+     * db/migration/clickhouse/V10__create_dial_usage_log_payload.sql, codecs stripped, plus the identity columns V16 adds).
      */
     private static Map<String, String> payloadLiveSchema() {
         Map<String, String> table = new LinkedHashMap<>();
@@ -118,7 +118,10 @@ class SchemaValidatorTest {
         table.put("request_body", "Nullable(String)");
         table.put("response_body", "Nullable(String)");
         table.put("assembled_response", "Nullable(String)");
-        table.put("request_scope", "UUID");
+        table.put("project_id", "LowCardinality(String)");
+        table.put("deployment", "LowCardinality(String)");
+        table.put("user_hash", "String");
+        table.put("session_id", "Nullable(String)");
         return table;
     }
 

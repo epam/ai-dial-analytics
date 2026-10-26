@@ -43,8 +43,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 // five columns to every enrichment created through the API. That is why this filters
                 // rather than asserting the 39-field total the pre-split test could safely assert.
                 .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(36)))
-                // The five that moved and the three request-delta columns (V50), under the qualified names the grain join publishes them at.
-                .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(8)))
+                // The five that moved and the cache markers (V50), under the qualified names the grain join publishes them at.
+                .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(6)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].type", contains("uuid")))
                 // field types are surfaced per the schema (filtered by name to stay order-independent).
                 .andExpect(jsonPath("$.fields[?(@.name=='project_id')].type", contains("string")))
@@ -91,8 +91,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='total_tokens')].tag", contains("token-usage")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].tag", contains("cost")))
                 // Column descriptions backfilled by the migration are surfaced on the flat schema, and
-                // every one of the 44 columns (36 own, 8 payload) carries a non-empty description.
-                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(44)))
+                // every one of the 42 columns (36 own, 6 payload) carries a non-empty description.
+                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(42)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].description",

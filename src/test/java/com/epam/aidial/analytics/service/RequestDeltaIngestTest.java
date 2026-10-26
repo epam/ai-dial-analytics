@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.blob.TestBlobSpans;
 import com.epam.aidial.analytics.configuration.BlobProperties;
 import com.epam.aidial.analytics.configuration.SyncProperties;
 import com.epam.aidial.analytics.sync.LogParser;
+import com.epam.aidial.analytics.sync.delta.Rebuild;
 import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import com.epam.aidial.analytics.sync.mapping.DeriverRegistry;
@@ -33,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * End to end through {@link BlobIngestor} under {@code sync.request-body-mode}: the payload target's sink stores a
- * chat request's follow-up turn as envelope + delta + parent link and leaves an MCP body whole, while the usage-log
+ * chat request's follow-up turn as its new messages + parent link and leaves an MCP body whole, while the usage-log
  * rows still describe the bodies as sent. Under {@code whole} nothing changes.
  */
 class RequestDeltaIngestTest {
@@ -49,7 +50,7 @@ class RequestDeltaIngestTest {
     private static final String MCP = "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}";
 
     @Test
-    void deltaStoresTheFollowUpAsDeltaAndLeavesOtherBodiesWhole(@TempDir Path baseDir) throws Exception {
+    void deltaStoresTheFollowUpCutAndLeavesOtherBodiesWhole(@TempDir Path baseDir) throws Exception {
         writeBlob(baseDir);
 
         List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.DELTA).rowsFor("dial_usage_log_payload");
@@ -57,16 +58,16 @@ class RequestDeltaIngestTest {
         assertThat(payload).hasSize(3);
         Map<String, Object> first = payload.get(0);
         Map<String, Object> second = payload.get(1);
-        assertThat(first.get("request_body")).isNull();
-        assertThat(second.get("request_body")).isNull();
+        assertThat(Rebuild.canonical((String) first.get("request_body"))).isEqualTo(Rebuild.canonical(TURN_1));
         assertThat(second.get("request_parent")).isEqualTo(first.get("request_path"));
-        assertThat(second.get("request_delta"))
-                .isEqualTo("[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}]");
-        assertThat((String) second.get("request_envelope")).contains("\"model\":\"m\"");
+        assertThat(second.get("request_body"))
+                .isEqualTo("{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
         assertThat(payload.get(2).get("request_body")).isEqualTo(MCP);
         assertThat(payload.get(2)).doesNotContainKey("request_path");
-        // The scope is written on every row, whatever the mode or body.
-        assertThat(payload).allSatisfy(row -> assertThat(row.get("request_scope")).isEqualTo(first.get("request_scope")));
+        // The identity columns are written on every row, whatever the mode or body; the session only when Core sent one.
+        assertThat(payload).allSatisfy(row -> assertThat(row).containsEntry("project_id", "p").containsEntry("deployment", "d")
+                .containsEntry("user_hash", "user-1"));
+        assertThat(payload).extracting(row -> row.get("session_id")).containsExactly("s-1", "s-1", null);
     }
 
     @Test
@@ -86,13 +87,13 @@ class RequestDeltaIngestTest {
         List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.WHOLE).rowsFor("dial_usage_log_payload");
 
         assertThat(payload).extracting(row -> row.get("request_body")).containsExactly(TURN_1, TURN_2, MCP);
-        assertThat(payload).allSatisfy(row -> assertThat(row).doesNotContainKeys("request_parent", "request_delta", "request_envelope"));
+        assertThat(payload).allSatisfy(row -> assertThat(row).doesNotContainKeys("request_parent", "request_inherited"));
         // A chat row stored whole still carries its path, so it can be a parent once delta is switched on.
         assertThat(payload.get(1).get("request_depth")).isEqualTo(4L);
         assertThat(payload.get(2)).doesNotContainKey("request_path");
     }
 
-    /** The mode applies after the inline-file rewrite (here: every file removed): a file dropped by it is in neither the envelope nor the delta. */
+    /** The mode applies after the inline-file rewrite (here: every file removed): a file dropped by it is not in the stored body. */
     @Test
     void deltaStoresTheBodyAsTheInlineFileRewriteLeftIt(@TempDir Path baseDir) throws Exception {
         String file = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -106,8 +107,8 @@ class RequestDeltaIngestTest {
 
         Map<String, Object> row = ingest(baseDir, RequestBodyMode.DELTA, InlineFilesPolicy.dropAll()).rowsFor("dial_usage_log_payload").getFirst();
 
-        assertThat((String) row.get("request_delta")).contains("data:image/png;base64,").doesNotContain(file);
-        assertThat((String) row.get("request_envelope")).doesNotContain(file);
+        assertThat((String) row.get("request_body")).contains("data:image/png;base64,").doesNotContain(file);
+        assertThat(row.get("request_path")).isNotNull();
     }
 
     private RecordingWriter ingest(Path baseDir, RequestBodyMode mode) throws Exception {
@@ -149,6 +150,9 @@ class RequestDeltaIngestTest {
         ObjectNode record = jsonMapper.createObjectNode();
         record.put("deployment", "d").putObject("project").put("id", "p");
         record.putObject("user").put("id", "user-1");
+        if (!uri.endsWith("/mcp")) {
+            record.putObject("session").put("id", "s-1");
+        }
         record.putObject("trace").put("trace_id", traceId).put("core_span_id", "s-" + traceId);
         record.putObject("request").put("method", "POST").put("uri", uri).put("time", time).put("body", requestBody);
         record.putObject("response").put("status", "200");

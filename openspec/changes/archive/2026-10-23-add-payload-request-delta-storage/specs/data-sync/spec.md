@@ -6,11 +6,11 @@ The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUE
 `whole` or `delta`, with default `whole`. Any other value SHALL fail startup.
 
 - **Under `whole`,** `request_body` SHALL be stored as it is today. A chat request's row SHALL also carry its
-  `request_path` and `request_depth`, so that a row stored whole can be a parent (see "Rebuild equivalence");
-  every other request-delta column except `request_scope` SHALL keep its default.
-- **Under `delta`,** a chat request body (see "A chat request body is stored as an envelope, a delta and a
-  parent link") SHALL be stored in the request-delta columns with `request_body` `NULL`, and every other
-  body SHALL be stored whole (see "A request body that is not a chat request is stored whole").
+  `request_path`, `request_depth` and `request_tools_hash`, so that a row stored whole can be a parent (see
+  "Rebuild equivalence"); every other request-delta column except the identity columns SHALL keep its default.
+- **Under `delta`,** a chat request body (see "A chat request body is stored as its new history and a parent
+  link") SHALL be stored in `request_body` cut to what its parent does not supply, and every other body SHALL be
+  stored whole (see "A request body that is not a chat request is stored whole").
 
 The setting SHALL apply to rows written after it takes effect only; it SHALL NOT rewrite, convert or
 re-read rows already stored. Switching from `delta` back to `whole` SHALL leave rows already written in
@@ -18,13 +18,26 @@ delta form as they are, and SHALL keep them rebuildable: a parent re-ingested un
 Switching from `whole` to `delta` SHALL let new requests link to rows stored whole before the switch.
 
 The mode SHALL apply after the inline-file rewrite (see "Inline files are removed from payload bodies in
-drop mode"), so a file removed by that rewrite is absent from the stored envelope and delta alike.
+drop mode"), so a file removed by that rewrite is absent from the stored body.
+
+The mode SHALL apply to an ingest target whose mapping maps `request_body`, `project_id` and `user_hash` and
+whose table has the request-delta columns; the table SHALL be checked once, on the target's first flush, and
+with startup schema validation off the mapping SHALL be trusted. A target whose table lacks the columns SHALL
+have its bodies stored as mapped, with a warning. Under `delta` with no target qualifying, startup SHALL log a
+warning that the setting has no effect.
 
 #### Scenario: The default stores request bodies whole
 
 - **WHEN** the service starts without `SYNC_REQUEST_BODY_MODE` and ingests a chat request
-- **THEN** the payload row carries the body in `request_body` and its `request_path` and `request_depth`, and
-  `request_envelope`, `request_delta` and `request_cache_markers` are `NULL`
+- **THEN** the payload row carries the body as received in `request_body` and its `request_path`, `request_depth`
+  and `request_tools_hash`, an all-zero `request_parent`, an empty `request_inherited`, and a `NULL`
+  `request_cache_markers`
+
+#### Scenario: A table without the request-delta columns keeps its bodies
+
+- **WHEN** a custom target maps `request_body`, `project_id` and `user_hash` onto a table without the
+  request-delta columns, under `delta`
+- **THEN** its rows carry `request_body` as mapped and a warning names the table
 
 #### Scenario: An unknown mode fails startup
 
@@ -34,8 +47,8 @@ drop mode"), so a file removed by that rewrite is absent from the stored envelop
 #### Scenario: Switching back to whole leaves delta rows unchanged
 
 - **WHEN** rows were ingested under `delta` and the service is restarted under `whole`
-- **THEN** new rows carry `request_body`, and the rows written under `delta` still carry their
-  envelope, delta and chain columns with `request_body` `NULL`
+- **THEN** new rows carry their whole body, and the rows written under `delta` still carry their cut
+  `request_body` and their chain columns
 
 #### Scenario: A parent re-ingested under whole keeps its child rebuildable
 
@@ -49,13 +62,11 @@ drop mode"), so a file removed by that rewrite is absent from the stored envelop
 - **WHEN** request A was stored under `whole`, the service switches to `delta`, and A's follow-up B is ingested
 - **THEN** B's parent is A's path, and B rebuilds through A's whole body
 
-### Requirement: A chat request body is stored as an envelope, a delta and a parent link
+### Requirement: A chat request body is stored as its new history and a parent link
 
 A request body SHALL be a **chat request** when it parses as a JSON object carrying a **message array** — an
 array whose elements are all JSON objects — under the first of `messages`, `input` or `contents` whose value is
-an array,
-and carries no top-level member of the name the envelope reserves for its history record. An `input` of
-strings or token arrays (an embeddings request) is therefore not a message array. Its
+an array. An `input` of strings or token arrays (an embeddings request) is therefore not a message array. Its
 **history** SHALL be, in order: the value of each present **top-level system key** — `system`,
 `instructions`, `system_instruction`, `systemInstruction`, in that order — then the elements of the message
 array. No other key SHALL be treated as history. Each history element SHALL be normalized by removing every `cache_control` member at any depth
@@ -63,33 +74,39 @@ array. No other key SHALL be treated as history. Each history element SHALL be n
 insignificant whitespace.
 
 For a history `h1..hn`, ingest SHALL compute the **prefix hashes**
-`p0 = H(project_id, deployment, user_hash, UTC day of request_time)` and `pk = H(p(k-1), canonical(hk))`,
-where `H` is a 128-bit hash and the three scope values are those the record's `dial_usage_log` row
+`p0 = H(project_id, user_hash, UTC day of request_time)` and `pk = H(p(k-1), canonical(hk))`,
+where `H` is a 128-bit hash and the two scope values are those the record's `dial_usage_log` row
 carries. `pn` is the request's **path**. Because each prefix hash folds in every element
 before it and the scope, two requests SHALL have an equal `pk` only when their first `k` history elements
-are identical and they share project, deployment, user and UTC day. Equal message text under a
+are identical and they share project, user and UTC day. Equal message text under a
 different history or scope SHALL never yield an equal hash.
 
 The request's **parent** SHALL be a stored or same-flush chat request whose path equals the deepest `pk`
-of this request with `1 ≤ k < n` among the sources resolution consults (see "A parent never crosses a UTC day
+of this request with `max(1, s) ≤ k < n`, where `s` is the number of its top-level system keys, among the sources
+resolution consults (see "A parent never crosses a UTC day
 or a user scope"); a deeper match that only another instance's rows hold MAY be missed, which costs storage only. A request is therefore never its own parent: a parent's history is always
-strictly shorter than its child's. The stored row SHALL carry:
+strictly shorter than its child's, and it always covers the child's whole system part, so a stored body either
+carries all of its system keys or inherits all of them. The stored row SHALL carry:
 
 - `request_path` = `pn`; `request_depth` = `n`;
 - `request_parent` = the parent's path, or all-zero when no parent was found (the request is a **root**);
 - `request_ancestors` = up to the 128 nearest paths of the requests on the chain when the row was written,
   root side first, ending with the parent's path; empty for a root. It is a read hint, not the chain itself
   (see rebuild below);
-- `request_delta` = the canonical JSON array of `h(k+1)..hn` (the whole history for a root);
-- `request_envelope` = the canonical JSON of the body without the history keys (the message array's key and
-  every present top-level system key), with a record of which history keys were present so the body can be
-  reassembled;
-- `request_body` = `NULL`.
+- `request_body` = the canonical JSON of the body with its `cache_control` markers removed from the history,
+  its message array holding only the elements of `h(k+1)..hn` that are messages, and, when it has a parent, without
+  its top-level system keys (their values are `h1..hs`, within the parent's history) and without `tools` when
+  inherited (see "A request inherits its parent's tools"). A root's `request_body` is therefore the whole request;
+- `request_inherited` = the top-level keys `request_body` leaves out for a rebuild to put back: the system keys
+  when the request has a parent, then `tools` when inherited; empty for a root;
+- `request_tools_hash` = the 128-bit hash of the request's `tools` as canonical JSON, or all-zero when it has
+  none.
 
-**Rebuild equivalence.** A row's history SHALL be its parent path's history followed by its own delta, where
-a path's history is that of **any** stored row carrying that path, a root's history is its own delta, and a
-row stored whole supplies its history from `request_body`, normalized and canonicalized as above.
-Rows carrying the same path MAY differ in parent and delta (a re-ingested event can link differently, and an
+**Rebuild equivalence.** A row's history SHALL be its parent path's history followed by the message array
+elements of its own `request_body`, where a path's history is that of **any** stored row carrying that path, and
+a row with an all-zero parent — a root, or a row stored whole — supplies its history from `request_body`,
+normalized and canonicalized as above.
+Rows carrying the same path MAY differ in parent and stored body (a re-ingested event can link differently, and an
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
 history, so following `request_parent` through whichever row is found always terminates — each parent is
 strictly shallower — and always yields the row's exact canonical history. While a row exists, a row carrying
@@ -103,29 +120,31 @@ release that changes the canonical form, gives its new copy a different path. A 
 with it then names a path no row carries any more. Re-ingesting whole UTC days after such a change avoids it,
 since a parent and its children always share one.
 `request_ancestors` lets a rebuild read the whole chain in one query in the common case, and read further
-only where a row found links through a path that list lacks. Restoring the history keys into the envelope
-and then the row's own cache markers SHALL yield a JSON document equal to the received body (same members and values; key
-order and whitespace are not preserved). This change SHALL store everything a rebuild needs; it SHALL NOT
+only where a row found links through a path that list lacks. Putting back into the row's `request_body` the full
+message array (under the key the classification above chose: the first of `messages`, `input` or `contents` whose
+value is an array), each inherited system key with its history element (`h1..hs`, in `request_inherited` order), the
+inherited `tools`, and then the row's own cache markers SHALL yield a JSON document equal to the received body
+(same members and values; key order and whitespace are not preserved). This change SHALL store everything a rebuild needs; it SHALL NOT
 itself expose a rebuilt body.
 
 #### Scenario: A follow-up turn stores only its new messages
 
 - **WHEN** request A with history `[system s, user u1]` is stored, and later request B with history
   `[system s, user u1, assistant a1, user u2]` by the same user on the same UTC day is ingested
-- **THEN** B's row carries `request_parent` = A's path, `request_depth` = 4, and `request_delta` holding
-  only `[a1, u2]`
+- **THEN** B's row carries `request_parent` = A's path, `request_depth` = 4, and a `request_body` whose message
+  array holds only `[a1, u2]`
 
 #### Scenario: Equal messages under a different history are not linked
 
 - **WHEN** a stored request has history `[u0, r0, u1, r1]`, and a request in the same scope arrives with
   history `[u1, r1, u2]`
-- **THEN** the new request is a root, and its `request_delta` holds all three elements
+- **THEN** the new request is a root, and its `request_body` holds all three elements
 
 #### Scenario: A first request is a root
 
 - **WHEN** a chat request has no stored or same-flush request whose path matches any of its prefixes
-- **THEN** its row carries an all-zero `request_parent`, an empty `request_ancestors`, and its whole
-  history in `request_delta`
+- **THEN** its row carries an all-zero `request_parent`, an empty `request_ancestors` and `request_inherited`,
+  and the whole request in `request_body`
 
 #### Scenario: An identical retry is linked like the original
 
@@ -133,47 +152,87 @@ itself expose a rebuilt body.
 - **THEN** its row carries R's path, and its parent is the deepest stored request R's history extends —
   never R itself
 
-#### Scenario: Envelope fields stay readable
+#### Scenario: Top-level fields stay readable
 
-- **WHEN** a chat request carrying `model`, `temperature` and `tools` is stored in delta form
-- **THEN** `json_extract_string("dial_usage_log_payload.request_envelope", 'model')` returns its model,
-  and `request_envelope` carries `temperature` and `tools` unchanged
+- **WHEN** a chat request carrying `model` and `temperature` is stored in delta form
+- **THEN** `json_extract_string("dial_usage_log_payload.request_body", 'model')` returns its model, and
+  `request_body` carries `temperature` unchanged
 
 #### Scenario: An Anthropic system prompt is part of the history
 
 - **WHEN** two consecutive Anthropic Messages requests of a conversation carry the same top-level `system`
   and the second extends the first's `messages`
-- **THEN** the second's delta holds only the messages it added, and neither its envelope nor its delta
-  repeats the system value
+- **THEN** the second's `request_body` holds only the messages it added and no `system` member, and its
+  `request_inherited` names `system`
 
 #### Scenario: A Gemini-style body is a chat request
 
 - **WHEN** a request body carries `system_instruction` and a `contents` array
 - **THEN** it is stored in delta form, with `system_instruction` as the first history element and the
-  `contents` elements after it, and neither key left in `request_envelope`
+  `contents` elements after it
 
 #### Scenario: The history rebuilds exactly
 
 - **WHEN** a chain root A and its descendants B and C are stored, and C is rebuilt by following
-  `request_parent` from C through stored rows to the root and concatenating the deltas root first
+  `request_parent` from C through stored rows to the root and concatenating their history elements root first
 - **THEN** the result equals C's normalized, canonical history element for element
 
 #### Scenario: A rebuild survives a parent re-linked by re-ingest
 
 - **WHEN** B was stored as a root, C was stored as B's child, and B is then re-ingested after A was stored,
-  so the surviving B row is A's child with a shorter delta
+  so the surviving B row is A's child with a shorter stored body
 - **THEN** rebuilding C by following `request_parent` through the surviving rows still yields C's exact
   history
+
+### Requirement: A request inherits its parent's tools
+
+Under `sync.request-body-mode=delta`, a chat request with a parent SHALL leave `tools` out of its stored body, and
+name it in `request_inherited`, when a stored or same-flush row carrying its parent's path has an equal
+`request_tools_hash`; otherwise it SHALL store its own `tools`. A request without `tools` inherits nothing, and a
+`tools` member that is `null` or an empty array is a value like any other, stored or inherited as such. The tools
+hashes compared SHALL be those of the rows carrying the parent's path, so a request inherits the tools its
+parent effectively had, whether that row stored them or inherited them in turn: the tools are stored once per
+change along a chain.
+
+A rebuild SHALL take inherited `tools` from a row of the same `(project_id, user_hash)` scope and UTC day whose
+`request_tools_hash` equals the row's and whose stored body carries `tools`; the nearest ancestor that stored them is
+one. Such a row SHALL exist while the inheriting row does, under the same exceptions as for its history (see
+"Rebuild equivalence"): the inheriting row's parent path is carried by a row with the same hash, which stored the
+tools or inherited them from its own ancestors in turn, and all of them share the day's partition. Rows carrying
+one path can differ in their tools, so the chain a rebuild follows need not pass through that row; the scope and day
+lookup by hash always finds it.
+
+#### Scenario: Unchanged tools are stored once
+
+- **WHEN** turns 1, 2 and 3 of a conversation carry the same `tools`, each extending the one before
+- **THEN** turn 1's `request_body` carries `tools`, and turns 2 and 3 leave it out and name it in
+  `request_inherited`
+
+#### Scenario: Changed tools are stored again
+
+- **WHEN** turn 2 carries different `tools` than turn 1
+- **THEN** turn 2's `request_body` carries its own `tools`, and a turn 3 with those tools inherits them
+
+#### Scenario: Explicit null tools are not taken for inherited ones
+
+- **WHEN** turn 1 carries `"tools": [...]` and turn 2 carries `"tools": null`
+- **THEN** turn 2 stores `"tools": null`, and its rebuild yields `null`, not turn 1's tools
+
+#### Scenario: Inherited tools rebuild exactly
+
+- **WHEN** a row that inherited `tools` is rebuilt
+- **THEN** the rebuilt body's `tools` equal the ones the request was sent with
 
 ### Requirement: A parent never crosses a UTC day or a user scope
 
 A parent SHALL be in the same daily partition (`toYYYYMMDD(request_time)`, UTC) as its child and in the same
-`(project_id, deployment, user_hash)` scope. Because the scope and the day are part of `p0`, a request in
+`(project_id, user_hash)` scope. Because the scope and the day are part of `p0`, a request in
 another scope or on another day can never match. The first request of a conversation on a new UTC day SHALL be a
 root, so a child never outlives a parent under the daily partition TTL, and rebuilding a request never
-reads another user's rows. The scope is the user, not the client session, because the session is not
-known at ingest; two conversations of one user with an identical history MAY share rows, which rebuilds
-correctly.
+reads another user's rows. Deployment is not part of the scope, so a user who switches deployment mid-conversation
+keeps one chain; the history hash alone decides what links. Nor is the client session: it is a client-supplied
+value that can be absent, change or vanish mid-conversation, and in the scope it would only cut links. Two
+conversations of one user with an identical history MAY share rows, which rebuilds correctly.
 
 Parent resolution SHALL consider, in order: earlier chat requests of the same flush (ordered by
 `request_time`), paths this service instance has already written successfully, then the payload table —
@@ -201,7 +260,23 @@ names its path as parent (see "Rebuild equivalence").
 
 - **WHEN** a user's requests at 23:58 and 00:03 UTC on consecutive days are ingested, and the second
   extends the first's history
-- **THEN** the second request is a root, with its whole history in `request_delta`
+- **THEN** the second request is a root, stored complete in `request_body`
+
+#### Scenario: A deployment switch keeps the chain
+
+- **WHEN** a user's follow-up request goes to a different deployment than the turn before it, with the same history
+  format
+- **THEN** the follow-up's parent is the earlier turn
+
+#### Scenario: Another project's identical history is not a parent
+
+- **WHEN** two requests with identical histories and the same user hash belong to different projects
+- **THEN** neither is the other's parent
+
+#### Scenario: A changed session id keeps the chain
+
+- **WHEN** a user's follow-up request carries a different `session.id` than the turn before it, or none
+- **THEN** the follow-up's parent is still the earlier turn, since the session is not part of the scope
 
 #### Scenario: Another user's identical history is not a parent
 
@@ -233,7 +308,7 @@ of the history element, the location of the member inside that element, and its 
 `request_cache_markers` SHALL be `NULL` for a request that carried none. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
 markers into the assembled history and no others. `cache_control` members outside the history (for
-example on `tools`) SHALL stay in `request_envelope` unchanged.
+example on `tools`) SHALL stay where they are, in the stored body or in the stored `tools` a request inherits.
 
 Removing the markers from the hash is what lets consecutive turns link: clients move the marker to the
 newest message on each turn, so the same earlier message would otherwise hash differently on every turn.
@@ -242,7 +317,7 @@ newest message on each turn, so the same earlier message would otherwise hash di
 
 - **WHEN** turn 1 carries `cache_control` on its last user message, and turn 2 repeats that message
   without it and adds two messages carrying `cache_control` on the newest
-- **THEN** turn 2's parent is turn 1, its delta holds only the two added messages without markers, and
+- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages without markers, and
   its `request_cache_markers` records the one marker on its newest message
 
 #### Scenario: Markers are not inherited
@@ -261,15 +336,14 @@ Under either mode, a request body that is not a chat request — an MCP JSON-RPC
 (an `input` of strings or token arrays included), a value that does not parse as JSON (including a body
 truncated at 4 MiB), a JSON object naming one member twice, a request whose `request_time` carries a UTC
 offset other than zero (its text day need not be its partition day), or a JSON value of any other shape — SHALL be stored in `request_body` exactly as it is
-stored today, with every request-delta column other than `request_scope` at its default. Such a request SHALL
+stored today, with every request-delta column other than the identity columns at its default. Such a request SHALL
 never be a parent. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
 content column.
 
 #### Scenario: An MCP body is stored whole
 
 - **WHEN** an MCP `tools/call` request is ingested under `delta`
-- **THEN** its row carries the body in `request_body`, and `request_delta` and `request_envelope` are
-  `NULL`
+- **THEN** its row carries the body as received in `request_body`, and its `request_path` is all-zero
 
 #### Scenario: A batched embeddings request is stored whole
 
@@ -293,8 +367,8 @@ value for any of them, and `V11` has dropped the columns from that table, so the
 write to. The bodies are stored as the producer sent them, except that `sync.inline-files-max-size`
 removes the payloads of their inline files longer than it and `sync.inline-files-drop-truncated` cuts a body
 truncated inside a file back to before it (see "Inline files are removed from payload bodies in drop mode"), and that under
-`sync.request-body-mode=delta` a chat request body is stored as an envelope, a delta and a parent link
-instead (see "A chat request body is stored as an envelope, a delta and a parent link").
+`sync.request-body-mode=delta` a chat request body is stored as its new history and a parent link instead
+(see "A chat request body is stored as its new history and a parent link").
 
 The table SHALL be provisioned by a versioned ClickHouse migration (never by the `/v1/tables` API) and
 SHALL declare:
@@ -309,19 +383,24 @@ SHALL declare:
   from `dial_usage_log` — same type, no codec. They are necessarily NON-nullable, because ClickHouse
   has no `Nullable(JSON)`;
 - the request-delta columns, added by a later migration with defaults so rows written before it read
-  them as empty: `request_envelope`, `request_delta` and `request_cache_markers` as `Nullable(String)`
-  under the same `AES_256_GCM_SIV` codec as the bodies; the chain columns `request_scope` (a hash of the
-  record's project, deployment and user, written by the mapping on every row), `request_path` and
+  them as empty: `request_cache_markers` as `Nullable(String)` under the same `AES_256_GCM_SIV` codec as the
+  bodies; the identity columns `project_id` and `deployment`
+  (`LowCardinality(String)`), `user_hash` (`String`) and `session_id` (`Nullable(String)`, the client session id
+  DIAL Core writes as `session.id`, absent when it sent none), written by the mapping on every row; the first three
+  carry the values the record's `dial_usage_log` row carries, while `session_id` is held only here, unencrypted like
+  the other identifiers; the chain columns `request_path` and
   `request_parent` (128-bit hashes, all-zero when absent), `request_depth` (the number of history elements of
-  the full request, `0` when absent) and `request_ancestors` (an array of path hashes, empty when absent); and a
+  the full request, `0` when absent), `request_ancestors` (an array of path hashes, empty when absent) and
+  `request_tools_hash` (a 128-bit hash, all-zero when absent); `request_inherited` (an array of top-level key
+  names, empty when absent); and a
   skip index on `request_path` (a low false-positive bloom filter), so a parent lookup asking about a few paths
   within one daily partition can skip granules instead of reading the partition's `request_path` whole;
 - the `ReplacingMergeTree` engine versioned by a table-side `_updated_at` default, so a re-ingested
   record replaces its predecessor for the same `event_id` in the same daily partition.
 
 `_updated_at` SHALL be the only column of this table left to its ClickHouse default on every row. The
-request-delta columns are filled by ingest's request-body stage, not by the mapping; under
-`sync.request-body-mode=whole` only a chat request's `request_path` and `request_depth` are set, and for a
+request-delta columns other than the identity columns are filled by ingest's request-body stage, not by the mapping;
+under `sync.request-body-mode=whole` only a chat request's `request_path`, `request_depth` and `request_tools_hash` are set, and for a
 body that is not a chat request every one keeps its default.
 
 One parsed record SHALL produce a `dial_usage_log` row **and** a `dial_usage_log_payload` row, from two

@@ -9,15 +9,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ChatRequestTest {
 
     @Test
-    void openAiMessagesAreTheHistoryAndTheRestIsTheEnvelope() {
+    void openAiMessagesAreTheHistoryAndRootStoresTheWholeRequest() {
         ChatRequest request = parse("{\"model\":\"m\",\"temperature\":0.2,\"tools\":[{\"type\":\"function\"}],"
                 + "\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}]}");
 
         assertThat(request.canonicalHistory()).containsExactly(
                 "{\"content\":\"s\",\"role\":\"system\"}", "{\"content\":\"u\",\"role\":\"user\"}");
-        assertThat(request.canonicalEnvelope()).isEqualTo("{\"__adas_history\":{\"array\":\"messages\",\"system\":[]},"
-                + "\"model\":\"m\",\"temperature\":0.2,\"tools\":[{\"type\":\"function\"}]}");
+        assertThat(request.stored(0, false)).isEqualTo("{\"messages\":[{\"content\":\"s\",\"role\":\"system\"},"
+                + "{\"content\":\"u\",\"role\":\"user\"}],\"model\":\"m\",\"temperature\":0.2,\"tools\":[{\"type\":\"function\"}]}");
+        assertThat(request.inherited(0, false)).isEmpty();
         assertThat(request.markers()).isEmpty();
+        assertThat(request.toolsHash()).isNotNull();
     }
 
     @Test
@@ -26,7 +28,35 @@ class ChatRequestTest {
 
         assertThat(request.canonicalHistory()).containsExactly(
                 "[{\"text\":\"s\",\"type\":\"text\"}]", "{\"content\":\"u\",\"role\":\"user\"}");
-        assertThat(request.canonicalEnvelope()).isEqualTo("{\"__adas_history\":{\"array\":\"messages\",\"system\":[\"system\"]}}");
+        assertThat(request.systemCount()).isEqualTo(1);
+        assertThat(request.stored(0, false)).isEqualTo(
+                "{\"messages\":[{\"content\":\"u\",\"role\":\"user\"}],\"system\":[{\"text\":\"s\",\"type\":\"text\"}]}");
+    }
+
+    /** A child leaves out the system keys its parent covers, and the tools it inherits, and names them. */
+    @Test
+    void childLeavesOutWhatItsParentSupplies() {
+        ChatRequest request = parse("{\"system\":\"s\",\"tools\":[{\"name\":\"t\"}],\"model\":\"m\",\"messages\":["
+                + "{\"role\":\"user\",\"content\":\"u1\"},{\"role\":\"assistant\",\"content\":\"a1\"},{\"role\":\"user\",\"content\":\"u2\"}]}");
+
+        assertThat(request.stored(2, true)).isEqualTo(
+                "{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
+        assertThat(request.inherited(2, true)).containsExactly("system", "tools");
+        assertThat(request.stored(2, false)).contains("\"tools\":[{\"name\":\"t\"}]").doesNotContain("\"system\"");
+        assertThat(request.inherited(2, false)).containsExactly("system");
+    }
+
+    /** null, an empty array and absent tools are three different requests. */
+    @Test
+    void toolsHashTellsNullEmptyAndAbsentApart() {
+        String messages = "\"messages\":[{\"role\":\"user\",\"content\":\"u\"}]";
+
+        assertThat(parse("{" + messages + "}").toolsHash()).isNull();
+        assertThat(parse("{" + messages + ",\"tools\":null}").toolsHash())
+                .isNotNull()
+                .isNotEqualTo(parse("{" + messages + ",\"tools\":[]}").toolsHash());
+        assertThat(parse("{" + messages + ",\"tools\":[{\"b\":1,\"a\":2}]}").toolsHash())
+                .isEqualTo(parse("{\"tools\":[{\"a\":2,\"b\":1}]," + messages + "}").toolsHash());
     }
 
     @Test
@@ -34,7 +64,7 @@ class ChatRequestTest {
         ChatRequest request = parse("{\"instructions\":\"be brief\",\"input\":[{\"role\":\"user\",\"content\":\"u\"}],\"model\":\"m\"}");
 
         assertThat(request.canonicalHistory()).containsExactly("\"be brief\"", "{\"content\":\"u\",\"role\":\"user\"}");
-        assertThat(request.canonicalEnvelope()).contains("\"array\":\"input\"", "\"system\":[\"instructions\"]", "\"model\":\"m\"");
+        assertThat(request.stored(0, false)).contains("\"input\":[", "\"instructions\":\"be brief\"", "\"model\":\"m\"");
     }
 
     @Test
@@ -43,9 +73,8 @@ class ChatRequestTest {
                 + "\"parts\":[{\"text\":\"u\"}]}],\"generationConfig\":{\"temperature\":1}}");
 
         assertThat(request.canonicalHistory()).hasSize(2).first().isEqualTo("{\"parts\":[{\"text\":\"s\"}]}");
-        assertThat(request.canonicalEnvelope())
-                .contains("\"array\":\"contents\"", "\"system\":[\"system_instruction\"]", "\"generationConfig\"")
-                .doesNotContain("\"contents\":[", "\"system_instruction\":{");
+        assertThat(request.stored(1, false)).contains("\"contents\":[", "\"generationConfig\"").doesNotContain("\"system_instruction\"");
+        assertThat(request.inherited(1, false)).containsExactly("system_instruction");
     }
 
     @Test
@@ -61,7 +90,6 @@ class ChatRequestTest {
         "\"text\"",
         "{\"model\":\"text-embedding\",\"input\":[\"chunk a\",\"chunk b\"]}",
         "{\"model\":\"text-embedding\",\"input\":[[1,2,3],[4,5]]}",
-        "{\"messages\":[{\"role\":\"user\",\"content\":\"u\"}],\"__adas_history\":{}}",
         "not json",
         ""
     })
@@ -80,7 +108,8 @@ class ChatRequestTest {
                 .containsExactly(org.assertj.core.groups.Tuple.tuple(0, "/0"), org.assertj.core.groups.Tuple.tuple(1, "/content/0"));
         assertThat(request.markers().get(1).value().toString()).isEqualTo("{\"type\":\"ephemeral\",\"ttl\":\"1h\"}");
         // Outside the history a marker stays where it is.
-        assertThat(request.canonicalEnvelope()).contains("\"tools\":[{\"cache_control\":{\"type\":\"ephemeral\"},\"name\":\"t\"}]");
+        assertThat(request.stored(0, false)).contains("\"tools\":[{\"cache_control\":{\"type\":\"ephemeral\"},\"name\":\"t\"}]")
+                .doesNotContain("\"ttl\"");
     }
 
     @Test

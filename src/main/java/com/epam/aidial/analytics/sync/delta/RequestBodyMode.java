@@ -7,12 +7,13 @@ package com.epam.aidial.analytics.sync.delta;
  */
 public enum RequestBodyMode {
 
-    /** Store every request body whole in {@code request_body}; the request-delta columns keep their defaults. The default. */
+    /** Store every request body whole in {@code request_body}, a chat request stamped with its path. The default. */
     WHOLE,
 
     /**
-     * Store a chat request as its envelope, the history elements its parent did not have, and a link to that parent,
-     * with {@code request_body} written NULL (see {@link RequestDeltaEncoder}). Any other body is stored whole.
+     * Store a chat request in {@code request_body} cut to the history elements its parent did not have, without the
+     * tools it shares with its parent, with a link to that parent (see {@link RequestDeltaEncoder}). Any other body is
+     * stored whole.
      */
     DELTA
 }

@@ -18,8 +18,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class RequestDeltaEncoderTest {
 
-    private static final String SCOPE = "00000000-0000-4000-8000-000000000001";
-    private static final String OTHER_SCOPE = "00000000-0000-4000-8000-000000000002";
+    /** User hashes: the scope is project and user. */
+    private static final String SCOPE = "user-1";
+    private static final String OTHER_SCOPE = "user-2";
     private static final String DAY = "2026-01-15";
 
     private final Table table = new Table();
@@ -37,21 +38,21 @@ class RequestDeltaEncoderTest {
 
         assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
         assertThat(b.get("request_depth")).isEqualTo(4L);
-        assertThat(b.get("request_delta")).isEqualTo("[" + canonicalMsg("assistant", "a1") + "," + canonicalMsg("user", "u2") + "]");
+        assertThat(b.get("request_body")).isEqualTo("{\"messages\":[" + canonicalMsg("assistant", "a1") + "," + canonicalMsg("user", "u2") + "],\"model\":\"m\"}");
         assertThat(b.get("request_ancestors")).isEqualTo(List.of(a.get("request_path")));
-        assertThat(b.get("request_body")).isNull();
+        assertThat(b.get("request_inherited")).isEqualTo(List.of());
         assertRebuilds(b);
     }
 
     @Test
-    void firstRequestIsRootWithItsWholeHistory() {
+    void firstRequestIsRootStoredComplete() {
         Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
 
         flush(a);
 
         assertThat(a.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(a.get("request_ancestors")).isEqualTo(List.of());
-        assertThat(a.get("request_delta")).isEqualTo("[" + canonicalMsg("user", "u1") + "]");
+        assertThat(a.get("request_body")).isEqualTo("{\"messages\":[" + canonicalMsg("user", "u1") + "],\"model\":\"m\"}");
         assertThat(a.get("request_cache_markers")).isNull();
         assertRebuilds(a);
     }
@@ -66,7 +67,7 @@ class RequestDeltaEncoderTest {
         flush(other);
 
         assertThat(other.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(Rebuild.MAPPER.readTree((String) other.get("request_delta"))).hasSize(3);
+        assertThat(messages(other)).hasSize(3);
     }
 
     @Test
@@ -83,7 +84,7 @@ class RequestDeltaEncoderTest {
 
         assertThat(retry.get("request_path")).isEqualTo(b.get("request_path"));
         assertThat(retry.get("request_parent")).isEqualTo(a.get("request_path")).isNotEqualTo(retry.get("request_path"));
-        assertThat(retry.get("request_delta")).isEqualTo(b.get("request_delta"));
+        assertThat(retry.get("request_body")).isEqualTo(b.get("request_body"));
         assertRebuilds(retry);
         assertRebuilds(b);
     }
@@ -113,7 +114,7 @@ class RequestDeltaEncoderTest {
         flush(early);
 
         assertThat(early.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(Rebuild.MAPPER.readTree((String) early.get("request_delta"))).hasSize(3);
+        assertThat(messages(early)).hasSize(3);
     }
 
     @Test
@@ -182,7 +183,8 @@ class RequestDeltaEncoderTest {
         flush(t2);
 
         assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
-        assertThat((String) t2.get("request_delta")).doesNotContain("cache_control");
+        assertThat(messages(t2)).hasSize(2);
+        assertThat((String) t2.get("request_body")).doesNotContain("cache_control");
         assertThat(t2.get("request_cache_markers")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}}]");
         // Each rebuild carries its own markers only: t2's first message comes back without the marker t1 had.
         assertRebuilds(t1);
@@ -197,7 +199,7 @@ class RequestDeltaEncoderTest {
 
         flush(mcp, truncated, none);
 
-        assertThat(mcp).doesNotContainKeys("request_path", "request_delta", "request_envelope").containsKey("request_body");
+        assertThat(mcp).doesNotContainKeys("request_path", "request_inherited", "request_tools_hash").containsKey("request_body");
         assertThat(truncated.get("request_body")).isEqualTo("{\"messages\":[{\"role\":\"user\",\"content\":\"cut");
         assertThat(none.get("request_body")).isNull();
         assertThat(outcomes()).containsEntry("whole", 3.0);
@@ -229,9 +231,15 @@ class RequestDeltaEncoderTest {
         Random random = new Random(42);
         List<Map<String, Object>> events = new ArrayList<>();
         int event = 0;
+        // Tools as clients send them: absent, null, empty, and two different sets, one carrying a marker of its own.
+        List<String> toolChoices = List.of("", ",\"tools\":null", ",\"tools\":[]", ",\"tools\":[{\"name\":\"search\"}]",
+                ",\"tools\":[{\"name\":\"run\",\"cache_control\":{\"type\":\"ephemeral\"}}]");
         for (int conversation = 0; conversation < 40; conversation++) {
             String scope = random.nextBoolean() ? SCOPE : OTHER_SCOPE;
             String day = random.nextInt(4) == 0 ? "2026-01-14" : DAY;
+            // Half the conversations carry a top-level system prompt, as Anthropic's API does, the others a system message.
+            String system = random.nextBoolean() ? ",\"system\":\"agent " + random.nextInt(3) + "\"" : "";
+            String tools = toolChoices.get(random.nextInt(toolChoices.size()));
             List<String> history = new ArrayList<>();
             history.add("{\"role\":\"system\",\"content\":\"agent " + random.nextInt(3) + "\"}");
             int turns = 1 + random.nextInt(12);
@@ -239,9 +247,12 @@ class RequestDeltaEncoderTest {
                 if (turn > 0 && random.nextInt(6) == 0) {
                     history = new ArrayList<>(history.subList(0, Math.max(1, history.size() - 2))); // an edit: branch off
                 }
+                if (random.nextInt(5) == 0) {
+                    tools = toolChoices.get(random.nextInt(toolChoices.size())); // the agent's tools change
+                }
                 history.add("{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"q" + conversation + "-" + turn + "\""
                         + (random.nextBoolean() ? ",\"cache_control\":{\"type\":\"ephemeral\"}" : "") + "}]}");
-                String body = "{\"model\":\"m\",\"messages\":[" + String.join(",", history) + "]}";
+                String body = "{\"model\":\"m\"" + system + tools + ",\"messages\":[" + String.join(",", history) + "]}";
                 String time = String.format("%02d:%02d:%02d.000", 8 + conversation % 10, turn, random.nextInt(60));
                 events.add(row("e" + event++, time, scope, day, body));
                 if (random.nextInt(8) == 0) {
@@ -291,7 +302,7 @@ class RequestDeltaEncoderTest {
             Map<String, Object> row = row("e" + turn, String.format("10:%02d:%02d.%03d", turn / 3600 % 60, turn / 60 % 60, turn % 1000), SCOPE, DAY, body);
             flush(row);
             bodyBytes += body.length();
-            deltaBytes += ((String) row.get("request_delta")).length();
+            deltaBytes += ((String) row.get("request_body")).length();
             history.append(",{\"role\":\"assistant\",\"content\":\"ok ").append(turn).append("\"}");
         }
         long millis = (System.nanoTime() - started) / 1_000_000;
@@ -316,7 +327,8 @@ class RequestDeltaEncoderTest {
 
         assertThat(row.get("request_body")).isEqualTo(body);
         assertThat(row.get("request_depth")).isEqualTo(2L);
-        assertThat(row).containsKey("request_path").doesNotContainKeys("request_parent", "request_delta", "request_envelope");
+        assertThat(row).containsKeys("request_path", "request_tools_hash").doesNotContainKeys("request_parent", "request_inherited");
+        assertThat(row.get("request_tools_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(table.lookups).hasValue(0);
         assertThat(outcomes()).containsEntry("whole_with_path", 1.0);
     }
@@ -395,16 +407,178 @@ class RequestDeltaEncoderTest {
         assertThat(surrogate.get("request_path")).isNotEqualTo(question.get("request_path"));
     }
 
-    /** A row the second parse cannot reproduce (here: passed twice) is kept as written, never a failed flush. */
+    /**
+     * A row the second parse cannot reproduce (here: passed twice, so its second write finds the body its first write
+     * cut) is kept as written, never a failed flush.
+     */
     @Test
     void sameRowPassedTwiceDoesNotFailTheFlush() {
-        Map<String, Object> row = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "]"));
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> row = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
 
-        encoder.encode(new ArrayList<>(List.of(row, row))).written();
+        List<Map<String, Object>> batch = new ArrayList<>(List.of(a, row, row));
+        RequestDeltaEncoder.Encoding encoding = encoder.encode(batch);
+        table.insert(batch);
+        encoding.written();
 
-        assertThat(row.get("request_body")).isNull();
-        assertThat(row.get("request_delta")).isNotNull();
+        assertThat(row.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(messages(row)).hasSize(2);
         assertThat(outcomes()).containsEntry("whole_with_path", 1.0);
+        assertRebuilds(row);
+    }
+
+    @Test
+    void unchangedToolsAreStoredOnce() {
+        String tools = ",\"tools\":[{\"name\":\"search\"}]";
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat(tools, "[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(tools, "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        Map<String, Object> t3 = row("e3", "10:02:00.000", chat(tools, "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + ","
+                + msg("assistant", "a2") + "," + msg("user", "u3") + "]"));
+
+        flush(t1);
+        flush(t2);
+        flush(t3);
+
+        assertThat((String) t1.get("request_body")).contains("\"tools\"");
+        assertThat(t2.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertThat((String) t2.get("request_body")).doesNotContain("\"tools\"");
+        assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertThat(t3.get("request_tools_hash")).isEqualTo(t1.get("request_tools_hash"));
+        assertRebuilds(t2);
+        assertRebuilds(t3);
+    }
+
+    @Test
+    void changedToolsAreStoredAgainAndThenInherited() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat(",\"tools\":[{\"name\":\"a\"}]", "[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(",\"tools\":[{\"name\":\"b\"}]",
+                "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        Map<String, Object> t3 = row("e3", "10:02:00.000", chat(",\"tools\":[{\"name\":\"b\"}]",
+                "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "," + msg("assistant", "a2") + "," + msg("user", "u3") + "]"));
+
+        flush(t1);
+        flush(t2);
+        flush(t3);
+
+        assertThat(t2.get("request_inherited")).isEqualTo(List.of());
+        assertThat((String) t2.get("request_body")).contains("\"name\":\"b\"");
+        assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertRebuilds(t3);
+    }
+
+    /** "tools": null is a value, never a stand-in for inherited tools. */
+    @Test
+    void explicitNullToolsAreStoredAsSent() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat(",\"tools\":[{\"name\":\"a\"}]", "[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(",\"tools\":null", "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
+        assertThat(t2.get("request_inherited")).isEqualTo(List.of());
+        assertThat((String) t2.get("request_body")).contains("\"tools\":null");
+        assertRebuilds(t2);
+    }
+
+    @Test
+    void coldInstanceInheritsToolsFromTableParent() {
+        String tools = ",\"tools\":[{\"name\":\"search\"}]";
+        flush(row("e1", "10:00:00.000", chat(tools, "[" + msg("user", "u1") + "]")));
+        encoder = newEncoder();
+
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(tools, "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        flush(t2);
+
+        assertThat(outcomes()).containsEntry("table", 1.0);
+        assertThat(t2.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertRebuilds(t2);
+    }
+
+    /** An Anthropic-style top-level system prompt is stored once, in the first turn, and named as inherited after it. */
+    @Test
+    void topLevelSystemPromptIsInherited() {
+        String system = ",\"system\":[{\"type\":\"text\",\"text\":\"s\",\"cache_control\":{\"type\":\"ephemeral\"}}]";
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat(system, "[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(system, "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
+        assertThat(t2.get("request_inherited")).isEqualTo(List.of("system"));
+        assertThat((String) t2.get("request_body")).doesNotContain("\"system\"");
+        assertThat(messages(t2)).hasSize(2);
+        assertRebuilds(t1);
+        assertRebuilds(t2);
+    }
+
+    /** A parent never ends inside the system part of the history, so a body never keeps only some of its system keys. */
+    @Test
+    void parentNeverEndsInsideTheSystemPart() {
+        Map<String, Object> a = row("e1", "10:00:00.000", "{\"system\":\"s\",\"messages\":[]}");
+        Map<String, Object> b = row("e2", "10:01:00.000", "{\"system\":\"s\",\"instructions\":\"i\",\"messages\":[" + msg("user", "u1") + "]}");
+
+        flush(a);
+        flush(b);
+
+        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertRebuilds(b);
+    }
+
+    /** Deployment is not part of the scope: a user who switches deployment mid-conversation keeps one chain. */
+    @Test
+    void switchingDeploymentKeepsTheChain() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        b.put("deployment", "deployment-2");
+
+        flush(a);
+        flush(b);
+
+        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+    }
+
+    /** The session is not part of the scope: a changed or missing session id keeps the chain. */
+    @Test
+    void changedSessionKeepsTheChain() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        a.put("session_id", "s-1");
+        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        b.put("session_id", null);
+
+        flush(a);
+        flush(b);
+
+        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+    }
+
+    /** The scope's parts cannot run into each other: project "ab" + user "c" is not project "a" + user "bc". */
+    @Test
+    void scopePartsDoNotRunTogether() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        a.put("project_id", "ab");
+        a.put("user_hash", "c");
+        Map<String, Object> b = row("e2", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        b.put("project_id", "a");
+        b.put("user_hash", "bc");
+
+        flush(a, b);
+
+        assertThat(a.get("request_path")).isNotEqualTo(b.get("request_path"));
+    }
+
+    /** Another project's user with the same user hash is still another scope. */
+    @Test
+    void anotherProjectIsNeverParent() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        b.put("project_id", "project-2");
+
+        flush(a);
+        flush(b);
+
+        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
     }
 
     @Test
@@ -424,11 +598,11 @@ class RequestDeltaEncoderTest {
         for (int i = 0; i < 128; i++) {
             hint.add(new UUID(1, i));
         }
-        ChainNode stored = ChainNode.stored(new UUID(2, 0), hint);
+        ChainNode stored = ChainNode.stored(new UUID(2, 0), new ParentLookup.Found(hint, List.of()));
         ChainNode node = stored;
         List<UUID> written = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
-            node = ChainNode.written(new UUID(3, i), node);
+            node = ChainNode.written(new UUID(3, i), node, null);
             written.add(new UUID(3, i));
         }
 
@@ -438,7 +612,7 @@ class RequestDeltaEncoderTest {
         assertThat(node.lineage(128)).containsExactlyElementsOf(expected);
 
         for (int i = 5; i < 300; i++) {
-            node = ChainNode.written(new UUID(3, i), node);
+            node = ChainNode.written(new UUID(3, i), node, null);
         }
         List<UUID> nearest = node.lineage(128);
         assertThat(nearest).hasSize(128).first().isEqualTo(new UUID(3, 172));
@@ -486,19 +660,31 @@ class RequestDeltaEncoderTest {
         row.put("event_id", eventId);
         row.put("request_time", day + " " + time);
         row.put("request_body", body);
-        row.put("request_scope", scope);
+        row.put("project_id", "project-1");
+        row.put("deployment", "deployment-1");
+        row.put("user_hash", scope);
         table.original.putIfAbsent(eventId, body);
         return row;
     }
 
     private static Map<String, Object> copy(Map<String, Object> row) {
         Map<String, Object> copy = new LinkedHashMap<>(row);
-        copy.keySet().removeIf(key -> key.startsWith("request_") && !List.of("request_time", "request_body", "request_scope").contains(key));
+        copy.keySet().removeIf(key -> key.startsWith("request_") && !List.of("request_time", "request_body").contains(key));
         return copy;
     }
 
     private static String chat(String messages) {
-        return "{\"model\":\"m\",\"messages\":" + messages + "}";
+        return chat("", messages);
+    }
+
+    /** A chat body with {@code members} (each with its leading comma) between the model and the messages. */
+    private static String chat(String members, String messages) {
+        return "{\"model\":\"m\"" + members + ",\"messages\":" + messages + "}";
+    }
+
+    /** The message array a row's stored body holds. */
+    private static JsonNode messages(Map<String, Object> row) {
+        return Rebuild.MAPPER.readTree((String) row.get("request_body")).get("messages");
     }
 
     private static String msg(String role, String content) {
@@ -529,18 +715,23 @@ class RequestDeltaEncoderTest {
         }
 
         @Override
-        public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+        public Map<UUID, Found> find(Collection<String> days, Collection<UUID> paths) {
             lookups.incrementAndGet();
-            Map<UUID, List<UUID>> found = new HashMap<>();
+            Map<UUID, List<UUID>> ancestorsByPath = new HashMap<>();
+            Map<UUID, List<UUID>> toolsByPath = new HashMap<>();
             for (Map<String, Object> row : byEvent.values()) {
                 Object path = row.get("request_path");
                 if (path != null && paths.contains(UUID.fromString((String) path))
                         && days.contains(((String) row.get("request_time")).substring(0, 10))) {
+                    UUID key = UUID.fromString((String) path);
                     @SuppressWarnings("unchecked")
                     List<String> ancestors = (List<String>) row.getOrDefault("request_ancestors", List.of());
-                    found.put(UUID.fromString((String) path), ancestors.stream().map(UUID::fromString).toList());
+                    ancestorsByPath.put(key, ancestors.stream().map(UUID::fromString).toList());
+                    toolsByPath.computeIfAbsent(key, k -> new ArrayList<>()).add(UUID.fromString((String) row.get("request_tools_hash")));
                 }
             }
+            Map<UUID, Found> found = new HashMap<>();
+            ancestorsByPath.forEach((path, ancestors) -> found.put(path, new Found(ancestors, toolsByPath.get(path))));
             return found;
         }
     }

@@ -10,7 +10,7 @@ import java.util.UUID;
 /**
  * The prefix hashes that identify a request's place in a chain: {@code p0 = H(scope, day)} and
  * {@code pk = H(p(k-1), canonical(hk))}. Each hash folds in every history element before it and the scope, so two
- * requests share {@code pk} only when their first {@code k} elements are identical and they share user and UTC day.
+ * requests share {@code pk} only when their first {@code k} elements are identical and they share project, user and UTC day.
  * {@code H} is SHA-256 truncated to 128 bits and carried as a {@link UUID}, the type the chain columns store. Element
  * text is hashed as its UTF-16 code units rather than encoded to UTF-8 first, because the UTF-8 encoder replaces a lone
  * surrogate with {@code ?}: two different elements would hash alike, and one could link to the other's history.
@@ -26,7 +26,7 @@ final class PathHash {
     /**
      * The prefix hashes {@code p0..pn} of a history.
      *
-     * @param scope   the row's {@code request_scope}
+     * @param scope   the row's chain scope (project and user)
      * @param day     the row's UTC day ({@code yyyy-MM-dd})
      * @param history the canonical history elements
      * @return {@code n + 1} hashes; element {@code k} covers the first {@code k} history elements
@@ -36,7 +36,7 @@ final class PathHash {
         MessageDigest digest = sha256();
         digest.update(SEED);
         digest.update((byte) 0);
-        digest.update(scope.getBytes(StandardCharsets.UTF_8));
+        updateChars(digest, scope);
         digest.update((byte) 0);
         digest.update(day.getBytes(StandardCharsets.UTF_8));
         prefixes[0] = truncate(digest.digest());
@@ -46,6 +46,23 @@ final class PathHash {
             prefixes[k] = truncate(digest.digest());
         }
         return prefixes;
+    }
+
+    /**
+     * The hash of a canonical top-level value, such as a request's {@code tools}: what a child compares with its parent
+     * to inherit the value, and what a rebuild looks the stored value up by.
+     *
+     * @param key  the top-level key the value sits under
+     * @param text the value as canonical JSON
+     */
+    static UUID value(String key, String text) {
+        MessageDigest digest = sha256();
+        digest.update(SEED);
+        digest.update((byte) 1);
+        updateChars(digest, key);
+        digest.update((byte) 0);
+        updateChars(digest, text);
+        return truncate(digest.digest());
     }
 
     /** Feeds every UTF-16 code unit of {@code text}, big-endian, lone surrogates included. */
