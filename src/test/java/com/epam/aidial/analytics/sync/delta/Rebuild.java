@@ -14,9 +14,10 @@ import java.util.Map;
 /**
  * The rebuild the spec promises, for tests: a row's history is its parent path's history (read from any stored row
  * carrying that path) followed by the messages of its own {@code request_body}; a row with no parent supplies its whole
- * history from its body. The row's body then takes back its full message array, its inherited system keys, the tools
- * of the root its chain ends at (every row on a chain has the same tools), and its own cache markers. Production code
- * exposes no rebuild yet, so this is the reference the stored rows are checked against.
+ * history from its body. The row's body then takes back its full message array, the system keys and tools of the root
+ * its chain ends at (every row on a chain has the same ones; the system values are the first history elements), and its
+ * own cache markers. Production code exposes no rebuild yet, so this is the reference the stored rows are checked
+ * against.
  */
 public final class Rebuild {
 
@@ -28,39 +29,32 @@ public final class Rebuild {
     /** The full body of {@code row}, rebuilt from {@code stored} (every payload row that exists). */
     public static JsonNode body(Map<String, Object> row, Collection<Map<String, Object>> stored) {
         String text = (String) row.get("request_body");
-        if (!hasParent(row) && row.get("request_cache_markers") == null) {
+        if (!hasParent(row) && row.get("request_cache_control") == null) {
             return text == null ? null : MAPPER.readTree(text);
         }
         List<JsonNode> history = history(row, stored, 0);
-        restoreMarkers(history, (String) row.get("request_cache_markers"));
+        restoreMarkers(history, (String) row.get("request_cache_control"));
         ObjectNode body = (ObjectNode) MAPPER.readTree(text);
         String arrayKey = arrayKey(body);
-        List<String> inherited = inherited(row);
+        // A row with a parent left out its system keys and tools; its chain's root stores the same ones.
+        ObjectNode keys = hasParent(row) ? (ObjectNode) MAPPER.readTree((String) root(row, stored, 0).get("request_body")) : body;
         int next = 0;
-        if (hasParent(row)) {
-            for (String key : inherited) {
-                if (ChatRequest.SYSTEM_KEYS.contains(key)) {
-                    body.set(key, history.get(next++));
-                }
-            }
-        } else {
-            for (String key : ChatRequest.SYSTEM_KEYS) {
-                if (body.has(key)) {
-                    body.set(key, history.get(next++));
-                }
+        for (String key : ChatRequest.SYSTEM_KEYS) {
+            if (keys.has(key)) {
+                body.set(key, history.get(next++));
             }
         }
         ArrayNode array = body.putArray(arrayKey);
         for (int i = next; i < history.size(); i++) {
             array.add(history.get(i));
         }
-        if (inherited.contains(ChatRequest.TOOLS)) {
-            body.set(ChatRequest.TOOLS, tools(row, stored, 0));
+        if (hasParent(row) && keys.has(ChatRequest.TOOLS)) {
+            body.set(ChatRequest.TOOLS, keys.get(ChatRequest.TOOLS));
         }
         return body;
     }
 
-    /** The canonical history of {@code row}, following {@code request_parent} through whichever row carries each path. */
+    /** The canonical history of {@code row}, following {@code request_parent_hash} through whichever row carries each path. */
     static List<JsonNode> history(Map<String, Object> row, Collection<Map<String, Object>> stored, int hops) {
         if (hops > 100_000) {
             throw new AssertionError("parent walk does not terminate");
@@ -77,19 +71,12 @@ public final class Rebuild {
         return history;
     }
 
-    /** The inherited tools: those of the root the row's {@code request_parent} chain ends at. */
-    private static JsonNode tools(Map<String, Object> row, Collection<Map<String, Object>> stored, int hops) {
+    /** The root the row's {@code request_parent_hash} chain ends at: a row stored whole, whose body is the whole request. */
+    private static Map<String, Object> root(Map<String, Object> row, Collection<Map<String, Object>> stored, int hops) {
         if (hops > 100_000) {
             throw new AssertionError("parent walk does not terminate");
         }
-        if (!hasParent(row)) {
-            JsonNode tools = MAPPER.readTree((String) row.get("request_body")).get(ChatRequest.TOOLS);
-            if (tools == null) {
-                throw new AssertionError("the chain's root carries no tools");
-            }
-            return tools;
-        }
-        return tools(parentRow(row, stored), stored, hops + 1);
+        return hasParent(row) ? root(parentRow(row, stored), stored, hops + 1) : row;
     }
 
     /** The message array's key, chosen as the classifier chooses it: the first key whose value is an array. */
@@ -99,20 +86,14 @@ public final class Rebuild {
 
     /** Any stored row carrying the row's parent path. */
     private static Map<String, Object> parentRow(Map<String, Object> row, Collection<Map<String, Object>> stored) {
-        String parent = (String) row.get("request_parent");
-        return stored.stream().filter(r -> parent.equals(r.get("request_path"))).findAny()
+        String parent = (String) row.get("request_parent_hash");
+        return stored.stream().filter(r -> parent.equals(r.get("request_hash"))).findAny()
                 .orElseThrow(() -> new AssertionError("no stored row carries parent path " + parent));
     }
 
     private static boolean hasParent(Map<String, Object> row) {
-        Object parent = row.get("request_parent");
+        Object parent = row.get("request_parent_hash");
         return parent != null && !RequestDeltaEncoder.NO_PARENT.toString().equals(parent);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<String> inherited(Map<String, Object> row) {
-        Object keys = row.get("request_inherited");
-        return keys == null ? List.of() : (List<String>) keys;
     }
 
     private static void restoreMarkers(List<JsonNode> history, String markers) {

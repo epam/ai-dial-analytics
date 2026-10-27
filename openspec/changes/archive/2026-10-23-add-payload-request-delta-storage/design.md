@@ -82,15 +82,15 @@ each conversation after the deploy becomes a root, and nothing breaks.
 
 The mapping stays per-record and stateless. It still emits `request_body` after the inline-file rewrite,
 plus the identity columns. A new request-body encoder runs when the payload sink flushes. Under `whole` it only stamps
-each chat request with its path and depth (D7). Under `delta`, for each flush it:
+each chat request with its path (D7). Under `delta`, for each flush it:
 1. Parses and classifies each `request_body`, and computes its prefix hashes. Non-chat bodies pass
    through untouched.
 2. Sorts chat rows by `request_time`, then resolves each against:
    - (a) paths already resolved in this flush,
    - (b) the instance's path cache,
-   - (c) one lookup per flush for the rows (a) and (b) cannot link at all: `SELECT request_path,
-     request_ancestors FROM dial_usage_log_payload WHERE request_time in the days' range AND
-     toYYYYMMDD(request_time) IN (…) AND request_path IN (…)`. It reads without `FINAL`, because any copy of a
+   - (c) one lookup per flush for the rows (a) and (b) cannot link at all: `SELECT request_hash,
+     request_ancestor_hashes FROM dial_usage_log_payload WHERE request_time in the days' range AND
+     toYYYYMMDD(request_time) IN (…) AND request_hash IN (…)`. It reads without `FINAL`, because any copy of a
      path is equivalent. It asks about each row's 8 deepest prefixes (`TABLE_CANDIDATES`), and about 16,384
      prefixes per flush at most (`MAX_TABLE_CANDIDATES`); a row beyond that is a root. A typical follow-up's
      parent is 1–3 elements shallower, so a deeper miss falls back to a root.
@@ -118,14 +118,14 @@ node written in the flush, never on its own, so the cache holds one small entry 
 few hundred bytes per entry, plus at most one packed hint (128 paths, 2 KiB) per conversation that was linked
 through the table.
 
-### D6. The chain is the parent links; `request_ancestors` is only a read hint
+### D6. The chain is the parent links; `request_ancestor_hashes` is only a read hint
 
 Rows sharing a path can differ in parent and delta: a re-ingested event may link to a parent that has been
 stored since, and an event stored as a root can share its path with an identical one stored as a child. A
-stored ancestor list could therefore name a link that no longer exists. A rebuild follows `request_parent`
+stored ancestor list could therefore name a link that no longer exists. A rebuild follows `request_parent_hash`
 through whichever row it finds for each path instead. Every row with a given path rebuilds to the same history,
 and each parent is strictly shallower (the parent's depth `k` is always below `n`, and a row is never its own
-parent), so the walk terminates and is exact. `request_ancestors` remains useful for reading the whole chain
+parent), so the walk terminates and is exact. `request_ancestor_hashes` remains useful for reading the whole chain
 in one `IN` query in the common case. It is capped at the 128 nearest ancestors: being a hint, it need not be
 complete, and a rebuild reads further only where a chain is longer. Uncapped, it grows quadratically with chain
 length; even so, its cost under `ORDER BY event_id` was measured at a few percent of the request side.
@@ -139,7 +139,7 @@ original's path, so a rebuild reading "any row with that path" could land on the
 upgrade must not do that silently, so operators opt in, as with `drop` for inline files. Switching back
 needs no migration.
 
-Under `whole` the encoder still parses each body and stamps a chat request's row with its path and depth,
+Under `whole` the encoder still parses each body and stamps a chat request's row with its path,
 while keeping the body. Without that, rolling back would break chains. A delta row's parent that is
 re-ingested under `whole` (a backfill after the rollback, or a rolling deploy with one replica on each mode)
 would replace the only row carrying the parent's path with a row carrying none, and the child could no
@@ -159,20 +159,18 @@ as the operator's to avoid.
 - **ClickHouse (next free version):**
   - `ALTER TABLE dial_usage_log_payload ADD COLUMN` for:
     - `project_id` and `deployment` `LowCardinality(String)`, `user_hash String`, `session_id Nullable(String)`;
-    - `request_path` and `request_parent`, both `UUID`, so they travel as plain strings in `JSONEachRow`;
-    - `request_depth UInt32`;
-    - `request_ancestors Array(UUID)`;
-    - `request_inherited Array(LowCardinality(String))` (D9);
-    - `request_cache_markers Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV)`.
-  - `ADD INDEX idx_request_path request_path TYPE bloom_filter(0.001) GRANULARITY 1`. An `IN` set keeps a
+    - `request_hash` and `request_parent_hash`, both `UUID`, so they travel as plain strings in `JSONEachRow`;
+    - `request_ancestor_hashes Array(UUID)`;
+    - `request_cache_control Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV)`.
+  - `ADD INDEX idx_request_hash request_hash TYPE bloom_filter(0.001) GRANULARITY 1`. An `IN` set keeps a
     granule when any of its values may match, so pruning weakens with the number of candidates: hence the low
     false-positive rate and only 8 candidates per request. When it does not prune, the lookup reads
-    `request_path` and `request_time` of the day, two small columns.
+    `request_hash` and `request_time` of the day, two small columns.
 
   All of these are metadata-only on existing parts. The index is not materialized for old parts, which
   hold no paths.
 - **Postgres catalog (next free version):** one `column_mapping` row on `dial_usage_log_payload`,
-  `request_cache_markers` (`string`, nullable, sensitive, heavy, with a description and display name), and the
+  `request_cache_control` (`string`, nullable, sensitive, heavy, with a description and display name), and the
   seeded `request_body` description extended while it is still the seeded text.
 - **Mapping:** `dial-usage-log-payload.yaml` gains the four identity columns. The startup schema validation then
   covers it.
@@ -180,13 +178,14 @@ as the operator's to avoid.
 ### D9. One body column, and tools inherited from the parent
 
 A delta row keeps everything in `request_body`: the request with its message array cut to the elements its
-parent does not have. A first turn is therefore stored complete, and a non-zero `request_parent` is what says a
+parent does not have. A first turn is therefore stored complete, and a non-zero `request_parent_hash` is what says a
 body is partial. Rejected: an envelope column and a delta column beside a `NULL` `request_body`. Under `delta` no
 column holds a later turn's whole history either way, so a `NULL` body protects no search, while the single column
 keeps top-level fields where readers already look and lets a text search find each message usually once.
 
 - The system keys lead the history, so a parent always covers them (`k` at least their count) and a child's body
-  leaves them out; `request_inherited` names them, so the rebuild puts each value back under the child's own key.
+  leaves them out. A system element is hashed with its key name, so every request on a chain has the same system
+  keys, names included, and the rebuild copies the names from the chain's root and the values from its history.
 - `tools` is part of the chain seed `p0`, so every row carrying a path has the same tools, and a child always leaves
   them out. The rebuild takes them from the chain's root, which it reads anyway. A request whose tools changed finds
   no parent and is a root, re-storing its history once. Rejected: comparing a separate tools hash with the rows
@@ -194,8 +193,10 @@ keeps top-level fields where readers already look and lets a text search find ea
   their tools, so a rebuild must look them up by hash across the day's partition, and the lookup, the chain nodes
   and the table each carry tools hashes. Tools rarely change within a conversation, so re-storing a history at
   each change costs little.
-- The left-out keys are listed rather than written as `null`: a client can send `"tools": null`, absent `tools`, or
-  `"tools": []`, and each must rebuild as sent.
+- Nothing records which keys a body left out: a non-zero `request_parent_hash` says it, and the root says which ones.
+  Writing them as `null` would not do, since a client can send `"tools": null`, absent `tools`, or `"tools": []`,
+  and each must rebuild as sent. Rejected: a column listing the left-out keys. Once the path covers the system key
+  names and the tools, the root answers the same question, and the rebuild reads the root anyway.
 
 ## Risks / Trade-offs
 
@@ -203,7 +204,7 @@ keeps top-level fields where readers already look and lets a text search find ea
   array order and any `cache_control` member inside it kept, so a client that reorders its tool list or moves a
   tool's marker on every turn makes every turn a root, and stores whole histories as `whole` would. Accepted:
   clients send the same tools along a conversation, and the cost is space only. Should one not, moving tool-level
-  markers into `request_cache_markers` is the fix.
+  markers into `request_cache_control` is the fix.
 - **[Readers of `request_body` break under `delta`]** → Opt-in mode (D7). The breaking note goes into the
   specs and the proposal; top-level fields stay readable from `request_body`, and a text search finds each
   message once, in the turn that first sent it.

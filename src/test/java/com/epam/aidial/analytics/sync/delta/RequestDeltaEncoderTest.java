@@ -36,11 +36,9 @@ class RequestDeltaEncoderTest {
         flush(a);
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
-        assertThat(b.get("request_depth")).isEqualTo(4L);
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
         assertThat(b.get("request_body")).isEqualTo("{\"messages\":[" + canonicalMsg("assistant", "a1") + "," + canonicalMsg("user", "u2") + "],\"model\":\"m\"}");
-        assertThat(b.get("request_ancestors")).isEqualTo(List.of(a.get("request_path")));
-        assertThat(b.get("request_inherited")).isEqualTo(List.of());
+        assertThat(b.get("request_ancestor_hashes")).isEqualTo(List.of(a.get("request_hash")));
         assertRebuilds(b);
     }
 
@@ -50,10 +48,10 @@ class RequestDeltaEncoderTest {
 
         flush(a);
 
-        assertThat(a.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(a.get("request_ancestors")).isEqualTo(List.of());
+        assertThat(a.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(a.get("request_ancestor_hashes")).isEqualTo(List.of());
         assertThat(a.get("request_body")).isEqualTo("{\"messages\":[" + canonicalMsg("user", "u1") + "],\"model\":\"m\"}");
-        assertThat(a.get("request_cache_markers")).isNull();
+        assertThat(a.get("request_cache_control")).isNull();
         assertRebuilds(a);
     }
 
@@ -66,7 +64,7 @@ class RequestDeltaEncoderTest {
 
         flush(other);
 
-        assertThat(other.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(other.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(messages(other)).hasSize(3);
     }
 
@@ -82,8 +80,8 @@ class RequestDeltaEncoderTest {
         flush(b);
         flush(retry);
 
-        assertThat(retry.get("request_path")).isEqualTo(b.get("request_path"));
-        assertThat(retry.get("request_parent")).isEqualTo(a.get("request_path")).isNotEqualTo(retry.get("request_path"));
+        assertThat(retry.get("request_hash")).isEqualTo(b.get("request_hash"));
+        assertThat(retry.get("request_parent_hash")).isEqualTo(a.get("request_hash")).isNotEqualTo(retry.get("request_hash"));
         assertThat(retry.get("request_body")).isEqualTo(b.get("request_body"));
         assertRebuilds(retry);
         assertRebuilds(b);
@@ -100,8 +98,8 @@ class RequestDeltaEncoderTest {
         flush(mine);
         flush(theirs, theirFollowUp);
 
-        assertThat(theirs.get("request_path")).isNotEqualTo(mine.get("request_path"));
-        assertThat(theirFollowUp.get("request_parent")).isEqualTo(theirs.get("request_path"));
+        assertThat(theirs.get("request_hash")).isNotEqualTo(mine.get("request_hash"));
+        assertThat(theirFollowUp.get("request_parent_hash")).isEqualTo(theirs.get("request_hash"));
     }
 
     @Test
@@ -113,7 +111,7 @@ class RequestDeltaEncoderTest {
         flush(late);
         flush(early);
 
-        assertThat(early.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(early.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(messages(early)).hasSize(3);
     }
 
@@ -124,7 +122,7 @@ class RequestDeltaEncoderTest {
 
         flush(b, a); // out of time order within the batch
 
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
         assertThat(table.lookups).hasValue(0);
         assertThat(outcomes()).containsEntry("flush", 1.0).containsEntry("root", 1.0);
     }
@@ -137,8 +135,8 @@ class RequestDeltaEncoderTest {
         flush(b);
         flush(a);
 
-        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(table.row("e2").get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(table.row("e2").get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertRebuilds(b);
     }
 
@@ -155,8 +153,8 @@ class RequestDeltaEncoderTest {
         flush(b, y);
 
         assertThat(table.lookups).hasValue(1);
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
-        assertThat(y.get("request_parent")).isEqualTo(other.get("request_path"));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        assertThat(y.get("request_parent_hash")).isEqualTo(other.get("request_hash"));
         assertThat(outcomes()).containsEntry("table", 2.0);
     }
 
@@ -168,7 +166,7 @@ class RequestDeltaEncoderTest {
         Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "]"));
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
     }
 
     @Test
@@ -182,10 +180,10 @@ class RequestDeltaEncoderTest {
         flush(t1);
         flush(t2);
 
-        assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
         assertThat(messages(t2)).hasSize(2);
         assertThat((String) t2.get("request_body")).doesNotContain("cache_control");
-        assertThat(t2.get("request_cache_markers")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}}]");
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}}]");
         // Each rebuild carries its own markers only: t2's first message comes back without the marker t1 had.
         assertRebuilds(t1);
         assertRebuilds(t2);
@@ -199,7 +197,7 @@ class RequestDeltaEncoderTest {
 
         flush(mcp, truncated, none);
 
-        assertThat(mcp).doesNotContainKeys("request_path", "request_inherited").containsKey("request_body");
+        assertThat(mcp).doesNotContainKeys("request_hash", "request_parent_hash").containsKey("request_body");
         assertThat(truncated.get("request_body")).isEqualTo("{\"messages\":[{\"role\":\"user\",\"content\":\"cut");
         assertThat(none.get("request_body")).isNull();
         assertThat(outcomes()).containsEntry("whole", 3.0);
@@ -217,7 +215,7 @@ class RequestDeltaEncoderTest {
         encoder = newEncoder();
         flush(row("e2", "10:01:00.000", chat(historyB)));          // B re-ingested: now A's child, shorter delta
 
-        assertThat(table.row("e2").get("request_parent")).isEqualTo(table.row("e1").get("request_path"));
+        assertThat(table.row("e2").get("request_parent_hash")).isEqualTo(table.row("e1").get("request_hash"));
         assertRebuilds(table.row("e3"));
         assertRebuilds(table.row("e2"));
     }
@@ -310,7 +308,7 @@ class RequestDeltaEncoderTest {
         assertThat(outcomes()).containsEntry("cache", 599.0).containsEntry("root", 1.0);
         assertThat(deltaBytes * 100).isLessThan(bodyBytes);
         Map<String, Object> last = table.row("e599");
-        assertThat((List<?>) last.get("request_ancestors")).hasSize(RequestDeltaEncoder.ANCESTORS_HINT);
+        assertThat((List<?>) last.get("request_ancestor_hashes")).hasSize(RequestDeltaEncoder.ANCESTORS_HINT);
         assertRebuilds(last); // the hint is capped; the chain is not
         // Recorded for the reader, not asserted tightly: parsing and hashing every body is linear in its size.
         System.out.printf("request-delta: 600 turns, %d MiB of bodies encoded in %d ms%n", bodyBytes >> 20, millis);
@@ -326,8 +324,7 @@ class RequestDeltaEncoderTest {
         flush(row);
 
         assertThat(row.get("request_body")).isEqualTo(body);
-        assertThat(row.get("request_depth")).isEqualTo(2L);
-        assertThat(row).containsKey("request_path").doesNotContainKeys("request_parent", "request_inherited");
+        assertThat(row).containsKey("request_hash").doesNotContainKeys("request_parent_hash", "request_ancestor_hashes");
         assertThat(table.lookups).hasValue(0);
         assertThat(outcomes()).containsEntry("whole_with_path", 1.0);
     }
@@ -342,7 +339,25 @@ class RequestDeltaEncoderTest {
         Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        assertRebuilds(b);
+    }
+
+    /** A root stored whole, as sent, supplies its system key and tools to a delta child; the rebuild is JSON-equal. */
+    @Test
+    void wholeRootSuppliesSystemKeyAndTools() {
+        encoder = newEncoder(RequestBodyMode.WHOLE);
+        Map<String, Object> a = row("e1", "10:00:00.000", "{ \"instructions\" : \"be brief\", \"model\":\"m\","
+                + " \"tools\": [ {\"name\":\"t\", \"cache_control\":{\"type\":\"ephemeral\"}} ], \"input\": [ " + msg("user", "u1") + " ] }");
+        flush(a);
+        encoder = newEncoder(RequestBodyMode.DELTA);
+
+        Map<String, Object> b = row("e2", "10:01:00.000", "{\"input\":[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2")
+                + "],\"model\":\"m\",\"tools\":[{\"cache_control\":{\"type\":\"ephemeral\"},\"name\":\"t\"}],\"instructions\":\"be brief\"}");
+        flush(b);
+
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        assertThat((String) b.get("request_body")).doesNotContain("\"instructions\"", "\"tools\"");
         assertRebuilds(b);
     }
 
@@ -369,7 +384,7 @@ class RequestDeltaEncoderTest {
 
         failing.encode(new ArrayList<>(List.of(b))).written();
 
-        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(registry.get("ingest.request.delta.lookup.failures").counter().count()).isEqualTo(1.0);
     }
 
@@ -393,7 +408,7 @@ class RequestDeltaEncoderTest {
 
         assertThat(asked).singleElement().satisfies(size -> assertThat(size)
                 .isLessThanOrEqualTo(RequestDeltaEncoder.MAX_TABLE_CANDIDATES).isGreaterThan(RequestDeltaEncoder.MAX_TABLE_CANDIDATES - 8));
-        assertThat(batch).allSatisfy(row -> assertThat(row.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString()));
+        assertThat(batch).allSatisfy(row -> assertThat(row.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString()));
     }
 
     @Test
@@ -403,7 +418,7 @@ class RequestDeltaEncoderTest {
 
         flush(surrogate, question);
 
-        assertThat(surrogate.get("request_path")).isNotEqualTo(question.get("request_path"));
+        assertThat(surrogate.get("request_hash")).isNotEqualTo(question.get("request_hash"));
     }
 
     /**
@@ -420,7 +435,7 @@ class RequestDeltaEncoderTest {
         table.insert(batch);
         encoding.written();
 
-        assertThat(row.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(row.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
         assertThat(messages(row)).hasSize(2);
         assertThat(outcomes()).containsEntry("whole_with_path", 1.0);
         assertRebuilds(row);
@@ -439,10 +454,9 @@ class RequestDeltaEncoderTest {
         flush(t3);
 
         assertThat((String) t1.get("request_body")).contains("\"tools\"");
-        assertThat(t2.get("request_inherited")).isEqualTo(List.of("tools"));
         assertThat((String) t2.get("request_body")).doesNotContain("\"tools\"");
-        assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
-        assertThat(t3.get("request_parent")).isEqualTo(t2.get("request_path"));
+        assertThat((String) t3.get("request_body")).doesNotContain("\"tools\"");
+        assertThat(t3.get("request_parent_hash")).isEqualTo(t2.get("request_hash"));
         assertRebuilds(t2);
         assertRebuilds(t3);
     }
@@ -460,12 +474,11 @@ class RequestDeltaEncoderTest {
         flush(t2);
         flush(t3);
 
-        assertThat(t2.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(t2.get("request_inherited")).isEqualTo(List.of());
+        assertThat(t2.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat((String) t2.get("request_body")).contains("\"name\":\"b\"");
         assertThat(messages(t2)).hasSize(3);
-        assertThat(t3.get("request_parent")).isEqualTo(t2.get("request_path"));
-        assertThat(t3.get("request_inherited")).isEqualTo(List.of("tools"));
+        assertThat(t3.get("request_parent_hash")).isEqualTo(t2.get("request_hash"));
+        assertThat((String) t3.get("request_body")).doesNotContain("\"tools\"");
         assertRebuilds(t2);
         assertRebuilds(t3);
     }
@@ -479,8 +492,7 @@ class RequestDeltaEncoderTest {
         flush(t1);
         flush(t2);
 
-        assertThat(t2.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(t2.get("request_inherited")).isEqualTo(List.of());
+        assertThat(t2.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat((String) t2.get("request_body")).contains("\"tools\":null");
         assertRebuilds(t2);
     }
@@ -495,11 +507,10 @@ class RequestDeltaEncoderTest {
         flush(t2);
 
         assertThat(outcomes()).containsEntry("table", 1.0);
-        assertThat(t2.get("request_inherited")).isEqualTo(List.of("tools"));
         assertRebuilds(t2);
     }
 
-    /** An Anthropic-style top-level system prompt is stored once, in the first turn, and named as inherited after it. */
+    /** An Anthropic-style top-level system prompt is stored once, in the first turn, and left out after it. */
     @Test
     void topLevelSystemPromptIsInherited() {
         String system = ",\"system\":[{\"type\":\"text\",\"text\":\"s\",\"cache_control\":{\"type\":\"ephemeral\"}}]";
@@ -509,11 +520,24 @@ class RequestDeltaEncoderTest {
         flush(t1);
         flush(t2);
 
-        assertThat(t2.get("request_parent")).isEqualTo(t1.get("request_path"));
-        assertThat(t2.get("request_inherited")).isEqualTo(List.of("system"));
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
         assertThat((String) t2.get("request_body")).doesNotContain("\"system\"");
         assertThat(messages(t2)).hasSize(2);
         assertRebuilds(t1);
+        assertRebuilds(t2);
+    }
+
+    /** The same prompt under another system key is another history, so it does not link. */
+    @Test
+    void systemPromptUnderAnotherKeyDoesNotLink() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat(",\"system\":\"s\"", "[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat(",\"instructions\":\"s\"",
+                "[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertRebuilds(t2);
     }
 
@@ -526,7 +550,7 @@ class RequestDeltaEncoderTest {
         flush(a);
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertRebuilds(b);
     }
 
@@ -540,7 +564,7 @@ class RequestDeltaEncoderTest {
         flush(a);
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
     }
 
     /** The session is not part of the scope: a changed or missing session id keeps the chain. */
@@ -554,7 +578,7 @@ class RequestDeltaEncoderTest {
         flush(a);
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(a.get("request_path"));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
     }
 
     /** The scope's parts cannot run into each other: project "ab" + user "c" is not project "a" + user "bc". */
@@ -569,7 +593,7 @@ class RequestDeltaEncoderTest {
 
         flush(a, b);
 
-        assertThat(a.get("request_path")).isNotEqualTo(b.get("request_path"));
+        assertThat(a.get("request_hash")).isNotEqualTo(b.get("request_hash"));
     }
 
     /** Another project's user with the same user hash is still another scope. */
@@ -582,7 +606,7 @@ class RequestDeltaEncoderTest {
         flush(a);
         flush(b);
 
-        assertThat(b.get("request_parent")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
     }
 
     @Test
@@ -592,7 +616,7 @@ class RequestDeltaEncoderTest {
 
         flush(row);
 
-        assertThat(row).doesNotContainKey("request_path").containsKey("request_body");
+        assertThat(row).doesNotContainKey("request_hash").containsKey("request_body");
     }
 
     /** The ancestors hint through a node read from the table: the nearest 128 paths, root side first, nearest last. */
@@ -723,11 +747,11 @@ class RequestDeltaEncoderTest {
             lookups.incrementAndGet();
             Map<UUID, List<UUID>> ancestorsByPath = new HashMap<>();
             for (Map<String, Object> row : byEvent.values()) {
-                Object path = row.get("request_path");
+                Object path = row.get("request_hash");
                 if (path != null && paths.contains(UUID.fromString((String) path))
                         && days.contains(((String) row.get("request_time")).substring(0, 10))) {
                     @SuppressWarnings("unchecked")
-                    List<String> ancestors = (List<String>) row.getOrDefault("request_ancestors", List.of());
+                    List<String> ancestors = (List<String>) row.getOrDefault("request_ancestor_hashes", List.of());
                     ancestorsByPath.put(UUID.fromString((String) path), ancestors.stream().map(UUID::fromString).toList());
                 }
             }

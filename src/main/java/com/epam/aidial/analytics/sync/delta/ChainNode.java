@@ -9,7 +9,7 @@ import java.util.UUID;
 /**
  * A stored request's place in a chain, as ingest knows it: its path and a link to its parent's node. Linking nodes
  * instead of copying ancestor lists keeps a cache entry small however deep the chain is. A node learned from the
- * payload table has no parent node; it carries the {@code request_ancestors} hint its row was stored with instead,
+ * payload table has no parent node; it carries the {@code request_ancestor_hashes} hint its row was stored with instead,
  * packed as two longs per path — and it is cached only as the parent of a node written here.
  */
 final class ChainNode {
@@ -31,7 +31,7 @@ final class ChainNode {
         return new ChainNode(path, parent, NONE);
     }
 
-    /** A node read back from the payload table, with the {@code request_ancestors} its row carries (root side first). */
+    /** A node read back from the payload table, with the {@code request_ancestor_hashes} its row carries (root side first). */
     static ChainNode stored(UUID path, List<UUID> ancestors) {
         long[] packed = new long[ancestors.size() * 2];
         for (int i = 0; i < ancestors.size(); i++) {

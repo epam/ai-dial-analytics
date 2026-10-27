@@ -59,11 +59,11 @@ class RequestDeltaIngestTest {
         Map<String, Object> first = payload.get(0);
         Map<String, Object> second = payload.get(1);
         assertThat(Rebuild.canonical((String) first.get("request_body"))).isEqualTo(Rebuild.canonical(TURN_1));
-        assertThat(second.get("request_parent")).isEqualTo(first.get("request_path"));
+        assertThat(second.get("request_parent_hash")).isEqualTo(first.get("request_hash"));
         assertThat(second.get("request_body"))
                 .isEqualTo("{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
         assertThat(payload.get(2).get("request_body")).isEqualTo(MCP);
-        assertThat(payload.get(2)).doesNotContainKey("request_path");
+        assertThat(payload.get(2)).doesNotContainKey("request_hash");
         // The identity columns are written on every row, whatever the mode or body; the session only when Core sent one.
         assertThat(payload).allSatisfy(row -> assertThat(row).containsEntry("project_id", "p").containsEntry("deployment", "d")
                 .containsEntry("user_hash", "user-1"));
@@ -87,10 +87,10 @@ class RequestDeltaIngestTest {
         List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.WHOLE).rowsFor("dial_usage_log_payload");
 
         assertThat(payload).extracting(row -> row.get("request_body")).containsExactly(TURN_1, TURN_2, MCP);
-        assertThat(payload).allSatisfy(row -> assertThat(row).doesNotContainKeys("request_parent", "request_inherited"));
+        assertThat(payload).allSatisfy(row -> assertThat(row).doesNotContainKeys("request_parent_hash", "request_ancestor_hashes"));
         // A chat row stored whole still carries its path, so it can be a parent once delta is switched on.
-        assertThat(payload.get(1).get("request_depth")).isEqualTo(4L);
-        assertThat(payload.get(2)).doesNotContainKey("request_path");
+        assertThat(payload.get(1)).containsKey("request_hash");
+        assertThat(payload.get(2)).doesNotContainKey("request_hash");
     }
 
     /** The mode applies after the inline-file rewrite (here: every file removed): a file dropped by it is not in the stored body. */
@@ -108,7 +108,7 @@ class RequestDeltaIngestTest {
         Map<String, Object> row = ingest(baseDir, RequestBodyMode.DELTA, InlineFilesPolicy.dropAll()).rowsFor("dial_usage_log_payload").getFirst();
 
         assertThat((String) row.get("request_body")).contains("data:image/png;base64,").doesNotContain(file);
-        assertThat(row.get("request_path")).isNotNull();
+        assertThat(row.get("request_hash")).isNotNull();
     }
 
     private RecordingWriter ingest(Path baseDir, RequestBodyMode mode) throws Exception {

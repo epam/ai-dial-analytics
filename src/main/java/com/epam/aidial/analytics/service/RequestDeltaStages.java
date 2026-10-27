@@ -41,7 +41,7 @@ public class RequestDeltaStages {
 
     /** The columns the stage writes beyond the mapping: what a payload table gains in ClickHouse V16. */
     private static final Set<String> REQUIRED_TABLE_COLUMNS = Set.of(
-            "request_path", "request_parent", "request_depth", "request_ancestors", "request_inherited", "request_cache_markers");
+            "request_hash", "request_parent_hash", "request_ancestor_hashes", "request_cache_control");
 
     private final Map<String, FlushStage> stages;
 

@@ -113,7 +113,7 @@ The catalog migrations seed four:
 | `dial_usage_log_payload.request_body` | verbatim LLM request body, unbounded per row |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
-| `dial_usage_log_payload.request_cache_markers` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
+| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
 
 Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header
@@ -156,7 +156,7 @@ and a parent link").
 
 ## The payload columns live on their own table
 
-The heavy payload columns — `request_body`, `response_body`, `assembled_response` and `request_cache_markers` — are **not** columns of
+The heavy payload columns — `request_body`, `response_body`, `assembled_response` and `request_cache_control` — are **not** columns of
 `dial_usage_log`, neither in the catalog nor physically (`V11` dropped them from it). They live on
 `dial_usage_log_payload`, a system **enrichment** of it keyed on `event_id`, so that they can carry a
 shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's (a year by default,

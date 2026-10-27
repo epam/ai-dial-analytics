@@ -22,7 +22,8 @@ import java.util.TreeMap;
  * of each present {@link #SYSTEM_KEYS top-level system key}, in that order, then the array's elements. Every
  * {@code cache_control} member inside the history is removed and recorded as a {@link #markers() marker}, because
  * clients move that marker to the newest message on each turn: left in, the same earlier message would canonicalize
- * differently on every turn and no turn would find its parent.
+ * differently on every turn and no turn would find its parent. A system element is hashed under its key name
+ * ({@link #hashedHistory()}), so requests sharing a prefix share their system keys too, names included.
  *
  * <p>Each history element and the stored body are rendered as <b>canonical JSON</b>: object members sorted by name, no
  * insignificant whitespace, numbers as parsed (floats kept exact as decimals), and an unpaired surrogate written as its
@@ -40,7 +41,7 @@ public final class ChatRequest {
     /** The top-level keys whose values open the history, in this order, when present. */
     static final List<String> SYSTEM_KEYS = List.of("system", "instructions", "system_instruction", "systemInstruction");
 
-    /** The top-level key a request inherits from its parent: the prefix hashes cover it, so a parent's is always equal. */
+    /** The top-level key a request inherits from its chain: the prefix hashes cover it, so a parent's is always equal. */
     static final String TOOLS = "tools";
 
     private static final String CACHE_CONTROL = "cache_control";
@@ -142,6 +143,18 @@ public final class ChatRequest {
         return canonicalHistory;
     }
 
+    /**
+     * The history as the prefix hashes cover it: each system element as its key and value ({@code "system":...}), then
+     * the message elements as they are. A message element is always an object, so the two never match.
+     */
+    List<String> hashedHistory() {
+        List<String> hashed = new ArrayList<>(canonicalHistory);
+        for (int i = 0; i < systemCount; i++) {
+            hashed.set(i, canonical(JsonNodeFactory.instance.stringNode(systemKeys.get(i))) + ":" + canonicalHistory.get(i));
+        }
+        return hashed;
+    }
+
     /** How many history elements come from top-level system keys; they open the history. */
     int systemCount() {
         return systemCount;
@@ -159,8 +172,9 @@ public final class ChatRequest {
 
     /**
      * The body to store, as canonical JSON: the request with its history cut to the elements from {@code from} on and
-     * its {@code cache_control} markers removed, and, when it has a parent ({@code from > 0}), without the system keys
-     * and {@code tools} it inherits. Only for a request parsed for storing.
+     * its {@code cache_control} markers removed, and, when it has a parent ({@code from > 0}), without its system keys
+     * and {@code tools}: every request on its chain has the same ones, and the chain's root stores them. Only for a
+     * request parsed for storing.
      *
      * @param from the parent's depth: 0 for a root, else at least {@link #systemCount()}
      */
@@ -185,18 +199,6 @@ public final class ChatRequest {
         members.forEach((name, value) -> out.append(out.length() > 1 ? "," : "")
                 .append(canonical(JsonNodeFactory.instance.stringNode(name))).append(':').append(value));
         return out.append('}').toString();
-    }
-
-    /**
-     * The top-level keys {@link #stored} leaves out for a rebuild to put back: none for a root ({@code from == 0}),
-     * else the system keys and {@code tools} the request carries.
-     */
-    List<String> inherited(int from) {
-        List<String> keys = new ArrayList<>(from > 0 ? systemKeys : List.of());
-        if (from > 0 && tools != null) {
-            keys.add(TOOLS);
-        }
-        return keys;
     }
 
     /**
@@ -286,7 +288,7 @@ public final class ChatRequest {
      */
     record Marker(int element, String at, JsonNode value) {
 
-        /** The marker as stored in {@code request_cache_markers}: {@code {"i": element, "at": pointer, "v": value}}. */
+        /** The marker as stored in {@code request_cache_control}: {@code {"i": element, "at": pointer, "v": value}}. */
         ObjectNode toJson() {
             ObjectNode json = JsonNodeFactory.instance.objectNode();
             json.put("i", element);

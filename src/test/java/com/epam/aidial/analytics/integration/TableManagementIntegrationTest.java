@@ -629,8 +629,8 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[?(@.name == 'jwt_claims')].sensitive").value(true))
                 .andExpect(jsonPath("$.columns[?(@.name == 'request_tags')].sensitive").value(true))
                 // The cache markers (V50) are part of a chat request's content: heavy and sensitive like it.
-                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].heavy").value(true))
-                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_markers')].sensitive").value(true))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_control')].heavy").value(true))
+                .andExpect(jsonPath("$.columns[?(@.name == 'request_cache_control')].sensitive").value(true))
                 .andExpect(jsonPath("$.columns", hasSize(6)))
                 // The catalog mirrors the physical shape: ORDER BY (event_id), recorded by V38 exactly as
                 // CatalogSchemaWriter records it for an API-created enrichment. Left at the column default

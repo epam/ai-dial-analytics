@@ -26,8 +26,8 @@ import java.util.UUID;
  * chat request is stored whole".
  *
  * <p>Runs once per flush of the payload sink, on the batch about to be inserted, after the mapping (and so after the
- * inline-file rewrite). Under {@link RequestBodyMode#WHOLE} it only stamps each chat request with its path and depth
- * and keeps the body: a row stored whole then still supplies its path's history, so a delta row that names it as parent
+ * inline-file rewrite). Under {@link RequestBodyMode#WHOLE} it only stamps each chat request with its path and keeps
+ * the body: a row stored whole then still supplies its path's history, so a delta row that names it as parent
  * stays rebuildable when its parent is re-ingested under {@code whole}, and a switch to {@code delta} links onto rows
  * written before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
  * parent the deepest prefix {@code pk}, {@code k < n}, that some stored request carries as its path, looking in order
@@ -40,8 +40,8 @@ import java.util.UUID;
  * a stored body either carries all of its system keys or inherits all of them.
  *
  * <p>The stored body is the request with its history cut to the elements after the parent's. The prefix hashes cover
- * the {@code tools} too, so a parent always has the child's tools and the child leaves them out; a request whose tools
- * changed finds no parent and is a root. {@code request_inherited} names every key left out.
+ * the system keys by name and the {@code tools}, so every request on a chain has the same ones: a child leaves them
+ * out, and a rebuild copies them from the chain's root. A request whose tools changed finds no parent and is a root.
  *
  * <p>Finding no parent is not an error: the request is a chain root and costs space only. That includes a table lookup
  * that fails — it is logged and counted, and the requests it would have resolved become roots, so a read problem never
@@ -73,19 +73,17 @@ public final class RequestDeltaEncoder {
     /** Prefixes asked of the payload table per flush, at most; requests beyond it are roots. */
     static final int MAX_TABLE_CANDIDATES = 16_384;
 
-    /** Ancestor paths kept in {@code request_ancestors}, nearest first to go: a read hint, so it need not be complete. */
+    /** Ancestor paths kept in {@code request_ancestor_hashes}, nearest first to go: a read hint, so it need not be complete. */
     static final int ANCESTORS_HINT = 128;
 
     static final String REQUEST_BODY = "request_body";
     static final String REQUEST_TIME = "request_time";
     static final String PROJECT_ID = "project_id";
     static final String USER_HASH = "user_hash";
-    static final String REQUEST_PATH = "request_path";
-    static final String REQUEST_PARENT = "request_parent";
-    static final String REQUEST_DEPTH = "request_depth";
-    static final String REQUEST_ANCESTORS = "request_ancestors";
-    static final String REQUEST_INHERITED = "request_inherited";
-    static final String REQUEST_CACHE_MARKERS = "request_cache_markers";
+    static final String REQUEST_HASH = "request_hash";
+    static final String REQUEST_PARENT_HASH = "request_parent_hash";
+    static final String REQUEST_ANCESTOR_HASHES = "request_ancestor_hashes";
+    static final String REQUEST_CACHE_CONTROL = "request_cache_control";
 
     /** The all-zero hash: a root's (and a whole body's) parent. */
     static final UUID NO_PARENT = new UUID(0L, 0L);
@@ -287,7 +285,7 @@ public final class RequestDeltaEncoder {
                 return null;
             }
             String scope = scope(row);
-            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.tools(), request.canonicalHistory()),
+            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.tools(), request.hashedHistory()),
                     request.systemCount());
         }
 
@@ -353,10 +351,9 @@ public final class RequestDeltaEncoder {
             return false;
         }
 
-        /** Under {@code whole}: the row keeps its body and carries its path and depth, and is never linked. */
+        /** Under {@code whole}: the row keeps its body and carries its path, and is never linked. */
         void stampPath() {
-            row.put(REQUEST_PATH, path().toString());
-            row.put(REQUEST_DEPTH, (long) depth());
+            row.put(REQUEST_HASH, path().toString());
         }
 
         /**
@@ -371,19 +368,18 @@ public final class RequestDeltaEncoder {
         boolean write(JsonMapper mapper, ChainNode parent, int parentDepth) {
             ChatRequest request = row.get(REQUEST_BODY) instanceof String body ? ChatRequest.parse(mapper, body, true) : null;
             // A row already carrying a parent was written by an earlier pass: its body is the stored one, not the sent one.
-            if (request == null || request.canonicalHistory().size() != depth() || row.containsKey(REQUEST_PARENT)) {
+            if (request == null || request.canonicalHistory().size() != depth() || row.containsKey(REQUEST_PARENT_HASH)) {
                 if (row.get(REQUEST_BODY) instanceof String) {
                     stampPath();
                 }
                 return false;
             }
             stampPath();
-            row.put(REQUEST_PARENT, (parent == null ? NO_PARENT : parent.path()).toString());
+            row.put(REQUEST_PARENT_HASH, (parent == null ? NO_PARENT : parent.path()).toString());
             List<UUID> lineage = parent == null ? List.of() : parent.lineage(ANCESTORS_HINT);
-            row.put(REQUEST_ANCESTORS, lineage.stream().map(UUID::toString).toList());
+            row.put(REQUEST_ANCESTOR_HASHES, lineage.stream().map(UUID::toString).toList());
             row.put(REQUEST_BODY, request.stored(parentDepth));
-            row.put(REQUEST_INHERITED, request.inherited(parentDepth));
-            row.put(REQUEST_CACHE_MARKERS, markers(request));
+            row.put(REQUEST_CACHE_CONTROL, markers(request));
             return true;
         }
 

@@ -9,7 +9,7 @@ import java.util.UUID;
 
 /**
  * The prefix hashes that identify a request's place in a chain: {@code p0 = H(scope, day, tools)} and
- * {@code pk = H(p(k-1), canonical(hk))}. Each hash folds in every history element before it, the scope and the tools,
+ * {@code pk = H(p(k-1), hk)}, {@code hk} as {@link ChatRequest#hashedHistory()} renders it. Each hash folds in every history element before it, the scope and the tools,
  * so two requests share {@code pk} only when their first {@code k} elements are identical, they share project, user and
  * UTC day, and their {@code tools} are equal JSON or both absent. A child therefore always has its parent's tools.
  * {@code H} is SHA-256 truncated to 128 bits and carried as a {@link UUID}, the type the chain columns store. Element
@@ -30,7 +30,7 @@ final class PathHash {
      * @param scope   the row's chain scope (project and user)
      * @param day     the row's UTC day ({@code yyyy-MM-dd})
      * @param tools   the request's {@code tools} as canonical JSON, or {@code null} when it carries none
-     * @param history the canonical history elements
+     * @param history the history elements as {@link ChatRequest#hashedHistory()} renders them
      * @return {@code n + 1} hashes; element {@code k} covers the first {@code k} history elements
      */
     static UUID[] prefixes(String scope, String day, String tools, List<String> history) {

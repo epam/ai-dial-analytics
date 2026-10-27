@@ -24,8 +24,8 @@ and existing blobs are never rewritten, so the repetition can only be removed he
   never breaks a chain and a later switch to `delta` links onto earlier rows.
 - ClickHouse migration: new columns (and a skip index for the parent lookup) on the existing
   `dial_usage_log_payload`; its sort key, partitioning and TTL are unchanged. Existing rows are not touched.
-- Catalog migration: the payload enrichment exposes one new sensitive, heavy column, `request_cache_markers`,
-  under the qualified name `"dial_usage_log_payload.request_cache_markers"`, and the seeded `request_body`
+- Catalog migration: the payload enrichment exposes one new sensitive, heavy column, `request_cache_control`,
+  under the qualified name `"dial_usage_log_payload.request_cache_control"`, and the seeded `request_body`
   description mentions the delta form. The chain columns stay hidden.
 - **BREAKING (only under `delta`)**: for a later turn of a chat written in delta form, `request_body` holds only
   the messages that turn added, and no system prompt or `tools` when its parent has the same. A query, evaluator

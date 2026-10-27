@@ -17,7 +17,7 @@ import java.util.UUID;
  * <p>The candidates go out in chunks of {@value #CHUNK} per query. The client sends query parameters in the request
  * URI, which the server bounds ({@code http_max_uri_size}), so one query per flush could outgrow it. Each query is
  * bounded to the partitions the candidates can live in: a parent shares its child's UTC day, and the partition key is
- * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_path} skip index (ClickHouse
+ * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_hash} skip index (ClickHouse
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
  * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do.
@@ -41,13 +41,13 @@ public final class ClickHouseParentLookup implements ParentLookup {
      * Public so a test can run the exact statement through {@code EXPLAIN}.
      */
     public static String statement(String table) {
-        return "SELECT toString(request_path) AS path,"
-                + " arrayStringConcat(arrayMap(x -> toString(x), any(request_ancestors)), ',') AS ancestors"
+        return "SELECT toString(request_hash) AS path,"
+                + " arrayStringConcat(arrayMap(x -> toString(x), any(request_ancestor_hashes)), ',') AS ancestors"
                 + " FROM `" + table.replace("`", "``") + "`"
                 + " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
                 + " AND toYYYYMMDD(request_time) IN (SELECT toUInt32(arrayJoin(splitByChar(',', {days:String}))))"
-                + " AND request_path IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))"
-                + " GROUP BY request_path";
+                + " AND request_hash IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))"
+                + " GROUP BY request_hash";
     }
 
     @Override

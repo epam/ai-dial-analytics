@@ -26,8 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RequestDeltaStagesTest {
 
-    private static final String[] TABLE_COLUMNS = {"request_path", "request_parent", "request_depth", "request_ancestors",
-        "request_inherited", "request_cache_markers"};
+    private static final String[] TABLE_COLUMNS = {"request_hash", "request_parent_hash", "request_ancestor_hashes",
+        "request_cache_control"};
 
     private final TransformRegistry transforms = new TransformRegistry();
     private final DeriverRegistry derivers = new DeriverRegistry(JsonMapper.builder().build());
@@ -38,18 +38,18 @@ class RequestDeltaStagesTest {
 
     @Test
     void payloadTableWithTheDeltaColumnsIsRewritten() {
-        assertThat(flush(stages(true, TABLE_COLUMNS))).containsKey("request_inherited");
+        assertThat(flush(stages(true, TABLE_COLUMNS))).containsKey("request_parent_hash");
     }
 
     /** A custom target mapping request_body onto a table without the columns would have its bodies emptied. */
     @Test
     void tableWithoutTheDeltaColumnsIsLeftAlone() {
-        assertThat(flush(stages(true, "request_body"))).doesNotContainKey("request_inherited").containsKey("request_body");
+        assertThat(flush(stages(true, "request_body"))).doesNotContainKey("request_parent_hash").containsKey("request_body");
     }
 
     @Test
     void withoutSchemaValidationTheMappingIsTrusted() {
-        assertThat(flush(stages(false))).containsKey("request_inherited");
+        assertThat(flush(stages(false))).containsKey("request_parent_hash");
     }
 
     @Test

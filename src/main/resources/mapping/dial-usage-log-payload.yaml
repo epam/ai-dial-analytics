@@ -42,7 +42,7 @@
 # the payload sink fills at flush under sync.request-body-mode=delta (RequestDeltaEncoder) and which otherwise keep
 # their defaults. request_body is the one mapped column that sink rewrites: for a chat request in delta form it is
 # cut to the history its parent did not have, without the tools it shares with it, and its cache_control markers move
-# to request_cache_markers.
+# to request_cache_control.
 #
 # Override the active targets/mappings via sync.targets (see docs/configuration.md).
 

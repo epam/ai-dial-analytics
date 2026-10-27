@@ -17,7 +17,6 @@ class ChatRequestTest {
                 "{\"content\":\"s\",\"role\":\"system\"}", "{\"content\":\"u\",\"role\":\"user\"}");
         assertThat(request.stored(0)).isEqualTo("{\"messages\":[{\"content\":\"s\",\"role\":\"system\"},"
                 + "{\"content\":\"u\",\"role\":\"user\"}],\"model\":\"m\",\"temperature\":0.2,\"tools\":[{\"type\":\"function\"}]}");
-        assertThat(request.inherited(0)).isEmpty();
         assertThat(request.markers()).isEmpty();
         assertThat(request.tools()).isEqualTo("[{\"type\":\"function\"}]");
     }
@@ -33,17 +32,23 @@ class ChatRequestTest {
                 "{\"messages\":[{\"content\":\"u\",\"role\":\"user\"}],\"system\":[{\"text\":\"s\",\"type\":\"text\"}]}");
     }
 
-    /** A child leaves out the system keys and the tools its parent supplies, and names them. */
+    /** A child leaves out the system keys and the tools its chain's root supplies. */
     @Test
-    void childLeavesOutWhatItsParentSupplies() {
+    void childLeavesOutWhatItsChainSupplies() {
         ChatRequest request = parse("{\"system\":\"s\",\"tools\":[{\"name\":\"t\"}],\"model\":\"m\",\"messages\":["
                 + "{\"role\":\"user\",\"content\":\"u1\"},{\"role\":\"assistant\",\"content\":\"a1\"},{\"role\":\"user\",\"content\":\"u2\"}]}");
 
         assertThat(request.stored(2)).isEqualTo(
                 "{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
-        assertThat(request.inherited(2)).containsExactly("system", "tools");
-        assertThat(parse("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"u1\"},{\"role\":\"user\",\"content\":\"u2\"}]}")
-                .inherited(1)).isEmpty();
+    }
+
+    /** A system element is hashed under its key name, so it never matches a message or a differently named key. */
+    @Test
+    void systemElementsAreHashedWithTheirKeyName() {
+        assertThat(parse("{\"system\":\"s\",\"messages\":[{\"role\":\"user\",\"content\":\"u\"}]}").hashedHistory())
+                .containsExactly("\"system\":\"s\"", "{\"content\":\"u\",\"role\":\"user\"}");
+        assertThat(parse("{\"instructions\":\"s\",\"input\":[{\"role\":\"user\",\"content\":\"u\"}]}").hashedHistory())
+                .first().isEqualTo("\"instructions\":\"s\"");
     }
 
     /** null, an empty array and absent tools are three different requests; key order does not matter. */
@@ -73,7 +78,6 @@ class ChatRequestTest {
 
         assertThat(request.canonicalHistory()).hasSize(2).first().isEqualTo("{\"parts\":[{\"text\":\"s\"}]}");
         assertThat(request.stored(1)).contains("\"contents\":[", "\"generationConfig\"").doesNotContain("\"system_instruction\"");
-        assertThat(request.inherited(1)).containsExactly("system_instruction");
     }
 
     @Test
