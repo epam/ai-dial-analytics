@@ -28,7 +28,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * Request-delta storage against a real ClickHouse: the {@code V16} columns and skip index, the parent lookup
- * {@link ClickHouseParentLookup} issues (chunked, pruned to the day, through the path index), cold encoders — a
+ * {@link ClickHouseParentLookup} issues (chunked, pruned to the day, through the hash index), cold encoders — a
  * restart, or another instance — linking to parents they only find in the table, re-ingest and mode switches leaving
  * every row rebuildable under a deduplicated read, tools inherited through the table, and the catalog exposing the
  * cache markers while hiding the chain columns.
@@ -50,7 +50,7 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     @Test
-    void theMigrationAddsTheColumnsAndThePathIndex() {
+    void theMigrationAddsTheColumnsAndTheHashIndex() {
         assertThat(showCreateTable(PAYLOAD))
                 .contains("`project_id` LowCardinality(String)", "`deployment` LowCardinality(String)", "`user_hash` String",
                         "`session_id` Nullable(String)", "`request_hash` UUID", "`request_parent_hash` UUID",
@@ -89,9 +89,9 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         assertThat(lookup.find(List.of("2001-01-01"), List.of(path))).isEmpty();
     }
 
-    /** The production statement, parameters inlined: its plan prunes by the partition key and uses the path index. */
+    /** The production statement, parameters inlined: its plan prunes by the partition key and uses the hash index. */
     @Test
-    void theLookupStatementUsesThePartitionKeyAndThePathIndex() {
+    void theLookupStatementUsesThePartitionKeyAndTheHashIndex() {
         write(newEncoder(), row("t1", "10:00:00.000", messages("user:u1")));
         String statement = ClickHouseParentLookup.statement(PAYLOAD)
                 .replace("{from:DateTime64(3, 'UTC')}", "toDateTime64('" + FIXTURE_DATE + " 00:00:00.000', 3, 'UTC')")

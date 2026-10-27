@@ -39,10 +39,10 @@
 # Column order matches the physical table. _updated_at (DEFAULT now64(3)) is left unmapped, so it applies its
 # ClickHouse default: the caller never sets the ReplacingMergeTree version, and duplicate writes per event_id
 # collapse to the latest on a final=1 read. The other unmapped columns are the request-delta columns of V16, which
-# the payload sink fills at flush under sync.request-body-mode=delta (RequestDeltaEncoder) and which otherwise keep
-# their defaults. request_body is the one mapped column that sink rewrites: for a chat request in delta form it is
-# cut to the history its parent did not have, without the tools it shares with it, and its cache_control markers move
-# to request_cache_control.
+# the payload sink fills at flush (RequestDeltaEncoder): under sync.request-body-mode=whole only a chat request's
+# request_hash, under delta all of them. request_body is the one mapped column that sink rewrites: for a chat request
+# in delta form it is cut to the history its parent did not have, without the system keys and tools it shares with
+# it, and its cache_control markers move to request_cache_control.
 #
 # Override the active targets/mappings via sync.targets (see docs/configuration.md).
 

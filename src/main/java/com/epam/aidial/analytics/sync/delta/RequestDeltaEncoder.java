@@ -65,7 +65,7 @@ public final class RequestDeltaEncoder {
 
     /**
      * Prefixes per unresolved request asked of the payload table. A typical parent is one to three elements shallower,
-     * and every candidate weakens the path index's pruning, so only the deepest few are asked; a parent further back
+     * and every candidate weakens the hash index's pruning, so only the deepest few are asked; a parent further back
      * than that is not looked for, and the request is a root.
      */
     static final int TABLE_CANDIDATES = 8;
