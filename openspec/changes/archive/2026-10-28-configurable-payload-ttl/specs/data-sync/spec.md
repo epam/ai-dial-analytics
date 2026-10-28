@@ -30,7 +30,7 @@ is past the new limit SHALL be dropped whole, exactly as an expiry under the old
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter the payload
-table, and `SYNC_PAYLOAD_TTL_DAYS` SHALL have no effect. When the configured payload table does not exist,
+table and SHALL NOT apply `SYNC_PAYLOAD_TTL_DAYS`, which is still validated. When the configured payload table does not exist,
 the service SHALL log that the reconciliation was skipped and start normally. A failed alteration SHALL fail
 startup, as a failed migration does.
 
@@ -93,7 +93,7 @@ query to the payload window; the query surface documents this asymmetry rather t
 #### Scenario: Disabled migrations leave the retention alone
 
 - **WHEN** the service starts with `CLICKHOUSE_MIGRATIONS_ENABLED=false` and `SYNC_PAYLOAD_TTL_DAYS=30`
-- **THEN** the payload table's `TTL` is not altered
+- **THEN** the payload table's `TTL` is not altered, while an invalid value such as `0` still fails startup
 
 #### Scenario: A missing payload table is skipped
 

@@ -28,7 +28,7 @@ Pieces already in place:
 - Retention for `dial_usage_log`, `rate_analytics` or user tables.
 - Re-aligning the TTL of enrichments that inherited the payload TTL when they were created
   (`InheritedTtl`); they keep the TTL they were created with.
-- A confirmation switch for shortening. Validation plus a WARN log is the agreed guard.
+- A confirmation switch for shortening. Validation plus a WARN log is the guard: a confirmation switch would be a second setting, set once and left on.
 
 ## Decisions
 
@@ -116,7 +116,7 @@ recalculation is metadata-only per D5.
 ## Risks / Trade-offs
 
 - [A mistyped value deletes data] → Validation rejects `0` and negatives other than `-1`; the WARN line
-  records the old and new retention. Agreed as sufficient; no confirmation switch.
+  records the old and new retention. No confirmation switch (see Non-Goals).
 - [A deployment that set its TTL by hand loses it on upgrade] → Called out as BREAKING in the proposal and
   in the spec; they must set `SYNC_PAYLOAD_TTL_DAYS` first.
 - [A later ClickHouse version makes the TTL materialization rewrite parts] → D5 records the measurement
