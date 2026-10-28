@@ -338,7 +338,7 @@ aliases, used by `V9__ttl_only_drop_parts` on `dial_usage_log` and `rate_analyti
 `ALTER DROP COLUMN` for `V11__drop_dial_usage_log_payload_columns`. Each may be narrowed to the three ingest tables instead of
 `<database>.*`. The retention reconciliation after the migrations needs an eighth, `ALTER TTL` (alias
 `ALTER MODIFY TTL`), on `dial_usage_log` and `dial_usage_log_payload`, but only on a start where
-`SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` differs from the live `TTL`; it covers both `MODIFY TTL`,
+`SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` is set and differs from the live `TTL`; it covers both `MODIFY TTL`,
 including the materialization that follows, and `REMOVE TTL` (verified against 26.8.34.13). The `dial_usage_log_payload` line below is **required**, not optional: V12 is the first
 migration to `ALTER` that table, so without it startup fails at V12:
 

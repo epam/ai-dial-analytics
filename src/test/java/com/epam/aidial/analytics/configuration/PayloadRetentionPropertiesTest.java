@@ -18,12 +18,13 @@ class PayloadRetentionPropertiesTest {
             .withUserConfiguration(BindPayloadRetentionProperties.class);
 
     @Test
-    void defaultsToNinetyDaysOnThePayloadTable() {
+    void unsetByDefaultOnThePayloadTable() {
         contextRunner.run(context -> {
             final PayloadRetentionProperties props = context.getBean(PayloadRetentionProperties.class);
-            assertThat(props.ttlDays()).isEqualTo(90);
-            assertThat(props.table()).isEqualTo("dial_usage_log_payload");
+            assertThat(props.ttlDays()).isNull();
+            assertThat(props.unset()).isTrue();
             assertThat(props.noTtl()).isFalse();
+            assertThat(props.table()).isEqualTo("dial_usage_log_payload");
         });
     }
 

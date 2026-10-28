@@ -6,17 +6,16 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * Typed binding for the usage log's retention ({@code sync.usage-log.*}), env-overridable via
  * {@code application.yml}.
  *
- * <p>The usage log's {@code TTL} is provisioned by a migration as one year and then reconciled at every start (see
- * {@code IngestTtlReconciler}). Unset keeps that year rather than defaulting to a number of days: the server
- * renders it {@code toIntervalYear(1)}, which no day count equals, so a day default would alter every existing
- * table on upgrade. {@code -1} removes the {@code TTL}; {@code 0} is rejected, as for
+ * <p>The usage log's {@code TTL} is provisioned by a migration as one year. A set {@code ttlDays} is applied to the
+ * live table at every start (see {@code IngestTtlReconciler}); unset leaves the live {@code TTL} as it is, so
+ * removing the property never alters the table. {@code -1} removes the {@code TTL}; {@code 0} is rejected, as for
  * {@link PayloadRetentionProperties}.
  *
  * <p>{@code table} reads the same {@code SYNC_TABLE} variable as the usage-log ingest target
  * ({@code sync.targets[0].table}).
  *
  * @param ttlDays the usage-log retention in days, {@code 1} or more, or {@link #NO_TTL}; {@code null} (unset) means
- *                the provisioned year
+ *                the live {@code TTL} is left alone
  * @param table   the usage-log table; {@code null} or blank (absent) means {@link #DEFAULT_TABLE}
  */
 @ConfigurationProperties(prefix = "sync.usage-log")
@@ -34,8 +33,8 @@ public record UsageLogRetentionProperties(Integer ttlDays, String table) {
         table = table == null || table.isBlank() ? DEFAULT_TABLE : table.trim();
     }
 
-    /** Whether the usage log keeps its provisioned one-year {@code TTL}. */
-    public boolean provisionedYear() {
+    /** Whether the property is unset, so the usage log keeps its live {@code TTL}. */
+    public boolean unset() {
         return ttlDays == null;
     }
 

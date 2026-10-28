@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The usage-log and payload {@code TTL} reconciliation against the real server, on copies of the migrated tables so
@@ -46,7 +47,7 @@ class IngestTtlReconcilerIntegrationTest extends AbstractClickHouseIntegrationTe
 
     @Test
     void theMigratedTablesAlreadyCarryTheDefaults() {
-        // The startup reconciliation ran with the defaults, so it found 90 days and one year and left both alone.
+        // Both properties are unset at startup, so the reconciliation left the provisioned 90 days and one year alone.
         assertThat(engineFull(PayloadRetentionProperties.DEFAULT_TABLE))
                 .contains("TTL toDateTime(request_time) + toIntervalDay(90)")
                 .contains("ttl_only_drop_parts = 1");
@@ -90,23 +91,50 @@ class IngestTtlReconcilerIntegrationTest extends AbstractClickHouseIntegrationTe
     }
 
     @Test
-    void minusOneRemovesTheTtlAndUnsetRestoresIt() {
+    void minusOneRemovesTheTtlAndUnsetKeepsItRemoved() {
         reconcile(-1, -1);
         assertThat(engineFull(PAYLOAD_COPY)).doesNotContain(" TTL ").contains("ttl_only_drop_parts = 1");
         assertThat(engineFull(USAGE_LOG_COPY)).doesNotContain(" TTL ").contains("ttl_only_drop_parts = 1");
 
-        reconcile(null, 90);
+        reconcile(null, null);
+        assertThat(engineFull(PAYLOAD_COPY)).doesNotContain(" TTL ");
+        assertThat(engineFull(USAGE_LOG_COPY)).doesNotContain(" TTL ");
+
+        reconcile(365, 90);
         assertThat(engineFull(PAYLOAD_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(90)");
-        assertThat(engineFull(USAGE_LOG_COPY)).contains("TTL toDateTime(request_time) + toIntervalYear(1)");
+        assertThat(engineFull(USAGE_LOG_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(365)");
     }
 
     @Test
-    void retentionSetByHandIsReverted() {
+    void removingThePropertyKeepsTheRetentionItApplied() {
+        reconcile(null, 30);
+        reconcile(null, null);
+        assertThat(engineFull(PAYLOAD_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(30)");
+    }
+
+    @Test
+    void retentionSetByHandSurvivesWithThePropertiesUnset() {
         ddl.execute("ALTER TABLE " + PAYLOAD_COPY + " MODIFY TTL toDateTime(request_time) + INTERVAL 45 DAY");
-        ddl.execute("ALTER TABLE " + USAGE_LOG_COPY + " MODIFY TTL toDateTime(request_time) + INTERVAL 200 DAY");
+        ddl.execute("ALTER TABLE " + USAGE_LOG_COPY + " MODIFY TTL toDateTime(request_time) + INTERVAL 500 DAY");
+        reconcile(null, null);
+        assertThat(engineFull(PAYLOAD_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(45)");
+        assertThat(engineFull(USAGE_LOG_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(500)");
+    }
+
+    @Test
+    void retentionSetByHandIsRevertedBySetValue() {
+        ddl.execute("ALTER TABLE " + PAYLOAD_COPY + " MODIFY TTL toDateTime(request_time) + INTERVAL 45 DAY");
         reconcile(null, 90);
         assertThat(engineFull(PAYLOAD_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(90)");
-        assertThat(engineFull(USAGE_LOG_COPY)).contains("TTL toDateTime(request_time) + toIntervalYear(1)");
+    }
+
+    @Test
+    void setUsageLogShorterThanTheLivePayloadFailsBeforeAnyAlter() {
+        final String usageLogBefore = engineFull(USAGE_LOG_COPY);
+        assertThatThrownBy(() -> reconcile(60, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sync.usage-log.ttl-days (60)");
+        assertThat(engineFull(USAGE_LOG_COPY)).isEqualTo(usageLogBefore);
     }
 
     @Test
@@ -118,7 +146,7 @@ class IngestTtlReconcilerIntegrationTest extends AbstractClickHouseIntegrationTe
         assertThat(engineFull(USAGE_LOG_COPY)).contains("TTL toDateTime(request_time) + toIntervalDay(180)");
     }
 
-    private void reconcile(Integer usageLogDays, int payloadDays) {
+    private void reconcile(Integer usageLogDays, Integer payloadDays) {
         new IngestTtlReconciler(new UsageLogRetentionProperties(usageLogDays, USAGE_LOG_COPY),
                 new PayloadRetentionProperties(payloadDays, PAYLOAD_COPY), inspector, ddl, renderer).reconcile();
     }

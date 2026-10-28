@@ -18,11 +18,11 @@ class UsageLogRetentionPropertiesTest {
             .withUserConfiguration(BindUsageLogRetentionProperties.class);
 
     @Test
-    void unsetKeepsTheProvisionedYearOnTheUsageLog() {
+    void unsetByDefaultOnTheUsageLog() {
         contextRunner.run(context -> {
             final UsageLogRetentionProperties props = context.getBean(UsageLogRetentionProperties.class);
             assertThat(props.ttlDays()).isNull();
-            assertThat(props.provisionedYear()).isTrue();
+            assertThat(props.unset()).isTrue();
             assertThat(props.noTtl()).isFalse();
             assertThat(props.table()).isEqualTo("dial_usage_log");
         });
@@ -45,7 +45,7 @@ class UsageLogRetentionPropertiesTest {
                 .run(context -> {
                     final UsageLogRetentionProperties props = context.getBean(UsageLogRetentionProperties.class);
                     assertThat(props.ttlDays()).isEqualTo(180);
-                    assertThat(props.provisionedYear()).isFalse();
+                    assertThat(props.unset()).isFalse();
                 });
     }
 

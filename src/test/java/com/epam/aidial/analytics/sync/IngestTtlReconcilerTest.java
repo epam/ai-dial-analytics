@@ -25,20 +25,24 @@ import static org.mockito.Mockito.when;
 
 /**
  * The usage-log and payload {@code TTL} decisions, over {@code engine_full} strings in the spelling ClickHouse
- * renders, and the bound of the payload retention by the usage log's.
+ * renders, and the bound of the payload retention by the usage log's on set and live retentions.
  */
 class IngestTtlReconcilerTest {
 
     private static final String HEAD =
             "ReplacingMergeTree(_updated_at) PARTITION BY toYYYYMMDD(request_time) ORDER BY event_id";
     private static final String SETTINGS = " SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192";
-    private static final String TTL_90 = HEAD + " TTL toDateTime(request_time) + toIntervalDay(90)" + SETTINGS;
-    private static final String TTL_YEAR = HEAD + " TTL toDateTime(request_time) + toIntervalYear(1)" + SETTINGS;
+    private static final String TTL_90 = ttl("toIntervalDay(90)");
+    private static final String TTL_YEAR = ttl("toIntervalYear(1)");
     private static final String NO_TTL = HEAD + SETTINGS;
+    private static final String MOVE_RULE = HEAD + " TTL toDateTime(request_time) + toIntervalDay(7) TO VOLUME 'cold', "
+            + "toDateTime(request_time) + toIntervalYear(1)" + SETTINGS;
     private static final String PAYLOAD = PayloadRetentionProperties.DEFAULT_TABLE;
     private static final String USAGE_LOG = UsageLogRetentionProperties.DEFAULT_TABLE;
 
     private final TableDdlRenderer renderer = new TableDdlRenderer();
+
+    // --- the per-table decision ---
 
     @Test
     void matchingRetentionNeedsNoStatement() {
@@ -59,6 +63,7 @@ class IngestTtlReconcilerTest {
 
     @Test
     void minusOneRemovesAnExistingTtl() {
+        assertThat(IngestTtlReconciler.target(-1)).isEmpty();
         assertThat(IngestTtlReconciler.command(TTL_90, Optional.empty(), renderer)).contains("REMOVE TTL");
     }
 
@@ -70,8 +75,13 @@ class IngestTtlReconcilerTest {
 
     @Test
     void sameLengthInAnotherUnitIsReplaced() {
-        final String weeks = HEAD + " TTL toDateTime(request_time) + toIntervalWeek(90)" + SETTINGS;
-        assertThat(IngestTtlReconciler.command(weeks, days(90), renderer)).isPresent();
+        assertThat(IngestTtlReconciler.command(ttl("toIntervalWeek(90)"), days(90), renderer)).isPresent();
+    }
+
+    @Test
+    void threeHundredSixtyFiveDaysIsNotTheYear() {
+        assertThat(IngestTtlReconciler.command(TTL_YEAR, days(365), renderer))
+                .contains("MODIFY TTL toDateTime(`request_time`) + INTERVAL 365 DAY");
     }
 
     @Test
@@ -82,9 +92,7 @@ class IngestTtlReconcilerTest {
 
     @Test
     void ttlOfSeveralRulesIsReplaced() {
-        final String rules = HEAD + " TTL toDateTime(request_time) + toIntervalDay(90), "
-                + "toDateTime(request_time) + toIntervalDay(30) DELETE WHERE event_id = ''" + SETTINGS;
-        assertThat(IngestTtlReconciler.command(rules, days(90), renderer)).isPresent();
+        assertThat(IngestTtlReconciler.command(MOVE_RULE, days(365), renderer)).isPresent();
     }
 
     @Test
@@ -95,49 +103,42 @@ class IngestTtlReconcilerTest {
         assertThat(IngestTtlReconciler.ttlClause(NO_TTL)).isEmpty();
     }
 
-    @Test
-    void unsetUsageLogRetentionTargetsTheProvisionedYear() {
-        final Optional<TtlDdl> target = IngestTtlReconciler.usageLogTtl(usageLog(null));
-        assertThat(target).contains(new TtlDdl("request_time", 1, TtlUnit.YEAR, true));
-        assertThat(IngestTtlReconciler.command(TTL_YEAR, target, renderer)).isEmpty();
-    }
+    // --- reconcile: unset leaves a table alone ---
 
     @Test
-    void unsetUsageLogRetentionRestoresTheYear() {
-        assertThat(IngestTtlReconciler.command(TTL_90, IngestTtlReconciler.usageLogTtl(usageLog(null)), renderer))
-                .contains("MODIFY TTL toDateTime(`request_time`) + INTERVAL 1 YEAR");
-    }
-
-    @Test
-    void threeHundredSixtyFiveDaysIsNotTheYear() {
-        assertThat(IngestTtlReconciler.command(TTL_YEAR, IngestTtlReconciler.usageLogTtl(usageLog(365)), renderer))
-                .contains("MODIFY TTL toDateTime(`request_time`) + INTERVAL 365 DAY");
-    }
-
-    @Test
-    void minusOneUsageLogRetentionTargetsNoTtl() {
-        assertThat(IngestTtlReconciler.usageLogTtl(usageLog(-1))).isEmpty();
-    }
-
-    @Test
-    void reconcileAltersBothConfiguredTables() {
+    void unsetPropertiesIssueNothingWhateverTheTablesCarry() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(usageLog(180), payload(30), Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
+        reconciler(null, null, Optional.of(ttl("toIntervalDay(500)")), Optional.of(NO_TTL), ddl).reconcile();
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void anUnsetSideIsLeftAloneWhileTheSetSideIsReconciled() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(180, null, Optional.of(TTL_YEAR), Optional.of(ttl("toIntervalDay(45)")), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log` MODIFY TTL toDateTime(`request_time`) + INTERVAL 180 DAY");
+        verify(ddl, never()).execute(contains(PAYLOAD));
+    }
+
+    @Test
+    void reconcileAltersBothSetTables() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(180, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
         verify(ddl).execute("ALTER TABLE `dial_usage_log` MODIFY TTL toDateTime(`request_time`) + INTERVAL 180 DAY");
         verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 30 DAY");
     }
 
     @Test
-    void reconcileIssuesNothingWhenBothTablesMatch() {
+    void reconcileIssuesNothingWhenBothSetTablesMatch() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(usageLog(null), payload(90), Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
+        reconciler(180, 90, Optional.of(ttl("toIntervalDay(180)")), Optional.of(TTL_90), ddl).reconcile();
         verify(ddl, never()).execute(anyString());
     }
 
     @Test
     void reconcileSkipsMissingTableAndStillReconcilesTheOther() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(usageLog(180), payload(30), Optional.of(TTL_YEAR), Optional.empty(), ddl).reconcile();
+        reconciler(180, 30, Optional.of(TTL_YEAR), Optional.empty(), ddl).reconcile();
         verify(ddl).execute("ALTER TABLE `dial_usage_log` MODIFY TTL toDateTime(`request_time`) + INTERVAL 180 DAY");
         verify(ddl, never()).execute(contains(PAYLOAD));
     }
@@ -145,7 +146,7 @@ class IngestTtlReconcilerTest {
     @Test
     void reconcileSkipsMissingUsageLogAndStillReconcilesThePayload() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(usageLog(180), payload(30), Optional.empty(), Optional.of(TTL_90), ddl).reconcile();
+        reconciler(null, 30, Optional.empty(), Optional.of(TTL_90), ddl).reconcile();
         verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 30 DAY");
         verify(ddl, never()).execute(contains("`" + USAGE_LOG + "`"));
     }
@@ -154,69 +155,165 @@ class IngestTtlReconcilerTest {
     void rejectedAlterPropagates() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
         doThrow(new ClickHouseQueryException("rejected", new RuntimeException())).when(ddl).execute(anyString());
-        assertThatThrownBy(() -> reconciler(usageLog(null), payload(30), Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl)
-                .reconcile())
+        assertThatThrownBy(() -> reconciler(null, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
                 .isInstanceOf(ClickHouseQueryException.class);
     }
 
+    // --- the bound on two set values ---
+
     @Test
-    void payloadLongerThanUsageLogFailsNamingBothProperties() {
-        assertThatThrownBy(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(60), payload(90)))
+    void twoSetValuesWithTheLongerPayloadFailNamingBothProperties() {
+        assertThatThrownBy(() -> IngestTtlReconciler.checkSetRetentions(usageLog(60), payload(90)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("sync.payload.ttl-days")
                 .hasMessageContaining("sync.usage-log.ttl-days");
-    }
-
-    @Test
-    void payloadLongerThanTheProvisionedYearFails() {
-        assertThatThrownBy(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(null), payload(366)))
+        assertThatThrownBy(() -> IngestTtlReconciler.checkSetRetentions(usageLog(500), payload(-1)))
                 .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
-    void unlimitedPayloadNeedsAnUnlimitedUsageLog() {
-        assertThatThrownBy(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(null), payload(-1)))
-                .isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(10_000), payload(-1)))
-                .isInstanceOf(IllegalStateException.class);
-        assertThatCode(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(-1), payload(-1)))
-                .doesNotThrowAnyException();
+    void twoSetValuesEqualShorterOrBothUnlimitedAreAccepted() {
+        assertThatCode(() -> IngestTtlReconciler.checkSetRetentions(usageLog(60), payload(60))).doesNotThrowAnyException();
+        assertThatCode(() -> IngestTtlReconciler.checkSetRetentions(usageLog(-1), payload(-1))).doesNotThrowAnyException();
+        assertThatCode(() -> IngestTtlReconciler.checkSetRetentions(usageLog(-1), payload(90))).doesNotThrowAnyException();
     }
 
     @Test
-    void equalOrShorterPayloadIsAccepted() {
-        assertThatCode(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(60), payload(60)))
-                .doesNotThrowAnyException();
-        assertThatCode(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(null), payload(365)))
-                .doesNotThrowAnyException();
-        assertThatCode(() -> IngestTtlReconciler.checkPayloadWithinUsageLog(usageLog(-1), payload(90)))
-                .doesNotThrowAnyException();
+    void anUnsetSideIsNotJudgedAtConstruction() {
+        assertThatCode(() -> IngestTtlReconciler.checkSetRetentions(usageLog(null), payload(-1))).doesNotThrowAnyException();
+        assertThatCode(() -> IngestTtlReconciler.checkSetRetentions(usageLog(1), payload(null))).doesNotThrowAnyException();
     }
 
     @Test
-    void constructionChecksTheBound() {
+    void constructionChecksTwoSetValues() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        assertThatThrownBy(() -> reconciler(usageLog(30), payload(90), Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl))
+        assertThatThrownBy(() -> reconciler(30, 90, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl))
                 .isInstanceOf(IllegalStateException.class);
     }
 
-    private IngestTtlReconciler reconciler(UsageLogRetentionProperties usageLog, PayloadRetentionProperties payload,
+    // --- the bound against a live TTL ---
+
+    @Test
+    void setUsageLogShorterThanTheLivePayloadFailsBeforeAnyAlter() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatThrownBy(() -> reconciler(60, null, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sync.payload.ttl-days (unset, live TTL toDateTime(request_time) + toIntervalDay(90))")
+                .hasMessageContaining("sync.usage-log.ttl-days (60)");
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void setPayloadLongerThanTheLiveYearFailsBeforeAnyAlter() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatThrownBy(() -> reconciler(null, 366, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> reconciler(null, -1, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
+                .isInstanceOf(IllegalStateException.class);
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void setPayloadOfYearDaysFitsTheLiveYear() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(null, 365, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 365 DAY");
+    }
+
+    @Test
+    void setPayloadFitsUsageLogWithoutTtl() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(null, -1, Optional.of(NO_TTL), Optional.of(TTL_90), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` REMOVE TTL");
+    }
+
+    @Test
+    void liveTtlsOutOfBoundWithBothUnsetAreOnlyReported() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatCode(() -> reconciler(null, null, Optional.of(TTL_90), Optional.of(TTL_YEAR), ddl).reconcile())
+                .doesNotThrowAnyException();
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void anUnreadableLiveTtlSkipsTheBoundAndStillReconcilesTheSetSide() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(null, 400, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 400 DAY");
+        verify(ddl, never()).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
+    @Test
+    void missingUnsetSideSkipsTheBound() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(null, 400, Optional.empty(), Optional.of(TTL_90), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 400 DAY");
+    }
+
+    // --- reading a live TTL ---
+
+    @Test
+    void effectiveRetentionIsTheSetValueElseTheLiveTtl() {
+        assertThat(IngestTtlReconciler.effective(30, Optional.of(TTL_YEAR))).contains(days(30));
+        assertThat(IngestTtlReconciler.effective(null, Optional.of(TTL_YEAR)))
+                .contains(Optional.of(new TtlDdl("request_time", 1, TtlUnit.YEAR, true)));
+        assertThat(IngestTtlReconciler.effective(null, Optional.of(NO_TTL))).contains(Optional.empty());
+        assertThat(IngestTtlReconciler.effective(null, Optional.of(MOVE_RULE))).isEmpty();
+        assertThat(IngestTtlReconciler.effective(null, Optional.empty())).isEmpty();
+    }
+
+    @Test
+    void likeUnitsCompareTheirIntervals() {
+        assertThat(IngestTtlReconciler.exceeds(rule(1, TtlUnit.YEAR), rule(1, TtlUnit.YEAR))).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(rule(2, TtlUnit.MONTH), rule(1, TtlUnit.MONTH))).isTrue();
+    }
+
+    @Test
+    void mixedUnitsCompareThePayloadsWidestWithTheUsageLogsNarrowest() {
+        // A year is 365 to 366 days, a month 28 to 31, an hour count is rounded up for the payload and down for the log.
+        assertThat(IngestTtlReconciler.exceeds(days(365), rule(1, TtlUnit.YEAR))).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(days(366), rule(1, TtlUnit.YEAR))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(rule(1, TtlUnit.YEAR), days(365))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(days(28), rule(1, TtlUnit.MONTH))).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(days(29), rule(1, TtlUnit.MONTH))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(rule(1, TtlUnit.WEEK), days(7))).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(rule(25, TtlUnit.HOUR), days(1))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(days(1), rule(47, TtlUnit.HOUR))).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(days(2), rule(47, TtlUnit.HOUR))).isTrue();
+    }
+
+    @Test
+    void noTtlIsUnlimited() {
+        assertThat(IngestTtlReconciler.exceeds(Optional.empty(), days(10_000))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(days(10_000), Optional.empty())).isFalse();
+        assertThat(IngestTtlReconciler.exceeds(Optional.empty(), Optional.empty())).isFalse();
+    }
+
+    private IngestTtlReconciler reconciler(Integer usageLogDays, Integer payloadDays,
             Optional<String> usageLogEngine, Optional<String> payloadEngine, DdlExecutor ddl) {
         final ClickHouseTableInspector inspector = mock(ClickHouseTableInspector.class);
         when(inspector.engineFull(USAGE_LOG)).thenReturn(usageLogEngine);
         when(inspector.engineFull(PAYLOAD)).thenReturn(payloadEngine);
-        return new IngestTtlReconciler(usageLog, payload, inspector, ddl, renderer);
+        return new IngestTtlReconciler(usageLog(usageLogDays), payload(payloadDays), inspector, ddl, renderer);
+    }
+
+    private static String ttl(String interval) {
+        return HEAD + " TTL toDateTime(request_time) + " + interval + SETTINGS;
     }
 
     private static Optional<TtlDdl> days(int days) {
-        return Optional.of(new TtlDdl("request_time", days, TtlUnit.DAY, true));
+        return rule(days, TtlUnit.DAY);
+    }
+
+    private static Optional<TtlDdl> rule(int interval, TtlUnit unit) {
+        return Optional.of(new TtlDdl("request_time", interval, unit, true));
     }
 
     private static UsageLogRetentionProperties usageLog(Integer ttlDays) {
         return new UsageLogRetentionProperties(ttlDays, null);
     }
 
-    private static PayloadRetentionProperties payload(int ttlDays) {
+    private static PayloadRetentionProperties payload(Integer ttlDays) {
         return new PayloadRetentionProperties(ttlDays, null);
     }
 }
