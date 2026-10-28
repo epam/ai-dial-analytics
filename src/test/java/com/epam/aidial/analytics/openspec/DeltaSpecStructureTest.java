@@ -94,14 +94,26 @@ class DeltaSpecStructureTest {
     }
 
     @Test
-    @DisplayName("an already-synced rename, CRLF endings and a lower-case section header are accepted")
-    void syncedRenameAndCrlfAreAccepted() {
+    @DisplayName("an already-synced rename is accepted as a no-op")
+    void syncedRenameIsNoOp() {
         final Set<String> shipped = new LinkedHashSet<>(List.of("New"));
         final List<String> problems = new ArrayList<>();
-        applyRenames("cap", renamed("Old", "New").replace("\n", "\r\n"), shipped, problems);
-        applyRenames("cap", renamed("Gone", "New").replace("RENAMED", "Renamed"), shipped, problems);
+        applyRenames("cap", renamed("Gone", "New"), shipped, problems);
         assertThat(problems).isEmpty();
         assertThat(shipped).containsExactly("New");
+    }
+
+    @Test
+    @DisplayName("CRLF endings and a mixed-case section header still apply the rename")
+    void crlfAndMixedCaseHeaderStillApply() {
+        final List<String> problems = new ArrayList<>();
+        final Set<String> crlf = new LinkedHashSet<>(List.of("Old"));
+        applyRenames("cap", renamed("Old", "New").replace("\n", "\r\n"), crlf, problems);
+        final Set<String> mixedCase = new LinkedHashSet<>(List.of("Old"));
+        applyRenames("cap", renamed("Old", "New").replace("RENAMED", "Renamed"), mixedCase, problems);
+        assertThat(problems).isEmpty();
+        assertThat(crlf).containsExactly("New");
+        assertThat(mixedCase).containsExactly("New");
     }
 
     @Test

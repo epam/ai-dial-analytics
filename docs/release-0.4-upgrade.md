@@ -67,9 +67,9 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   before deploying; otherwise rows past the restored retention are deleted soon after the start. Only a single
   `request_time + INTERVAL <n> DAY` rule can be kept this way: any other hand-made `TTL` (a move rule, several
   rules, another column, a month interval) is replaced, and survives only with migrations disabled. The payload
-  value may not exceed the usage-log value, so a payload `-1` needs a usage-log `-1`; this is checked, and fails
-  startup, with migrations disabled too. With sub-privileges granted individually, the writer also needs
-  `ALTER TTL` on both tables (see
+  value may not exceed the usage-log value (an unset usage log counts as 365 days), so a payload `-1` needs a
+  usage-log `-1`; this is checked, and fails startup, with migrations disabled too. With sub-privileges granted
+  individually, the writer also needs `ALTER TTL` on both tables (see
   [`clickhouse-server.md`](clickhouse-server.md#narrowing-alter-to-sub-privileges)).
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
