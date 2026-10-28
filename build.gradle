@@ -319,6 +319,11 @@ dependencies {
         implementation('org.apache.calcite.avatica:avatica-metrics:1.29.0') {
             because('Aligned with avatica-core 1.29.0 — same release train')
         }
+        // Guava (transitive from Calcite 1.42.0, which requests 33.4.8-jre): versions before 33.7.2
+        // allow unthrottled memory allocation during deserialization.
+        implementation('com.google.guava:guava:33.7.2-jre') {
+            because('CVE-2026-102554')
+        }
     }
 }
 
