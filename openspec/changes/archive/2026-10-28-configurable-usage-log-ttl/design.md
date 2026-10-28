@@ -80,7 +80,7 @@ to the parent's (a silent override of an explicit setting).
 
 ### D5. No part rewrite on `dial_usage_log`
 
-The payload measurement (archived change, D5) covered the payload table's shape. `dial_usage_log` adds
+The payload measurement (`2026-10-28-configurable-payload-ttl` design, D5) covered the payload table's shape. `dial_usage_log` adds
 skip indexes and force-merge settings, so it was measured separately.
 
 Measured on ClickHouse 26.8 on a copy of the migrated shape (V1 through V15: five skip indexes,

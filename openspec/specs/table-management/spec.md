@@ -3543,4 +3543,3 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 - **WHEN** a query projects a held enrichment's columns
 - **THEN** it succeeds
-

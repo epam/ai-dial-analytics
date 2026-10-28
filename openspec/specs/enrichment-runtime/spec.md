@@ -1287,8 +1287,8 @@ join exactly as it referenced the bare names before.
 The general rule SHALL stand: a value-producing reference to a **non-nullable** enrichment column is
 refused, because an unmatched grain join renders it as its type default rather than `NULL`, so a
 derived value could not distinguish "no payload row for this event" from a real value. Because the
-payload table's retention is shorter than its parent's, unmatched rows are an ordinary occurrence
-rather than an edge case, and the distinction is load-bearing. The three body columns satisfy the rule
+payload table's retention is shorter than its parent's by default (and never longer), unmatched rows are
+an ordinary occurrence rather than an edge case, and the distinction is load-bearing. The three body columns satisfy the rule
 directly: they are declared `nullable`.
 
 An `object` column SHALL be **exempt** from that refusal, joining `array` and `map`, and for the same
