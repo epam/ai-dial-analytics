@@ -40,8 +40,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *   <li><b>REMOVED</b> deletes one, so it must say why — a {@code **Reason**} line — and reproducing the
  *       requirement body there instead is the shape that hid the first defect.</li>
  *   <li><b>RENAMED</b> renames one, so its {@code FROM} heading must exist upstream and its {@code TO} heading
- *       must not. Archive applies the rename first, so the other sections are judged against the shipped
- *       headings with the rename applied.</li>
+ *       must not — unless the rename was already synced ({@code FROM} gone, {@code TO} present), which archive
+ *       treats as a no-op. Archive applies the rename first, so the other sections are judged against the
+ *       shipped headings with the rename applied.</li>
  * </ul>
  *
  * <p>Scoped to {@code openspec/changes} and never {@code archive}: an archived change's deltas have already
@@ -69,6 +70,53 @@ class DeltaSpecStructureTest {
         assertThat(problems)
                 .as("each violation would corrupt the shipped spec at archive time, not merely read oddly")
                 .isEmpty();
+    }
+
+    @Test
+    @DisplayName("a rename applies to the shipped headings the other sections are judged against")
+    void renameAppliesToShippedHeadings() {
+        final Set<String> shipped = new LinkedHashSet<>(List.of("Old", "Other"));
+        final List<String> problems = new ArrayList<>();
+        applyRenames("cap", renamed("Old", "New"), shipped, problems);
+        assertThat(problems).isEmpty();
+        assertThat(shipped).containsExactlyInAnyOrder("New", "Other");
+    }
+
+    @Test
+    @DisplayName("a rename onto a shipped heading, or from a missing one, is reported")
+    void badRenamesAreReported() {
+        final List<String> problems = new ArrayList<>();
+        applyRenames("cap", renamed("Old", "Other"), new LinkedHashSet<>(List.of("Old", "Other")), problems);
+        applyRenames("cap", renamed("Missing", "New"), new LinkedHashSet<>(List.of("Old")), problems);
+        assertThat(problems).hasSize(2);
+        assertThat(problems.get(0)).contains("already has");
+        assertThat(problems.get(1)).contains("does not have");
+    }
+
+    @Test
+    @DisplayName("an already-synced rename, CRLF endings and a lower-case section header are accepted")
+    void syncedRenameAndCrlfAreAccepted() {
+        final Set<String> shipped = new LinkedHashSet<>(List.of("New"));
+        final List<String> problems = new ArrayList<>();
+        applyRenames("cap", renamed("Old", "New").replace("\n", "\r\n"), shipped, problems);
+        applyRenames("cap", renamed("Gone", "New").replace("RENAMED", "Renamed"), shipped, problems);
+        assertThat(problems).isEmpty();
+        assertThat(shipped).containsExactly("New");
+    }
+
+    @Test
+    @DisplayName("rename lines outside the RENAMED section are ignored")
+    void renameLinesOutsideTheSectionAreIgnored() {
+        final Set<String> shipped = new LinkedHashSet<>(List.of("Old"));
+        final List<String> problems = new ArrayList<>();
+        applyRenames("cap", renamed("Old", "New").replace("## RENAMED Requirements", "## MODIFIED Requirements"),
+                shipped, problems);
+        assertThat(problems).isEmpty();
+        assertThat(shipped).containsExactly("Old");
+    }
+
+    private static String renamed(String from, String to) {
+        return "## RENAMED Requirements\n\n- FROM: `" + REQUIREMENT + from + "`\n- TO: `" + REQUIREMENT + to + "`\n";
     }
 
     /** Every filing problem in one delta file, so one run reports them all. */
@@ -104,12 +152,12 @@ class DeltaSpecStructureTest {
      * Applies the delta's {@code RENAMED} pairs to {@code shipped}, as archive does before the other sections. A
      * pair whose {@code FROM} is gone and whose {@code TO} is already shipped was synced early and is a no-op.
      */
-    private static void applyRenames(String capability, String delta, Set<String> shipped, List<String> problems) {
+    static void applyRenames(String capability, String delta, Set<String> shipped, List<String> problems) {
         boolean renamed = false;
         String from = null;
         for (final String line : delta.split("\n", -1)) {
             if (line.startsWith("## ")) {
-                renamed = line.strip().equals("## RENAMED Requirements");
+                renamed = line.strip().equalsIgnoreCase("## RENAMED Requirements");
                 continue;
             }
             final Matcher rename = RENAME.matcher(line.strip());

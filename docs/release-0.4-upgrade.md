@@ -60,12 +60,16 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   JDBC and ADBC clients show it as the database product name (`DatabaseMetaData.getDatabaseProductName()`).
   Queries and results do not change. The name is fixed, not configurable, so a client that keys a connection
   profile, dialect or driver setting on `analytics-data-access-service` has to match the new name instead.
-- **Retention set by hand.** 0.4 sets the `TTL` of `dial_usage_log` and `dial_usage_log_payload` from
-  `SYNC_USAGE_LOG_TTL_DAYS` and `SYNC_PAYLOAD_TTL_DAYS` at every start (§7), and reverts a `TTL` changed with a
-  manual `ALTER` (unset means one year and 90 days). If either table's `TTL` was changed or removed by hand, set
-  the property to the live value, or `-1` for none, before deploying; otherwise rows past the restored retention
-  are deleted soon after the start. The payload value may not exceed the usage-log value, or startup fails. With
-  sub-privileges granted individually, the writer also needs `ALTER TTL` on both tables (see
+- **Retention set by hand.** With `CLICKHOUSE_MIGRATIONS_ENABLED=true` (the default), 0.4 sets the `TTL` of
+  `dial_usage_log` and `dial_usage_log_payload` from `SYNC_USAGE_LOG_TTL_DAYS` and `SYNC_PAYLOAD_TTL_DAYS` at every
+  start (§7), and reverts a `TTL` changed with a manual `ALTER` (unset means one year and 90 days). If either
+  table's `TTL` was changed or removed by hand, set the property to the live value in days, or `-1` for none,
+  before deploying; otherwise rows past the restored retention are deleted soon after the start. Only a single
+  `request_time + INTERVAL <n> DAY` rule can be kept this way: any other hand-made `TTL` (a move rule, several
+  rules, another column, a month interval) is replaced, and survives only with migrations disabled. The payload
+  value may not exceed the usage-log value, so a payload `-1` needs a usage-log `-1`; this is checked, and fails
+  startup, with migrations disabled too. With sub-privileges granted individually, the writer also needs
+  `ALTER TTL` on both tables (see
   [`clickhouse-server.md`](clickhouse-server.md#narrowing-alter-to-sub-privileges)).
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
@@ -180,7 +184,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
-| Ingest-table `TTL` set from `SYNC_USAGE_LOG_TTL_DAYS` / `SYNC_PAYLOAD_TTL_DAYS` at every start | A `TTL` changed by hand reverts to one year / 90 days, and older rows are deleted | Set both properties to the live retentions before deploying (§1) |
+| Ingest-table `TTL` set from `SYNC_USAGE_LOG_TTL_DAYS` / `SYNC_PAYLOAD_TTL_DAYS` at every start (migrations enabled) | A `TTL` changed by hand reverts to one year / 90 days; rows past it are deleted if it was longer | Set both properties to the live retentions in days, payload no longer than usage log, before deploying (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
 
 ## 7. New configuration
@@ -192,7 +196,9 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 - `SYNC_INLINE_FILES_MAX_SIZE` (default unset) — remove inline files whose stored base64 is longer than this size
   (`256KB`, `1MB`; `0` removes all). An earlier `SYNC_INLINE_FILES_MODE` no longer exists and is ignored if left set:
   replace `keep` with `SYNC_INLINE_FILES_DROP_TRUNCATED=false` and `drop` with `SYNC_INLINE_FILES_MAX_SIZE=0`.
-- `SYNC_USAGE_LOG_TTL_DAYS` (default unset, one year) and `SYNC_PAYLOAD_TTL_DAYS` (default `90`) — the retention of
-  `dial_usage_log` and `dial_usage_log_payload` in days, `-1` for none; see [`configuration.md`](configuration.md).
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
+- `SYNC_PAYLOAD_TTL_DAYS` (default `90`) — the payload table's retention in days, `-1` for none; no longer than
+  `SYNC_USAGE_LOG_TTL_DAYS`. See [`configuration.md`](configuration.md).
+- `SYNC_USAGE_LOG_TTL_DAYS` (default unset, one year) — `dial_usage_log`'s retention in days, `-1` for none. See
+  [`configuration.md`](configuration.md).
