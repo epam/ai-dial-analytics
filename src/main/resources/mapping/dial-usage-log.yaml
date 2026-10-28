@@ -13,7 +13,7 @@
 # This mapping no longer captures any verbatim request/response content: the two bodies, the merged
 # `assembled_response`, the JWT claims and the request headers are all captured by
 # mapping/dial-usage-log-payload.yaml into dial_usage_log_payload, under a 90-day default retention (SYNC_PAYLOAD_TTL_DAYS) instead of
-# this table's year. The bodies remain DERIVER SOURCES here (response_id, reasoning_tokens,
+# this table's (a year by default, SYNC_USAGE_LOG_TTL_DAYS). The bodies remain DERIVER SOURCES here (response_id, reasoning_tokens,
 # number_request_messages, mcp_method, mcp_tool_call_name, request_body_bytes, response_body_bytes
 # all read them off the parsed record), which is a read of the incoming record and persists nothing.
 #
@@ -36,7 +36,7 @@
 #
 # The three body columns this mapping used to declare — request_body, response_body,
 # assembled_response — have MOVED to mapping/dial-usage-log-payload.yaml and to the
-# dial_usage_log_payload table, which holds them for 90 days by default rather than a year. This mapping no
+# dial_usage_log_payload table, which holds them for 90 days by default rather than this table's year. This mapping no
 # longer declares any of the five verbatim-content columns, and ClickHouse V11 has dropped them from
 # the physical dial_usage_log table. They are still queryable, from the same entity, under their
 # qualified names ("dial_usage_log_payload.request_body" and so on).

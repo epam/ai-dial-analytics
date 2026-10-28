@@ -534,7 +534,7 @@
     {
       "table": {
         "name": "usage_request_baggage",
-        "description": "Per-event W3C baggage propagation header, lifted out of the usage log's captured request tags so it can be kept for a year — the retention of the event itself — where dial_usage_log_payload.request_tags expires with the payload retention (90 days by default). Sparse by design: only events whose request carried a non-empty baggage header get a row.",
+        "description": "Per-event W3C baggage propagation header, lifted out of the usage log's captured request tags so it can be kept for a year — the usage log's default retention — where dial_usage_log_payload.request_tags expires with the payload retention (90 days by default). Sparse by design: only events whose request carried a non-empty baggage header get a row.",
         "type": "enrichment",
         "source_table": "dial_usage_log",
         "tag_order": [

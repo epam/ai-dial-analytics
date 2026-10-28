@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -37,6 +39,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *   <li><b>ADDED</b> introduces one, so its heading must not.</li>
  *   <li><b>REMOVED</b> deletes one, so it must say why — a {@code **Reason**} line — and reproducing the
  *       requirement body there instead is the shape that hid the first defect.</li>
+ *   <li><b>RENAMED</b> renames one, so its {@code FROM} heading must exist upstream. Archive applies the rename
+ *       first, so the other sections are judged against the shipped headings with the rename applied.</li>
  * </ul>
  *
  * <p>Scoped to {@code openspec/changes} and never {@code archive}: an archived change's deltas have already
@@ -47,6 +51,8 @@ class DeltaSpecStructureTest {
     private static final Path CHANGES = Path.of("openspec", "changes");
     private static final Path SPECS = Path.of("openspec", "specs");
     private static final String REQUIREMENT = "### Requirement: ";
+    /** One side of a {@code RENAMED} entry: {@code - FROM: `### Requirement: <name>`} or {@code - TO: …}. */
+    private static final Pattern RENAME = Pattern.compile("- (FROM|TO): `### Requirement: (.+)`");
 
     @Test
     @DisplayName("every delta requirement is filed under the section that matches the shipped spec")
@@ -67,8 +73,20 @@ class DeltaSpecStructureTest {
     /** Every filing problem in one delta file, so one run reports them all. */
     private static List<String> check(Path delta) {
         final String capability = delta.getParent().getFileName().toString();
-        final Set<String> shipped = shippedRequirements(capability);
+        final Set<String> shipped = new LinkedHashSet<>(shippedRequirements(capability));
         final List<String> problems = new ArrayList<>();
+        for (final String line : read(delta).split("\n", -1)) {
+            final Matcher rename = RENAME.matcher(line.strip());
+            if (!rename.matches()) {
+                continue;
+            }
+            if (rename.group(1).equals("FROM") && !shipped.remove(rename.group(2).strip())) {
+                problems.add(capability + " / " + rename.group(2).strip()
+                        + ": renamed FROM a requirement the shipped spec does not have — archive would fail");
+            } else if (rename.group(1).equals("TO")) {
+                shipped.add(rename.group(2).strip());
+            }
+        }
         String section = null;
         String heading = null;
         final StringBuilder body = new StringBuilder();

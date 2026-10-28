@@ -10,9 +10,10 @@ import java.util.regex.Pattern;
  * drops expired parts whole ({@code ttl_only_drop_parts}).
  *
  * <p>Read from the source's {@code engine_full} rather than the catalog, because the case that matters has no
- * catalog TTL: {@code dial_usage_log}'s one year is migration-managed and deliberately not mirrored into its
- * definition. The server renders the clause in one canonical spelling —
- * {@code TTL toDateTime(request_time) + toIntervalYear(1)} — which is all this parses. A TTL in any other shape
+ * catalog TTL: {@code dial_usage_log}'s retention (one year by default) is provisioned by a migration, set by
+ * {@code sync.usage-log.ttl-days}, and deliberately not mirrored into its definition. The server renders the
+ * clause in one canonical spelling — {@code TTL toDateTime(request_time) + toIntervalYear(1)} — which is all this
+ * parses. A TTL in any other shape
  * (several rules, a {@code DELETE WHERE}, an expression over another column) is not inherited: copying a clause
  * the enrichment may not even have the columns for would make its {@code CREATE TABLE} fail.
  *

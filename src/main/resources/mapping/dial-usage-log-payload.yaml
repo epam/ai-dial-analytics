@@ -1,6 +1,6 @@
 # Data-sync column mapping for the dial_usage_log_payload table — the five verbatim-content columns of
 # the usage log, stored separately so they can carry a shorter retention (90 days by default, set by
-# SYNC_PAYLOAD_TTL_DAYS, against dial_usage_log's one year). See db/migration/clickhouse/V10__create_dial_usage_log_payload.sql.
+# SYNC_PAYLOAD_TTL_DAYS, against dial_usage_log's one year by default). See db/migration/clickhouse/V10__create_dial_usage_log_payload.sql.
 #
 # THIS IS THE ONLY PLACE THESE FIVE COLUMNS ARE CAPTURED. dial-usage-log.yaml declared them until the
 # split; it stopped declaring them when this mapping took over capturing them, so removing a column

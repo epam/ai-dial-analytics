@@ -136,7 +136,8 @@ budget](configuration.md#query-execution-budget) refuses.
 The three heavy columns — `request_body`, `response_body`, `assembled_response` — are **not** columns of
 `dial_usage_log`, neither in the catalog nor physically (`V11` dropped them from it). They live on
 `dial_usage_log_payload`, a system **enrichment** of it keyed on `event_id`, so that they can carry a
-shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's year. A ClickHouse
+shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's (a year by default,
+`SYNC_USAGE_LOG_TTL_DAYS`, which bounds the payload's). A ClickHouse
 row-expiry TTL is a property of the table, not of a column, so a second table is the only way to say
 "keep the metrics for a year and the payloads for a quarter".
 
@@ -162,7 +163,7 @@ Two consequences of the move:
   enrichment columns, and [a wildcard never fans out into a grain join](#what-a-wildcard-projects).
   Either rule alone would exclude them.
 - **A payload can be absent while its event is present.** The payload table holds 90 days by default and
-  `dial_usage_log` holds a year, so naming a payload column for an older event returns `NULL` — the
+  `dial_usage_log` a year by default, so naming a payload column for an older event returns `NULL` — the
   outcome of a `LEFT JOIN` that finds no row — rather than failing.
 
 `jwt_claims` and `request_tags` **moved too**, and are addressed as
@@ -183,7 +184,7 @@ missing payload row, because the value is `{}`, not `NULL`. Use a body column, w
 `Nullable(String)` and does read `NULL`, when you need to distinguish the two.
 
 **The same asymmetry applies after the payload expires.** Once an event is older than the payload retention (90 days by default) its
-payload row is gone while the event stays for a year, and its `jwt_claims` / `request_tags` then read
+payload row is gone while the event stays (a year by default), and its `jwt_claims` / `request_tags` then read
 as `{}` — indistinguishable from a request that genuinely carried no claims or no headers. A query
 that counts requests "whose `request_tags` lacks header X" over six months will silently classify
 everything older than the retention as lacking it. Bound such a query to the payload window

@@ -128,6 +128,9 @@ sync:
   payload:
     ttl-days: ${SYNC_PAYLOAD_TTL_DAYS:90}
     table: ${SYNC_PAYLOAD_TABLE:dial_usage_log_payload}
+  usage-log:
+    ttl-days: ${SYNC_USAGE_LOG_TTL_DAYS:}
+    table: ${SYNC_TABLE:dial_usage_log}
   targets:
     - table: ${SYNC_TABLE:dial_usage_log}
       mapping-file: ${SYNC_MAPPING_FILE:classpath:mapping/dial-usage-log.yaml}

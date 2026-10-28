@@ -7,8 +7,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@code application.yml}.
  *
  * <p>The payload table's {@code TTL} is provisioned by a migration and then reconciled to {@code ttlDays} at every
- * start (see {@code PayloadTtlReconciler}). {@code -1} removes the {@code TTL}; {@code 0} is rejected rather than
- * given a meaning, because on a setting that deletes data it reads as "keep zero days".
+ * start (see {@code IngestTtlReconciler}, which also bounds it by the usage log's retention). {@code -1} removes
+ * the {@code TTL}; {@code 0} is rejected rather than given a meaning, because on a setting that deletes data it
+ * reads as "keep zero days".
  *
  * <p>{@code table} names the table to reconcile. It reads the same {@code SYNC_PAYLOAD_TABLE} variable as the
  * payload ingest target ({@code sync.targets[1].table}), whose list position carries no role code could rely on.
