@@ -906,7 +906,7 @@ SHALL NOT introduce a new XDBC type code.
 
 A statement naming a payload-enrichment column for an event whose payload row is absent SHALL stream
 that cell as an Arrow null and SHALL NOT fail. The row is most often absent because the event is older
-than the payload table's 90-day retention while its `dial_usage_log` row is not. This is the existing
+than the payload table's retention (90 days by default) while its `dial_usage_log` row is not. This is the existing
 unmatched-`LEFT JOIN` rule (see "Arrow result schema and type mapping"), and it becomes reachable in
 ordinary use once the two tables carry different retentions.
 

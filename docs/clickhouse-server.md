@@ -209,7 +209,7 @@ it with `SELECT merge_algorithm, peak_memory_usage FROM system.part_log WHERE ta
 Some ingested rows are still written twice — a blob written again after a crash between its rows and
 its ingest-ledger entry, a backfill with `includeIngested`, and every day ingested before the ledger
 existed — and the automatic merge selector leaves a finished day as a few similar-sized parts, so the
-stale versions otherwise stay on disk until the `TTL` (90 days for the payload table, one year for `dial_usage_log`).
+stale versions otherwise stay on disk until the `TTL` (90 days by default for the payload table, one year for `dial_usage_log`).
 With the settings, once **every** part of a day partition is older than 2 days ClickHouse merges that
 partition into one part, one row per key. Reads are unaffected either way — they deduplicate with
 `final = 1` — so this is about disk and `FINAL` work. The why and the exact behaviour are in the
@@ -296,7 +296,7 @@ aggregate `INSERT … SELECT` statements. Which grants it needs depends on which
 | Surface                                                   | Statements issued                                                                                                                                                    | Grant                                                     |
 |-----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------|
 | `data-sync` ingest                                        | `INSERT INTO`, `DESCRIBE TABLE` (startup schema validation), and `SELECT` / `INSERT INTO` on the ingest ledger `_dial_internal_ingested_blob`                        | `INSERT`, `SELECT`                                        |
-| Startup migrations (`CLICKHOUSE_MIGRATIONS_ENABLED=true`) | `CREATE TABLE`, `ALTER TABLE … ADD COLUMN` / `MODIFY COLUMN` / `MATERIALIZE COLUMN` / `ADD INDEX` / `MATERIALIZE INDEX` / `MODIFY SETTING`, plus Flyway history r/w  | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`               |
+| Startup migrations (`CLICKHOUSE_MIGRATIONS_ENABLED=true`) | `CREATE TABLE`, `ALTER TABLE … ADD COLUMN` / `MODIFY COLUMN` / `MATERIALIZE COLUMN` / `ADD INDEX` / `MATERIALIZE INDEX` / `MODIFY SETTING`, payload `MODIFY TTL` / `REMOVE TTL`, Flyway history r/w | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`               |
 | Table catalog create (`POST /v1/tables`)                  | `CREATE TABLE`, best-effort `DROP TABLE IF EXISTS` after a failed create                                                                                             | `CREATE TABLE`, `DROP TABLE`                              |
 | Table catalog schema evolution (`PATCH …/schema`)         | `ALTER TABLE … ADD/DROP/RENAME COLUMN`                                                                                                                               | `ALTER`                                                   |
 | Table catalog delete (`DELETE /v1/tables/{name}`)         | `DROP TABLE`                                                                                                                                                         | `DROP TABLE`                                              |

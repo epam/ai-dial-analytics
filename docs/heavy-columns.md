@@ -136,7 +136,7 @@ budget](configuration.md#query-execution-budget) refuses.
 The three heavy columns — `request_body`, `response_body`, `assembled_response` — are **not** columns of
 `dial_usage_log`, neither in the catalog nor physically (`V11` dropped them from it). They live on
 `dial_usage_log_payload`, a system **enrichment** of it keyed on `event_id`, so that they can carry a
-90-day retention against the usage log's year. A ClickHouse
+shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's year. A ClickHouse
 row-expiry TTL is a property of the table, not of a column, so a second table is the only way to say
 "keep the metrics for a year and the payloads for a quarter".
 
@@ -161,7 +161,7 @@ Two consequences of the move:
 - **A wildcard omits them twice over.** They were already skipped for being `heavy`; now they are also
   enrichment columns, and [a wildcard never fans out into a grain join](#what-a-wildcard-projects).
   Either rule alone would exclude them.
-- **A payload can be absent while its event is present.** The payload table holds 90 days and
+- **A payload can be absent while its event is present.** The payload table holds 90 days by default and
   `dial_usage_log` holds a year, so naming a payload column for an older event returns `NULL` — the
   outcome of a `LEFT JOIN` that finds no row — rather than failing.
 
