@@ -17,4 +17,4 @@
 - [x] 3.1 `docs/configuration.md`: one row for `SYNC_USAGE_LOG_TTL_DAYS`; mention the bound on the payload row
 - [x] 3.2 Replace fixed "one year" wording for `dial_usage_log` where it states the retention as fixed (`docs/`, `InheritedTtl` Javadoc, mapping comments)
 - [x] 3.3 Record the `dial_usage_log` `MODIFY TTL` measurement in design.md D5
-- [ ] 3.4 `./gradlew clean build`; `openspec validate configurable-usage-log-ttl`
+- [x] 3.4 `./gradlew clean build`; `openspec validate configurable-usage-log-ttl`

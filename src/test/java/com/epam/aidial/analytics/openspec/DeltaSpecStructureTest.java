@@ -32,15 +32,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * claimed them — a mistake no amount of care at the keyboard prevents, and one that only shows up at
  * archive time, which is exactly when it is expensive.
  *
- * <p>Three rules, each the statement of what a section means:
+ * <p>Four rules, each the statement of what a section means:
  *
  * <ul>
  *   <li><b>MODIFIED</b> replaces a shipped requirement, so its heading must exist verbatim upstream.</li>
  *   <li><b>ADDED</b> introduces one, so its heading must not.</li>
  *   <li><b>REMOVED</b> deletes one, so it must say why — a {@code **Reason**} line — and reproducing the
  *       requirement body there instead is the shape that hid the first defect.</li>
- *   <li><b>RENAMED</b> renames one, so its {@code FROM} heading must exist upstream. Archive applies the rename
- *       first, so the other sections are judged against the shipped headings with the rename applied.</li>
+ *   <li><b>RENAMED</b> renames one, so its {@code FROM} heading must exist upstream and its {@code TO} heading
+ *       must not. Archive applies the rename first, so the other sections are judged against the shipped
+ *       headings with the rename applied.</li>
  * </ul>
  *
  * <p>Scoped to {@code openspec/changes} and never {@code archive}: an archived change's deltas have already
@@ -75,18 +76,7 @@ class DeltaSpecStructureTest {
         final String capability = delta.getParent().getFileName().toString();
         final Set<String> shipped = new LinkedHashSet<>(shippedRequirements(capability));
         final List<String> problems = new ArrayList<>();
-        for (final String line : read(delta).split("\n", -1)) {
-            final Matcher rename = RENAME.matcher(line.strip());
-            if (!rename.matches()) {
-                continue;
-            }
-            if (rename.group(1).equals("FROM") && !shipped.remove(rename.group(2).strip())) {
-                problems.add(capability + " / " + rename.group(2).strip()
-                        + ": renamed FROM a requirement the shipped spec does not have — archive would fail");
-            } else if (rename.group(1).equals("TO")) {
-                shipped.add(rename.group(2).strip());
-            }
-        }
+        applyRenames(capability, read(delta), shipped, problems);
         String section = null;
         String heading = null;
         final StringBuilder body = new StringBuilder();
@@ -108,6 +98,47 @@ class DeltaSpecStructureTest {
         }
         problems.addAll(judge(capability, section, heading, body.toString(), shipped));
         return problems;
+    }
+
+    /**
+     * Applies the delta's {@code RENAMED} pairs to {@code shipped}, as archive does before the other sections. A
+     * pair whose {@code FROM} is gone and whose {@code TO} is already shipped was synced early and is a no-op.
+     */
+    private static void applyRenames(String capability, String delta, Set<String> shipped, List<String> problems) {
+        boolean renamed = false;
+        String from = null;
+        for (final String line : delta.split("\n", -1)) {
+            if (line.startsWith("## ")) {
+                renamed = line.strip().equals("## RENAMED Requirements");
+                continue;
+            }
+            final Matcher rename = RENAME.matcher(line.strip());
+            if (!renamed || !rename.matches()) {
+                continue;
+            }
+            final String name = rename.group(2).strip();
+            if (rename.group(1).equals("FROM")) {
+                from = name;
+                continue;
+            }
+            if (from == null) {
+                continue;
+            }
+            final String where = capability + " / " + from;
+            if (shipped.contains(from)) {
+                if (shipped.contains(name)) {
+                    problems.add(where + ": renamed TO '" + name + "', which the shipped spec already has — archive"
+                            + " would refuse the rename");
+                } else {
+                    shipped.remove(from);
+                    shipped.add(name);
+                }
+            } else if (!shipped.contains(name)) {
+                problems.add(where + ": renamed FROM a requirement the shipped spec does not have — archive would"
+                        + " fail");
+            }
+            from = null;
+        }
     }
 
     private static List<String> judge(
