@@ -73,7 +73,7 @@ new usage-log value of `-1` always does); where neither is provable, avoid the o
 break it (for example payload first when the live payload cannot be read but the new payload value already
 exceeds the live usage log); where both or neither are known to break it, the payload goes first.
 
-Some states have no provably safe order. The exact condition is: the narrowest reading of the live usage log
+Some states have no provably safe order. Where both live `TTL`s can be read, the exact condition is: the narrowest reading of the live usage log
 < the payload value <= the usage-log value < the widest reading of the live payload. For example, live
 `1 MONTH` on both and `30` set on both (either intermediate state lets a payload outlive its event in some
 month), or a live payload of 90 days under a live 30-day usage log, which the both-unset path only reports,
