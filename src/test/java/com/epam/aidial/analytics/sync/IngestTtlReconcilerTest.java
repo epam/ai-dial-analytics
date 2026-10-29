@@ -344,6 +344,16 @@ class IngestTtlReconcilerTest {
     }
 
     @Test
+    void unreadableUsageLogWithNonFittingPayloadTakesPayloadFirst() {
+        // Usage log first would leave the live 90 days under the new 30; payload first is merely unproven.
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
+    @Test
     void bothUnreadableTakePayloadFirst() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
         reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(MOVE_RULE), ddl).reconcile();
@@ -353,7 +363,7 @@ class IngestTtlReconcilerTest {
     }
 
     @Test
-    void liveStateAlreadyOutOfBoundTakesPayloadFirst() {
+    void bothIntermediateStatesOutOfBoundTakePayloadFirst() {
         // Live payload 90 under a live 30-day log, both set to 60: either intermediate state is out of bound.
         final DdlExecutor ddl = mock(DdlExecutor.class);
         reconciler(60, 60, Optional.of(ttl("toIntervalDay(30)")), Optional.of(TTL_90), ddl).reconcile();

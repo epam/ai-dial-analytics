@@ -73,9 +73,11 @@ new usage-log value of `-1` always does); where neither is provable, avoid the o
 break it (for example payload first when the live payload cannot be read but the new payload value already
 exceeds the live usage log); where both or neither are known to break it, the payload goes first.
 
-Some states have no provably safe order: both live `TTL`s in the same calendar unit with the set values inside
-its day spread (live `1 MONTH` on both, `30` set on both: either intermediate state lets a payload outlive its
-event in some month), or a live state already out of bound, which the both-unset path only reports. The spec
+Some states have no provably safe order. The exact condition is: the narrowest reading of the live usage log
+< the payload value <= the usage-log value < the widest reading of the live payload. For example, live
+`1 MONTH` on both and `30` set on both (either intermediate state lets a payload outlive its event in some
+month), or a live payload of 90 days under a live 30-day usage log, which the both-unset path only reports,
+with `60` set on both. The spec
 promises a safe intermediate state only where some order provably gives one.
 
 *Alternative:* "payload first when the usage log shrinks". Rejected: with calendar units "shrinks" has no

@@ -8,7 +8,7 @@
 
 - [x] 2.1 `IngestTtlReconciler` skips a table whose property is unset and logs its live `TTL` at INFO
 - [x] 2.2 Bound with both set stays in the constructor; with one set, check in `reconcile()` against the live `TTL` before any `ALTER`; with neither set, WARN on a live violation
-- [x] 2.3 Live `TTL` to days: widest for the payload, narrowest for the usage log, like units compared directly; unreadable skips the bound with a WARN, missing skips it quietly; usage log altered first only when the live payload fits under its new value
+- [x] 2.3 Live `TTL` to days: widest for the payload, narrowest for the usage log, like units compared directly; unreadable skips the bound with a WARN, missing skips it quietly; ALTER order chosen by which intermediate state provably honours the bound (D4)
 - [x] 2.4 Unit tests for each branch; integration tests: unset leaves a hand-set `TTL`, removal keeps the last one, a set value bounded by the live one fails before any `ALTER`
 
 ## 3. Docs

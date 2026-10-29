@@ -78,8 +78,9 @@ usage log SHALL go first when that state provably honours the bound (always so w
 `-1`); otherwise the payload table SHALL go first when its state provably does; where neither does, the
 order whose state is not known to break the bound SHALL go first, and the payload table where both or neither
 are. Whenever some order provably keeps the state within the bound, a failed second `ALTER` therefore leaves
-no payload row outliving its event. No order provably does, for example, with both live `TTL`s in the same
-calendar unit and the set values inside its day spread, or with a live state already out of bound.
+no payload row outliving its event. No order provably does, for example, with live `INTERVAL 1 MONTH` on both
+tables and both properties `30`, or with a live payload of 90 days under a live 30-day usage log and both
+properties `60`.
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter either
