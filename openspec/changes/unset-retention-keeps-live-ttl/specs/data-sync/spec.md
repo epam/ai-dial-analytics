@@ -71,10 +71,12 @@ skipped, since no payload row can then outlive an event row. When the unset side
 `request_time`, the bound SHALL be skipped with a `WARN`. In both cases the set side, if its table exists, is still
 reconciled.
 
-When both tables are altered, the usage log SHALL be altered first only when the payload table's live `TTL`
-fits within the new usage-log retention by the reading above; otherwise, including when the payload's live
-`TTL` cannot be read, the payload table SHALL be altered first. A failed second `ALTER` then never leaves
-payload rows outliving their events.
+When both tables are altered, the usage log SHALL be altered first when its new retention is `-1` or the
+payload table's live `TTL` fits within it by the reading above; otherwise, including when the payload's live
+`TTL` cannot be read, the payload table SHALL be altered first. Whenever some order keeps the state between
+the two `ALTER`s within the bound, this one does, so a failed second `ALTER` leaves no payload row outliving
+its event. Where no order provably does — both live `TTL`s in the same calendar unit with the set values
+inside its day spread, or a live `TTL` that cannot be read — the payload table is altered first.
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter either
@@ -181,11 +183,17 @@ query to the payload window; the query surface documents this asymmetry rather t
   `INTERVAL 1 YEAR`
 - **THEN** startup proceeds
 
-#### Scenario: A shrinking usage log is altered after the payload
+#### Scenario: A payload that does not fit the new usage-log retention is altered first
 
 - **WHEN** the service starts with `SYNC_USAGE_LOG_TTL_DAYS=30` and `SYNC_PAYLOAD_TTL_DAYS=30` while the
   tables carry one year and 90 days, and the payload `ALTER` is refused
 - **THEN** startup fails and `dial_usage_log` still carries its one-year `TTL`
+
+#### Scenario: A payload that already fits lets the usage log go first
+
+- **WHEN** the service starts with `SYNC_USAGE_LOG_TTL_DAYS=30` and `SYNC_PAYLOAD_TTL_DAYS=30` while
+  `dial_usage_log` carries `INTERVAL 1 MONTH` and the payload table 7 days
+- **THEN** `dial_usage_log` is altered first, then the payload table
 
 #### Scenario: Live TTLs out of bound with both properties unset are only reported
 

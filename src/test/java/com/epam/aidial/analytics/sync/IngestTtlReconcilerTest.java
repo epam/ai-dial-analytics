@@ -286,7 +286,7 @@ class IngestTtlReconcilerTest {
     // --- the order of the two ALTERs ---
 
     @Test
-    void shrinkingUsageLogAltersThePayloadFirst() {
+    void payloadNotFittingTheNewUsageLogIsAlteredFirst() {
         // Were the usage log shortened first and the payload ALTER then refused, payloads would outlive events.
         final DdlExecutor ddl = mock(DdlExecutor.class);
         reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
@@ -305,7 +305,7 @@ class IngestTtlReconcilerTest {
     }
 
     @Test
-    void failedPayloadAlterLeavesShrinkingUsageLogUntouched() {
+    void failedPayloadAlterLeavesTheUsageLogUntouched() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
         doThrow(new ClickHouseQueryException("rejected", new RuntimeException())).when(ddl).execute(contains(PAYLOAD));
         assertThatThrownBy(() -> reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
@@ -325,9 +325,9 @@ class IngestTtlReconcilerTest {
     }
 
     @Test
-    void unreadablePayloadIsAlteredFirst() {
+    void unreadablePayloadIsAlteredFirstEvenWhenTheUsageLogGrows() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(MOVE_RULE), ddl).reconcile();
+        reconciler(500, 400, Optional.of(TTL_YEAR), Optional.of(MOVE_RULE), ddl).reconcile();
         final InOrder order = inOrder(ddl);
         order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
         order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
@@ -335,11 +335,21 @@ class IngestTtlReconcilerTest {
 
     @Test
     void unreadableUsageLogIsOrderedByThePayload() {
+        // The live usage log cannot be read, but the live 7-day payload fits under the new 30 days, so the log goes first.
         final DdlExecutor ddl = mock(DdlExecutor.class);
-        reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile();
+        reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(ttl("toIntervalDay(7)")), ddl).reconcile();
         final InOrder order = inOrder(ddl);
-        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
         order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+    }
+
+    @Test
+    void unlimitedUsageLogGoesFirstWhateverThePayloadCarries() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(-1, -1, Optional.of(TTL_YEAR), Optional.of(MOVE_RULE), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute("ALTER TABLE `dial_usage_log` REMOVE TTL");
+        order.verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` REMOVE TTL");
     }
 
     // --- reading a live TTL ---

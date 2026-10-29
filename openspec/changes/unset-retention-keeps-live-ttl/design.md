@@ -68,9 +68,14 @@ and new retention. Live violation with both unset: WARN naming both tables and b
 Both final states honour the bound, but the two `ALTER`s are separate statements, and the second can fail
 (for example a writer granted `ALTER TTL` on one table only). The usage log goes first only when the
 payload's live `TTL` fits under the new usage-log value, which proves the intermediate state (old payload,
-new usage log) safe without reading the usage log's live `TTL`. Otherwise the payload goes first, which is
-the safe order whenever the usage log shrinks, since the new payload fits under the new, and so the old,
-usage log.
+new usage log) safe without reading the usage log's live `TTL`; a new usage-log value of `-1` always counts as
+fitting. Otherwise the payload goes first, which is safe whenever the new usage-log value is no longer than
+the live one's narrowest reading, since the new payload fits under the new, and so the old, usage log.
+
+Some states have no provably safe order: both live `TTL`s in the same calendar unit with the set values inside
+its day spread (live `1 MONTH` on both, `30` set on both: either intermediate state lets a payload outlive its
+event in some month), or an unreadable live `TTL`. The payload goes first there, and the spec says so rather
+than promising more.
 
 *Alternative:* "payload first when the usage log shrinks". Rejected: with calendar units "shrinks" has no
 exact answer — `30` days against a live `1 MONTH` may or may not be shorter — and the conservative reading

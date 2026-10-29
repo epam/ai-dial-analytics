@@ -79,9 +79,10 @@ public class IngestTtlReconciler {
         final Optional<String> usageLogEngine = inspector.engineFull(usageLog.table());
         final Optional<String> payloadEngine = inspector.engineFull(payload.table());
         checkLiveRetentions(usageLogEngine, payloadEngine);
-        // Each final state honours the bound; the order keeps the state between the two ALTERs honouring it too, so
-        // a failed second ALTER cannot leave payloads outliving their events. The usage log goes first only when the
-        // payload's current retention provably fits under its new one; otherwise the payload is brought down first.
+        // Each final state honours the bound; the order keeps the state between the two ALTERs honouring it too
+        // whenever some order provably does, so a failed second ALTER then cannot leave payloads outliving their
+        // events. The usage log goes first only when the payload's current retention provably fits under its new
+        // one; otherwise the payload goes first, which is also the choice where no order is provably safe.
         if (payloadFitsNewUsageLog(payloadEngine)) {
             reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
             reconcile(payload.table(), payload.ttlDays(), payloadEngine);
@@ -113,11 +114,12 @@ public class IngestTtlReconciler {
     }
 
     /**
-     * Whether altering the usage log first is safe: it is not being set, or the payload table's live retention fits
-     * under its new one. An unreadable or missing payload {@code TTL} does not count as fitting.
+     * Whether altering the usage log first is safe: it is not being set, its new retention is unlimited, or the
+     * payload table's live retention fits under it. An unreadable or missing payload {@code TTL} does not count as
+     * fitting a finite one.
      */
     private boolean payloadFitsNewUsageLog(Optional<String> payloadEngine) {
-        if (usageLog.unset()) {
+        if (usageLog.unset() || usageLog.noTtl()) {
             return true;
         }
         if (payloadEngine.isEmpty()) {
