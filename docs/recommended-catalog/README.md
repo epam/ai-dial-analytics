@@ -10,14 +10,14 @@ grants and no Enrichment Runner state. The pipelines fill the tables from `dial_
 
 ## What it contains
 
-| Object                       | Kind                          | What it does                                                                              |
-|------------------------------|-------------------------------|-------------------------------------------------------------------------------------------|
-| `usage_client_identity`      | enrichment table              | Per event: client (Chat, Claude Code, Codex, OpenCode), normalised session id, auth kind. |
-| `usage-client-identity-live` | `enrich` pipeline (SQL)       | Fills `usage_client_identity` from request headers and JWT claims.                        |
-| `sessions`                   | source table, `upsert_by_key` | One row per client session: turns, tokens, cost, durations, principal.                    |
-| `sessions_rollup`            | `aggregate` pipeline          | Rolls `dial_usage_log` up into `sessions` every 15 minutes.                               |
-| `usage_request_baggage`      | enrichment table, 1-year TTL  | Per event that sent one: the W3C `baggage` request header.                                |
-| `usage-request-baggage-live` | `enrich` pipeline (SQL)       | Fills `usage_request_baggage` from the captured request tags.                             |
+| Object                       | Kind                          | What it does                                                                                              |
+|------------------------------|-------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `usage_client_identity`      | enrichment table              | Per event: client (Chat, Claude Code, Claude Desktop, Codex, OpenCode), normalised session id, auth kind. |
+| `usage-client-identity-live` | `enrich` pipeline (SQL)       | Fills `usage_client_identity` from request headers and JWT claims.                                        |
+| `sessions`                   | source table, `upsert_by_key` | One row per client session: turns, tokens, cost, durations, principal.                                    |
+| `sessions_rollup`            | `aggregate` pipeline          | Rolls `dial_usage_log` up into `sessions` every 15 minutes.                                               |
+| `usage_request_baggage`      | enrichment table, 1-year TTL  | Per event that sent one: the W3C `baggage` request header.                                                |
+| `usage-request-baggage-live` | `enrich` pipeline (SQL)       | Fills `usage_request_baggage` from the captured request tags.                                             |
 
 The bundle requires the `dial_usage_log` and `dial_usage_log_payload` system tables (listed under
 `required_system_tables`). `usage_request_baggage` keeps the header for a year, the usage log's default retention, where
