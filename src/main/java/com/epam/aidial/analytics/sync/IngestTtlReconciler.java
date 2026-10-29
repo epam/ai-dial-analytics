@@ -79,11 +79,9 @@ public class IngestTtlReconciler {
         final Optional<String> usageLogEngine = inspector.engineFull(usageLog.table());
         final Optional<String> payloadEngine = inspector.engineFull(payload.table());
         checkLiveRetentions(usageLogEngine, payloadEngine);
-        // Each final state honours the bound; the order keeps the state between the two ALTERs honouring it too
-        // whenever some order provably does, so a failed second ALTER then cannot leave payloads outliving their
-        // events. The usage log goes first only when the payload's current retention provably fits under its new
-        // one; otherwise the payload goes first, which is also the choice where no order is provably safe.
-        if (payloadFitsNewUsageLog(payloadEngine)) {
+        // Each final state honours the bound; the order keeps the state between the two ALTERs within it too whenever
+        // some order provably does, so a failed second ALTER then leaves no payload outliving its event.
+        if (usageLogFirst(usageLogEngine, payloadEngine)) {
             reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
             reconcile(payload.table(), payload.ttlDays(), payloadEngine);
         } else {
@@ -114,20 +112,27 @@ public class IngestTtlReconciler {
     }
 
     /**
-     * Whether altering the usage log first is safe: it is not being set, its new retention is unlimited, or the
-     * payload table's live retention fits under it. An unreadable or missing payload {@code TTL} does not count as
-     * fitting a finite one.
+     * Whether to alter the usage log before the payload table. Usage log first leaves (live payload, new usage log)
+     * between the two ALTERs; payload first leaves (new payload, live usage log). The order that provably keeps that
+     * state within the bound wins, the usage log's first; where neither does, the order not known to break it, and
+     * the payload's where both or neither are. Only one table changes when either property is unset, so the order
+     * is then immaterial.
      */
-    private boolean payloadFitsNewUsageLog(Optional<String> payloadEngine) {
-        if (usageLog.unset() || usageLog.noTtl()) {
+    private boolean usageLogFirst(Optional<String> usageLogEngine, Optional<String> payloadEngine) {
+        if (usageLog.unset() || payload.unset() || usageLog.noTtl()) {
             return true;
         }
-        if (payloadEngine.isEmpty()) {
+        final Optional<Boolean> usageLogFirstSafe = effective(null, payloadEngine)
+                .map(live -> !exceeds(live, target(usageLog.ttlDays())));
+        final Optional<Boolean> payloadFirstSafe = effective(null, usageLogEngine)
+                .map(live -> !exceeds(target(payload.ttlDays()), live));
+        if (usageLogFirstSafe.orElse(false)) {
+            return true;
+        }
+        if (payloadFirstSafe.orElse(false)) {
             return false;
         }
-        return effective(null, payloadEngine)
-                .map(live -> !exceeds(live, target(usageLog.ttlDays())))
-                .orElse(false);
+        return usageLogFirstSafe.isEmpty() && payloadFirstSafe.isPresent();
     }
 
     /** The {@code TTL} a set {@code ttlDays} asks for: empty for {@code -1} (none), else that many days. */

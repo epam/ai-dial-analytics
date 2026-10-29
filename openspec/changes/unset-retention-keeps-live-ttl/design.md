@@ -66,16 +66,17 @@ and new retention. Live violation with both unset: WARN naming both tables and b
 ### D4. ALTER order
 
 Both final states honour the bound, but the two `ALTER`s are separate statements, and the second can fail
-(for example a writer granted `ALTER TTL` on one table only). The usage log goes first only when the
-payload's live `TTL` fits under the new usage-log value, which proves the intermediate state (old payload,
-new usage log) safe without reading the usage log's live `TTL`; a new usage-log value of `-1` always counts as
-fitting. Otherwise the payload goes first, which is safe whenever the new usage-log value is no longer than
-the live one's narrowest reading, since the new payload fits under the new, and so the old, usage log.
+(for example a writer granted `ALTER TTL` on one table only). Each order leaves a known
+intermediate state: usage log first leaves (live payload, new usage log), payload first leaves (new payload,
+live usage log). The rule: take the order whose state provably honours the bound, the usage log's first (a
+new usage-log value of `-1` always does); where neither is provable, avoid the order whose state is known to
+break it (for example payload first when the live payload cannot be read but the new payload value already
+exceeds the live usage log); where both or neither are known to break it, the payload goes first.
 
 Some states have no provably safe order: both live `TTL`s in the same calendar unit with the set values inside
 its day spread (live `1 MONTH` on both, `30` set on both: either intermediate state lets a payload outlive its
-event in some month), or an unreadable live `TTL`. The payload goes first there, and the spec says so rather
-than promising more.
+event in some month), or a live state already out of bound, which the both-unset path only reports. The spec
+promises a safe intermediate state only where some order provably gives one.
 
 *Alternative:* "payload first when the usage log shrinks". Rejected: with calendar units "shrinks" has no
 exact answer — `30` days against a live `1 MONTH` may or may not be shorter — and the conservative reading

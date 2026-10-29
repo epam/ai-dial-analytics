@@ -71,12 +71,15 @@ skipped, since no payload row can then outlive an event row. When the unset side
 `request_time`, the bound SHALL be skipped with a `WARN`. In both cases the set side, if its table exists, is still
 reconciled.
 
-When both tables are altered, the usage log SHALL be altered first when its new retention is `-1` or the
-payload table's live `TTL` fits within it by the reading above; otherwise, including when the payload's live
-`TTL` cannot be read, the payload table SHALL be altered first. Whenever some order keeps the state between
-the two `ALTER`s within the bound, this one does, so a failed second `ALTER` leaves no payload row outliving
-its event. Where no order provably does — both live `TTL`s in the same calendar unit with the set values
-inside its day spread, or a live `TTL` that cannot be read — the payload table is altered first.
+When both tables are altered, the order SHALL be chosen by the state it leaves between the two `ALTER`s —
+the live payload `TTL` under the new usage-log retention if the usage log goes first, the new payload
+retention under the live usage-log `TTL` if the payload table goes first — judged by the reading above. The
+usage log SHALL go first when that state provably honours the bound (always so when its new retention is
+`-1`); otherwise the payload table SHALL go first when its state provably does; where neither does, the
+order whose state is not known to break the bound SHALL go first, and the payload table where both or neither
+are. Whenever some order provably keeps the state within the bound, a failed second `ALTER` therefore leaves
+no payload row outliving its event. No order provably does, for example, with both live `TTL`s in the same
+calendar unit and the set values inside its day spread, or with a live state already out of bound.
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter either
