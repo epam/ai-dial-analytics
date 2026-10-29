@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.clickhouse;
 
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
+import com.epam.aidial.analytics.sync.IngestTtlReconciler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -22,6 +23,11 @@ import org.springframework.stereotype.Component;
  * paths go through the ClickHouse HTTP client, not JDBC. Calling Flyway directly builds a JDBC URL
  * used only for migrations and connects over the ClickHouse JDBC driver, with no {@code DataSource}
  * or {@code spring-jdbc} dragged into the app just to satisfy auto-config.
+ *
+ * <p>After the migrations it reconciles the usage log's and the payload table's {@code TTL} with
+ * {@code sync.usage-log.ttl-days} and {@code sync.payload.ttl-days} ({@link IngestTtlReconciler}): the migrations
+ * only provision the defaults, and applied migrations are frozen.
+ * Done here so it shares this runner's gate and runs before every other startup step.
  *
  * <p>Connects with the <em>writer</em> credential, which must additionally hold {@code CREATE TABLE}
  * grants (DDL). Gated by {@code clickhouse.migrations.enabled} (default true); disable it when the
@@ -57,6 +63,7 @@ public class ClickHouseMigrationRunner implements ApplicationRunner {
 
     private final ClickHouseProperties properties;
     private final ClickHouseWriterProperties writerProperties;
+    private final IngestTtlReconciler ingestTtlReconciler;
 
     @Override
     public void run(ApplicationArguments args) {
@@ -68,6 +75,7 @@ public class ClickHouseMigrationRunner implements ApplicationRunner {
                 .load();
         final int applied = flyway.migrate().migrationsExecuted;
         log.info("ClickHouse schema migrations complete ({} applied)", applied);
+        ingestTtlReconciler.reconcile();
     }
 
     /**

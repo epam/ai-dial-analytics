@@ -136,7 +136,8 @@ budget](configuration.md#query-execution-budget) refuses.
 The three heavy columns — `request_body`, `response_body`, `assembled_response` — are **not** columns of
 `dial_usage_log`, neither in the catalog nor physically (`V11` dropped them from it). They live on
 `dial_usage_log_payload`, a system **enrichment** of it keyed on `event_id`, so that they can carry a
-90-day retention against the usage log's year. A ClickHouse
+shorter retention (90 days by default, `SYNC_PAYLOAD_TTL_DAYS`) against the usage log's (a year by default,
+`SYNC_USAGE_LOG_TTL_DAYS`, which bounds the payload's). A ClickHouse
 row-expiry TTL is a property of the table, not of a column, so a second table is the only way to say
 "keep the metrics for a year and the payloads for a quarter".
 
@@ -161,8 +162,8 @@ Two consequences of the move:
 - **A wildcard omits them twice over.** They were already skipped for being `heavy`; now they are also
   enrichment columns, and [a wildcard never fans out into a grain join](#what-a-wildcard-projects).
   Either rule alone would exclude them.
-- **A payload can be absent while its event is present.** The payload table holds 90 days and
-  `dial_usage_log` holds a year, so naming a payload column for an older event returns `NULL` — the
+- **A payload can be absent while its event is present.** The payload table holds 90 days by default and
+  `dial_usage_log` a year by default, so naming a payload column for an older event returns `NULL` — the
   outcome of a `LEFT JOIN` that finds no row — rather than failing.
 
 `jwt_claims` and `request_tags` **moved too**, and are addressed as
@@ -182,12 +183,12 @@ One consequence worth knowing: an `IS NULL` check against a claim/header column 
 missing payload row, because the value is `{}`, not `NULL`. Use a body column, which is
 `Nullable(String)` and does read `NULL`, when you need to distinguish the two.
 
-**The same asymmetry applies after the payload expires.** Once an event is older than 90 days its
-payload row is gone while the event stays for a year, and its `jwt_claims` / `request_tags` then read
+**The same asymmetry applies after the payload expires.** Once an event is older than the payload retention (90 days by default) its
+payload row is gone while the event stays (a year by default), and its `jwt_claims` / `request_tags` then read
 as `{}` — indistinguishable from a request that genuinely carried no claims or no headers. A query
 that counts requests "whose `request_tags` lacks header X" over six months will silently classify
-everything older than 90 days as lacking it. Bound such a query to the payload window
-(`request_time > now() - INTERVAL 90 DAY`), or test a body column's `IS NULL` alongside to tell an
+everything older than the retention as lacking it. Bound such a query to the payload window
+(`request_time > now() - INTERVAL <SYNC_PAYLOAD_TTL_DAYS> DAY`), or test a body column's `IS NULL` alongside to tell an
 expired payload from an empty document.
 
 Composite SQL statements (joins, CTEs, subqueries) run with `join_use_nulls = 1`, standard outer-join
@@ -229,7 +230,7 @@ bodies still scans every one of them, so keep a `request_time` bound on both.
 
 The `*_bytes` columns also stayed, deliberately: they are 4 bytes each, they are the only way to size a
 payload before fetching it, and they must outlive the payload they describe for "how big were the
-bodies last quarter" to stay answerable past the 90-day window.
+bodies last quarter" to stay answerable past the payload window.
 
 ## Upgrading an existing deployment
 

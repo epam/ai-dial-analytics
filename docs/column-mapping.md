@@ -142,8 +142,8 @@ Each condition names a dotted `path`, an `op`, a `value`, and an optional `ignor
 heavy bodies (`request_body`, `response_body`, and the merged streaming `assembled_response`) plus the
 two documents that can carry credentials (`jwt_claims`, `request_tags`) — so raw prompt content, raw
 response content, the producer's assembled answer, the caller's claims and the request headers all
-**are** persisted, for 90 days. They are a separate target because a ClickHouse row-expiry TTL is a
-property of the table, not of a column: `dial_usage_log` keeps its analytic columns for a year, while
+**are** persisted, for 90 days by default (`SYNC_PAYLOAD_TTL_DAYS`). They are a separate target because a ClickHouse row-expiry TTL is a
+property of the table, not of a column: `dial_usage_log` keeps its analytic columns for a year by default (`SYNC_USAGE_LOG_TTL_DAYS`), while
 `dial_usage_log_payload` — catalogued as a system enrichment of it, keyed on `event_id` — keeps the
 content for a quarter. Its mapping is match-all, so it shadows the usage log one row for one row.
 
