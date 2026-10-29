@@ -79,8 +79,15 @@ public class IngestTtlReconciler {
         final Optional<String> usageLogEngine = inspector.engineFull(usageLog.table());
         final Optional<String> payloadEngine = inspector.engineFull(payload.table());
         checkLiveRetentions(usageLogEngine, payloadEngine);
-        reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
-        reconcile(payload.table(), payload.ttlDays(), payloadEngine);
+        // Each final state honours the bound; the order keeps the state between the two ALTERs honouring it too, so
+        // a failed second ALTER cannot leave payloads outliving their events: shrink the payload before the usage log.
+        if (usageLogShrinks(usageLogEngine)) {
+            reconcile(payload.table(), payload.ttlDays(), payloadEngine);
+            reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
+        } else {
+            reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
+            reconcile(payload.table(), payload.ttlDays(), payloadEngine);
+        }
     }
 
     private void reconcile(String table, Integer ttlDays, Optional<String> engineFull) {
@@ -102,6 +109,16 @@ public class IngestTtlReconciler {
         ddl.execute(ddlRenderer.renderAlter(table, List.of(command.get())));
         log.warn("Table '{}' retention changed from {} to {}", table,
                 ttlClause(engineFull.get()).orElse("none"), describe(target));
+    }
+
+    /** Whether the usage log's set retention may be shorter than its live one; an unreadable live one counts. */
+    private boolean usageLogShrinks(Optional<String> usageLogEngine) {
+        if (usageLog.unset() || usageLogEngine.isEmpty()) {
+            return false;
+        }
+        return effective(null, usageLogEngine)
+                .map(live -> exceeds(live, target(usageLog.ttlDays())))
+                .orElse(true);
     }
 
     /** The {@code TTL} a set {@code ttlDays} asks for: empty for {@code -1} (none), else that many days. */
@@ -153,9 +170,9 @@ public class IngestTtlReconciler {
             return;
         }
         if (usageLogTtl.isEmpty() || payloadTtl.isEmpty()) {
-            log.warn("The live TTL of '{}' or '{}' has a shape that cannot be read as one interval over {}; the bound"
-                    + " of the payload retention by the usage log's was not checked", usageLog.table(), payload.table(),
-                    TTL_COLUMN);
+            log.warn("The live TTL of '{}' has a shape that cannot be read as one interval over {}; the bound of the"
+                    + " payload retention by the usage log's was not checked",
+                    usageLogTtl.isEmpty() ? usageLog.table() : payload.table(), TTL_COLUMN);
             return;
         }
         if (!exceeds(payloadTtl.get(), usageLogTtl.get())) {

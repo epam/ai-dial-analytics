@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.table.TableDdlRenderer;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.TtlDdl;
 import com.epam.aidial.analytics.service.table.TtlUnit;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.Optional;
 
@@ -18,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -250,6 +252,76 @@ class IngestTtlReconcilerTest {
         verify(ddl).execute("ALTER TABLE `dial_usage_log_payload` MODIFY TTL toDateTime(`request_time`) + INTERVAL 400 DAY");
     }
 
+    @Test
+    void missingSetSideWithUnsetOtherSideAltersNothing() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatCode(() -> reconciler(60, null, Optional.empty(), Optional.of(TTL_90), ddl).reconcile())
+                .doesNotThrowAnyException();
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void unsetPayloadWithoutTtlIsUnlimitedAgainstSetUsageLog() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatThrownBy(() -> reconciler(365, null, Optional.of(TTL_YEAR), Optional.of(NO_TTL), ddl).reconcile())
+                .isInstanceOf(IllegalStateException.class);
+        verify(ddl, never()).execute(anyString());
+    }
+
+    @Test
+    void unreadablePayloadTtlSkipsTheBound() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, null, Optional.of(TTL_YEAR), Optional.of(MOVE_RULE), ddl).reconcile();
+        verify(ddl).execute("ALTER TABLE `dial_usage_log` MODIFY TTL toDateTime(`request_time`) + INTERVAL 30 DAY");
+    }
+
+    @Test
+    void unreadableTtlWithBothUnsetIsOnlyReported() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        assertThatCode(() -> reconciler(null, null, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile())
+                .doesNotThrowAnyException();
+        verify(ddl, never()).execute(anyString());
+    }
+
+    // --- the order of the two ALTERs ---
+
+    @Test
+    void shrinkingUsageLogAltersThePayloadFirst() {
+        // Were the usage log shortened first and the payload ALTER then refused, payloads would outlive events.
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
+    @Test
+    void growingUsageLogIsAlteredBeforeThePayload() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(500, 400, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+    }
+
+    @Test
+    void failedPayloadAlterLeavesShrinkingUsageLogUntouched() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        doThrow(new ClickHouseQueryException("rejected", new RuntimeException())).when(ddl).execute(contains(PAYLOAD));
+        assertThatThrownBy(() -> reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(TTL_90), ddl).reconcile())
+                .isInstanceOf(ClickHouseQueryException.class);
+        verify(ddl, never()).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
+    @Test
+    void unreadableUsageLogCountsAsShrinking() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
     // --- reading a live TTL ---
 
     @Test
@@ -280,6 +352,10 @@ class IngestTtlReconcilerTest {
         assertThat(IngestTtlReconciler.exceeds(rule(25, TtlUnit.HOUR), days(1))).isTrue();
         assertThat(IngestTtlReconciler.exceeds(days(1), rule(47, TtlUnit.HOUR))).isFalse();
         assertThat(IngestTtlReconciler.exceeds(days(2), rule(47, TtlUnit.HOUR))).isTrue();
+        // Twelve months are 336 to 372 days, a year 365 to 366: each outlasts the other's narrowest reading.
+        assertThat(IngestTtlReconciler.exceeds(rule(1, TtlUnit.YEAR), rule(12, TtlUnit.MONTH))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(rule(12, TtlUnit.MONTH), rule(1, TtlUnit.YEAR))).isTrue();
+        assertThat(IngestTtlReconciler.exceeds(rule(11, TtlUnit.MONTH), rule(1, TtlUnit.YEAR))).isFalse();
     }
 
     @Test

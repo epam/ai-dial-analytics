@@ -7,9 +7,9 @@ live `TTL` alone", so the scenarios that revert a hand-set `TTL` with the proper
 the bound is judged on effective retentions. Replaced by "The ingest tables' retention follows only
 explicitly set properties".
 
-**Migration**: Set `SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` to apply a retention. To return a
-table to its provisioned retention, set `365` or `90` explicitly. Removing a property keeps the `TTL` it last
-applied.
+**Migration**: Set `SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` to apply a retention. `90`
+restores the payload table's provisioned `TTL`; no day count equals the usage log's provisioned
+`INTERVAL 1 YEAR`, and `365` is the nearest. Removing a property keeps the `TTL` it last applied.
 
 ## ADDED Requirements
 
@@ -55,7 +55,8 @@ event. The bound SHALL be judged on each table's effective retention: its set va
 `TTL`. `-1`, or a live table without a `TTL`, SHALL count as unlimited. A live `TTL` SHALL be read in whole
 days as the widest reading for the payload and the narrowest for the usage log: a `DAY` or `WEEK` interval
 exactly, a `MONTH` as 28 to 31 days per month, a `YEAR` as 365 to 366 days per year, and an `HOUR` interval
-rounded up to whole days for the payload and down for the usage log. Equal retentions SHALL be accepted. A
+rounded up to whole days for the payload and down for the usage log. Two `TTL`s in the same unit SHALL instead
+compare their intervals directly. Equal retentions SHALL be accepted. A
 payload retention longer than the usage-log retention SHALL fail startup, naming both properties, before any
 table is altered:
 
@@ -65,9 +66,13 @@ table is altered:
 - when neither is set, the service alters nothing and SHALL NOT fail startup; a live payload `TTL` longer
   than the live usage-log `TTL` SHALL be logged at `WARN`.
 
-When either table does not exist, the bound SHALL be skipped, since no payload row can then outlive an event
-row. When the unset side's live `TTL` has a shape the service cannot read as a single interval over
+When at least one property is unset and either table does not exist, the bound against the live `TTL` SHALL be
+skipped, since no payload row can then outlive an event row. When the unset side's live `TTL` has a shape the service cannot read as a single interval over
 `request_time`, the bound SHALL be skipped with a `WARN`. In both cases the set side is still reconciled.
+
+When both tables are altered, the payload table SHALL be altered first if the usage-log retention is being
+shortened (or its live `TTL` cannot be read), and second otherwise, so that a failed second `ALTER` never
+leaves payload rows outliving their events.
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter either
@@ -173,6 +178,12 @@ query to the payload window; the query surface documents this asymmetry rather t
   `SYNC_PAYLOAD_TTL_DAYS=365`, `SYNC_USAGE_LOG_TTL_DAYS` unset and `dial_usage_log` carrying
   `INTERVAL 1 YEAR`
 - **THEN** startup proceeds
+
+#### Scenario: A shrinking usage log is altered after the payload
+
+- **WHEN** the service starts with `SYNC_USAGE_LOG_TTL_DAYS=30` and `SYNC_PAYLOAD_TTL_DAYS=30` while the
+  tables carry one year and 90 days, and the payload `ALTER` is refused
+- **THEN** startup fails and `dial_usage_log` still carries its one-year `TTL`
 
 #### Scenario: Live TTLs out of bound with both properties unset are only reported
 

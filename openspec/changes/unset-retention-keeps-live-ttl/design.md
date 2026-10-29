@@ -16,8 +16,9 @@ default can change without a deprecation path.
 
 **Non-Goals:**
 
-- A "reset to provisioned" switch. Setting `365` or `90` does it, and `365` days is close to but not the
-  same as the provisioned year (see the archived change, D1).
+- A "reset to provisioned" switch. Setting `90` restores the payload table's; `365` days is the nearest to,
+  but not the same as, the usage log's provisioned year (see
+  `openspec/changes/archive/2026-10-28-configurable-usage-log-ttl/design.md`).
 - Enforcing the bound on TTLs ADAS does not manage.
 
 ## Decisions
@@ -62,13 +63,21 @@ against the provisioned `1 YEAR` is the common case, and it mixes units.
 Unset: INFO, "retention is not set; keeping its live TTL <clause>". Applied: the existing WARN with the old
 and new retention. Live violation with both unset: WARN naming both tables and both clauses.
 
+### D4. ALTER order
+
+Both final states honour the bound, but the two `ALTER`s are separate statements, and the second can fail
+(for example a writer granted `ALTER TTL` on one table only). When the usage log shrinks, the payload table
+is altered first: the intermediate state has the new, shorter payload under the old, longer usage log.
+Otherwise the usage log goes first: the intermediate state has the old payload under a usage log that did
+not shrink. An unreadable live usage-log `TTL` counts as shrinking.
+
 ## Risks / Trade-offs
 
 - [Drift is invisible] → the INFO line records the live `TTL` on every start.
 - [The bound against a live TTL needs migrations enabled] → with migrations disabled ADAS alters nothing, so
   it cannot create the violation either.
 - [An operator expects removal to restore the default] → the configuration rows and the upgrade note say
-  removal keeps the last `TTL`, and that `365` or `90` restores it.
+  removal keeps the last `TTL`, that `90` restores the payload's, and that `365` is the nearest to the year.
 
 ## Migration Plan
 

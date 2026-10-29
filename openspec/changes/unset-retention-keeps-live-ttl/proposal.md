@@ -12,11 +12,12 @@ Removing configuration should not trigger a destructive action.
   last applied.
 - `SYNC_PAYLOAD_TTL_DAYS` loses its `90` default; both properties default to unset. Fresh installs keep the
   provisioned one year and 90 days, which the migrations create.
-- Returning a table to its provisioned retention takes an explicit value (`365`, `90`).
+- Returning the payload table to its provisioned retention takes an explicit `90`; no day count equals the
+  usage log's provisioned `INTERVAL 1 YEAR`, and `365` is the nearest.
 - The payload-within-usage-log bound is checked on effective retentions: the configured value, else the
   live `TTL`. Two set values are checked at startup whatever the migrations setting; with one or both unset
   the check runs in the reconciliation, against the live `TTL`, before any `ALTER`. With both unset nothing
-  is checked or altered.
+  is altered, and a live violation is logged at WARN.
 - No longer **BREAKING** for hand-set `TTL`s: an upgrade with both properties unset changes no table.
 
 ## Capabilities
