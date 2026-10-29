@@ -122,13 +122,14 @@ class MappingEngineTest {
      * {@code _updated_at} is the table's own default and stays unmapped.
      */
     @Test
-    void payloadMappingProducesTheNineDeclaredColumns() {
+    void payloadMappingProducesTheThirteenDeclaredColumns() {
         Map<String, Object> row = payloadEngine.toRow(read(SAMPLE), "blob-1.log");
 
         assertThat(row).containsOnlyKeys(
                 "event_id", "request_time", "trace_id", "core_span_id",
                 "jwt_claims", "request_tags",
-                "request_body", "response_body", "assembled_response");
+                "request_body", "response_body", "assembled_response",
+                "project_id", "deployment", "user_hash", "session_id");
         assertThat(row).doesNotContainKey("_updated_at");
     }
 

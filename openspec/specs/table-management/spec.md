@@ -2216,10 +2216,15 @@ it uses. The restriction applies by
 default (see the `authentication` capability's "Sensitive column authorization" for the enforcement
 rule). The seeded sensitive set SHALL be `dial_usage_log_payload.jwt_claims`,
 `dial_usage_log_payload.request_tags`, `dial_usage_log_payload.request_body`,
-`dial_usage_log_payload.response_body`, `dial_usage_log_payload.assembled_response`, and
-`rate_analytics.comment`. Every other seeded column SHALL default to `sensitive = false`.
+`dial_usage_log_payload.response_body`, `dial_usage_log_payload.assembled_response`,
+`dial_usage_log_payload.request_cache_control`, and `rate_analytics.comment`. Every other seeded column SHALL
+default to `sensitive = false`.
 
-All five SHALL carry the flag on `dial_usage_log_payload` because that is where they are stored;
+`request_cache_control` SHALL be seeded sensitive on the same grounds as `request_body`: under
+`sync.request-body-mode=delta` it holds part of that body's content, the cache markers taken out of its history,
+so storing a request in parts SHALL NOT relax its sensitivity.
+
+All six SHALL carry the flag on `dial_usage_log_payload` because that is where they are stored;
 re-homing them SHALL NOT relax it. `rate_analytics.comment` SHALL therefore be the only sensitive
 SOURCE column left in the seeded catalog — which matters for any surface reporting an entity's
 wildcard schema, since an enrichment column is absent from one for every caller regardless of role. Enforcement is unchanged by the move: the flag is applied
@@ -2252,7 +2257,7 @@ are changed only by a further migration.
 
 - **WHEN** the catalog is read after the table-catalog migrations run
 - **THEN** `dial_usage_log` reports `jwt_claims` and `request_tags` with `sensitive: true` and
-  `user_hash` with `sensitive: false`, `dial_usage_log_payload` reports all three of its columns with
+  `user_hash` with `sensitive: false`, `dial_usage_log_payload` reports all six of its exposed columns with
   `sensitive: true`, and `rate_analytics` reports `comment` with `sensitive: true`
 
 #### Scenario: Management responses expose the seeded flag unfiltered
@@ -2402,22 +2407,24 @@ governed exclusively by `sensitive`.
 
 The catalog migrations SHALL seed the `heavy` flag on the built-in tables' raw-payload columns
 so that a wildcard projection over the seeded schema is cheap by default. The seeded heavy set SHALL
-be `dial_usage_log_payload.request_body`, `dial_usage_log_payload.response_body`, and
-`dial_usage_log_payload.assembled_response` — the verbatim LLM request, the verbatim response, and the
-producer's merged response, the only seeded columns whose per-row size is unbounded. Every other
+be `dial_usage_log_payload.request_body`, `dial_usage_log_payload.response_body`,
+`dial_usage_log_payload.assembled_response` and `dial_usage_log_payload.request_cache_control` — the verbatim
+LLM request, the verbatim response, the producer's merged response, and the cache markers a chat request's
+history loses under `sync.request-body-mode=delta` (see the data-sync capability), the only seeded columns whose
+per-row size is unbounded. Every other
 seeded column SHALL default to `heavy = false`, including the `object`-typed
 `dial_usage_log_payload.jwt_claims` and `dial_usage_log_payload.request_tags` (small claim/header
 documents) and `rate_analytics.comment` (a short free-text note). `heavy` and payload ownership SHALL
 remain independent: the claim/header pair lives on the enrichment without being heavy.
 
-All three seeded heavy columns are also seeded `sensitive` (see "Seeded column sensitivity on the
+All four seeded heavy columns are also seeded `sensitive` (see "Seeded column sensitivity on the
 built-in source tables"), so for a caller without `TABLE_SENSITIVE` on the owning table they are
 already absent from the
 model and the heavy flag changes nothing.
 
 For an entitled caller the flag is now belt-and-braces on a wildcard over `dial_usage_log`: every
 heavy seeded column is an enrichment column, and a wildcard never fans out into an enrichment join, so
-the three bodies are omitted whether or not they are flagged. The flag remains load-bearing where the
+the four are omitted whether or not they are flagged. The flag remains load-bearing where the
 enrichment rule does not reach — a wildcard's expansion is still reported with `heavy` in discovery,
 the `validate-sql` heavy-column warning is keyed on it, and an operator flipping it through the API
 still changes what a wildcard over a non-seeded table returns.
@@ -2429,8 +2436,8 @@ independent.
 #### Scenario: Seeded heavy flags after migration
 
 - **WHEN** the catalog is read after the table-catalog migrations run
-- **THEN** `dial_usage_log_payload` reports `request_body`, `response_body`, and `assembled_response`
-  with `heavy: true`, and every other column of `dial_usage_log`, `dial_usage_log_payload` and
+- **THEN** `dial_usage_log_payload` reports `request_body`, `response_body`, `assembled_response` and
+  `request_cache_control` with `heavy: true`, and every other column of `dial_usage_log`, `dial_usage_log_payload` and
   `rate_analytics` with `heavy: false`
 
 #### Scenario: Management responses expose the seeded heavy flag
@@ -2771,11 +2778,19 @@ consistently with what is injected.
 The catalog migrations SHALL seed a third built-in table, `dial_usage_log_payload`, as an
 `enrichment` of `dial_usage_log` with `status=ACTIVE`, `system=true` and `grain_key=event_id`, and
 SHALL therefore report `cardinality` as `ZERO_OR_ONE` (a derived facet of having a grain key, not a
-stored one). It SHALL expose exactly three columns — `request_body`, `response_body`,
+stored one). It SHALL expose the three body columns — `request_body`, `response_body`,
 `assembled_response` — which SHALL resolve into `dial_usage_log`'s flat schema under the qualified
 names `"dial_usage_log_payload.request_body"`, `"dial_usage_log_payload.response_body"` and
 `"dial_usage_log_payload.assembled_response"`, by the ordinary grain join (see "Grain-based enrichment
 join with enforced cardinality").
+
+It SHALL also expose `request_cache_control` (see the data-sync capability, "A chat request body is stored as
+its new history and a parent link"), under the qualified name `"dial_usage_log_payload.request_cache_control"`.
+It SHALL be added by a later catalog migration as a new `column_mapping` row of type `string`, `nullable`,
+`sensitive` and `heavy`, with a description, placed after the existing columns; for a row whose request body is
+stored whole it reads as `NULL`. The same migration SHALL extend the seeded description of `request_body` to say
+that a chat request in delta form carries only its new history, replacing it only while it is still the seeded
+text.
 
 **BREAKING**: those five columns SHALL NOT be exposed as columns of `dial_usage_log`. A query naming
 any of them as a bare field of `dial_usage_log` SHALL be rejected as an unknown field, exactly as any
@@ -2787,8 +2802,10 @@ carried over unchanged and continues to be reported by `GET /v1/tables/dial_usag
 schema discovery under the qualified name. Vacating those ordinals MAY leave gaps in
 `dial_usage_log`'s column order; the surviving columns SHALL keep the relative order they had.
 
-The definition's physical columns beyond the three exposed ones — its `event_id` grain key,
-`request_time`, `trace_id`, `core_span_id`, and its `_updated_at` version column — SHALL NOT appear in
+The definition's physical columns beyond the exposed ones — its `event_id` grain key,
+`request_time`, `trace_id`, `core_span_id`, its `_updated_at` version column, and the chain columns
+`request_hash`, `request_parent_hash` and `request_ancestor_hashes`, and the identity columns `project_id`,
+`deployment`, `user_hash` and `session_id` — SHALL NOT appear in
 the exposed schema, matching the existing rule that an enrichment's grain key is a hidden physical
 column.
 
@@ -2800,7 +2817,8 @@ the API could try to modify (see "Table TTL").
 
 - **WHEN** the catalog is read after the table-catalog migrations run
 - **THEN** it contains `dial_usage_log_payload` as an `enrichment` with `source_table=dial_usage_log`,
-  `status=ACTIVE`, `system=true`, `grain_key=event_id`, and its three exposed columns
+  `status=ACTIVE`, `system=true`, `grain_key=event_id`, and its exposed columns, including
+  `request_cache_control`
 
 #### Scenario: Body columns resolve under their qualified names
 
@@ -2841,6 +2859,18 @@ the API could try to modify (see "Table TTL").
   privilege
 - **THEN** the request is rejected with HTTP 409 and the system-owned `error` code, and no ClickHouse
   DDL or write is issued
+
+#### Scenario: The cache markers resolve under their qualified name
+
+- **WHEN** `GET /v1/queries/entities/schema/dial_usage_log` is called by a caller entitled to the
+  payload table's sensitive columns
+- **THEN** the schema carries `"dial_usage_log_payload.request_cache_control"`, reported `sensitive: true` and
+  `heavy: true`, and carries none of the chain columns
+
+#### Scenario: A caller without sensitive access does not see the cache markers
+
+- **WHEN** a caller not entitled to sensitive columns reads the schema of `dial_usage_log`
+- **THEN** `request_cache_control` is not listed, exactly as for the body columns
 
 ### Requirement: An object column is always non-nullable
 

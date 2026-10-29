@@ -594,7 +594,7 @@ class BlobPollingServiceTest {
         datePath = datePathFormat.format(LocalDate.now(ZoneOffset.UTC));
         syncProps = new SyncProperties(
                 "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, datePattern, fileNamePrefixPattern, false,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null);
     }
 
     private void writeBlob(String fileName, Instant lastModified) throws Exception {
