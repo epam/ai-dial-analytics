@@ -16,4 +16,4 @@
 - [x] 3.1 `docs/configuration.md` rows: unset keeps the live `TTL`; `90` restores the payload's provisioned value
 - [x] 3.2 `docs/release-0.4-upgrade.md`: drop the hand-set-`TTL` warning and the breaking-change row; keep the new-configuration entries
 - [x] 3.3 Javadoc and docs that describe unset as the default
-- [ ] 3.4 `./gradlew clean build`; `openspec validate unset-retention-keeps-live-ttl --strict`
+- [x] 3.4 `./gradlew clean build`; `openspec validate unset-retention-keeps-live-ttl --strict`

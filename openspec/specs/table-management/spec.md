@@ -2309,7 +2309,7 @@ The TTL SHALL be catalog metadata as well as physical DDL: it SHALL be persisted
 returned as a `ttl` object by `GET /v1/tables/{name}`; consistent with `NON_NULL` serialization,
 an unset TTL SHALL be omitted from responses. The seeded `system` tables' TTLs
 SHALL NOT be mirrored into the catalog, and the API SHALL NOT modify them: they are provisioned by
-the migrations, and `dial_usage_log`'s and `dial_usage_log_payload`'s are set by the
+the migrations, and `dial_usage_log`'s and `dial_usage_log_payload`'s can be changed through the
 `SYNC_USAGE_LOG_TTL_DAYS` and `SYNC_PAYLOAD_TTL_DAYS` properties (see the data-sync capability).
 
 TTL-based row expiry is applied by ClickHouse lazily (on merges), so rows older than the TTL MAY
@@ -3258,8 +3258,9 @@ as given; under the tuple join it is unmatched and attaches to no source row.
 ### Requirement: An aligned enrichment inherits its source's TTL
 
 An aligned enrichment that declares no `ttl` SHALL be created with its source's physical TTL clause and its
-`ttl_only_drop_parts` setting, both read from the source's ClickHouse table (for `dial_usage_log`, its
-configured retention — one year by default, see the data-sync capability — with `ttl_only_drop_parts = 1`).
+`ttl_only_drop_parts` setting, both read from the source's ClickHouse table (for `dial_usage_log`, its live
+retention — one year as provisioned unless `SYNC_USAGE_LOG_TTL_DAYS` changed it, see the data-sync
+capability — with `ttl_only_drop_parts = 1`).
 The clause applies unchanged because the alignment column has the source partition column's name and type.
 It is read when the enrichment is created: a later change of the source's retention SHALL NOT by itself
 re-align an existing enrichment's TTL. An explicitly declared `ttl` SHALL override the inherited one. An
