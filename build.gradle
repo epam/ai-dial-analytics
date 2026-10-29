@@ -51,8 +51,9 @@ repositories {
 dependencies {
     implementation platform(SpringBootPlugin.BOM_COORDINATES)
     // Overrides the Boot-BOM-managed OpenTelemetry 1.55.0 — unbounded memory allocation in W3C
-    // baggage propagation, patched in 1.62.0.
-    implementation platform('io.opentelemetry:opentelemetry-bom:1.62.0')
+    // baggage propagation (patched in 1.62.0) and quadratic CPU in W3C tracestate parsing
+    // (CVE-2026-118259, patched in 1.67.0).
+    implementation platform('io.opentelemetry:opentelemetry-bom:1.67.0')
 
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
@@ -98,13 +99,13 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-opentelemetry'
     // Routes log4j2 events into the OTel SDK; the official starter does not auto-install the
     // appender (OpenTelemetryLogAppenderConfiguration does). Version aligned with the OTel API
-    // 1.62.0 pinned via opentelemetry-bom above (instrumentation 2.28.x <-> SDK 1.62.x).
-    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.28.1-alpha'
+    // 1.67.0 pinned via opentelemetry-bom above (instrumentation 2.33.x <-> SDK 1.67.x).
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-log4j-appender-2.17:2.33.1-alpha'
     // CLIENT-span instrumentation for the auto-configured JDBC DataSource (Postgres metadata store).
     // Same OTel instrumentation family/version as the log4j appender above; the OTel API it needs is
     // managed by the opentelemetry-bom pinned at the top. Boot-version-independent (it wraps the
     // DataSource bean), so it sidesteps datasource-micrometer's lack of a Spring Boot 4 release.
-    implementation 'io.opentelemetry.instrumentation:opentelemetry-jdbc:2.28.1-alpha'
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-jdbc:2.33.1-alpha'
 
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.3'
 
@@ -318,6 +319,11 @@ dependencies {
         }
         implementation('org.apache.calcite.avatica:avatica-metrics:1.29.0') {
             because('Aligned with avatica-core 1.29.0 — same release train')
+        }
+        // Guava (transitive from Calcite 1.42.0, which requests 33.4.8-jre): versions before 33.7.2
+        // allow unthrottled memory allocation during deserialization.
+        implementation('com.google.guava:guava:33.7.2-jre') {
+            because('CVE-2026-102554')
         }
     }
 }

@@ -20,7 +20,7 @@ grants and no Enrichment Runner state. The pipelines fill the tables from `dial_
 | `usage-request-baggage-live` | `enrich` pipeline (SQL)       | Fills `usage_request_baggage` from the captured request tags.                             |
 
 The bundle requires the `dial_usage_log` and `dial_usage_log_payload` system tables (listed under
-`required_system_tables`). `usage_request_baggage` keeps the header for the event's one-year retention, where
+`required_system_tables`). `usage_request_baggage` keeps the header for a year, the usage log's default retention, where
 `dial_usage_log_payload.request_tags` expires sooner. No pipeline calls a model, so the bundle needs no DIAL deployment on
 the target.
 

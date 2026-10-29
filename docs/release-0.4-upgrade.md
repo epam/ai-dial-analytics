@@ -186,3 +186,11 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   replace `keep` with `SYNC_INLINE_FILES_DROP_TRUNCATED=false` and `drop` with `SYNC_INLINE_FILES_MAX_SIZE=0`.
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
+- `SYNC_PAYLOAD_TTL_DAYS` (default unset) — the payload table's retention in days, `-1` for none, applied at
+  startup; no longer than the usage log's. Unset leaves the live `TTL` alone, so an upgrade changes no table and
+  removing the variable keeps the last `TTL`; set `90` to return to the provisioned value. With sub-privileges
+  granted individually, applying a value needs `ALTER TTL` (see
+  [`clickhouse-server.md`](clickhouse-server.md#narrowing-alter-to-sub-privileges)).
+- `SYNC_USAGE_LOG_TTL_DAYS` (default unset) — `dial_usage_log`'s retention in days, `-1` for none, applied the same
+  way. No day count equals the provisioned `INTERVAL 1 YEAR`; `365` is the nearest. See
+  [`configuration.md`](configuration.md).
