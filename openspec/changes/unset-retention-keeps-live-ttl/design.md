@@ -66,10 +66,15 @@ and new retention. Live violation with both unset: WARN naming both tables and b
 ### D4. ALTER order
 
 Both final states honour the bound, but the two `ALTER`s are separate statements, and the second can fail
-(for example a writer granted `ALTER TTL` on one table only). When the usage log shrinks, the payload table
-is altered first: the intermediate state has the new, shorter payload under the old, longer usage log.
-Otherwise the usage log goes first: the intermediate state has the old payload under a usage log that did
-not shrink. An unreadable live usage-log `TTL` counts as shrinking.
+(for example a writer granted `ALTER TTL` on one table only). The usage log goes first only when the
+payload's live `TTL` fits under the new usage-log value, which proves the intermediate state (old payload,
+new usage log) safe without reading the usage log's live `TTL`. Otherwise the payload goes first, which is
+the safe order whenever the usage log shrinks, since the new payload fits under the new, and so the old,
+usage log.
+
+*Alternative:* "payload first when the usage log shrinks". Rejected: with calendar units "shrinks" has no
+exact answer — `30` days against a live `1 MONTH` may or may not be shorter — and the conservative reading
+put the payload first in a case where only the other order was provably safe.
 
 ## Risks / Trade-offs
 

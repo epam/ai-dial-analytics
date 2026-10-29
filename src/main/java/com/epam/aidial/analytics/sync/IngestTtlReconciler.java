@@ -80,13 +80,14 @@ public class IngestTtlReconciler {
         final Optional<String> payloadEngine = inspector.engineFull(payload.table());
         checkLiveRetentions(usageLogEngine, payloadEngine);
         // Each final state honours the bound; the order keeps the state between the two ALTERs honouring it too, so
-        // a failed second ALTER cannot leave payloads outliving their events: shrink the payload before the usage log.
-        if (usageLogShrinks(usageLogEngine)) {
-            reconcile(payload.table(), payload.ttlDays(), payloadEngine);
+        // a failed second ALTER cannot leave payloads outliving their events. The usage log goes first only when the
+        // payload's current retention provably fits under its new one; otherwise the payload is brought down first.
+        if (payloadFitsNewUsageLog(payloadEngine)) {
             reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
+            reconcile(payload.table(), payload.ttlDays(), payloadEngine);
         } else {
-            reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
             reconcile(payload.table(), payload.ttlDays(), payloadEngine);
+            reconcile(usageLog.table(), usageLog.ttlDays(), usageLogEngine);
         }
     }
 
@@ -111,14 +112,20 @@ public class IngestTtlReconciler {
                 ttlClause(engineFull.get()).orElse("none"), describe(target));
     }
 
-    /** Whether the usage log's set retention may be shorter than its live one; an unreadable live one counts. */
-    private boolean usageLogShrinks(Optional<String> usageLogEngine) {
-        if (usageLog.unset() || usageLogEngine.isEmpty()) {
+    /**
+     * Whether altering the usage log first is safe: it is not being set, or the payload table's live retention fits
+     * under its new one. An unreadable or missing payload {@code TTL} does not count as fitting.
+     */
+    private boolean payloadFitsNewUsageLog(Optional<String> payloadEngine) {
+        if (usageLog.unset()) {
+            return true;
+        }
+        if (payloadEngine.isEmpty()) {
             return false;
         }
-        return effective(null, usageLogEngine)
-                .map(live -> exceeds(live, target(usageLog.ttlDays())))
-                .orElse(true);
+        return effective(null, payloadEngine)
+                .map(live -> !exceeds(live, target(usageLog.ttlDays())))
+                .orElse(false);
     }
 
     /** The {@code TTL} a set {@code ttlDays} asks for: empty for {@code -1} (none), else that many days. */

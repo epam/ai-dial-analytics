@@ -314,7 +314,27 @@ class IngestTtlReconcilerTest {
     }
 
     @Test
-    void unreadableUsageLogCountsAsShrinking() {
+    void monthlyUsageLogShortenedToDaysGoesFirstWhenThePayloadAlreadyFits() {
+        // 30 days may be longer than a month (28 to 31 days), so "does the log shrink" cannot decide the order; the
+        // live 7-day payload fits under the new 30 days, so altering the usage log first is provably safe.
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, 30, Optional.of(ttl("toIntervalMonth(1)")), Optional.of(ttl("toIntervalDay(7)")), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+    }
+
+    @Test
+    void unreadablePayloadIsAlteredFirst() {
+        final DdlExecutor ddl = mock(DdlExecutor.class);
+        reconciler(30, 30, Optional.of(TTL_YEAR), Optional.of(MOVE_RULE), ddl).reconcile();
+        final InOrder order = inOrder(ddl);
+        order.verify(ddl).execute(contains("`" + PAYLOAD + "`"));
+        order.verify(ddl).execute(contains("`" + USAGE_LOG + "`"));
+    }
+
+    @Test
+    void unreadableUsageLogIsOrderedByThePayload() {
         final DdlExecutor ddl = mock(DdlExecutor.class);
         reconciler(30, 30, Optional.of(MOVE_RULE), Optional.of(TTL_90), ddl).reconcile();
         final InOrder order = inOrder(ddl);

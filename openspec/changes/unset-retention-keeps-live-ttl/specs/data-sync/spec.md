@@ -68,11 +68,13 @@ table is altered:
 
 When at least one property is unset and either table does not exist, the bound against the live `TTL` SHALL be
 skipped, since no payload row can then outlive an event row. When the unset side's live `TTL` has a shape the service cannot read as a single interval over
-`request_time`, the bound SHALL be skipped with a `WARN`. In both cases the set side is still reconciled.
+`request_time`, the bound SHALL be skipped with a `WARN`. In both cases the set side, if its table exists, is still
+reconciled.
 
-When both tables are altered, the payload table SHALL be altered first if the usage-log retention is being
-shortened (or its live `TTL` cannot be read), and second otherwise, so that a failed second `ALTER` never
-leaves payload rows outliving their events.
+When both tables are altered, the usage log SHALL be altered first only when the payload table's live `TTL`
+fits within the new usage-log retention by the reading above; otherwise, including when the payload's live
+`TTL` cannot be read, the payload table SHALL be altered first. A failed second `ALTER` then never leaves
+payload rows outliving their events.
 
 The reconciliation SHALL run only when the service runs the ClickHouse migrations
 (`CLICKHOUSE_MIGRATIONS_ENABLED=true`). When migrations are disabled the service SHALL NOT alter either
