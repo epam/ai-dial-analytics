@@ -13,7 +13,9 @@ import java.util.Map;
 import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -52,6 +54,9 @@ class AggregateSqlDeclarationIntegrationTest extends AbstractClickHouseIntegrati
     private static final String USAGE_TARGET = "SELECT toString(groupArray((deployment, day, call_count, tokens))) AS r"
             + " FROM (SELECT deployment, formatDateTime(day, '%F %T', 'UTC') AS day, call_count, tokens FROM "
             + USAGE_ROLLUP + " FINAL ORDER BY deployment, day)";
+
+    private static final String PROMPT_ROLLUP = "usage_prompt_sql";
+    private static final String PROMPT_PIPELINE = "usage_prompt_sql_rollup";
 
     private static final String RATIO_ROLLUP = "usage_ratio_sql";
     private static final String RATIO_PIPELINE = "usage_ratio_sql_rollup";
@@ -102,6 +107,8 @@ class AggregateSqlDeclarationIntegrationTest extends AbstractClickHouseIntegrati
     void dropAll() throws Exception {
         mockMvc.perform(delete(PIPELINES + "/" + USAGE_PIPELINE));
         mockMvc.perform(delete("/v1/tables/" + USAGE_ROLLUP));
+        mockMvc.perform(delete(PIPELINES + "/" + PROMPT_PIPELINE));
+        mockMvc.perform(delete("/v1/tables/" + PROMPT_ROLLUP));
         mockMvc.perform(delete(PIPELINES + "/" + RATIO_PIPELINE));
         mockMvc.perform(delete("/v1/tables/" + RATIO_ROLLUP));
         mockMvc.perform(delete(PIPELINES + "/" + OWNER_PIPELINE));
@@ -160,14 +167,18 @@ class AggregateSqlDeclarationIntegrationTest extends AbstractClickHouseIntegrati
         seedUsage("claude", "2026-01-02", 7, 3);
         seedUsage("ignored", "2026-01-02", 1000, 4);
 
-        // The preview samples the block: target-named key and measure columns, the sample's own SELECT.
-        mockMvc.perform(post(PIPELINES + "/" + USAGE_PIPELINE + "/preview"))
+        // The preview samples the block: target-named key and measure columns, and the block as a statement the
+        // query API runs — which, every group fitting the sample, answers the sampled groups in key order.
+        final String preview = mockMvc.perform(post(PIPELINES + "/" + USAGE_PIPELINE + "/preview"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.statement", startsWith("select")))
+                .andExpect(jsonPath("$.statement", startsWith("SELECT \"deployment\", date_trunc('day', \"request_time\") AS \"day\"")))
                 .andExpect(jsonPath("$.columns[*].name", contains("deployment", "day", "call_count", "tokens")))
                 .andExpect(jsonPath("$.columns[*].role", contains("key", "key", "measure", "measure")))
                 .andExpect(jsonPath("$.rows", hasSize(2)))
-                .andExpect(jsonPath("$.total_rows").value(2));
+                .andExpect(jsonPath("$.total_rows").value(2))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(PreviewStatements.runStatement(mockMvc, preview))
+                .containsExactlyInAnyOrderElementsOf(PreviewStatements.body(preview).get("rows"));
 
         arm(USAGE_PIPELINE);
         assertThat(refresh(USAGE_PIPELINE)).isEqualTo(2);
@@ -183,6 +194,28 @@ class AggregateSqlDeclarationIntegrationTest extends AbstractClickHouseIntegrati
 
         assertThat(refresh(USAGE_PIPELINE)).as("the input is drained: a second tick writes nothing").isZero();
         assertThat(queryScalar(USAGE_TARGET, "r")).isEqualTo(afterAppend);
+    }
+
+    @Test
+    void measureNamedLikeInputFieldKeepsItsTargetNameInStatement() throws Exception {
+        // The sample aliases the item positionally so it cannot shadow the input's own prompt_tokens; the statement
+        // a caller copies names it by its target column, and the query path runs it with the declaration's meaning.
+        IntegrationTables.upsertSource(mockMvc, PROMPT_ROLLUP, """
+                [{"source_name":"deployment","name":"deployment","type":"string"},
+                 {"source_name":"prompt_tokens","name":"prompt_tokens","type":"long","nullable":true}]""",
+                "[\"deployment\"]");
+        create(PROMPT_PIPELINE, PROMPT_ROLLUP, "INSERT INTO " + PROMPT_ROLLUP + " (deployment, prompt_tokens)"
+                + " SELECT deployment, sum(total_tokens) FROM dial_usage_log GROUP BY 1");
+        seedUsage("gpt-4", "2026-01-01", 100, 1);
+        seedUsage("gpt-4", "2026-01-01", 40, 2);
+
+        final String preview = mockMvc.perform(post(PIPELINES + "/" + PROMPT_PIPELINE + "/preview"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].prompt_tokens").value(140))
+                .andExpect(jsonPath("$.statement", containsString("sum(\"total_tokens\") AS \"prompt_tokens\"")))
+                .andExpect(jsonPath("$.statement", not(containsString("__c"))))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(PreviewStatements.runStatement(mockMvc, preview)).isEqualTo(PreviewStatements.body(preview).get("rows"));
     }
 
     @Test

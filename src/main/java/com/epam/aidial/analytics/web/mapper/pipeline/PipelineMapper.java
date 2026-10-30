@@ -600,6 +600,7 @@ public abstract class PipelineMapper {
     public PreviewDto toPreviewDto(PipelinePreview preview) {
         return new PreviewDto(
                 preview.statement(),
+                preview.query(),
                 preview.columns().stream()
                         .map(column -> new PreviewColumnDto(column.name(), column.role(), column.type(),
                                 column.targetType(), column.maxBytes()))

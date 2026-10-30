@@ -32,9 +32,12 @@ import com.epam.aidial.analytics.service.pipeline.preview.PreviewValueCapper;
 import com.epam.aidial.analytics.service.pipeline.preview.SampledPosition;
 import com.epam.aidial.analytics.service.pipeline.preview.TargetCoercion;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
+import com.epam.aidial.analytics.service.query.PortableQueryRenderer;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
+import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.repository.StructuredQueryExecutor;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
+import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import io.opentelemetry.api.common.AttributeKey;
@@ -132,6 +135,7 @@ public class AggregateRefreshService {
     private final ClientSpanTracer spanTracer;
     private final TransitionLog transitions;
     private final PreviewValueCapper capper;
+    private final PortableQueryRenderer portable;
 
     /**
      * The probed window's <b>start and end</b> tuples, plus whether the probe filled its limit.
@@ -284,7 +288,7 @@ public class AggregateRefreshService {
         final AggregateCompiler.Compiled compiled = declaration.compileRefresh(pipeline.getTarget(), pinned);
         log.debug("Refreshing pipeline '{}' from '{}' into '{}'", name, input, pipeline.getTarget());
         // The statement a scheduled run actually executed — the one place it is visible, since preview returns
-        // only its sample's statement: a run that behaved unexpectedly at 03:00 otherwise leaves nothing to
+        // only the declaration as a portable query: a run that behaved unexpectedly at 03:00 otherwise leaves nothing to
         // compare against. DEBUG because it is large and identical on every run of an unchanged declaration.
         SqlLog.LOG.debug("Pipeline '{}' refresh statement: {}", name, compiled.sql());
         final long rowsWritten = write(pipeline, compiled.sql(), model);
@@ -397,8 +401,11 @@ public class AggregateRefreshService {
      * without a probe was neither what a refresh runs nor safe to copy out of a response. The one fact it carried
      * that matters before arming, "would a run write nothing?", is the {@code held_by_enrichment} note.
      *
-     * <p>The sample's own statement is returned with the settings it ran under, its columns typed by the gate,
-     * and {@code total_rows} counted by that same statement before its {@code LIMIT}.
+     * <p><b>Not the sample's statement either.</b> What is returned is the declaration as a query the caller can run
+     * through the query API, rendered against the caller's own view of the input (see {@link
+     * PortableQueryRenderer#tryRender}); the physical sample, its helper columns and its settings are logged at DEBUG.
+     * The sample's columns are typed by the gate, and {@code total_rows} is counted by the sample before its
+     * {@code LIMIT}.
      */
     public PipelinePreview preview(String name) {
         final PipelineEntity pipeline = require(name);
@@ -428,10 +435,16 @@ public class AggregateRefreshService {
         // its cells are returned under the target column like every other one.
         final Map<String, String> renamed = declaration.sampleAliases();
         final QuerySettings settings = PreviewBudget.settings(properties.preview());
-        // Rendered from the settings it runs under, through the same merge the executor applies, so the
-        // statement run by hand reads the same rows under the same limits.
-        final String statement = FinalSettings.render(sample.getSQL(ParamType.INLINED), settings, model.partitionLocal());
+        // The physical sample is for whoever reads the log, rendered through the same merge the executor applies so
+        // it carries the settings it ran under; the response carries the declaration as the query API runs it.
+        if (SqlLog.LOG.isDebugEnabled()) {
+            SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", name,
+                    FinalSettings.render(sample.getSQL(ParamType.INLINED), settings, model.partitionLocal()));
+        }
         final List<Map<String, Object>> sampled = runSample(name, sample, settings, model);
+        // Capped at the query API's own row ceiling, so a preview-rows above it still yields a statement it runs.
+        final PortableQueryRenderer.Portable rendered = portable.tryRender(
+                declaration.portableQuery(input, Math.min(properties.previewRows(), StructuredQueryBuilder.MAX_LIMIT)));
 
         final long totalRows = sampled.isEmpty() ? 0L : ((Number) sampled.getFirst().get(AggregateCompiler.TOTAL_GROUPS)).longValue();
         final SampledPosition newest =
@@ -467,7 +480,9 @@ public class AggregateRefreshService {
         notes.addAll(TargetCoercion.notes(columns, rows, declaration.valuePreservingMeasures()));
         final PreviewValueCapper.Capped capped = capper.cap(columns, rows);
         notes.addAll(capped.notes());
-        return new PipelinePreview(statement, capped.columns(), capped.rows(), totalRows, null, notes);
+        notes.addAll(PreviewNotes.statementNotPortable(rendered));
+        return new PipelinePreview(rendered.sql(), rendered.query(), capped.columns(), capped.rows(), totalRows, null,
+                notes);
     }
 
     /**
@@ -577,6 +592,9 @@ public class AggregateRefreshService {
 
         SelectQuery<Record> compilePreview(CursorColumns cursorColumns, int limit);
 
+        /** The declaration as a structured query over {@code input}, for the caller to run through the query API. */
+        StructuredQuery portableQuery(String input, int limit);
+
         /** The sample's column aliases that are not their target column's name, mapped to that name. */
         Map<String, String> sampleAliases();
 
@@ -622,6 +640,11 @@ public class AggregateRefreshService {
         @Override
         public SelectQuery<Record> compilePreview(CursorColumns cursorColumns, int limit) {
             return compiler.compilePreview(spec, model, cursorColumns, filter, measureFilters, limit);
+        }
+
+        @Override
+        public StructuredQuery portableQuery(String input, int limit) {
+            return compiler.portablePreview(spec, input, filter, measureFilters, limit);
         }
 
         @Override
@@ -679,6 +702,11 @@ public class AggregateRefreshService {
         @Override
         public SelectQuery<Record> compilePreview(CursorColumns cursorColumns, int limit) {
             return sqlCompiler.compilePreview(analysis, model, cursorColumns, limit);
+        }
+
+        @Override
+        public StructuredQuery portableQuery(String input, int limit) {
+            return sqlCompiler.portablePreview(analysis, limit);
         }
 
         @Override
@@ -857,7 +885,7 @@ public class AggregateRefreshService {
         }
         return new AggregateCompiler.CompiledFilter(
                 filterTranslator.toCondition(analysis.filter(), model.bindings()),
-                Set.copyOf(analysis.columns()));
+                Set.copyOf(analysis.columns()), analysis.filter());
     }
 
     private PipelineEntity require(String name) {
