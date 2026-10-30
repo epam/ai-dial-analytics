@@ -5,9 +5,11 @@ import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.ScanProperties;
+import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
 import com.epam.aidial.analytics.service.enrichment.model.GroupPage;
 import com.epam.aidial.analytics.service.enrichment.model.InputBinding;
+import com.epam.aidial.analytics.service.enrichment.model.MemberOrder;
 import com.epam.aidial.analytics.service.enrichment.model.MemberSelect;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
@@ -48,10 +50,12 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -192,7 +196,7 @@ class GroupFetchServiceTest {
             body.put(REQUEST_BODY, "{\"i\":" + i + "}");
             bodies.add(body);
         }
-        given(executor.executeScan(any(), any(), any())).willReturn(pool).willReturn(bodies);
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(pool).willReturn(bodies);
 
         final GroupFetchService.MemberSample sample = service.previewMembers(resolved(), GROUP_KEY, 5);
 
@@ -216,7 +220,7 @@ class GroupFetchServiceTest {
         final MemberSelect select = new MemberSelect();
         select.setLimit(10);
         narrowed.pipeline().setMemberSelect(select);
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
 
         final GroupFetchService.MemberSample sample = service.previewMembers(narrowed, GROUP_KEY, 5);
 
@@ -234,7 +238,7 @@ class GroupFetchServiceTest {
         final MemberSelect select = new MemberSelect();
         select.setLimit(100);
         atDefault.pipeline().setMemberSelect(select);
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
 
         final GroupFetchService.MemberSample sample = service.previewMembers(atDefault, GROUP_KEY, 5);
 
@@ -261,7 +265,7 @@ class GroupFetchServiceTest {
             body.put(REQUEST_BODY, "{\"i\":" + i + "}");
             bodies.add(body);
         }
-        given(executor.executeScan(any(), any(), any())).willReturn(pool).willReturn(bodies);
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(pool).willReturn(bodies);
 
         final GroupFetchService.MemberSample sample = service.previewMembers(resolved(), GROUP_KEY, 5);
 
@@ -283,7 +287,7 @@ class GroupFetchServiceTest {
     @Test
     void previewWithNoBoundColumnReturnsAnEmptyRowPerMember() {
         givenPipelineBinding();
-        given(executor.executeScan(any(), any(), any())).willReturn(new ArrayList<>(List.of(member(2), member(1))));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(new ArrayList<>(List.of(member(2), member(1))));
 
         final GroupFetchService.MemberSample sample = service.previewMembers(resolved(), GROUP_KEY, 5);
 
@@ -291,6 +295,27 @@ class GroupFetchServiceTest {
         assertThat(sample.columns()).isEmpty();
         assertThat(sample.rows()).hasSize(2).allSatisfy(row -> assertThat(row).isEmpty());
         assertThat(sample.selected()).isEqualTo(2);
+    }
+
+    /**
+     * A declaration stored before every write refused a computed ranking is refused here too, before any statement:
+     * the selection phase would otherwise order the members by the stand-in tuple rendered in the field's place.
+     */
+    @Test
+    void storedRankingByComputedFieldIsRefusedBeforeAnyStatement() {
+        givenPipelineBinding(REQUEST_BODY);
+        final MemberOrder order = new MemberOrder();
+        order.setColumn(DialUsageLogTestModel.payload("request_body_full"));
+        final MemberSelect select = new MemberSelect();
+        select.setOrderBy(List.of(order));
+        resolved().pipeline().setMemberSelect(select);
+        given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.withComputedFields(DialUsageLogTestModel.model()));
+
+        assertThatThrownBy(() -> service.fetch(NAME, GROUP_KEY, 100))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("member_select.order_by references 'dial_usage_log_payload.request_body_full'")
+                .hasMessageContaining("bound as a transform input");
+        verify(executor, never()).executeScan(any(), any(), any(), any());
     }
 
     private ResolvedEnrichPipeline resolved() {
@@ -311,7 +336,7 @@ class GroupFetchServiceTest {
     /** The SQL of every statement the assembly ran, in order, asserting how many there were. */
     private List<String> executedStatements(int expected) {
         final ArgumentCaptor<SelectQuery<Record>> captor = ArgumentCaptor.captor();
-        verify(executor, times(expected)).executeScan(captor.capture(), any(), any());
+        verify(executor, times(expected)).executeScan(captor.capture(), any(), any(), any());
         return captor.getAllValues().stream().map(select -> select.getSQL(ParamType.INLINED)).toList();
     }
 
@@ -366,6 +391,6 @@ class GroupFetchServiceTest {
         member.put("__cursor_v", "2026-09-15 00:00:00.000");
         member.put("__cursor_id", "e-1");
         member.put("chat_id", GROUP_KEY);
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(member));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(member));
     }
 }

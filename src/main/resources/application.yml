@@ -211,6 +211,9 @@ query:
     timeout: ${QUERY_BUDGET_TIMEOUT:20s}
     max-memory: ${QUERY_BUDGET_MAX_MEMORY:2GB}
     spill-threshold: ${QUERY_BUDGET_SPILL_THRESHOLD:1GB}
+  request-body-rebuild:
+    max-rounds: ${QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS:8}
+    max-ancestors: ${QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS:20000}
 
 pipeline:
   budget:

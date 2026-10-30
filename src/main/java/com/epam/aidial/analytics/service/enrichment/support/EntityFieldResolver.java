@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.enrichment.support;
 
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -8,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -49,15 +51,27 @@ public class EntityFieldResolver {
         }
         for (final TableDefinitionEntity enrichment : catalog.activeEnrichmentsOf(table)) {
             final String owner = enrichment.getName();
-            for (final ColumnMappingEntity column : columns.findByTableNameOrderByOrdinal(owner)) {
+            final List<ColumnMappingEntity> enrichmentColumns = columns.findByTableNameOrderByOrdinal(owner);
+            for (final ColumnMappingEntity column : enrichmentColumns) {
                 // Qualified so a base table and its enrichments cannot collide on a bare column name,
                 // exactly as the query model qualifies them. putIfAbsent is deliberate: a well-formed
                 // catalog makes a clash impossible, and silently overwriting would hide a corrupt one.
                 byName.putIfAbsent(owner + "." + column.getName(),
                         new EntityFields.Field(owner, column, true));
             }
+            addComputed(byName, owner, enrichmentColumns);
         }
         return new EntityFields(byName);
+    }
+
+    /**
+     * Appends {@code owner}'s computed fields after its catalog columns, as the query model does, so a declaration
+     * resolves them by the same qualified names — and each gate can refuse one by name rather than as unknown.
+     */
+    private static void addComputed(Map<String, EntityFields.Field> byName, String owner, List<ColumnMappingEntity> columns) {
+        for (final ComputedFields.Descriptor computed : ComputedFields.of(owner, columns)) {
+            byName.putIfAbsent(owner + "." + computed.column().getName(), new EntityFields.Field(owner, computed.column(), true, true));
+        }
     }
 
     /**
@@ -93,10 +107,12 @@ public class EntityFieldResolver {
         }
         for (final TableDefinitionEntity enrichment : catalog.activeEnrichmentsOf(source)) {
             final String owner = enrichment.getName();
-            for (final ColumnMappingEntity column : columns.findByTableNameOrderByOrdinal(owner)) {
+            final List<ColumnMappingEntity> enrichmentColumns = columns.findByTableNameOrderByOrdinal(owner);
+            for (final ColumnMappingEntity column : enrichmentColumns) {
                 byName.putIfAbsent(owner + "." + column.getName(),
                         new EntityFields.Field(owner, column, true));
             }
+            addComputed(byName, owner, enrichmentColumns);
         }
         return new EntityFields(byName);
     }

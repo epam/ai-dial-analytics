@@ -25,6 +25,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineReadBudget;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
@@ -296,6 +297,13 @@ public class GroupFetchService {
             declared.add(order.getColumn());
         }
         sensitiveGuard.enforceEntity(source, declared, "group assembly");
+        // A computed field is completed after a statement runs, so this phase would rank or group by the stand-in it
+        // renders in the field's place. Every declaration write refuses one here, but a declaration stored before that
+        // refusal existed is read as it is stored. The fragments are refused by name already, in their parse above.
+        for (MemberOrder order : orderBy) {
+            requireNotComputed("member_select.order_by", order.getColumn());
+        }
+        requireNotComputed("trigger.group_by", groupKeyField);
 
         // What the selection phase names beyond its projection: the preference, the ordering, and the group
         // key. Kept apart from `declared` — which also carries the bound columns, so it is the right set to
@@ -313,6 +321,13 @@ public class GroupFetchService {
 
         return new Assembly(pipelineName, source, cursorColumns, model, select, orderBy, filter, prefer, bound,
                 response, policy, groupKeyField, groupKeyAlias, scanSources.orderingKey(source));
+    }
+
+    /** 422 for a computed field named where a statement would compute over it (see {@link ComputedFields}). */
+    static void requireNotComputed(String what, String column) {
+        if (ComputedFields.isComputed(column)) {
+            throw new PipelineValidationException(ComputedFields.declarationMessage(what, column));
+        }
     }
 
     /**
@@ -661,14 +676,27 @@ public class GroupFetchService {
      * the whole declaration before either phase runs, so a sensitive column is either present in the
      * role-filtered model or has already been refused — and of the two ways to be wrong about a column's
      * cost, one statement too many is the one that cannot exhaust a budget.
+     *
+     * <p>The computed fields of one enrichment share one read, as one heavy column: their values are completed
+     * together from the one stored body they all stand in for, so a status bound beside the rebuilt body adds no body
+     * read and always agrees with it. Read apart, each would run its own rebuild, and the status could report
+     * {@code rebuilt} for a body the other read returned {@code partial}.
      */
     private static List<Set<String>> projectionBatches(
             Map<String, QueryFieldBinding> bindings, Set<String> bound) {
         List<Set<String>> heavy = new ArrayList<>();
+        Map<String, Set<String>> computedByOwner = new HashMap<>();
         Set<String> light = new LinkedHashSet<>();
         for (String name : bound) {
             QueryFieldBinding binding = bindings.get(name);
-            if (binding == null || binding.heavy()) {
+            if (binding != null && binding.isComputed()) {
+                String owner = name.substring(0, Math.max(0, name.indexOf('.')));
+                computedByOwner.computeIfAbsent(owner, ignored -> {
+                    Set<String> batch = new LinkedHashSet<>();
+                    heavy.add(batch);
+                    return batch;
+                }).add(name);
+            } else if (binding == null || binding.heavy()) {
                 heavy.add(new LinkedHashSet<>(List.of(name)));
             } else {
                 light.add(name);

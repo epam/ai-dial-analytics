@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.enrichment.validation.FilterSqlValidato
 import com.epam.aidial.analytics.service.pipeline.model.AggregateSpec;
 import com.epam.aidial.analytics.service.pipeline.model.TruncUnit;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
 import com.epam.aidial.analytics.service.query.JooqTypes;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -814,5 +815,29 @@ class AggregateSqlValidatorTest {
         given(definitions.findById(INPUT)).willReturn(Optional.of(table(INPUT, TableType.SOURCE)));
 
         assertRefused(HEAD + KEYS + "FROM dial_usage_log GROUP BY 1, 2", "not scannable");
+    }
+
+    /**
+     * An SQL declaration stored before every write refused a computed field still meets the gate's own refusal at
+     * preview and arm: the stand-in a statement would read in the field's place is a tuple, never the rebuilt body.
+     */
+    @Test
+    void statementMeasuringTheRebuiltBodyIsRefusedNamingTheField() {
+        final String full = DialUsageLogTestModel.payload("request_body_full");
+        final QueryEntityModel base = DialUsageLogTestModel.modelWithKeyedEnrichment();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put(full, QueryFieldBinding.computed(full, ComputedFields.REQUEST_BODY_FULL, ComputedFields.TABLE));
+        given(frontEndCatalog.findModel(eq(INPUT), any())).willReturn(Optional.of(new QueryEntityModel(base.entity(), base.table(),
+                bindings, base.enrichments(), base.baseSchema(), null, base.partitionLocal())));
+        final TableDefinitionEntity payload = table(ComputedFields.TABLE, TableType.ENRICHMENT);
+        payload.setSourceTable(INPUT);
+        payload.setGrainKey("event_id");
+        given(definitions.findById(ComputedFields.TABLE)).willReturn(Optional.of(payload));
+        given(catalog.activeEnrichmentsOf(INPUT)).willReturn(List.of(table(ENRICHMENT, TableType.ENRICHMENT), payload));
+        given(columns.findByTableNameOrderByOrdinal(ComputedFields.TABLE))
+                .willReturn(List.of(nullable(column(ComputedFields.TABLE, "request_body", QueryFieldType.STRING))));
+
+        assertRefused(HEAD + "SELECT deployment, date_trunc('day', request_time), max(length(\"" + full + "\")), sum(total_tokens)"
+                + " FROM dial_usage_log GROUP BY 1, 2", "the SQL declaration references '" + full + "'", "bound as a transform input");
     }
 }
