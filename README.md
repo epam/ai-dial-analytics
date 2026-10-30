@@ -191,7 +191,7 @@ governed per table, with more controls on top:
 - [Row-level security](docs/row-level-security.md) per provider role
 
 The shipped mapping stores raw request and response bodies in an encrypted payload table with a 90-day
-retention. Review [column mapping](docs/column-mapping.md) before enabling ingestion.
+retention by default (`SYNC_PAYLOAD_TTL_DAYS`). Review [column mapping](docs/column-mapping.md) before enabling ingestion.
 
 To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a public issue.
 

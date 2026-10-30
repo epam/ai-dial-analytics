@@ -21,7 +21,7 @@
         "name": "client_type",
         "label": "Client",
         "type": "custom",
-        "query": "chat,claudecode,opencode",
+        "query": "chat,claudecode,claudedesktop,codex,opencode",
         "options": [
           {
             "selected": true,
@@ -37,6 +37,16 @@
             "selected": false,
             "text": "claudecode",
             "value": "claudecode"
+          },
+          {
+            "selected": false,
+            "text": "claudedesktop",
+            "value": "claudedesktop"
+          },
+          {
+            "selected": false,
+            "text": "codex",
+            "value": "codex"
           },
           {
             "selected": false,

@@ -125,6 +125,12 @@ sync:
   validate-schema: ${SYNC_VALIDATE_SCHEMA:true}
   inline-files-drop-truncated: ${SYNC_INLINE_FILES_DROP_TRUNCATED:true}
   inline-files-max-size: ${SYNC_INLINE_FILES_MAX_SIZE:}
+  payload:
+    ttl-days: ${SYNC_PAYLOAD_TTL_DAYS:}
+    table: ${SYNC_PAYLOAD_TABLE:dial_usage_log_payload}
+  usage-log:
+    ttl-days: ${SYNC_USAGE_LOG_TTL_DAYS:}
+    table: ${SYNC_TABLE:dial_usage_log}
   targets:
     - table: ${SYNC_TABLE:dial_usage_log}
       mapping-file: ${SYNC_MAPPING_FILE:classpath:mapping/dial-usage-log.yaml}
