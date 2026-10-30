@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.enrichment;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.ScanProperties;
+import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.observability.TransitionLog;
 import com.epam.aidial.analytics.service.enrichment.model.InputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
@@ -53,11 +54,13 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -113,7 +116,7 @@ class ScanServiceTest {
         given(filterTranslator.toCondition(any(), any()))
                 .willReturn(DSL.condition("\"usage_client_identity\".\"client_session_id\" != ''"));
         given(freshness.bound(any(), anyString())).willReturn(Optional.empty());
-        given(executor.executeScan(any(), any(), any())).willReturn(new ArrayList<>());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(new ArrayList<>());
         SensitiveGuardStubs.givenEntitledCaller(sensitiveGuard);
     }
 
@@ -163,6 +166,22 @@ class ScanServiceTest {
         assertThat(executed(1).getFirst()).isEqualTo(RUNNER_ALIASED_GROUP_SCAN);
     }
 
+    /**
+     * A declaration stored before every write refused a computed group key is refused here too, before any statement:
+     * the page would otherwise group by the stand-in tuple rendered in the field's place.
+     */
+    @Test
+    void storedComputedGroupKeyIsRefusedBeforeAnyStatement() {
+        given(pipelines.resolveForScan(NAME)).willReturn(
+                resolved(DialUsageLogTestModel.payload("request_body_full"), "chat_id", "deployment"));
+        given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.withComputedFields(DialUsageLogTestModel.modelWithEnrichment()));
+
+        assertThatThrownBy(() -> service.scan(NAME, null, 50, null, null))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("trigger.group_by references 'dial_usage_log_payload.request_body_full'");
+        verify(executor, never()).executeScan(any(), any(), any(), any());
+    }
+
     /** {@code ready_when.signal} is projected as the computed verdict, not as the columns it reads. */
     @Test
     void runnerGroupScanWithReadySignalRendersExactlyItsStatement() {
@@ -202,13 +221,13 @@ class ScanServiceTest {
         assertThat(sample.heldBy()).isEqualTo(ENRICHMENT);
         assertThat(sample.rows()).isEmpty();
         assertThat(sample.columns()).isNotEmpty();
-        verify(executor, times(0)).executeScan(any(), any(), any());
+        verify(executor, times(0)).executeScan(any(), any(), any(), any());
     }
 
     @Test
     void partialClampIsProbedPastTheBoundForTheNewestVersionAlone() {
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 1_000L, "e1")));
-        given(executor.executeScan(any(), any(), any()))
+        given(executor.executeScan(any(), any(), any(), any()))
                 .willReturn(new ArrayList<>())
                 .willReturn(new ArrayList<>(List.of(Map.of("__cursor_v", 9_000L))));
 
@@ -247,12 +266,12 @@ class ScanServiceTest {
         assertThat(service.withholdingEnrichment(group("deployment"))).isEqualTo(ENRICHMENT);
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 9_000L, "e9")));
         assertThat(service.withholdingEnrichment(group("deployment"))).isNull();
-        verify(executor, times(0)).executeScan(any(), any(), any());
+        verify(executor, times(0)).executeScan(any(), any(), any(), any());
     }
 
     @Test
     void theGroupChoiceSkipsAnEmptyKeyAndLooksAtTheLastDayFirst() {
-        given(executor.executeScan(any(), any(), any()))
+        given(executor.executeScan(any(), any(), any(), any()))
                 .willReturn(new ArrayList<>())
                 .willReturn(new ArrayList<>(List.of(Map.of("__group_key", "chat-9"))));
 
@@ -278,12 +297,12 @@ class ScanServiceTest {
 
         assertThat(pick.heldBy()).isEqualTo(ENRICHMENT);
         assertThat(pick.groupKey()).isNull();
-        verify(executor, times(0)).executeScan(any(), any(), any());
+        verify(executor, times(0)).executeScan(any(), any(), any(), any());
     }
 
     private List<String> executed(int expected) {
         final ArgumentCaptor<SelectQuery<Record>> captor = ArgumentCaptor.captor();
-        verify(executor, times(expected)).executeScan(captor.capture(), any(), any());
+        verify(executor, times(expected)).executeScan(captor.capture(), any(), any(), any());
         return captor.getAllValues().stream().map(select -> select.getSQL(ParamType.INLINED)).toList();
     }
 

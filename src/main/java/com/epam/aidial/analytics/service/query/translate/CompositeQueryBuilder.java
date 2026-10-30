@@ -132,6 +132,9 @@ public class CompositeQueryBuilder {
          */
         private SelectQuery<Record> buildLeaf(EntityRelation entity, QueryEntityModel model, StructuredQuery leaf,
                 int maxLimit, LimitPolicy policy, List<Condition> keyConjuncts) {
+            // Every entity read of a composite plan is a leaf built here, so this one check covers joins, derived
+            // tables, set operations and subqueries alike.
+            ComputedFieldUse.refuseInComposite(model, leaf);
             final StructuredQuery marked = leaf.withFinalRead(entity.finalRead());
             if (builder.readsFinal(model, marked)) {
                 finalReads.accept(model);

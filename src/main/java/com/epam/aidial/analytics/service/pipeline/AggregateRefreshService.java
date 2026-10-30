@@ -523,8 +523,9 @@ public class AggregateRefreshService {
     private List<Map<String, Object>> runSample(String name, SelectQuery<Record> sample, QuerySettings settings,
             QueryEntityModel model) {
         try {
-            new StatementTag(name, "preview").applyTo(settings);
-            return executor.executeScan(sample, settings, model);
+            final StatementTag tag = new StatementTag(name, "preview");
+            tag.applyTo(settings);
+            return executor.executeScan(sample, settings, model, tag);
         } catch (RuntimeException ex) {
             throw PreviewBudget.translate(ex, properties.preview());
         }

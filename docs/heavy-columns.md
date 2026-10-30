@@ -150,9 +150,33 @@ WHERE request_time >= now() - INTERVAL 1 HOUR LIMIT 10;
 A text search over `request_body` usually finds each message once, in the turn that first sent it; a conversation
 that starts a new chain, on a new UTC day for example, stores its history again.
 
-A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`.
+A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`. It
+reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, after the statement runs, to the request
+as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
+`dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
+byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
+request). Both are `NULL` when the event has no payload row or no stored request body.
+
+```sql
+-- one hop, read back whole
+SELECT trace_id, "dial_usage_log_payload.request_body_full", "dial_usage_log_payload.request_body_rebuild"
+FROM dial_usage_log
+WHERE trace_id = 'trace-0001' AND core_span_id = 'span-0003'
+  AND request_time >= '2026-03-02 10:00:00' AND request_time < '2026-03-02 10:01:00'
+LIMIT 1;
+```
+
+Both fields are **projection-only**: they can be selected, aliased or not, by a single-entity query, and bound as a
+pipeline's `transform.inputs`, but not filtered, sorted, grouped, passed to a function or read inside a join, derived
+table, CTE, subquery or set operation (`400 bad_request`; `422 pipeline_validation_failed` in a pipeline declaration,
+a disabled draft included).
+Discovery marks them `projection_only: true`. A rebuild reads the row's chain inside its own UTC day — first the small
+chain columns, then the bodies of exactly the rows on the chain — so it costs extra statements for delta rows only,
+none for rows stored whole. It runs within what is left of the read's time budget, after the read's own statements,
+and rows it has no time left for read `partial`; the per-read bounds are in
+[configuration](configuration.md#request-body-rebuild).
 The behaviour is specified in `openspec/specs/data-sync/spec.md` ("A chat request body is stored as its new history
-and a parent link").
+and a parent link", "A rebuilt request body is readable beside the stored one").
 
 ## The payload columns live on their own table
 

@@ -4,7 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -43,8 +45,9 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 // five columns to every enrichment created through the API. That is why this filters
                 // rather than asserting the 39-field total the pre-split test could safely assert.
                 .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(36)))
-                // The five that moved and the cache markers (V50), under the qualified names the grain join publishes them at.
-                .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(6)))
+                // The five that moved and the cache markers (V50), under the qualified names the grain join publishes them at,
+                // plus the two computed rebuild fields the service appends after them.
+                .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(8)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].type", contains("uuid")))
                 // field types are surfaced per the schema (filtered by name to stay order-independent).
                 .andExpect(jsonPath("$.fields[?(@.name=='project_id')].type", contains("string")))
@@ -91,8 +94,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='total_tokens')].tag", contains("token-usage")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].tag", contains("cost")))
                 // Column descriptions backfilled by the migration are surfaced on the flat schema, and
-                // every one of the 42 columns (36 own, 6 payload) carries a non-empty description.
-                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(42)))
+                // every one of the 44 fields (36 own, 6 payload, 2 computed) carries a non-empty description.
+                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(44)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].description",
@@ -101,6 +104,35 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                                 + "etc.) are not reflected here.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='prompt_tokens')].description",
                         contains("Number of prompt (input) tokens consumed.")));
+    }
+
+    /**
+     * The two computed rebuild fields are listed after the payload's catalog columns and flagged projection-only; every
+     * catalog field carries the flag as false. Hiding them from a caller not cleared for the payload's sensitive columns
+     * is the model's own sensitive filter, covered by {@code CatalogQueryServiceTest} (security is off here).
+     */
+    @Test
+    void theRebuildFieldsAreFlaggedProjectionOnlyAndAreNotCatalogColumns() throws Exception {
+        final String full = "dial_usage_log_payload.request_body_full";
+        final String status = "dial_usage_log_payload.request_body_rebuild";
+        mockMvc.perform(get("/v1/queries/entities/schema/dial_usage_log"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].type", contains("string")))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].projection_only", contains(true)))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].sensitive", contains(true)))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].heavy", contains(true)))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].source", contains("request_body_full")))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].type", contains("enum")))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].enum_values[*]", contains("stored", "rebuilt", "partial")))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].projection_only", contains(true)))
+                .andExpect(jsonPath("$.fields[?(@.name=='dial_usage_log_payload.request_body')].projection_only", contains(false)))
+                .andExpect(jsonPath("$.fields[?(@.name=='request_time')].projection_only", contains(false)))
+                .andExpect(jsonPath("$.fields[?(@.projection_only == true)]", hasSize(2)));
+        mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[*].name", hasItem("request_body")))
+                .andExpect(jsonPath("$.columns[*].name", not(hasItem("request_body_full"))))
+                .andExpect(jsonPath("$.columns[*].name", not(hasItem("request_body_rebuild"))));
     }
 
     @Test

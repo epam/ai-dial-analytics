@@ -103,6 +103,27 @@ class ClickHouseBudgetTest {
     }
 
     @Test
+    void skippableStatementGetsNothingOnceUnderOneSecondIsLeft() {
+        // The floor above suits a statement that must run; one the caller can skip must not be handed a fresh second
+        // per statement once the budget is spent, or a sequence of them outlives the ceiling.
+        assertThat(ClickHouseBudget.remainingTimeIfAny(ClickHouseBudget.settings(BUDGET), Duration.ofMillis(19_001))).isNull();
+        assertThat(ClickHouseBudget.remainingTimeIfAny(ClickHouseBudget.settings(BUDGET), Duration.ofSeconds(45))).isNull();
+        assertThat(ClickHouseBudget.remainingTimeIfAny(ClickHouseBudget.settings(BUDGET), Duration.ofSeconds(8)).getAllSettings())
+                .containsEntry(MAX_EXECUTION_TIME, "12");
+        final QuerySettings unbudgeted = new QuerySettings().serverSetting("final", "1");
+        assertThat(ClickHouseBudget.remainingTimeIfAny(unbudgeted, Duration.ofHours(1))).isSameAs(unbudgeted);
+    }
+
+    @Test
+    void theRemainderIsRoundedDownNotTheElapsedTime() {
+        // 1.1 s of a 20 s ceiling are left: granting 2 s (20 - truncated 18 s) would let the statement end past the ceiling.
+        assertThat(ClickHouseBudget.remainingTimeIfAny(ClickHouseBudget.settings(BUDGET), Duration.ofMillis(18_900)).getAllSettings())
+                .containsEntry(MAX_EXECUTION_TIME, "1");
+        assertThat(ClickHouseBudget.remainingTime(ClickHouseBudget.settings(BUDGET), Duration.ofMillis(7_500)).getAllSettings())
+                .containsEntry(MAX_EXECUTION_TIME, "12");
+    }
+
+    @Test
     void settingsCarryingNoCeilingAreReturnedUnchanged() {
         // Every scan, materialize and refresh call site passes settings with no budget attached; the
         // deduction has to be inert there rather than inventing a ceiling those paths never asked for.

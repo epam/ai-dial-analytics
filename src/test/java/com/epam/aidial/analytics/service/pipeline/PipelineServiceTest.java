@@ -76,6 +76,7 @@ class PipelineServiceTest {
     private static final String NAME = "usage_daily_rollup";
     private static final String ENRICH_NAME = "usage-client-identity-live";
     private static final String CRON = "0 0 * * * *";
+    private static final String COMPUTED = "dial_usage_log_payload.request_body_full";
 
     @Mock
     private PipelineRepository pipelines;
@@ -214,6 +215,67 @@ class PipelineServiceTest {
         assertThatThrownBy(() -> service.create(aggregate(NAME, "not a cron")))
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("not a valid cron");
+    }
+
+    private static PipelineRegistration aggregateDraft(AggregateSpec spec, String filter) {
+        return new PipelineRegistration(NAME, PipelineKind.AGGREGATE, "usage_daily", "dial_usage_log", filter,
+                spec, TriggerKind.SCHEDULE, CRON, null, null, null, false);
+    }
+
+    /**
+     * An aggregate registration is always a draft, so the arming gate never sees it: a computed field anywhere in
+     * the declaration is refused by name on the write itself, with the gate's 422, form and SQL mode alike.
+     */
+    @Test
+    void aggregateDraftNamingComputedFieldIsRefusedOnTheWrite() {
+        given(pipelines.existsById(NAME)).willReturn(false);
+        final AggregateSpec sql = new AggregateSpec();
+        sql.setSql("INSERT INTO usage_daily (n) SELECT max(length(\"" + COMPUTED + "\")) AS n FROM dial_usage_log");
+        final GroupKey key = new GroupKey();
+        key.setColumn(COMPUTED);
+        final AggregateSpec grouped = new AggregateSpec();
+        grouped.setGroupBy(List.of(key));
+        final Measure scoped = new Measure();
+        scoped.setName("n");
+        scoped.setFn("count");
+        scoped.setWhere(COMPUTED + " IS NOT NULL");
+        final AggregateSpec measured = new AggregateSpec();
+        measured.setMeasures(List.of(scoped));
+
+        assertThatThrownBy(() -> service.create(aggregateDraft(sql, null)))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("the SQL declaration references '" + COMPUTED + "'")
+                .hasMessageContaining("bound as a transform input");
+        assertThatThrownBy(() -> service.create(aggregateDraft(grouped, null)))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("group_by references '" + COMPUTED + "'");
+        assertThatThrownBy(() -> service.create(aggregateDraft(measured, null)))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("measure 'n' where references '" + COMPUTED + "'");
+        assertThatThrownBy(() -> service.create(aggregateDraft(new AggregateSpec(), "\"" + COMPUTED + "\" <> ''")))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("filter references '" + COMPUTED + "'");
+        verify(pipelines, never()).saveAndFlush(any());
+        // Named only in a literal or a comment, it is no reference.
+        assertThatCode(() -> service.create(aggregateDraft(new AggregateSpec(),
+                "deployment <> '" + COMPUTED + "' /* not \"" + COMPUTED + "\" */"))).doesNotThrowAnyException();
+    }
+
+    /** A {@code sql} transform's output expression on an enrich draft, refused on the write as at arming. */
+    @Test
+    void enrichDraftWhoseSqlOutputReadsComputedFieldIsRefusedOnTheWrite() {
+        given(pipelines.existsById(ENRICH_NAME)).willReturn(false);
+        final EnrichSpec spec = enrichSpec();
+        final TransformOutput output = new TransformOutput();
+        output.setName("size");
+        output.setSql("length(\"" + COMPUTED + "\")");
+        spec.mutableTransform().setOutputs(List.of(output));
+
+        assertThatThrownBy(() -> service.create(new PipelineRegistration(ENRICH_NAME, PipelineKind.ENRICH,
+                "usage_client_identity", null, null, spec, TriggerKind.SCHEDULE, null, null, null, null, false)))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("output variable 'size' references '" + COMPUTED + "'");
+        verify(pipelines, never()).saveAndFlush(any());
     }
 
     @Test

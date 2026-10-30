@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.pipeline.model.TruncUnit;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.QueryFunctionCatalog;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
 import com.epam.aidial.analytics.service.query.model.CaseBranch;
@@ -261,6 +262,12 @@ public final class AggregateSqlValidator {
         // The entitlement gate first: a caller who may not see a sensitive column should be told that, not told about
         // the shape of the expression it sits in.
         governance.enforceSensitive(inputTable, input, referenced, operation);
+        // A computed field is completed after a read's statement runs, so no aggregate statement can compute over one.
+        for (final String column : referenced) {
+            if (input.isComputed(column)) {
+                throw new PipelineValidationException(ComputedFields.declarationMessage("the SQL declaration", column));
+            }
+        }
 
         final List<RelationColumn> columns = relationColumns(plan, input);
         final List<Integer> keys = keyPositions(query, plan.translation().columns(), plan.columns(),

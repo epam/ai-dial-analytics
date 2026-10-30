@@ -178,7 +178,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
-| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's | Only when you set `delta`: check readers that need a later turn's whole history or tools (§7) |
+| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's | Before you set `delta`, re-point pipelines binding `dial_usage_log_payload.request_body` to `request_body_full`, and move other readers that need a turn's whole request to it (§7) |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
@@ -199,6 +199,16 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   0.4:** it writes rows without the hidden chain columns, and the later turns that link to them can no longer be
   rebuilt. For the same reason, set `delta` only once no pre-0.4 pod is left ingesting. Switching back to `whole` on 0.4
   is safe.
+  **Before setting `delta`, re-point every pipeline whose `transform.inputs` binds `dial_usage_log_payload.request_body`
+  to `dial_usage_log_payload.request_body_full`** (and bind `request_body_rebuild` too if the pipeline should tell a
+  `partial` rebuild apart), and move saved queries and other readers that need a turn's whole request the same way.
+  `request_body` keeps returning what is stored; `request_body_full` returns the rebuilt request, and under `whole` it
+  returns the stored body marked `stored`, so re-pointing first is safe. ADAS does not rewrite pipelines. To roll back to
+  a build without the field, re-point such pipelines back to `request_body` and switch ingest to `whole` first: an older
+  build refuses a pipeline bound to `request_body_full`.
+- `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` (default `8`) and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` (default `20000`)
+  — the work one read may spend rebuilding `request_body_full`; past either bound the affected rows read `partial`. See
+  [`configuration.md`](configuration.md#request-body-rebuild).
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
 - `SYNC_PAYLOAD_TTL_DAYS` (default unset) — the payload table's retention in days, `-1` for none, applied at

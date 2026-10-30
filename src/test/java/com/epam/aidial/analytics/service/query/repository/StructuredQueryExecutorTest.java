@@ -1,22 +1,32 @@
 package com.epam.aidial.analytics.service.query.repository;
 
+import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
+import com.epam.aidial.analytics.clickhouse.StatementTag;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
+import com.epam.aidial.analytics.configuration.RequestBodyRebuildProperties;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
+import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
+import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
+import com.epam.aidial.analytics.service.query.rebuild.ComputedFieldCompleter;
+import com.epam.aidial.analytics.service.query.rebuild.RequestChainReader;
 import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.query.translate.ValueExprToObjectMapper;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.service.security.RowPolicyFilterStubs;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.SelectQuery;
@@ -24,16 +34,23 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -68,6 +85,15 @@ class StructuredQueryExecutorTest {
     private static QueryEntityModel collapsing(QueryEntityModel m) {
         return new QueryEntityModel(m.entity(), m.table(), m.bindings(), m.enrichments(), m.baseSchema(), m.tagOrder(),
                 m.partitionLocal(), true);
+    }
+
+    /** Where the executors below count their completed computed-field rows. */
+    private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+
+    /** An executor over the mocked client whose rebuild statements go through that client too. */
+    private StructuredQueryExecutor executor(StructuredQueryBuilder queryBuilder, RowPolicyFilter rowPolicies) {
+        return new StructuredQueryExecutor(queryBuilder, ctx, clickHouse, rowPolicies,
+                new ComputedFieldCompleter(new RequestChainReader(clickHouse), new RequestBodyRebuildProperties(8, 100), meters));
     }
 
     private List<String> sqlOfEveryStatement(int statements) {
@@ -117,7 +143,7 @@ class StructuredQueryExecutorTest {
         // under FINAL instead of merging every part of the payload table.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal());
+        executor(builder, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal());
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
                 .doesNotContainKey(FINAL_KEY)
@@ -131,7 +157,7 @@ class StructuredQueryExecutorTest {
         // global — slower, never wrong — on every statement of the read.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        executor(builder, RowPolicyFilterStubs.inert())
                 .execute(collapsing(DialUsageLogTestModel.crossPartitionModel()), rowQueryWithTotal());
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
@@ -146,7 +172,7 @@ class StructuredQueryExecutorTest {
         // which only affects FINAL reads, is not attached either.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
+        executor(builder, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
                 .doesNotContainKey(FINAL_KEY)
@@ -160,7 +186,7 @@ class StructuredQueryExecutorTest {
         final ExprTranslator expr = new ExprTranslator(new ValueExprToObjectMapper());
         final StructuredQueryBuilder forced = new StructuredQueryBuilder(expr, new FilterTranslator(expr), true);
 
-        new StructuredQueryExecutor(forced, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
+        executor(forced, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s).containsEntry(NO_MERGE_KEY, "1"));
         assertThat(sqlOfEveryStatement(2)).allSatisfy(sql -> assertThat(sql).contains("\"dial_usage_log\" FINAL"));
@@ -171,7 +197,7 @@ class StructuredQueryExecutorTest {
         // A caller adds to the deduplication rather than replacing it. A budget that silently dropped
         // final=1 would change what the preview *reports*, not just what it costs — and the numbers would
         // be wrong in the direction of showing more rows than any read of the same data returns.
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        executor(builder, RowPolicyFilterStubs.inert())
                 .executeScan(scanStatement(), new QuerySettings().serverSetting("max_execution_time", "30"));
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
@@ -183,7 +209,7 @@ class StructuredQueryExecutorTest {
 
     @Test
     void scanWithoutCallerSettingsStillDeduplicates() {
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).executeScan(scanStatement());
+        executor(builder, RowPolicyFilterStubs.inert()).executeScan(scanStatement());
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
         verify(clickHouse).query(anyString(), settings.capture());
@@ -196,7 +222,7 @@ class StructuredQueryExecutorTest {
      */
     @Test
     void pipelineReadCarriesItsQueryIdThroughTheSettingsCall() {
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        executor(builder, RowPolicyFilterStubs.inert())
                 .executeScan(scanStatement(), new QuerySettings().setQueryId("adas-p1-scan-1"), model);
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
@@ -207,7 +233,7 @@ class StructuredQueryExecutorTest {
 
     @Test
     void modelAwareScanFollowsTheModelsPartitionLocality() {
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = executor(builder, RowPolicyFilterStubs.inert());
 
         executor.executeScan(scanStatement(), new QuerySettings(), model);
         executor.executeScan(scanStatement(), new QuerySettings(), DialUsageLogTestModel.crossPartitionModel());
@@ -222,7 +248,7 @@ class StructuredQueryExecutorTest {
         // No model, no claim: the model-less scans keep final=1 alone, and the two-argument composite — a user
         // read, whose FINAL lives in its SQL — carries nothing. A composite plan asserts partition locality
         // explicitly, having ANDed it over every entity it reads final.
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = executor(builder, RowPolicyFilterStubs.inert());
 
         executor.executeScan(scanStatement());
         executor.executeScan(scanStatement(), new QuerySettings());
@@ -243,7 +269,7 @@ class StructuredQueryExecutorTest {
         // the key set from, so the page itself must carry the projection — for the DSL page and the
         // composite (execute-sql) page alike.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = executor(builder, RowPolicyFilterStubs.inert());
         final StructuredQuery aliased = new StructuredQuery(
                 DialUsageLogTestModel.ENTITY,
                 null,
@@ -273,7 +299,7 @@ class StructuredQueryExecutorTest {
         final RowPolicyFilter confining = org.mockito.Mockito.mock(RowPolicyFilter.class);
         given(confining.apply(any(QuerySettings.class))).willAnswer(inv ->
                 ((QuerySettings) inv.getArgument(0)).serverSetting(RowPolicyFilter.SETTING, "{'default.t':'1 = 0'}"));
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, confining);
+        final StructuredQueryExecutor executor = executor(builder, confining);
         final String filterKey = com.clickhouse.client.api.ClientConfigProperties.serverSetting(RowPolicyFilter.SETTING);
 
         executor.execute(collapsing, rowQueryWithTotal());
@@ -284,5 +310,149 @@ class StructuredQueryExecutorTest {
         assertThat(sent.subList(0, 3)).allSatisfy(s -> assertThat(s).containsEntry(filterKey, "{'default.t':'1 = 0'}"));
         assertThat(sent.get(3)).doesNotContainKey(filterKey);
         verify(confining, times(2)).apply(any(QuerySettings.class));
+    }
+
+    // ---- computed fields: the rebuild shares the read's wall-clock ceiling ----
+
+    private static final String FULL = "dial_usage_log_payload.request_body_full";
+    private static final String DELTA = "{\"messages\":[{\"content\":\"u2\",\"role\":\"user\"}]}";
+
+    private StructuredQueryExecutor rebuildingExecutor() {
+        return executor(builder, RowPolicyFilterStubs.inert());
+    }
+
+    /** A page row whose stand-in cell is a delta with a parent, so completing it needs a rebuild statement. */
+    private static GenericRecord deltaRow() {
+        final GenericRecord record = mock(GenericRecord.class);
+        final Map<String, Object> values = new LinkedHashMap<>();
+        values.put(FULL, new Object[] {DELTA, "00000000-0000-4000-8000-000000000001", List.of("00000000-0000-4000-8000-000000000001"), null,
+                20260302L});
+        given(record.getValues()).willReturn(values);
+        return record;
+    }
+
+    @Test
+    void spentBudgetIssuesNoRebuildStatement() {
+        // A one-second ceiling has less than a second left as soon as the scan returns. Floored per statement, as the
+        // total count's remainder is, every rebuild statement would get a fresh second, and their number, not the
+        // budget, would bound how long the read takes.
+        final SelectQuery<Record> scan = scanStatement();
+        scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of(row));
+
+        final List<Map<String, Object>> rows = rebuildingExecutor()
+                .executeScan(scan, new QuerySettings().serverSetting("max_execution_time", "1"), model);
+
+        verify(clickHouse, never()).query(anyString(), anyMap(), any(QuerySettings.class));
+        assertThat(rows.getFirst()).containsEntry(FULL, DELTA);
+    }
+
+    @Test
+    void pipelineRebuildStatementsCarryTheirOwnPipelineQueryId() {
+        // Every statement run on a pipeline's behalf is attributable in system.query_log: the rebuild statements a scan's
+        // computed field costs get fresh adas-{pipeline}-{stage}-rebuild-{uuid} ids, never the scan's own id and never
+        // none. The MDC keeps the scan's id, which the call's outcome line reports.
+        final SelectQuery<Record> scan = scanStatement();
+        scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of(row));
+        final StatementTag tag = new StatementTag("p1", "group-project");
+        final QuerySettings settings = new QuerySettings().serverSetting("max_execution_time", "30");
+        try {
+            final String scanId = tag.applyTo(settings);
+
+            rebuildingExecutor().executeScan(scan, settings, model, tag);
+
+            final ArgumentCaptor<QuerySettings> rebuild = ArgumentCaptor.forClass(QuerySettings.class);
+            verify(clickHouse).query(anyString(), anyMap(), rebuild.capture());
+            assertThat(rebuild.getValue().getQueryId()).startsWith("adas-p1-group-project-rebuild-").isNotEqualTo(scanId);
+            assertThat(StatementTag.current()).isEqualTo(scanId);
+            assertThat(settings.getQueryId()).isEqualTo(scanId);
+        } finally {
+            StatementTag.clear();
+        }
+    }
+
+    @Test
+    void userReadRebuildStatementsCarryNoPipelineQueryId() {
+        final SelectQuery<Record> scan = scanStatement();
+        scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of(row));
+
+        rebuildingExecutor().executeScan(scan, new QuerySettings().serverSetting("max_execution_time", "30"), model);
+
+        final ArgumentCaptor<QuerySettings> rebuild = ArgumentCaptor.forClass(QuerySettings.class);
+        verify(clickHouse).query(anyString(), anyMap(), rebuild.capture());
+        assertThat(rebuild.getValue().getQueryId()).isNull();
+    }
+
+    /** The rows a read completed, counted under {@code surface}. */
+    private double completedRows(String surface) {
+        return meters.find("query.request.rebuild.rows").tag("surface", surface).counters().stream()
+                .mapToDouble(Counter::count).sum();
+    }
+
+    /** The model with {@code request_body_full} bound, joined on the event, as the query model builds it. */
+    private QueryEntityModel modelWithComputed() {
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(model.bindings());
+        bindings.put(FULL, QueryFieldBinding.computed(FULL, ComputedFields.REQUEST_BODY_FULL, ComputedFields.TABLE));
+        final EnrichmentJoin join = EnrichmentJoin.keyed(DSL.table(DSL.name(ComputedFields.TABLE)),
+                DSL.field(DSL.name("dial_usage_log", "event_id")), DSL.field(DSL.name(ComputedFields.TABLE, "event_id")),
+                DSL.field(DSL.name("dial_usage_log", "request_time")), DSL.field(DSL.name(ComputedFields.TABLE, "request_time")),
+                Set.of(FULL), null);
+        return new QueryEntityModel(model.entity(), model.table(), bindings, List.of(join), List.of(), null, true);
+    }
+
+    /**
+     * A pipeline read's completions are counted under {@code surface=pipeline} and a user read's under
+     * {@code surface=query}, so the pipeline's rebuild cost stays its own series.
+     */
+    @Test
+    void completedRowsAreCountedUnderTheSurfaceThatReadThem() {
+        final SelectQuery<Record> scan = scanStatement();
+        scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of(row));
+        final StructuredQueryExecutor executor = rebuildingExecutor();
+
+        executor.executeScan(scan, new QuerySettings().serverSetting("max_execution_time", "30"), model,
+                new StatementTag("p1", "scan"));
+        assertThat(completedRows("pipeline")).isEqualTo(1.0);
+        assertThat(completedRows("query")).isZero();
+
+        executor.execute(modelWithComputed(), new StructuredQuery(DialUsageLogTestModel.ENTITY, null, QueryMode.ROW, false,
+                List.of(new OutputColumn(new FieldExpr(FULL), null)), null, null, null, new OffsetPage(0L, 10, false)),
+                10, new QuerySettings().serverSetting("max_execution_time", "30"));
+        assertThat(completedRows("pipeline")).isEqualTo(1.0);
+        assertThat(completedRows("query")).isEqualTo(1.0);
+    }
+
+    @Test
+    void totalCountRunsBeforeTheRebuild() {
+        // The count fails the read when it times out; a rebuild short of time only degrades rows, so the count goes first.
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(model.bindings());
+        bindings.put(FULL, QueryFieldBinding.computed(FULL, ComputedFields.REQUEST_BODY_FULL, ComputedFields.TABLE));
+        final EnrichmentJoin join = EnrichmentJoin.keyed(DSL.table(DSL.name(ComputedFields.TABLE)),
+                DSL.field(DSL.name("dial_usage_log", "event_id")), DSL.field(DSL.name(ComputedFields.TABLE, "event_id")),
+                DSL.field(DSL.name("dial_usage_log", "request_time")), DSL.field(DSL.name(ComputedFields.TABLE, "request_time")),
+                Set.of(FULL), null);
+        final QueryEntityModel withComputed = new QueryEntityModel(model.entity(), model.table(), bindings, List.of(join), List.of(), null,
+                true);
+        final StructuredQuery query = new StructuredQuery(DialUsageLogTestModel.ENTITY, null, QueryMode.ROW, false,
+                List.of(new OutputColumn(new FieldExpr(FULL), null)), null, null, null, new OffsetPage(0L, 10, true));
+        final GenericRecord count = mock(GenericRecord.class);
+        given(count.getValues()).willReturn(Map.of("count", 1L));
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willAnswer(invocation ->
+                invocation.<String>getArgument(0).contains("count(") ? List.of(count) : List.of(row));
+
+        final QueryResultPage page = rebuildingExecutor().execute(withComputed, query, 10, new QuerySettings().serverSetting("max_execution_time", "30"));
+
+        final InOrder order = inOrder(clickHouse);
+        order.verify(clickHouse).query(contains("count("), any(QuerySettings.class));
+        order.verify(clickHouse).query(anyString(), anyMap(), any(QuerySettings.class));
+        assertThat(page.totalCount()).isEqualTo(1L);
     }
 }

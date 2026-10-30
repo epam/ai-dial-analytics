@@ -134,6 +134,19 @@ public final class DialUsageLogTestModel {
     }
 
     /**
+     * {@code base} with the payload enrichment's two computed fields bound, as {@code CatalogQueryService} appends
+     * them: a read naming one renders its stand-in, so a pipeline read that let one into a ranking or a group key would
+     * reach the executor rather than fail to resolve.
+     */
+    public static QueryEntityModel withComputedFields(QueryEntityModel base) {
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        for (final ComputedField field : List.of(ComputedFields.REQUEST_BODY_FULL, ComputedFields.REQUEST_BODY_REBUILD)) {
+            bindings.put(payload(field.name()), QueryFieldBinding.computed(payload(field.name()), field, PAYLOAD));
+        }
+        return new QueryEntityModel(ENTITY, base.table(), bindings, base.enrichments(), base.baseSchema(), null, base.partitionLocal());
+    }
+
+    /**
      * The same model plus one extra {@code long} column, for the cases where an entity column name
      * collides with a derived output name (an entity owning a column called {@code count}).
      */

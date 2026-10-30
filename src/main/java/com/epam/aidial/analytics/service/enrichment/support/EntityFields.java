@@ -30,11 +30,25 @@ public record EntityFields(Map<String, Field> byName) {
      *
      * @param enrichment whether the field is reached through the entity's grain join rather than
      *     declared on the base table itself
+     * @param computed   whether the field is a service-defined computed field ({@code ComputedFields}), whose
+     *     {@code column} is a transient descriptor: it may be bound as a transform input and named nowhere else
      */
-    public record Field(String owner, ColumnMappingEntity column, boolean enrichment) {}
+    public record Field(String owner, ColumnMappingEntity column, boolean enrichment, boolean computed) {
+
+        /** A field backed by a catalog column. */
+        public Field(String owner, ColumnMappingEntity column, boolean enrichment) {
+            this(owner, column, enrichment, false);
+        }
+    }
 
     public boolean contains(String name) {
         return byName.containsKey(name);
+    }
+
+    /** Whether {@code name} is a computed field: completed after a read's statement runs, so no SQL can name it. */
+    public boolean isComputed(String name) {
+        final Field field = byName.get(name);
+        return field != null && field.computed();
     }
 
     /** The table {@code name} belongs to, or null when it resolves to nothing. */

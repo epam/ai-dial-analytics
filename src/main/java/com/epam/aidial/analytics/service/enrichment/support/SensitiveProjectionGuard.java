@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.enrichment.support;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -64,7 +66,7 @@ public class SensitiveProjectionGuard {
         // Either spelling of every sensitive column, collected once: a projection names columns by their
         // logical name, but a raw-name fallback can name the physical one.
         Set<String> sensitive = new HashSet<>();
-        for (ColumnMappingEntity column : columns.findByTableNameOrderByOrdinal(source)) {
+        for (ColumnMappingEntity column : fieldsOf(source)) {
             if (column.isSensitive()) {
                 sensitive.add(column.getName());
                 sensitive.add(column.getSourceName());
@@ -138,6 +140,15 @@ public class SensitiveProjectionGuard {
         return hasSensitiveColumn(table) && !sensitiveAccess.maySeeSensitive(table);
     }
 
+    /**
+     * {@code table}'s catalog columns and its computed fields, which carry the {@code sensitive} flag of the columns
+     * they return: a computed field is projected by name like a column, so the guard judges it like one. Without it a
+     * non-entitled caller binding one would pass here and be refused later, as an unresolvable column.
+     */
+    private List<ColumnMappingEntity> fieldsOf(String table) {
+        return ComputedFields.withComputed(table, columns.findByTableNameOrderByOrdinal(table));
+    }
+
     private boolean hasSensitiveColumn(String table) {
         return columns.findByTableNameOrderByOrdinal(table).stream()
                 .anyMatch(ColumnMappingEntity::isSensitive);
@@ -186,7 +197,7 @@ public class SensitiveProjectionGuard {
                 continue;
             }
             Set<String> qualified = new HashSet<>();
-            for (ColumnMappingEntity column : columns.findByTableNameOrderByOrdinal(owner)) {
+            for (ColumnMappingEntity column : fieldsOf(owner)) {
                 if (column.isSensitive()) {
                     // Only the qualified flat name: that is the sole spelling an enrichment column has in
                     // the entity namespace, and the sole one a pipeline-scoped read can project it under.

@@ -27,6 +27,12 @@ import java.util.Set;
  * facts that can drift; this is one fact read twice. {@link QueryEntityModel#withPrunedPaths} is what
  * stamps it, and only {@link EnrichmentJoins} calls that, because only it knows whether the join it
  * emitted was keyed.
+ *
+ * <p>{@code computed} is the registry entry of a {@link ComputedField computed field}, {@code null} for every
+ * catalog binding; such a binding's {@code field} is the field's {@link ComputedField.StandIn stand-in}, which no
+ * clause but a plain projection may use. {@code reads} is the physical columns the binding reads — the binding's own
+ * {@code field} for a catalog binding, the stand-in's columns for a computed one — which is what a derived table
+ * holding the binding's enrichment must project.
  */
 public record QueryFieldBinding(
         String name,
@@ -34,10 +40,20 @@ public record QueryFieldBinding(
         QueryFieldType type,
         QueryFieldType elementType,
         boolean heavy,
-        Set<List<String>> prunedPaths) {
+        Set<List<String>> prunedPaths,
+        ComputedField computed,
+        List<Field<?>> reads) {
 
     public QueryFieldBinding {
         prunedPaths = prunedPaths == null ? Set.of() : Set.copyOf(prunedPaths);
+        reads = reads == null ? List.of(field) : List.copyOf(reads);
+    }
+
+    /** A catalog binding with statement-specific pruned paths. */
+    public QueryFieldBinding(
+            String name, Field<?> field, QueryFieldType type, QueryFieldType elementType, boolean heavy,
+            Set<List<String>> prunedPaths) {
+        this(name, field, type, elementType, heavy, prunedPaths, null, null);
     }
 
     /** Convenience constructor for a field this statement reads whole — every field the catalog produces. */
@@ -56,8 +72,19 @@ public record QueryFieldBinding(
         this(name, field, type, null, false, Set.of());
     }
 
+    /** The binding of computed field {@code computed} over {@code table}: heavy, its field the stand-in. */
+    public static QueryFieldBinding computed(String name, ComputedField computed, String table) {
+        return new QueryFieldBinding(name, computed.standIn(table), computed.type(), null, true, Set.of(), computed,
+                computed.reads(table));
+    }
+
+    /** Whether this binding is a computed field's. */
+    public boolean isComputed() {
+        return computed != null;
+    }
+
     /** This binding as the statement renders it once its grain join projects {@code paths} as subcolumns. */
     public QueryFieldBinding prunedTo(Set<List<String>> paths) {
-        return new QueryFieldBinding(name, field, type, elementType, heavy, paths);
+        return new QueryFieldBinding(name, field, type, elementType, heavy, paths, computed, reads);
     }
 }
