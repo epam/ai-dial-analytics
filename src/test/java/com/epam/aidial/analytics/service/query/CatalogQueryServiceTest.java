@@ -508,4 +508,79 @@ class CatalogQueryServiceTest {
         assertThat(FinalDecision.finalCapable(service.findModel("events", Privilege.TABLE_GET).orElseThrow())).isTrue();
         assertThat(FinalDecision.finalCapable(service.findModel("events", Privilege.TABLE_READ).orElseThrow())).isTrue();
     }
+
+    /** The payload enrichment's computed fields follow its catalog columns, as projection-only stand-in bindings. */
+    @Test
+    void computedFieldsFollowThePayloadColumnsForCallerClearedForThem() {
+        stubPayloadEntity(sensitiveColumn("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0));
+
+        final QueryEntityModel model = service(true).findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
+
+        assertThat(model.bindings().keySet()).containsExactly("trace_id", "dial_usage_log_payload.request_body",
+                "dial_usage_log_payload.request_body_full", "dial_usage_log_payload.request_body_rebuild");
+        final QueryFieldBinding full = model.bindings().get("dial_usage_log_payload.request_body_full");
+        assertThat(full.isComputed()).isTrue();
+        assertThat(full.heavy()).isTrue();
+        assertThat(ComputedField.standInOf(full.field().as("x"))).isNotNull();
+        assertThat(full.reads()).extracting(field -> field.getUnqualifiedName().last())
+                .containsExactly("request_body", "request_parent_hash", "request_ancestor_hashes", "request_cache_control", "request_time");
+        assertThat(model.ownerOf("dial_usage_log_payload.request_body_rebuild")).isNotNull();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body").isComputed()).isFalse();
+        assertThat(model.baseSchema())
+                .extracting(QuerySchemaFieldDto::name, QuerySchemaFieldDto::type, QuerySchemaFieldDto::source, QuerySchemaFieldDto::sensitive,
+                        QuerySchemaFieldDto::heavy, QuerySchemaFieldDto::projectionOnly)
+                .containsExactly(
+                        tuple("trace_id", QueryFieldType.STRING, "trace_id", false, false, false),
+                        tuple("dial_usage_log_payload.request_body", QueryFieldType.STRING, "request_body", true, false, false),
+                        tuple("dial_usage_log_payload.request_body_full", QueryFieldType.STRING, "request_body_full", true, true, true),
+                        tuple("dial_usage_log_payload.request_body_rebuild", QueryFieldType.ENUM, "request_body_rebuild", true, true, true));
+        assertThat(model.baseSchema().getLast().enumValues()).containsExactly("stored", "rebuilt", "partial");
+    }
+
+    @Test
+    void computedFieldsAreHiddenFromCallerNotClearedForTheBody() {
+        stubPayloadEntity(sensitiveColumn("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0));
+
+        final QueryEntityModel model = service(false).findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
+
+        assertThat(model.bindings().keySet()).containsExactly("trace_id");
+        assertThat(model.baseSchema()).extracting(QuerySchemaFieldDto::name).containsExactly("trace_id");
+    }
+
+    @Test
+    void computedFieldsNeedTheRequestBodyRowAndStayOutOfTableBindings() {
+        stubPayloadEntity(column("dial_usage_log_payload", "response_body", QueryFieldType.STRING, 0));
+        final CatalogQueryService service = service(true);
+
+        assertThat(service.findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .containsExactly("trace_id", "dial_usage_log_payload.response_body");
+        given(columns.findByTableNameOrderByOrdinal("dial_usage_log_payload")).willReturn(List.of(
+                sensitiveColumn("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0)));
+        assertThat(service.tableBindings("dial_usage_log_payload")).containsOnlyKeys("request_body");
+    }
+
+    /** The rebuilt body returns the cache markers too, so a sensitive markers row makes the computed fields sensitive. */
+    @Test
+    void computedFieldsCarryTheMarkersRowsSensitiveFlagToo() {
+        stubPayloadEntity(column("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0),
+                sensitiveColumn("dial_usage_log_payload", "request_cache_control", QueryFieldType.STRING, 1));
+
+        assertThat(service(false).findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .containsExactly("trace_id", "dial_usage_log_payload.request_body");
+        assertThat(service(true).findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow().baseSchema())
+                .filteredOn(QuerySchemaFieldDto::projectionOnly)
+                .extracting(QuerySchemaFieldDto::sensitive)
+                .containsExactly(true, true);
+    }
+
+    private void stubPayloadEntity(ColumnMappingEntity... payloadColumns) {
+        final TableDefinitionEntity source = definition("dial_usage_log", TableType.SOURCE, null, null);
+        final TableDefinitionEntity payload = definition("dial_usage_log_payload", TableType.ENRICHMENT, "dial_usage_log", null);
+        payload.setGrainKey("event_id");
+        lenient().when(definitions.findById("dial_usage_log")).thenReturn(Optional.of(source));
+        lenient().when(definitions.findBySourceTable("dial_usage_log")).thenReturn(List.of(payload));
+        lenient().when(columns.findByTableNameOrderByOrdinal("dial_usage_log")).thenReturn(List.of(
+                column("dial_usage_log", "trace_id", QueryFieldType.STRING, 0)));
+        lenient().when(columns.findByTableNameOrderByOrdinal("dial_usage_log_payload")).thenReturn(List.of(payloadColumns));
+    }
 }

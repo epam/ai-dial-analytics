@@ -528,7 +528,10 @@ final class ReadShaping {
             return null;
         }
         final QueryFieldBinding binding = model.bindings().get(field);
-        if (binding == null || !binding.heavy() || binding.type() != QueryFieldType.STRING || model.ownerOf(field) == null) {
+        // A computed field is a stand-in, not a column a derived table could compute a call over; no call over one is
+        // accepted anyway (StructuredQueryBuilder refuses it as projection-only).
+        if (binding == null || !binding.heavy() || binding.isComputed() || binding.type() != QueryFieldType.STRING
+                || model.ownerOf(field) == null) {
             return null;
         }
         final List<Expr> rest = fn.args().subList(1, fn.args().size());

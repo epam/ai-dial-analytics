@@ -118,8 +118,22 @@ public final class ClickHouseBudget {
         if (configured == null) {
             return reduced;
         }
-        final long remaining = Long.parseLong(configured.toString()) - elapsed.toSeconds();
+        // Whole seconds left, rounded down: truncating the elapsed time instead would grant up to a second more than is left.
+        final long remaining = Duration.ofSeconds(Long.parseLong(configured.toString())).minus(elapsed).toSeconds();
         return reduced.setOption(MAX_EXECUTION_TIME, String.valueOf(Math.max(1L, remaining)));
+    }
+
+    /**
+     * As {@link #remainingTime}, but {@code null} when {@code settings} carry a wall-clock ceiling of which less than one
+     * second is left after {@code elapsed}: for a statement the caller may skip rather than run, so a spent budget stops
+     * the sequence instead of granting each further statement {@link #remainingTime}'s one-second floor.
+     */
+    public static QuerySettings remainingTimeIfAny(QuerySettings settings, Duration elapsed) {
+        final Object configured = settings.getOption(MAX_EXECUTION_TIME);
+        if (configured != null && Duration.ofSeconds(Long.parseLong(configured.toString())).minus(elapsed).toMillis() < 1000) {
+            return null;
+        }
+        return remainingTime(settings, elapsed);
     }
 
     /**

@@ -134,6 +134,55 @@ public final class QualifiedColumnTokens {
     }
 
     /**
+     * Every {@code table.column} name a SQL fragment mentions <b>outside</b> its string literals and comments,
+     * lowercased: the {@link #of qualified tokens} and the {@link #quoted double-quoted identifiers} of the fragment with
+     * each literal and comment blanked out; empty for a blank one.
+     *
+     * <p>For a refusal by name asked of a fragment that may not parse yet (a draft's), where a name quoted as a value,
+     * {@code request = 'enr.col'}, must not count as a reference. A qualified name an expression reads as a column is
+     * always one of the two spellings, so nothing the front end would resolve is missed.
+     */
+    public static Set<String> referencedNames(String sql) {
+        if (StringUtils.isBlank(sql)) {
+            return Set.of();
+        }
+        final StringBuilder code = new StringBuilder(sql.length());
+        final int length = sql.length();
+        int i = 0;
+        while (i < length) {
+            final char c = sql.charAt(i);
+            int end;
+            if (c == '\'') {
+                end = Math.min(length, endOfDelimited(sql, i, '\'', null));
+                code.append(' ');
+            } else if (c == '-' && sql.startsWith("--", i)) {
+                final int newline = sql.indexOf('\n', i);
+                end = newline < 0 ? length : newline + 1;
+                code.append(' ');
+            } else if (c == '/' && sql.startsWith("/*", i)) {
+                final int close = sql.indexOf("*/", i + 2);
+                end = close < 0 ? length : close + 2;
+                code.append(' ');
+            } else if (c == '"') {
+                end = Math.min(length, endOfDelimited(sql, i, '"', null));
+                code.append(sql, i, end);
+            } else {
+                end = i + 1;
+                code.append(c);
+            }
+            i = end;
+        }
+        final Set<String> names = new LinkedHashSet<>();
+        for (final String qualified : of(code.toString())) {
+            names.add(qualified.toLowerCase(Locale.ROOT));
+        }
+        for (final String content : quoted(code.toString())) {
+            names.add(content.toLowerCase(Locale.ROOT));
+        }
+        return names;
+    }
+
+    /**
      * The index just past the closing {@code quote} of the delimited token opening at {@code start}, a doubled quote
      * being an escaped one; {@code sql.length() + 1} when it never closes. Its contents are appended to {@code into}
      * when given.

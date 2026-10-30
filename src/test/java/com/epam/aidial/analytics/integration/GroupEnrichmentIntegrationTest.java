@@ -12,6 +12,7 @@ import java.util.List;
 import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
@@ -430,6 +431,241 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.rows", hasSize(1)))
                 .andExpect(jsonPath("$.truncated").value(true))
                 .andExpect(jsonPath("$.rows[0]['dial_usage_log_payload.request_body']").value(startsWith("newer-")));
+    }
+
+    // ------------------------------------------------------------ computed fields: the rebuilt request body
+
+    private static final String FULL = "dial_usage_log_payload.request_body_full";
+    private static final String STATUS = "dial_usage_log_payload.request_body_rebuild";
+    private static final String ZERO = "00000000-0000-0000-0000-000000000000";
+
+    /** A member stored in delta form: its payload row carries {@code body}, its chain path and its parent's. */
+    private void seedDeltaMember(String eventId, String chatId, String ingestedAt, String path, String parent, String body) {
+        execute("INSERT INTO dial_usage_log (event_id, project_id, deployment, request_time, trace_id,"
+                + " core_span_id, chat_id, event_kind, _ingested_at) VALUES (toUUID('" + eventId
+                + "'),'p','d', " + REQUEST_TIME + ",'t','" + eventId.substring(0, 8) + "','" + chatId + "','chat','"
+                + ingestedAt + "')");
+        execute("INSERT INTO dial_usage_log_payload (event_id, request_time, trace_id, core_span_id, request_hash,"
+                + " request_parent_hash, request_ancestor_hashes, request_body) VALUES (toUUID('" + eventId + "'), " + REQUEST_TIME
+                + ", 't','" + eventId.substring(0, 8) + "', toUUID('" + path + "'), toUUID('" + parent + "'), "
+                + (ZERO.equals(parent) ? "[]" : "[toUUID('" + parent + "')]") + ", '" + body + "')");
+    }
+
+    private static String body(String... contents) {
+        final List<String> messages = new java.util.ArrayList<>();
+        for (final String content : contents) {
+            messages.add("{\"content\":\"" + content + "\",\"role\":\"user\"}");
+        }
+        return "{\"messages\":[" + String.join(",", messages) + "]}";
+    }
+
+    private String createRebuildPipeline(String name, String memberSelect) throws Exception {
+        return mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + name + "\"," + groupTransform("body", FULL, "status", STATUS) + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"group\",\"group_by\":\"chat_id\",\"ready_when\":{\"idle\":\"10m\"}"
+                                + (memberSelect == null ? "" : ",\"member_select\":" + memberSelect) + "},"
+                                + "\"enabled\":true}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+    }
+
+    @Test
+    void groupMemberIsAssembledWithItsWholeRequest() throws Exception {
+        seedDeltaMember("61111111-1111-1111-1111-111111111111", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000201", ZERO, body("u1"));
+        seedDeltaMember("62222222-2222-2222-2222-222222222222", "chat-a", "2020-01-01 00:00:02.000",
+                "00000000-0000-4000-8000-000000000202", "00000000-0000-4000-8000-000000000201", body("u2"));
+        final String name = JsonPath.read(createRebuildPipeline("conv-rebuild-pipeline", null), "$.name");
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + name + "/group-rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"group_key\":\"chat-a\",\"limit\":100}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(2)))
+                .andExpect(jsonPath("$.truncated").value(false))
+                .andExpect(jsonPath("$.rows[0]['" + FULL + "']").value(body("u1")))
+                .andExpect(jsonPath("$.rows[0]['" + STATUS + "']").value("stored"))
+                .andExpect(jsonPath("$.rows[1]['" + FULL + "']").value(body("u1", "u2")))
+                .andExpect(jsonPath("$.rows[1]['" + STATUS + "']").value("rebuilt"));
+    }
+
+    @Test
+    void partialMemberIsFedAsStoredAndDoesNotSetTruncated() throws Exception {
+        seedDeltaMember("63333333-3333-3333-3333-333333333333", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000302", "00000000-0000-4000-8000-0000000003ff", body("u2"));
+        final String name = JsonPath.read(createRebuildPipeline("conv-partial-pipeline", null), "$.name");
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + name + "/group-rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"group_key\":\"chat-a\",\"limit\":100}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(1)))
+                .andExpect(jsonPath("$.truncated").value(false))
+                .andExpect(jsonPath("$.rows[0]['" + FULL + "']").value(body("u2")))
+                .andExpect(jsonPath("$.rows[0]['" + STATUS + "']").value("partial"));
+    }
+
+    /**
+     * The root is stored whole but is no chat request, so a walk over the chain columns alone reaches it while the
+     * rebuild itself cannot use it. Bound together, the status must come from the same rebuild as the body: read apart,
+     * the status read would say {@code rebuilt} beside a body the other read returned as the stored delta.
+     */
+    @Test
+    void bothBoundFieldsAgreeWhenTheChainEndsAtUnusableRoot() throws Exception {
+        seedDeltaMember("68888888-8888-8888-8888-888888888888", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000601", ZERO, "{\"not\":\"chat\"}");
+        seedDeltaMember("69999999-9999-9999-9999-999999999999", "chat-a", "2020-01-01 00:00:02.000",
+                "00000000-0000-4000-8000-000000000602", "00000000-0000-4000-8000-000000000601", body("u2"));
+        final String name = JsonPath.read(createRebuildPipeline("conv-invalid-root-pipeline", null), "$.name");
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + name + "/group-rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"group_key\":\"chat-a\",\"limit\":100}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(2)))
+                .andExpect(jsonPath("$.rows[0]['" + STATUS + "']").value("stored"))
+                .andExpect(jsonPath("$.rows[1]['" + FULL + "']").value(body("u2")))
+                .andExpect(jsonPath("$.rows[1]['" + STATUS + "']").value("partial"));
+    }
+
+    /** Stored, the two members fit the lowered 4 KB cap; rebuilt, the newer one carries the older's history too. */
+    @Test
+    void theByteCapCountsTheRebuiltBody() throws Exception {
+        final String big = "x".repeat(2500);
+        seedDeltaMember("64444444-4444-4444-4444-444444444444", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000401", ZERO, body(big));
+        seedDeltaMember("65555555-5555-5555-5555-555555555555", "chat-a", "2020-01-01 00:00:02.000",
+                "00000000-0000-4000-8000-000000000402", "00000000-0000-4000-8000-000000000401", body("short"));
+        final String name = JsonPath.read(createRebuildPipeline("conv-cap-pipeline", null), "$.name");
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + name + "/group-rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"group_key\":\"chat-a\",\"limit\":100}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(1)))
+                .andExpect(jsonPath("$.truncated").value(true))
+                .andExpect(jsonPath("$.rows[0]['" + FULL + "']").value(body(big, "short")));
+    }
+
+    @Test
+    void rowGrainScanPageCarriesTheRebuiltBody() throws Exception {
+        seedDeltaMember("66666666-6666-6666-6666-666666666666", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000501", ZERO, body("u1"));
+        seedDeltaMember("67777777-7777-7777-7777-777777777777", "chat-a", "2020-01-01 00:00:02.000",
+                "00000000-0000-4000-8000-000000000502", "00000000-0000-4000-8000-000000000501", body("u2"));
+        final String transform = Transforms.llm()
+                .requestTemplate("{\"messages\":[{\"role\":\"user\",\"content\":\"Body: {{body}}\"}]}")
+                .input("body", FULL)
+                .proseOutputs("topic")
+                .member();
+        final String content = mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"conv-row-rebuild-pipeline\"," + transform + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\",\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"enabled\":true}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + JsonPath.read(content, "$.name") + "/scan")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"limit\":10}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(2)))
+                .andExpect(jsonPath("$.rows[0]['" + FULL + "']").value(body("u1")))
+                .andExpect(jsonPath("$.rows[1]['" + FULL + "']").value(body("u1", "u2")))
+                .andExpect(jsonPath("$.next_cursor").isNotEmpty());
+    }
+
+    /**
+     * The dry-run preview reads through the same choke point as the runner's reads, and types its columns from the
+     * computed bindings: the row sample and the group's member sample both carry the completed value, never the stored
+     * delta or the stand-in tuple.
+     */
+    @Test
+    void previewShowsWhatTheRunnerWouldReceive() throws Exception {
+        seedDeltaMember("6aaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "chat-a", "2020-01-01 00:00:01.000",
+                "00000000-0000-4000-8000-000000000701", ZERO, body("u1"));
+        seedDeltaMember("6bbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "chat-a", "2020-01-01 00:00:02.000",
+                "00000000-0000-4000-8000-000000000702", "00000000-0000-4000-8000-000000000701", body("u2"));
+        final String transform = Transforms.llm()
+                .requestTemplate("{\"messages\":[{\"role\":\"user\",\"content\":\"Body: {{body}} {{status}}\"}]}")
+                .input("body", FULL)
+                .input("status", STATUS)
+                .proseOutputs("topic")
+                .member();
+        final String row = JsonPath.read(mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"conv-row-rebuild-preview\"," + transform + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\",\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"enabled\":false}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString(), "$.name");
+
+        // The row sample is newest first.
+        mockMvc.perform(post("/v1/pipelines/" + row + "/preview"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[*].name", contains("chat_id", FULL, STATUS)))
+                .andExpect(jsonPath("$.columns[1].type").value("string"))
+                .andExpect(jsonPath("$.columns[2].type").value("enum"))
+                .andExpect(jsonPath("$.rows[*]['" + FULL + "']", contains(body("u1", "u2"), body("u1"))))
+                .andExpect(jsonPath("$.rows[*]['" + STATUS + "']", contains("rebuilt", "stored")));
+        // One pipeline per target: the group declaration replaces the row one.
+        mockMvc.perform(delete("/v1/pipelines/" + row)).andExpect(status().is2xxSuccessful());
+        final String group = JsonPath.read(createRebuildPipeline("conv-group-rebuild-preview", null), "$.name");
+        mockMvc.perform(post("/v1/pipelines/" + group + "/preview")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"group_key\":\"chat-a\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.group_key").value("chat-a"))
+                .andExpect(jsonPath("$.columns[*].name", contains(FULL, STATUS)))
+                .andExpect(jsonPath("$.columns[0].type").value("string"))
+                .andExpect(jsonPath("$.columns[1].type").value("enum"))
+                .andExpect(jsonPath("$.rows[*]['" + FULL + "']", containsInAnyOrder(body("u1"), body("u1", "u2"))))
+                .andExpect(jsonPath("$.rows[*]['" + STATUS + "']", containsInAnyOrder("stored", "rebuilt")));
+    }
+
+    @Test
+    void computedFieldIsRefusedAsMemberRankingAndInFilter() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(pipelineBody("chat_id", "{\"idle\":\"10m\"}", null,
+                                "{\"order_by\":[{\"column\":\"" + FULL + "\"}],\"limit\":5}")))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString(FULL)))
+                .andExpect(jsonPath("$.message").value(containsString("bound as a transform input")));
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(pipelineBody("chat_id", "{\"idle\":\"10m\"}", "\\\"" + STATUS + "\\\" = 'rebuilt'")))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString(STATUS)));
+    }
+
+    /**
+     * A draft is held to the same refusal: the data plane reads a disabled pipeline as stored, so a draft ranking its
+     * members by a computed field would be sampled by the stand-in the read renders in the field's place. Refused on
+     * a registration that leaves the pipeline disabled and on a patch that keeps it so, with the armed path's 422.
+     */
+    @Test
+    void draftCannotStoreComputedFieldOutsideItsInputs() throws Exception {
+        final String rankByBody = "{\"order_by\":[{\"column\":\"" + FULL + "\"}],\"limit\":5}";
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(draft(pipelineBody("chat_id", "{\"idle\":\"10m\"}", null, rankByBody))))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString("member_select.order_by references '" + FULL + "'")))
+                .andExpect(jsonPath("$.message").value(containsString("bound as a transform input")));
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(draft(pipelineBody("chat_id", "{\"idle\":\"10m\"}", "\\\"" + STATUS + "\\\" = 'rebuilt'"))))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(containsString("filter references '" + STATUS + "'")));
+        // A name quoted as a value is not a reference.
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(draft(pipelineBody("chat_id", "{\"idle\":\"10m\"}", "deployment = '" + FULL + "'"))))
+                .andExpect(status().isCreated());
+        mockMvc.perform(patch("/v1/pipelines/conv-pipeline").contentType(MediaType.APPLICATION_JSON)
+                        .content(draft(pipelineBody("chat_id", "{\"idle\":\"10m\"}", null, rankByBody))))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(containsString("member_select.order_by references '" + FULL + "'")));
+        mockMvc.perform(get("/v1/pipelines/conv-pipeline"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.trigger.member_select").doesNotExist());
+    }
+
+    private static String draft(String body) {
+        return body.replace("\"enabled\":true", "\"enabled\":false");
     }
 
     /**

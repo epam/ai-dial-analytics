@@ -195,7 +195,7 @@ public class CatalogQueryService {
         final List<QuerySchemaFieldDto> schema = new ArrayList<>();
         final boolean maySeeSourceSensitive = sensitiveAccess.maySeeSensitive(sourceName);
         for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(sourceName)) {
-            addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col);
+            addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col, null);
         }
 
         // Partition locality is decided for the whole entity, not per statement: one table whose key
@@ -229,12 +229,23 @@ public class CatalogQueryService {
             final boolean maySeeEnrichmentSensitive = sensitiveAccess.maySeeSensitive(enrichment.getName());
             final String grainKey = enrichment.getGrainKey();
             final Set<String> exposed = new LinkedHashSet<>();
-            for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(enrichment.getName())) {
+            final List<ColumnMappingEntity> enrichmentColumns = columns.findByTableNameOrderByOrdinal(enrichment.getName());
+            for (final ColumnMappingEntity col : enrichmentColumns) {
                 // Enrichment columns are exposed qualified by their owning table ("table.column") so that
                 // two enrichments (or a source) can share a bare column name without colliding in the flat
                 // schema. The qualified name is what the query path references and joins fire on.
                 final String flatName =
-                        addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive, col);
+                        addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive, col, null);
+                if (flatName != null) {
+                    exposed.add(flatName);
+                }
+            }
+            // The enrichment's computed fields follow its catalog columns, through the same sensitive gate, and are
+            // exposed like them so naming one pulls the grain join in. Never in tableBindings: a row policy judges
+            // what the store holds.
+            for (final ComputedFields.Descriptor computed : ComputedFields.of(enrichment.getName(), enrichmentColumns)) {
+                final String flatName = addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive,
+                        computed.column(), computed.field());
                 if (flatName != null) {
                     exposed.add(flatName);
                 }
@@ -276,7 +287,7 @@ public class CatalogQueryService {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         final List<QuerySchemaFieldDto> discarded = new ArrayList<>();
         for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(table)) {
-            addColumn(bindings, discarded, table, false, true, col);
+            addColumn(bindings, discarded, table, false, true, col, null);
         }
         return bindings;
     }
@@ -319,7 +330,8 @@ public class CatalogQueryService {
      * skip it from an enrichment's exposed set). Source columns keep their bare exposed name; enrichment
      * columns are qualified {@code owningTable.exposedName} so the flat namespace stays collision-free
      * across a source and its enrichments. The backing jOOQ {@link Field} is always the two-part physical
-     * reference {@code owningTable.sourceName}; only the published flat name differs.
+     * reference {@code owningTable.sourceName}; only the published flat name differs. A {@code computed} field's
+     * {@code col} is its transient descriptor, and its binding is backed by the field's stand-in instead.
      */
     private String addColumn(
             Map<String, QueryFieldBinding> bindings,
@@ -327,21 +339,23 @@ public class CatalogQueryService {
             String owningTable,
             boolean enrichment,
             boolean maySeeSensitive,
-            ColumnMappingEntity col) {
+            ColumnMappingEntity col,
+            ComputedField computed) {
         if (col.isSensitive() && !maySeeSensitive) {
             // Hidden, not forbidden: the column never enters the model, so discovery omits it and any
             // reference to it later fails as an ordinary unknown field, never revealing it exists.
             return null;
         }
         final String flatName = enrichment ? owningTable + "." + col.getName() : col.getName();
-        final Field<?> field = DSL.field(DSL.name(owningTable, col.getSourceName()), JooqTypes.of(col.getType()));
         // Array columns always carry an element type (declaration validation enforces it); the string
         // fallback is a defensive default for pre-validation catalog rows, matching the seeded column.
         final QueryFieldType elementType = col.getType() == QueryFieldType.ARRAY
                 ? (col.getElementType() == null ? QueryFieldType.STRING : col.getElementType())
                 : null;
-        final QueryFieldBinding binding =
-                new QueryFieldBinding(flatName, field, col.getType(), elementType, col.isHeavy());
+        final QueryFieldBinding binding = computed != null
+                ? QueryFieldBinding.computed(flatName, computed, owningTable)
+                : new QueryFieldBinding(flatName, DSL.field(DSL.name(owningTable, col.getSourceName()), JooqTypes.of(col.getType())),
+                        col.getType(), elementType, col.isHeavy());
         if (bindings.putIfAbsent(flatName, binding) != null) {
             // Qualification makes this impossible for a well-formed catalog; fail loud rather than
             // silently drop a column if the catalog is ever corrupted.
@@ -352,7 +366,7 @@ public class CatalogQueryService {
         // transfer-cost hint telling the client which fields a wildcard projection leaves behind.
         schema.add(new QuerySchemaFieldDto(
                 flatName, col.getType(), col.getElementType(), col.getEnumValues(), col.getSourceName(),
-                col.getDescription(), col.getDisplayName(), col.getTag(), col.isSensitive(), col.isHeavy()));
+                col.getDescription(), col.getDisplayName(), col.getTag(), col.isSensitive(), col.isHeavy(), computed != null));
         return flatName;
     }
 }

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.enrichment.validation;
 
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -89,6 +90,11 @@ public class SourceScopeGuard {
         }
         Set<String> known = knownColumns(source, allowEnrichmentColumns);
         for (String column : referenced) {
+            // Every governed fragment passes here, so this is the one place a computed field in SQL is refused by
+            // name: its value exists only after a read's statement has run, so no fragment can compute over it.
+            if (ComputedFields.isComputed(column)) {
+                throw new PipelineValidationException(ComputedFields.declarationMessage(what, column));
+            }
             if (!known.contains(column)) {
                 throw new PipelineValidationException(what + " references '" + column
                         + "', which is not a column of source '" + source + "'"

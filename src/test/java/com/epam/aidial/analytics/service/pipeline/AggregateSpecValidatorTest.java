@@ -1761,4 +1761,59 @@ class AggregateSpecValidatorTest {
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("upsert_by_key");
     }
+
+    // --- computed fields: the payload enrichment's rebuilt body is completed after a read, not in an aggregate
+
+    private static final String PAYLOAD = "dial_usage_log_payload";
+
+    private void givenPayloadEnrichment() {
+        final TableDefinitionEntity payload = new TableDefinitionEntity();
+        payload.setName(PAYLOAD);
+        payload.setType(TableType.ENRICHMENT);
+        payload.setStatus(TableStatus.ACTIVE);
+        payload.setSourceTable(INPUT);
+        payload.setGrainKey("event_id");
+        given(catalog.activeEnrichmentsOf(INPUT)).willReturn(List.of(payload));
+        final ColumnMappingEntity body = column(PAYLOAD, "request_body", QueryFieldType.STRING);
+        body.setNullable(true);
+        body.setSensitive(true);
+        given(columns.findByTableNameOrderByOrdinal(PAYLOAD)).willReturn(List.of(body));
+    }
+
+    @Test
+    void groupingByTheRebuildStatusIsRefusedNamingTheField() {
+        givenPayloadEnrichment();
+        final AggregateSpec spec = spec(List.of(named(PAYLOAD + ".request_body_rebuild", "deployment"),
+                bucket("request_time", TruncUnit.DAY, "day")), List.of(measure("call_count", "count", null)));
+
+        assertThatThrownBy(() -> validate(spec))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining(PAYLOAD + ".request_body_rebuild")
+                .hasMessageContaining("bound as a transform input");
+    }
+
+    @Test
+    void measuringTheRebuiltBodyIsRefusedNamingTheField() {
+        givenPayloadEnrichment();
+        final AggregateSpec spec = spec(List.of(column("deployment"), bucket("request_time", TruncUnit.DAY, "day")),
+                List.of(measure("call_count", "max", PAYLOAD + ".request_body_full")));
+
+        assertThatThrownBy(() -> validate(spec))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining(PAYLOAD + ".request_body_full")
+                .hasMessageContaining("selected by a query");
+    }
+
+    @Test
+    void timeBucketOverComputedFieldIsRefused() {
+        givenPayloadEnrichment();
+        final AggregateSpec spec = spec(List.of(column("deployment"), bucket(PAYLOAD + ".request_body_full", TruncUnit.DAY, "day")),
+                List.of(measure("call_count", "count", null)));
+
+        // The computed refusal, not the bucket's own type check, which names the field too.
+        assertThatThrownBy(() -> validate(spec))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining(PAYLOAD + ".request_body_full")
+                .hasMessageContaining("bound as a transform input");
+    }
 }

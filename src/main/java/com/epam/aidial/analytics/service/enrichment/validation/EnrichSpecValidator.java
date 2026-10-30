@@ -30,6 +30,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
 import com.epam.aidial.analytics.service.pipeline.QualifiedColumnTokens;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
@@ -742,6 +743,7 @@ public class EnrichSpecValidator {
             throw new PipelineValidationException("a sql transform cannot use the group trigger: a group-grain "
                     + "deterministic pipeline is an aggregation, not a Class-1 enrichment");
         }
+        requireNotComputed("trigger.group_by", declaration.triggerGroupBy(), entity);
         requireGroupByResolvesToGrain(declaration, entity, grainKey, source);
         referenced.add(declaration.triggerGroupBy());
         // Entitlement-checked like every other reference: the group key is copied into the target as its
@@ -816,6 +818,7 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException(unknownField(
                         "member_select.order_by column", order.getColumn(), source, entity));
             }
+            requireNotComputed("member_select.order_by", order.getColumn(), entity);
             orderColumns.add(order.getColumn());
         }
         referenced.addAll(orderColumns);
@@ -1449,6 +1452,16 @@ public class EnrichSpecValidator {
             }
         }
         requireAbsenceRepresentable("group_by", groupBy, entity);
+    }
+
+    /**
+     * A computed field may be bound as a transform input and named nowhere else: its value is completed after a read's
+     * statement runs, so no group key, ranking or fragment can use it.
+     */
+    private static void requireNotComputed(String what, String name, EntityFields entity) {
+        if (entity.isComputed(name)) {
+            throw new PipelineValidationException(ComputedFields.declarationMessage(what, name));
+        }
     }
 
     /**

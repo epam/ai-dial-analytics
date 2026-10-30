@@ -114,7 +114,10 @@ class FlightMetadataAuthIntegrationTest {
             "dial_usage_log_payload.request_body",
             "dial_usage_log_payload.response_body",
             "dial_usage_log_payload.assembled_response",
-            "dial_usage_log_payload.request_cache_control");
+            "dial_usage_log_payload.request_cache_control",
+            // The computed rebuild fields carry request_body's flag and are listed like any column of the entity.
+            "dial_usage_log_payload.request_body_full",
+            "dial_usage_log_payload.request_body_rebuild");
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;

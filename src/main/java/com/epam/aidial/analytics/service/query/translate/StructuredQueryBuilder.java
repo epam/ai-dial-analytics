@@ -256,6 +256,8 @@ public class StructuredQueryBuilder {
      */
     public SelectQuery<Record> build(
             DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
+        // Ahead of the shaping, which plans over the query's clauses before the statement is rendered.
+        ComputedFieldUse.requirePlainProjection(model, query);
         if (!readShaping) {
             return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED);
         }
@@ -467,6 +469,7 @@ public class StructuredQueryBuilder {
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock,
             boolean declarePaths, List<Condition> keyConjuncts) {
+        ComputedFieldUse.requirePlainProjection(model, query);
         final boolean finalRead = readsFinal(model, query);
         final SelectQuery<Record> select = dsl.selectQuery();
         // The source takes FINAL only when its own engine collapses; ClickHouse refuses it on a plain MergeTree,
@@ -510,6 +513,7 @@ public class StructuredQueryBuilder {
      * joined; a single-key 0..1 LEFT JOIN does not change the source row count.
      */
     public SelectQuery<Record> buildCount(DSLContext dsl, QueryEntityModel model, StructuredQuery query) {
+        ComputedFieldUse.requirePlainProjection(model, query);
         if (!readShaping) {
             return count(dsl, model, query, Map.of(), List.of(), false);
         }

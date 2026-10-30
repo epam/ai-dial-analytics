@@ -50,4 +50,16 @@ public record QuerySchemaFieldDto(
                 + "SELECT *, or a row-mode query with no select) because it is expensive to transfer. "
                 + "Still returned when named explicitly, and visible to every caller — a cost hint, not "
                 + "access control", example = "false")
-        boolean heavy) {}
+        boolean heavy,
+
+        @Schema(description = "Whether the field is computed by the service after the query runs rather than stored: "
+                + "it may only be selected as a plain row-mode projection, never filtered, sorted, grouped or "
+                + "passed to a function", example = "false")
+        @JsonProperty("projection_only") boolean projectionOnly) {
+
+    /** A field backed by a catalog column — every field but a computed one. */
+    public QuerySchemaFieldDto(String name, QueryFieldType type, QueryFieldType elementType, List<String> enumValues,
+            String source, String description, String displayName, String tag, boolean sensitive, boolean heavy) {
+        this(name, type, elementType, enumValues, source, description, displayName, tag, sensitive, heavy, false);
+    }
+}

@@ -213,13 +213,13 @@ class AggregateRefreshServiceTest {
         row.put("__start_v", startVersion);
         row.put("__start_id", startIdentity);
         // The probe carries pipeline.budget.* now, so it is the two-argument overload that answers.
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(row));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(row));
     }
 
     /** The probe statement the run composed, rendered. */
     private String probeSql() {
         final ArgumentCaptor<SelectQuery<Record>> probe = ArgumentCaptor.forClass(SelectQuery.class);
-        verify(executor).executeScan(probe.capture(), any(), any());
+        verify(executor).executeScan(probe.capture(), any(), any(), any());
         return probe.getValue().getSQL(ParamType.INLINED).toLowerCase();
     }
 
@@ -431,7 +431,7 @@ class AggregateRefreshServiceTest {
 
         service.refresh(NAME);
 
-        verify(executor).executeScan(probe.capture(), any(), any());
+        verify(executor).executeScan(probe.capture(), any(), any(), any());
         final String sql = probe.getValue().getSQL(ParamType.INLINED);
         assertThat(sql)
                 .as("the probe collapses its window to one row inside the engine")
@@ -478,7 +478,7 @@ class AggregateRefreshServiceTest {
         final PipelineEntity disabled = pipeline();
         disabled.setEnabled(false);
         given(pipelines.findById(NAME)).willReturn(Optional.of(disabled));
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(
                 sampleRow("gpt-4", 2L, 1_000L, 7L), sampleRow("gpt-5", 1L, 900L, 7L)));
 
         final PipelinePreview preview = service.preview(NAME);
@@ -495,7 +495,7 @@ class AggregateRefreshServiceTest {
 
     @Test
     void anEmptyPreviewReportsZeroRowsAndWhy() {
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
 
         final PipelinePreview preview = service.preview(NAME);
 
@@ -521,7 +521,7 @@ class AggregateRefreshServiceTest {
         final PipelineEntity filtered = pipeline();
         filtered.setFilterSql("\"deployment\" = 'none'");
         given(pipelines.findById(NAME)).willReturn(Optional.of(filtered));
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
 
         final PipelinePreview preview = service.preview(NAME);
 
@@ -532,7 +532,7 @@ class AggregateRefreshServiceTest {
     @Test
     void previewReportsAnEnrichmentWithNoBoundAsHoldingTheRefreshBack() {
         given(freshness.bound(any(), eq(INPUT))).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, null, null)));
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(sampleRow("gpt-4", 2L, 1_000L, 1L)));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(sampleRow("gpt-4", 2L, 1_000L, 1L)));
 
         final PipelinePreview preview = service.preview(NAME);
 
@@ -548,7 +548,7 @@ class AggregateRefreshServiceTest {
     void previewReportsAnEnrichmentBehindTheNewestSampledGroupWithTheGap() {
         given(freshness.bound(any(), eq(INPUT)))
                 .willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 1_000L, "a")));
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(
                 sampleRow("gpt-4", 2L, 3_601_000L, 2L), sampleRow("gpt-5", 1L, 500L, 2L)));
 
         final PipelinePreview preview = service.preview(NAME);
@@ -568,7 +568,7 @@ class AggregateRefreshServiceTest {
                 .willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 5_000L, "m")));
         final Map<String, Object> row = sampleRow("gpt-4", 2L, 5_000L, 1L);
         row.put(AggregateCompiler.LATEST_IDENTITY, "z");
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(row));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(row));
 
         final PipelinePreview preview = service.preview(NAME);
 
@@ -580,7 +580,7 @@ class AggregateRefreshServiceTest {
     void previewOfAnEnrichmentCaughtUpWithTheSampleCarriesNoNote() {
         given(freshness.bound(any(), eq(INPUT)))
                 .willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 5_000L, "a")));
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of(sampleRow("gpt-4", 2L, 5_000L, 1L)));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(sampleRow("gpt-4", 2L, 5_000L, 1L)));
 
         assertThat(service.preview(NAME).notes()).isEmpty();
     }
@@ -603,12 +603,12 @@ class AggregateRefreshServiceTest {
      */
     @Test
     void previewSampleRunsUnderTheConfiguredResourceBudget() {
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
 
         service.preview(NAME);
 
-        verify(executor).executeScan(any(), settings.capture(), any());
+        verify(executor).executeScan(any(), settings.capture(), any(), any());
         assertThat(settings.getValue().getAllSettings())
                 .containsEntry("clickhouse_setting_max_execution_time",
                         String.valueOf(PREVIEW_BUDGET.timeout().toSeconds()))
@@ -639,7 +639,7 @@ class AggregateRefreshServiceTest {
 
         service.refresh(NAME);
 
-        verify(executor).executeScan(any(), settings.capture(), any());
+        verify(executor).executeScan(any(), settings.capture(), any(), any());
         assertThat(settings.getValue().getAllSettings())
                 .containsEntry("clickhouse_setting_max_execution_time",
                         String.valueOf(READ_BUDGET.timeout().toSeconds()))
@@ -650,7 +650,7 @@ class AggregateRefreshServiceTest {
 
     @Test
     void previewStatementCarriesTheSettingsItRanUnderAndNoRefreshWindow() {
-        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of());
 
         final String statement = service.preview(NAME).statement();
 
@@ -905,7 +905,7 @@ class AggregateRefreshServiceTest {
                 .hasMessageNotContaining("already at its smallest");
 
         verify(insertSelect).insertSelect(anyString(), anyString(), anyBoolean(), any(), any());
-        verify(executor).executeScan(any(), any(), any());
+        verify(executor).executeScan(any(), any(), any(), any());
         verify(stateWriter).recordFailure(eq(NAME), anyString());
         verify(stateWriter, never()).recordSuccess(anyString(), any(), any(), anyLong(), anyBoolean(), any());
         verify(metrics).recordRun(eq(NAME), eq(false), eq(0L), any(), eq(0L));

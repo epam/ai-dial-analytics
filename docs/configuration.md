@@ -246,6 +246,13 @@ neither.
 |-----------------------|---------------------|---------|----------|----------------------------------------------------------------------------------------------------------------------|
 | `FORCE_FINAL_QUERIES` | `query.force-final` | `true`  | No       | Migration switch: `true` reads every user-facing query `FINAL` whatever it says; `false` honours the query's `FINAL`. |
 
+### Request body rebuild
+
+| Variable                                   | Property                                   | Default | Required | Description                                                                                                                             |
+|--------------------------------------------|--------------------------------------------|---------|----------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`    | `query.request-body-rebuild.max-rounds`    | `8`     | No       | Chain-lookup rounds one read may run for `request_body_full` / `request_body_rebuild`; past it rows read `partial`. At least `1`.       |
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` | `query.request-body-rebuild.max-ancestors` | `20000` | No       | Distinct ancestor rows one read of `request_body_full` / `request_body_rebuild` may resolve; past it rows read `partial`. At least `1`. |
+
 ### Saved queries
 
 | Variable                       | Property                       | Default | Required | Description                                                                                                                        |
