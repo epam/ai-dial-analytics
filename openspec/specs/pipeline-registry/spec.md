@@ -300,7 +300,6 @@ value changes. Changing when `created_at` is set is therefore a runner contract 
 - **THEN** the stored name is unchanged
 
 ### Requirement: Register and enable lifecycle
-
 A pipeline SHALL be registered `enabled: false` and SHALL NOT run until explicitly enabled through
 `PATCH /v1/pipelines/{name}`. A declaration edit SHALL be re-validated in full **when it leaves the
 pipeline armed**, and SHALL then be supplied whole: a partial declaration patch of a pipeline that
@@ -423,11 +422,26 @@ the reason is the target's write semantics rather than operator convenience:
   already written keep their previous values, which is already how that kind behaves and is why it
   carries a re-derivation marker and a backfill lane of its own. The invariant above is not weakened
   for this kind; it was never this kind's invariant. Requiring a disable/enable cycle for a routine
-  runtime edit would instead cost real work: the out-of-process runner drops a disabled pipeline from
-  its cache, and its dead-letter items lose their stored labels while it is disabled.
+  runtime edit would instead stop the pipeline for every edit: the out-of-process runner holds a disabled
+  pipeline's queued work unexecuted until it is re-enabled, so each edit would delay its labels for the
+  length of the cycle.
 
 A declaration change SHALL bump the pipeline's change token (`generation`), which is what an
 out-of-process consumer detects a re-declaration by.
+
+**A change of `enabled` alone is not a declaration change.** A patch that changes only `enabled` SHALL NOT
+bump `generation`; it SHALL move `updated_at`, so an `updated_since` reader still sees it. `generation`
+revises the declaration: it qualifies the materialized position, the runner's queued work and every row's
+`pipeline_generation` stamp, and a stop and restart changes none of what those describe. Bumping it would
+make the runner discard a stopped pipeline's queued work as stale on restart — on the row lane
+irreversibly, since the cursor already passed those rows — and would void the pipeline's materialized
+position, holding every dependent rollup back until the runner writes again, all for a declaration that
+did not change. A patch that re-declares and changes `enabled` together bumps `generation` once, for the
+re-declaration. The one exception on an enable-only patch is a derived member: the arming gate derives as
+well as refuses, and should it store a derived member (an output mapping, group keys, an SQL-mode input)
+other than the stored one, the declaration did change under the enable, so that patch SHALL bump
+`generation` once, with cause `patch(re-derive,enable)`. A draft save derives the same way, so arming
+normally stores what was already there and does not bump.
 
 A declaration change SHALL reset **only the execution state ADAS itself owns for that kind**. For a
 kind whose cursor and rebuild anchor are ADAS-owned, the cursor SHALL be reset so the next run reads
@@ -441,6 +455,25 @@ rebuilding or replacing a re-grained target remains an operator action.
 
 `DELETE /v1/pipelines/{name}` SHALL remove the pipeline and leave the target table and its rows
 intact: a target that stops being fed is stale, not invalid.
+
+#### Scenario: Stopping and restarting does not move the generation
+
+- **GIVEN** an enabled pipeline at generation 4
+- **WHEN** `PATCH /v1/pipelines/{name}` with only `enabled: false`, and later only `enabled: true`, is applied
+- **THEN** both responses report generation 4, and each moves `updated_at`
+
+#### Scenario: An enable whose gate re-derives a stored member bumps once
+
+- **GIVEN** a disabled `enrich` pipeline at generation 7 whose stored output mapping differs from the one
+  the arming gate derives
+- **WHEN** `PATCH /v1/pipelines/{name}` with only `enabled: true` is applied
+- **THEN** the response reports generation 8 and the generation-change line names `patch(re-derive,enable)`
+
+#### Scenario: A re-declaration that also enables bumps once
+
+- **GIVEN** a disabled pipeline at generation 4
+- **WHEN** one `PATCH /v1/pipelines/{name}` supplies a whole declaration and `enabled: true`
+- **THEN** the response reports generation 5
 
 #### Scenario: A registered pipeline does not run until enabled
 
@@ -1496,7 +1529,6 @@ of implemented ones.
   HTTP 400 `bad_request` naming the accepted values
 
 ### Requirement: The declaration gate runs when a write arms the pipeline, not when it is stored
-
 The system SHALL apply the kind's declaration gate at the moment a pipeline is **armed or executed**,
 and SHALL NOT require a stored declaration to be complete or valid while the pipeline is disabled. A
 write that leaves the pipeline `enabled: false` SHALL store what it was given.
@@ -1584,8 +1616,9 @@ A derived member SHALL be stored as an **empty collection rather than null** whe
 that a partial declaration has one representation in storage and in memory.
 
 **The deferral is safe because a disabled pipeline runs nothing.** ADAS's scheduler selects on
-`(enabled, next_run_at)`, and the Enrichment Runner's sync feed asks for `enabled=true`, so no
-incomplete declaration is reached by either. What the gate protects is the moment the pipeline begins to
+`(enabled, next_run_at)`; the enrich feed omits a pipeline whose declaration is incomplete whatever its
+flag, and the Enrichment Runner executes only feed entries carrying `enabled: true`, so no incomplete
+declaration is reached by either. What the gate protects is the moment the pipeline begins to
 produce rows, and that moment has its own enforcement, unchanged.
 
 **The gate's content SHALL NOT change.** Every check applied at registration today SHALL be applied at
@@ -1629,8 +1662,8 @@ arming, over the stored declaration, with the same status and the same error cod
 #### Scenario: A disabled pipeline with an incomplete declaration produces no rows
 
 - **WHEN** a pipeline's stored declaration is incomplete and its trigger's moment arrives
-- **THEN** ADAS's scheduler does not select it, the runner's `enabled=true` sync feed does not carry
-  it, and nothing is written to its target
+- **THEN** ADAS's scheduler does not select it, the enrich feed does not carry it under any
+  `enabled` filter, and nothing is written to its target
 
 #### Scenario: Preview of an enabled pipeline re-gates according to its kind
 
@@ -1830,19 +1863,21 @@ than a fault. Only a named single-pipeline read refuses.
   exactly as for a form-mode `aggregate` pipeline, and no rendered statement is served
 
 ### Requirement: A generation change is logged with its old and new value and its cause
-
 Every change to a pipeline's `generation` SHALL log one INFO line naming the pipeline, the old generation,
 the new generation and the cause. The cause is the mutation that bumped it: `register`; a patch, as
-`patch(…)` naming what the patch did (`re-declare`, `enable`, `disable`, or several of them, comma-separated); `version_column_repoint` for a
+`patch(…)` naming what the patch did (`re-declare` or, for an enable whose gate re-derived a stored member,
+`re-derive`, with `enable` or `disable` comma-separated after it when the same patch changed `enabled`); `version_column_repoint` for a
 source's version-column repoint; or `target_columns_changed` for a target's column change. A patch
-bumps the generation once however many of those it combines, so it logs one line, and a registration or patch that is refused logs none. It SHALL name the acting principal
+bumps the generation once however many of those it combines, so it logs one line; a registration or patch that
+is refused logs none, and neither does a patch that only changes `enabled` and re-derives nothing, since it bumps nothing (see "Register
+and enable lifecycle"). It SHALL name the acting principal
 as `actor=` when the mutation carries one, and SHALL give `actor=-` rather than invent one when it does not, as
 with a bump cascaded from a schema edit, or when `security.mode=none`. The field is always present, as the
 Enrichment Runner's operator lines always carry `principal=`, so a line without a principal is still parsed the
 same way. A bump that touches several pipelines at once
 SHALL log one line per pipeline, not only a count.
 
-The register, re-declare and enable lines SHALL also give the pipeline's resulting generation.
+The register, re-declare, enable and disable lines SHALL also give the pipeline's generation after the change.
 
 The generation qualifies the materialized position, the runner's scan state and every row's
 `pipeline_generation` stamp. A bump nobody can see explains a rollup freeze or a runner re-scan only
@@ -1853,6 +1888,11 @@ after a database read.
 - **WHEN** an operator re-declares a pipeline at generation 4
 - **THEN** one INFO line reports the pipeline, `4 -> 5`, the cause `patch(re-declare)`, and the operator when one
   is authenticated
+
+#### Scenario: A stop logs no generation change
+
+- **WHEN** an operator patches only `enabled: false` on a pipeline at generation 4
+- **THEN** no generation-change line is logged, and the disable line reports generation 4
 
 #### Scenario: A cascaded bump names each pipeline
 
@@ -2352,3 +2392,61 @@ two that look alike may not, and the registry does not parse to decide.
 - **WHEN** `PATCH /v1/pipelines/{name}` carries `sql` for an `aggregate` pipeline that is `enabled`
 - **THEN** the request is rejected with HTTP 409 `pipeline_conflict`, and the stored `sql`, `generation`
   and cursor are unchanged
+
+### Requirement: A pipeline has exactly one run control
+A pipeline's `enabled` flag SHALL be its **single run control**, for every kind: `true` means the
+pipeline is active and `false` means it is stopped. It is stored in the registry, changed only through
+`PATCH /v1/pipelines/{name}` (or set at registration where the kind allows it), and SHALL be the one
+place any caller — an API client, an admin tool, a UI — reads or changes whether a pipeline runs. No
+other component SHALL hold a caller-set stop for a pipeline: the out-of-process runner follows `enabled`
+through the enrich feed (see [enrichment-registry](../enrichment-registry/spec.md), "The enrich feed
+carries the transform, a resolved schema and a change token") and offers no pause of its own.
+
+Two independent switches — a registry flag and a pause held by the runner — let one pipeline read as
+running in one place and stopped in the other, and neither switch could explain the other's state. One
+durable flag owned by the registry removes that ambiguity: what `GET /v1/pipelines/{name}` reports is
+what every consumer acts on.
+
+**Stopping SHALL keep the pipeline's progress, whichever component owns it.** For a kind whose cursor
+ADAS owns, disabling SHALL leave the cursor and recorded state untouched, and the first run after
+re-enabling SHALL continue from that cursor; a re-declaration, not a stop, is what resets it. For a kind
+whose cursor the runner holds, the runner keeps its cursor, group state and queued work while the
+pipeline is stopped and continues from them once it is re-enabled. Neither a stop nor a restart moves
+`generation` (see "Register and enable lifecycle"), so nothing qualified by it is invalidated. Re-enabling
+SHALL re-run the declaration gate exactly as the first arming does, so a pipeline whose inputs drifted
+while it was stopped is refused rather than restarted.
+
+**A pause the runner imposes on its own is a runtime condition, not a control.** The runner's dead-letter
+circuit breaker stops a pipeline's new work for a bounded window and lifts itself; it SHALL NOT change
+`enabled`, and it is reported by the runner's runtime status rather than by the registry. A stopped
+pipeline and a pipeline the breaker has paused are therefore told apart by where the state is read: the
+first reads `enabled: false` here, the second reads `enabled: true` here and paused in the runner's
+status.
+
+#### Scenario: Stopping and restarting an ADAS-driven pipeline keeps its cursor
+
+- **GIVEN** an enabled `aggregate` pipeline whose cursor has advanced
+- **WHEN** `PATCH /v1/pipelines/{name}` sets `enabled: false` and a later patch sets `enabled: true`
+- **THEN** the cursor is unchanged, the next run time is computed from the trigger's cron at the second
+  patch, and the next run reads from the kept cursor
+
+#### Scenario: A stopped enrich pipeline stays on the unfiltered feed, marked stopped
+
+- **GIVEN** an enabled `enrich` pipeline whose declaration is complete
+- **WHEN** `PATCH /v1/pipelines/{name}` sets `enabled: false`
+- **THEN** `GET /v1/pipelines?kind=enrich&view=compiled` still returns it, carrying `enabled: false` and
+  the same resolved shape and an unchanged `generation`, while
+  `GET /v1/pipelines?kind=enrich&enabled=true&view=compiled` does not
+
+#### Scenario: Restarting re-runs the declaration gate
+
+- **GIVEN** a stopped pipeline whose declaration no longer passes its kind's governance gate
+- **WHEN** `PATCH /v1/pipelines/{name}` sets `enabled: true`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` and the pipeline stays
+  `enabled: false`
+
+#### Scenario: A breaker pause does not change the run control
+
+- **GIVEN** an enabled `enrich` pipeline that the runner's dead-letter circuit breaker has paused
+- **WHEN** `GET /v1/pipelines/{name}` is called
+- **THEN** it reports `enabled: true`

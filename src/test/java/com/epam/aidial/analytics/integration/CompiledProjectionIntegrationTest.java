@@ -414,8 +414,8 @@ class CompiledProjectionIntegrationTest extends AbstractClickHouseIntegrationTes
      * <p>The list path and the single-pipeline path resolve through different code
      * ({@code EnrichResolver.resolveAll} batches; {@code resolve} does one), and only the latter used to
      * compose. Everything looked correct through {@code GET /v1/pipelines/&#123;name&#125;?view=compiled}
-     * while {@code GET /v1/pipelines?kind=enrich&enabled=true&view=compiled} — the feed the Enrichment
-     * Runner actually reads — served the same pipeline with <b>no</b> {@code response_schema}.
+     * while {@code GET /v1/pipelines?kind=enrich&enabled=true&view=compiled} — the list path
+     * the Enrichment Runner's feed goes through — served the same pipeline with <b>no</b> {@code response_schema}.
      *
      * <p>The consequence was silent and expensive rather than loud. A declaration in the {@code outputs}
      * shape stores no schema, so an absent composed one reaches the runner as null,
