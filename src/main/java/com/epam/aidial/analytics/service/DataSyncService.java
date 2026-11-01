@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,6 +46,7 @@ public class DataSyncService {
     private final MeterRegistry meterRegistry;
     private final ClientSpanTracer clientSpanTracer;
     private final IngestLedger ledger;
+    private final IngestFailureService failures;
 
     private final Timer durationTimer;
     private final AtomicLong lastSuccessTimestamp = new AtomicLong(0);
@@ -57,7 +59,8 @@ public class DataSyncService {
             BlobPrefixResolver prefixResolver,
             MeterRegistry meterRegistry,
             ClientSpanTracer clientSpanTracer,
-            IngestLedger ledger) {
+            IngestLedger ledger,
+            IngestFailureService failures) {
         this.blobClient = blobClient;
         this.blobIngestor = blobIngestor;
         this.usageLogWriter = usageLogWriter;
@@ -66,6 +69,7 @@ public class DataSyncService {
         this.meterRegistry = meterRegistry;
         this.clientSpanTracer = clientSpanTracer;
         this.ledger = ledger;
+        this.failures = failures;
         this.durationTimer = Timer.builder("sync.duration").register(meterRegistry);
         Gauge.builder("sync.last.success.timestamp", lastSuccessTimestamp, AtomicLong::doubleValue)
                 .register(meterRegistry);
@@ -93,14 +97,15 @@ public class DataSyncService {
         } finally {
             durationTimer.record(Duration.ofNanos(System.nanoTime() - startNanos));
         }
-        meterRegistry.counter("sync.runs", "outcome", summary.success() ? "success" : "failure").increment();
+        meterRegistry.counter("sync.runs", "outcome", summary.complete() ? "success" : "failure").increment();
         meterRegistry.counter("sync.files.processed").increment(summary.filesProcessed());
         meterRegistry.counter("sync.blobs.skipped", "reason", "ledger").increment(summary.blobsSkipped());
         summary.rowsInsertedByTable().forEach((table, count) ->
                 meterRegistry.counter("sync.rows.inserted", "table", table).increment(count));
         meterRegistry.counter("sync.rows.skipped").increment(summary.rowsSkipped());
         meterRegistry.counter("sync.rows.dropped").increment(summary.rowsDropped());
-        if (summary.success()) {
+        meterRegistry.counter("sync.blobs.failed").increment(summary.blobsFailed());
+        if (summary.complete()) {
             lastSuccessTimestamp.set(Instant.now().getEpochSecond());
         }
         return summary;
@@ -114,7 +119,9 @@ public class DataSyncService {
      *
      * <p>All per-run state (the {@link RowBatchSink}) is local to this invocation and the only instance
      * state touched is thread-safe, so the method is re-entrant: a backfill thread may call it
-     * concurrently with the scheduler thread without sharing batch state. It never throws — a listing or
+     * concurrently with the scheduler thread without sharing batch state. A blob that fails to read or map is
+     * recorded in the failure ledger and skipped, and the day goes on ({@link RunSummary#blobsFailed()}). It never
+     * throws — a listing or
      * write failure, or a failure preparing the day (resolving its prefix, reading the catalog for its
      * write path), is caught, logged, and reflected as {@code success() == false} in the summary — so
      * callers iterating a range can isolate a failed day and continue.
@@ -154,15 +161,32 @@ public class DataSyncService {
      * @return a summary of the day's ingestion
      */
     public RunSummary runForDate(LocalDate targetDate, IngestLedger.Mode mode, IngestProgressListener progressListener) {
+        return runForDate(targetDate, mode, IngestPath.RECONCILE, progressListener);
+    }
+
+    /**
+     * As {@link #runForDate(LocalDate, IngestLedger.Mode, IngestProgressListener)}, naming the ingest path the day's
+     * failure-ledger events are recorded under. A day that fails as a whole is recorded as a day failure, which the
+     * retry sweep retries; a day that completes without a day-level fault resolves an earlier failure of it.
+     *
+     * @param path the path running the day: the reconciliation run, a backfill or the retry sweep
+     */
+    public RunSummary runForDate(LocalDate targetDate, IngestLedger.Mode mode, IngestPath path, IngestProgressListener progressListener) {
         // One INTERNAL parent span per day so the CLIENT spans this cycle triggers (blob list/get,
         // ClickHouse inserts) nest under a single trace instead of each becoming a disconnected root.
         Attributes attributes = Attributes.builder().put("sync.date", targetDate.toString()).build();
-        return clientSpanTracer.internalSpan("data-sync run", attributes, () -> ingestDate(targetDate, mode, progressListener));
+        return clientSpanTracer.internalSpan("data-sync run", attributes, () -> ingestDate(targetDate, mode, path, progressListener));
     }
 
-    private RunSummary ingestDate(LocalDate targetDate, IngestLedger.Mode mode, IngestProgressListener progressListener) {
+    private RunSummary ingestDate(LocalDate targetDate, IngestLedger.Mode mode, IngestPath path, IngestProgressListener progressListener) {
         long filesProcessed = 0;
         long blobsSkipped = 0;
+        long blobsFailed = 0;
+        // Where the day stands, so a day-level fault is recorded under the reason for the step that raised it.
+        IngestFailureReason failingStep = IngestFailureReason.PREPARE_FAILED;
+        Exception dayFault = null;
+        // The day's blob failures, written in one append (one part however many blobs fail) before the final flush.
+        List<IngestFailureEvent> blobFailures = new ArrayList<>();
         long rowsSkipped = 0;
         long rowsDropped = 0;
         boolean success = false;
@@ -178,7 +202,9 @@ public class DataSyncService {
             // Each blob is recorded the moment its rows are all written, so a day that fails part-way keeps what it
             // finished and a backfill of it afterwards ingests only the rest.
             sink = blobIngestor.newRunSink(usageLogWriter, properties.batchSize(), properties.maxBatchBytes(), ledger::record);
+            failingStep = IngestFailureReason.LISTING_FAILED;
             List<BlobListing> blobs = blobClient.listWithMetadata(prefix);
+            failingStep = IngestFailureReason.WRITE_FAILED;
             log.info("Data-sync found {} blob(s) under prefix {}", blobs.size(), prefix);
             // This path lists whole days, so it holds the only evidence of whether the poller's bounded
             // (band) listing can match these file names at all — band mode's own empty listing is
@@ -190,15 +216,33 @@ public class DataSyncService {
                     blobsSkipped++;
                     continue;
                 }
-                BlobIngestor.IngestResult result = blobIngestor.ingest(listing, sink);
+                BlobIngestor.IngestResult result;
+                try {
+                    result = blobIngestor.ingest(listing, sink);
+                } catch (RowBatchSink.FlushException fe) {
+                    // A batch write, or the ledger write recording what it wrote, failed: a fault of the day, not of
+                    // this blob.
+                    throw fe;
+                } catch (Exception ex) {
+                    // One bad blob must not stop its day: record it and go on with the rest. The failures are written
+                    // together below; a failed write fails the day, like a failed ledger write.
+                    blobFailures.add(failures.blobFailure(listing, path, ex));
+                    blobsFailed++;
+                    progressListener.onBlobFailed();
+                    continue;
+                }
                 rowsSkipped += result.rowsSkipped();
                 rowsDropped += result.rowsDropped();
                 filesProcessed++;
                 progressListener.onBlobIngested(result.rowsInserted(), result.rowsSkipped(), result.rowsDropped());
             }
+            failures.recordBlobFailures(blobFailures);
+            blobFailures.clear();
             sink.flush();
             success = true;
         } catch (Exception ex) {
+            dayFault = ex;
+            recordCollected(blobFailures);
             // A storage-full refusal is called out separately because it is not this day's problem: the store
             // cannot accept writes at all, so the caller is told rather than left to read it out of the log.
             storageFull = ClickHouseStorageFullException.isIn(ex);
@@ -212,12 +256,33 @@ public class DataSyncService {
             }
         }
 
+        if (success) {
+            failures.resolveDayIfOpen(targetDate, path);
+        } else {
+            failures.recordDayFailure(targetDate, path, storageFull ? IngestFailureReason.STORAGE_FULL : failingStep, dayFault);
+        }
+
         // A sink that was never built (the day failed while preparing) inserted nothing.
         RunSummary summary = new RunSummary(
                 filesProcessed, sink == null ? 0 : sink.totalInserted(), sink == null ? Map.of() : sink.insertedByTable(),
-                rowsSkipped, rowsDropped, blobsSkipped, success, storageFull);
+                rowsSkipped, rowsDropped, blobsSkipped, blobsFailed, success, storageFull);
         log.info("Data-sync run finished: {}", summary);
         return summary;
+    }
+
+    /**
+     * Best-effort write of the blob failures a failed day collected before its fault: the day failure is recorded
+     * either way and its retry meets these blobs again, so a failure here is only logged.
+     */
+    private void recordCollected(List<IngestFailureEvent> blobFailures) {
+        if (blobFailures.isEmpty()) {
+            return;
+        }
+        try {
+            failures.recordBlobFailures(blobFailures);
+        } catch (RuntimeException ex) {
+            log.warn("Could not record {} blob failure(s) of a failed day; its retry meets them again: {}", blobFailures.size(), ex.getMessage());
+        }
     }
 
     /**
@@ -229,7 +294,9 @@ public class DataSyncService {
      * @param rowsSkipped         malformed lines skipped across all files
      * @param rowsDropped         records dropped for lacking a deduplication key across all files
      * @param blobsSkipped        listed blobs not read because the ingest ledger records them
-     * @param success             whether the run completed without error
+     * @param blobsFailed         blobs that failed to read or map, each recorded in the failure ledger and skipped
+     * @param success             whether the day completed without a day-level fault; blob failures do not clear it,
+     *                            see {@link #complete()}
      * @param storageFull         whether the run failed because ClickHouse refused a write for lack of disk space;
      *                            always false when {@code success}. Carried as a flag rather than an exception so
      *                            {@link #runForDate(LocalDate)} keeps its never-throws contract, while a caller
@@ -243,11 +310,17 @@ public class DataSyncService {
             long rowsSkipped,
             long rowsDropped,
             long blobsSkipped,
+            long blobsFailed,
             boolean success,
             boolean storageFull) {
 
         public RunSummary {
             rowsInsertedByTable = rowsInsertedByTable == null ? Map.of() : Map.copyOf(rowsInsertedByTable);
+        }
+
+        /** Whether the day ingested every listed blob: no day-level fault and no failed blob. */
+        public boolean complete() {
+            return success && blobsFailed == 0;
         }
     }
 
@@ -265,5 +338,9 @@ public class DataSyncService {
         IngestProgressListener NO_OP = (rowsInserted, rowsSkipped, rowsDropped) -> { };
 
         void onBlobIngested(long rowsInserted, long rowsSkipped, long rowsDropped);
+
+        /** Called once per blob that failed to read or map and was skipped. */
+        default void onBlobFailed() {
+        }
     }
 }

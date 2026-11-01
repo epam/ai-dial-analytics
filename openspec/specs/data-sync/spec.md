@@ -21,9 +21,27 @@ does not record — those the poller missed (e.g. during downtime longer than th
 window, or finalization beyond the poller's band) — and skips, and counts, the blobs it does record. It
 records each blob it ingests as soon as that blob's rows are written. The job MUST run in-process and MUST
 NOT be triggerable via an HTTP endpoint in this phase. The scheduler MUST be configured such that a new run
-cannot start while a previous run is still in progress. A run that fails is not retried by a later scheduled
-run, which targets its own day; a failed day is recovered by an operator backfill, which ingests only the
-blobs the failed run did not finish.
+cannot start while a previous run is still in progress.
+
+A failure to ingest a single blob SHALL NOT abort the run. Such failures include:
+- the blob cannot be opened or read;
+- its gzip stream is invalid;
+- mapping one of its records raises an error.
+
+The run SHALL record the blob's failure in the failure ledger (see `data-sync-failures`), count it, and continue
+with the day's remaining blobs. Rows that the failing blob had already buffered MAY still be written. They are
+collapsed when the blob is ingested again, because the blob is not recorded in the ingest ledger.
+
+The run SHALL fail its day only on a day-level fault:
+- listing the prefix fails;
+- preparing the day fails;
+- a batch insert or ingest-ledger write fails;
+- writing a blob's failure event fails.
+
+The run's outcome SHALL be reported as a failure when the day failed or when any of its blobs failed. A day
+that failed SHALL be recorded in the failure ledger. A later scheduled run does not retry it, since that run
+targets its own day. Instead the retry sweep retries the failed day, and an operator backfill can also recover
+it; either way only the blobs the failed run did not finish are ingested.
 
 #### Scenario: Job runs on schedule
 
@@ -51,6 +69,18 @@ blobs the failed run did not finish.
 
 - **WHEN** a reconciliation run fails after some of its writes succeeded
 - **THEN** the blobs whose rows were all written are recorded and the rest are not
+
+#### Scenario: A bad blob does not stop the day
+
+- **WHEN** the third of five blobs under the day's prefix has a corrupt gzip stream
+- **THEN** the run records that blob's failure, ingests and records the other four blobs, reports its outcome
+  as a failure, and does not record a day failure
+
+#### Scenario: A failed day is recorded for retry
+
+- **WHEN** the run cannot list the day's prefix because the store is unreachable
+- **THEN** the day fails and is recorded in the failure ledger as a pending day failure, which the retry sweep
+  attempts once its backoff has elapsed
 
 ### Requirement: Near-real-time polling ingestion
 
@@ -90,9 +120,12 @@ window, and where the ledger has no entry for a blob, correctness under overlap,
 skew, and restarts SHALL still rest on the target table's primary-key deduplication. A failure to ingest a
 single blob (e.g. a corrupt
 file) MUST NOT abort the poll cycle or hold back the watermark: the service SHALL count and skip that
-blob, continue ingesting the remaining blobs, and still advance the watermark, so that one bad blob
-cannot wedge the poller — the skipped blob is not recorded, remains eligible for retry within the overlap
-window and is otherwise recovered by the reconciliation path. A failure to list blobs (e.g. the store is
+blob, record its failure in the failure ledger (see `data-sync-failures`), continue ingesting the remaining
+blobs, and still advance the watermark, so that one bad blob cannot wedge the poller. The skipped blob is not
+recorded in the ingest ledger. It stays eligible for retry within the overlap window, and is otherwise
+recovered by the reconciliation path or by the retry sweep, which keeps retrying it after both of those. A
+failure to write the blob's failure event SHALL fail the cycle like a failed ingest-ledger write, so the
+watermark holds. A failure to list blobs (e.g. the store is
 unreachable) SHALL instead leave the watermark unchanged so the next cycle re-covers the window. The
 poller MUST be controlled by an enable flag, MUST run in-process with no HTTP trigger, and MUST NOT
 allow a new poll cycle to start while a previous one is still in progress.
@@ -128,8 +161,16 @@ allow a new poll cycle to start while a previous one is still in progress.
 
 - **WHEN** one blob in the active prefix fails to ingest (e.g. it is corrupt) while other newer blobs
   are present
-- **THEN** the service counts and skips the failing blob without recording it, ingests the other blobs,
-  and advances the watermark, so the failing blob does not block subsequent ingestion
+- **THEN** the service counts and skips the failing blob without recording it in the ingest ledger, records
+  its failure in the failure ledger, ingests the other blobs, and advances the watermark, so the failing blob
+  does not block subsequent ingestion
+
+#### Scenario: A blob that keeps failing outlives the overlap window
+
+- **WHEN** a blob fails on the poller with a transient error on every cycle until it leaves the overlap
+  window
+- **THEN** the failure ledger holds it as pending, and the retry sweep keeps attempting it with backoff
+  after the poller has stopped considering it
 
 #### Scenario: A listing failure holds the watermark
 
@@ -2621,8 +2662,10 @@ surface.
 
 - **WHEN** reading or parsing a blob fails, or a write of rows from the same cycle or day fails before the
   blob's rows are all written
-- **THEN** the ledger holds no entry for that blob; the poller retries it while it stays within its overlap
-  window, a reconciliation run that lists it ingests it, and otherwise an operator backfill recovers it
+- **THEN** the ledger holds no entry for that blob. The poller retries it while it stays within its overlap
+  window, and a reconciliation run that lists it ingests it. If reading or parsing failed, the failure ledger
+  holds the blob's failure, and the retry sweep retries it or parks it for an operator (see
+  `data-sync-failures`). An operator backfill can also recover it
 
 #### Scenario: An empty blob is recorded
 
@@ -2980,3 +3023,19 @@ different settings replaces the stored row with their result.
 
 - **WHEN** the same record is ingested twice with `sync.inline-files-max-size=0`
 - **THEN** both writes carry identical body values
+
+### Requirement: A record is written for all of its targets or for none
+
+Each parsed record SHALL be mapped by every target before any of its rows is handed to the write path. When the
+match predicate, a transform or a deriver of any target raises an error, no row of that record SHALL be
+written, and the blob fails with a mapping fault.
+
+Writing the rows of the targets mapped before the fault would write a source row without the enrichment row its
+target maps after it. Every reader of the grain join treats the missing row as final. Records of the same blob
+that were mapped before the failing one are complete, and are written as usual.
+
+#### Scenario: A payload mapping fault writes no usage-log row for the record
+
+- **WHEN** the usage-log target maps a record and the payload target's transform then raises an error on it
+- **THEN** neither the usage-log row nor the payload row of that record is written, and the blob's failure is
+  recorded with the reason `mapping_error`

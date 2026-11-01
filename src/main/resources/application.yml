@@ -131,6 +131,13 @@ sync:
   usage-log:
     ttl-days: ${SYNC_USAGE_LOG_TTL_DAYS:}
     table: ${SYNC_TABLE:dial_usage_log}
+  retry:
+    enabled: ${SYNC_RETRY_ENABLED:true}
+    cron: ${SYNC_RETRY_CRON:0 */15 * * * *}
+    initial-backoff: ${SYNC_RETRY_INITIAL_BACKOFF:15m}
+    max-backoff: ${SYNC_RETRY_MAX_BACKOFF:24h}
+    max-attempts: ${SYNC_RETRY_MAX_ATTEMPTS:10}
+    max-per-sweep: ${SYNC_RETRY_MAX_PER_SWEEP:20}
   targets:
     - table: ${SYNC_TABLE:dial_usage_log}
       mapping-file: ${SYNC_MAPPING_FILE:classpath:mapping/dial-usage-log.yaml}

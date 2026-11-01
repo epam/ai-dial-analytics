@@ -27,6 +27,24 @@ public interface IngestLedger {
     Map<String, Instant> recorded(String prefix);
 
     /**
+     * The recorded entries among {@code keys}: key → the newest entry's last-modified time and when it was written.
+     * Keys the ledger does not record are absent. Used to tell which failed blobs have been ingested since they failed.
+     *
+     * @param keys full blob keys; an empty map when empty
+     * @return the recorded entries whose key is among {@code keys}
+     */
+    Map<String, Recorded> recordedAmong(Collection<String> keys);
+
+    /**
+     * One recorded blob.
+     *
+     * @param lastModified the last-modified time recorded for it
+     * @param ingestedAt   when that entry was written
+     */
+    record Recorded(Instant lastModified, Instant ingestedAt) {
+    }
+
+    /**
      * Records blobs whose rows have all been written. A listing without a last-modified time
      * ({@link Instant#EPOCH}) is not recorded, since it could never match a later listing.
      *

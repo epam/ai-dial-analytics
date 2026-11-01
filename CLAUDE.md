@@ -13,7 +13,8 @@ surface is added incrementally as spec-driven changes. The querying surface is t
 `execute-sql-csv` (capability `query-csv-export`, same pipeline, RFC 4180 body), and the
 translation-only pair `POST /v1/queries/translate` / `translate-sql` (capability
 `query-translation-endpoint`, DSL ↔ SQL without execution); the `data-sync` path ingests DIAL
-usage logs from blob storage into ClickHouse. `POST /v1/catalog/export` / `import` (each with a `/preview`
+usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic
+retry or operator requeue under `/v1/data-sync/failures` (capability `data-sync-failures`). `POST /v1/catalog/export` / `import` (each with a `/preview`
 twin; capability `catalog-export-import`) promote user tables and pipelines (never grants) between environments.
 
 ## Source of Truth

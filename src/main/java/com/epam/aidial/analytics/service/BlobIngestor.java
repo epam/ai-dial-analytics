@@ -8,9 +8,11 @@ import com.epam.aidial.analytics.sync.mapping.SyncTarget;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -127,11 +129,20 @@ public class BlobIngestor {
         long malformed;
         try (InputStream stream = blobClient.openStream(blobName)) {
             malformed = logParser.parse(stream, blobName, node -> {
+                // Every target maps the record before any of its rows reaches the sink, so a mapping fault on one
+                // target drops the whole record. Adding row by row would leave the rows of the targets mapped before
+                // the fault in the sink, to be written with the rest — a usage-log row without the payload row an
+                // enrichment target maps after it, which every reader of the grain join takes as final.
+                List<Map<String, Object>> rows = new ArrayList<>(targets.size());
                 for (SyncTarget target : targets) {
-                    if (!target.matcher().matches(node)) {
+                    rows.add(map(target, node, blobName));
+                }
+                for (int i = 0; i < targets.size(); i++) {
+                    SyncTarget target = targets.get(i);
+                    Map<String, Object> row = rows.get(i);
+                    if (row == null) {
                         continue;
                     }
-                    Map<String, Object> row = target.engine().toRow(node, blobName);
                     if (missingDedupKey(row)) {
                         counters.dropped++;
                         log.warn("Dropping record without a complete dedup key "
@@ -147,6 +158,23 @@ public class BlobIngestor {
         log.info("Ingested {}: {} rows accepted, {} malformed lines skipped, {} records dropped",
                 blobName, counters.accepted, malformed, counters.dropped);
         return new IngestResult(counters.accepted, malformed, counters.dropped);
+    }
+
+    /**
+     * The row {@code target} makes of {@code node}, or {@code null} when its match predicate rejects the record. A
+     * fault in the predicate, a transform or a deriver is raised as a {@link RecordMappingException}, so the ingest
+     * paths can tell a mapping fault from a read fault; the sink is deliberately outside this, so a write failure is
+     * never mistaken for one.
+     */
+    private static Map<String, Object> map(SyncTarget target, JsonNode node, String blobName) {
+        try {
+            if (!target.matcher().matches(node)) {
+                return null;
+            }
+            return target.engine().toRow(node, blobName);
+        } catch (RuntimeException ex) {
+            throw new RecordMappingException(target.table(), ex);
+        }
     }
 
     /** Per-blob tallies mutated from the parse callback; single-threaded, so no atomics are needed. */

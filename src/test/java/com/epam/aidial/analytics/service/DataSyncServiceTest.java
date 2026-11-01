@@ -7,6 +7,7 @@ import com.epam.aidial.analytics.clickhouse.TestClickHouseSpans;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import com.epam.aidial.analytics.configuration.BlobProperties;
 import com.epam.aidial.analytics.configuration.SyncProperties;
+import com.epam.aidial.analytics.exception.BlobAccessException;
 import com.epam.aidial.analytics.exception.ClickHouseStorageFullException;
 import com.epam.aidial.analytics.observability.TestClientSpanTracer;
 import com.epam.aidial.analytics.sync.LogParser;
@@ -29,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -38,6 +40,10 @@ import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Exercises {@link DataSyncService} end-to-end against the jclouds <em>filesystem</em> provider and an
@@ -53,6 +59,7 @@ class DataSyncServiceTest {
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
     private RecordingWriter writer;
     private final InMemoryIngestLedger ledger = new InMemoryIngestLedger();
+    private final InMemoryIngestFailureLedger failureLedger = new InMemoryIngestFailureLedger();
     private DataSyncService service;
     private String blobKey;
     // Retained so a test can rebuild the service around a different writer (see serviceWritingWith).
@@ -101,7 +108,7 @@ class DataSyncServiceTest {
         targets = List.of(new SyncTarget("dial_usage_log", mappingConfig, mappingEngine));
         ingestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, IngestFlushOrder.NONE);
         service = new DataSyncService(blobClient, ingestor, writer, syncProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     @Test
@@ -128,7 +135,7 @@ class DataSyncServiceTest {
     void secondRunOverTheSameDayInsertsNothingAndCountsTheSkip() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         DataSyncService counted = new DataSyncService(blobClient, ingestor, writer, syncProps,
-                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), registry, TestClientSpanTracer.noop(), ledger);
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), registry, TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
         counted.runOnce();
         int callsAfterFirst = writer.insertCalls;
 
@@ -212,7 +219,7 @@ class DataSyncServiceTest {
         BlobIngestor redeployed = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, IngestFlushOrder.NONE);
         DataSyncService next = new DataSyncService(blobClient, redeployed, writer, syncProps,
                 new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
-                ledger);
+                ledger, failureLedger.service(ledger));
 
         assertThat(next.runOnce().filesProcessed()).isZero();
     }
@@ -306,7 +313,7 @@ class DataSyncServiceTest {
         };
         BlobIngestor failingIngestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, failing);
         return new DataSyncService(blobClient, failingIngestor, writer, syncProps,
-                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), registry, TestClientSpanTracer.noop(), ledger);
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), registry, TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     @Test
@@ -325,7 +332,7 @@ class DataSyncServiceTest {
                 "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", "'date='yyyy-MM-dd", false, syncProps.targets(), null, null);
         DataSyncService flatService = new DataSyncService(
                 blobClient, ingestor, writer, flatProps, new BlobPrefixResolver(flatProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
 
         DataSyncService.RunSummary summary = flatService.runOnce();
 
@@ -386,7 +393,7 @@ class DataSyncServiceTest {
         SyncProperties props = new SyncProperties(
                 "-", 0, 2, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy-MM-dd", head, false, syncProps.targets(), null, null);
         return new DataSyncService(blobClient, ingestor, writer, props, new BlobPrefixResolver(props, registry),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     /** A service whose writer always fails the flush with {@code failure}, reusing this test's blob fixture. */
@@ -400,7 +407,167 @@ class DataSyncServiceTest {
         };
         return new DataSyncService(
                 blobClient, ingestor, failing, syncProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
+    }
+
+    /** One corrupt blob is recorded and skipped; the blobs listed after it are still ingested and recorded. */
+    @Test
+    void corruptBlobDoesNotStopItsDay() throws Exception {
+        String corrupt = blobKey.substring(0, blobKey.lastIndexOf('/') + 1) + "a-corrupt.log.gz";
+        Files.write(baseDir.resolve(BUCKET).resolve(corrupt), "not gzip at all".getBytes(StandardCharsets.UTF_8));
+        String after = writeDayFixture("z-after.log.gz", "late");
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        DataSyncService counted = new DataSyncService(blobClient, ingestor, writer, syncProps,
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), registry, TestClientSpanTracer.noop(), ledger,
+                failureLedger.service(ledger, registry, Clock.systemUTC()));
+
+        DataSyncService.RunSummary summary = counted.runOnce();
+
+        assertThat(summary.success()).isTrue();
+        assertThat(summary.blobsFailed()).isEqualTo(1);
+        assertThat(summary.complete()).isFalse();
+        assertThat(ledger.recordedKeys()).contains(blobKey, after).doesNotContain(corrupt);
+        assertThat(failureLedger.of(IngestFailureKind.BLOB, corrupt)).singleElement().satisfies(event -> {
+            assertThat(event.type()).isEqualTo(IngestFailureEvent.Type.FAILED);
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.CORRUPT_GZIP);
+            assertThat(event.path()).isEqualTo("reconcile");
+        });
+        assertThat(failureLedger.events).noneMatch(event -> event.kind() == IngestFailureKind.DAY);
+        assertThat(registry.counter("sync.runs", "outcome", "failure").count()).isEqualTo(1);
+        assertThat(registry.counter("sync.blobs.failed").count()).isEqualTo(1);
+        assertThat(registry.counter("sync.failures.recorded", "kind", "blob", "path", "reconcile", "reason", "corrupt_gzip").count())
+                .isEqualTo(1);
+    }
+
+    /** A day's blob failures are written together, in one insert, however many blobs fail. */
+    @Test
+    void blobFailuresOfDayAreWrittenInOneAppend() throws Exception {
+        String dir = blobKey.substring(0, blobKey.lastIndexOf('/') + 1);
+        Files.write(baseDir.resolve(BUCKET).resolve(dir + "a-corrupt.log.gz"), "not gzip".getBytes(StandardCharsets.UTF_8));
+        Files.write(baseDir.resolve(BUCKET).resolve(dir + "b-corrupt.log.gz"), "not gzip".getBytes(StandardCharsets.UTF_8));
+
+        DataSyncService.RunSummary summary = service.runForDate(LocalDate.now(ZoneOffset.UTC));
+
+        assertThat(summary.blobsFailed()).isEqualTo(2);
+        assertThat(failureLedger.events).hasSize(2);
+        assertThat(failureLedger.appends).isEqualTo(1);
+    }
+
+    /**
+     * A mapping fault on a later target drops the whole record: the row an earlier target already mapped never reaches
+     * the sink, so no source row is written without the enrichment row mapped after it.
+     */
+    @Test
+    void mappingFaultOnLaterTargetWritesNoRowOfTheRecord() {
+        MappingEngine failingEngine = mock(MappingEngine.class);
+        when(failingEngine.toRow(any(), any())).thenThrow(new IllegalArgumentException("payload transform fault"));
+        List<SyncTarget> twoTargets = List.of(targets.getFirst(),
+                new SyncTarget("dial_usage_log_payload", targets.getFirst().mapping(), failingEngine));
+        BlobIngestor ingestor2 = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES),
+                twoTargets, IngestFlushOrder.NONE);
+        DataSyncService twoTargetService = new DataSyncService(blobClient, ingestor2, writer, syncProps,
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
+                ledger, failureLedger.service(ledger));
+
+        DataSyncService.RunSummary summary = twoTargetService.runForDate(LocalDate.now(ZoneOffset.UTC));
+
+        assertThat(summary.blobsFailed()).isEqualTo(1);
+        assertThat(writer.rowsFor("dial_usage_log")).isEmpty();
+        assertThat(writer.rowsFor("dial_usage_log_payload")).isEmpty();
+    }
+
+    /** A mapping fault is deterministic, so the blob is parked rather than retried. */
+    @Test
+    void mappingFaultIsRecordedAsDeterministic() {
+        MappingEngine failingEngine = mock(MappingEngine.class);
+        when(failingEngine.toRow(any(), any()))
+                .thenThrow(new IllegalArgumentException("deriver fault"));
+        List<SyncTarget> failingTargets = List.of(new SyncTarget("dial_usage_log", targets.getFirst().mapping(), failingEngine));
+        BlobIngestor failingIngestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES),
+                failingTargets, IngestFlushOrder.NONE);
+        IngestFailureService failures = failureLedger.service(ledger);
+        DataSyncService mapping = new DataSyncService(blobClient, failingIngestor, writer, syncProps,
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
+                ledger, failures);
+
+        DataSyncService.RunSummary summary = mapping.runForDate(LocalDate.now(ZoneOffset.UTC));
+
+        assertThat(summary.blobsFailed()).isEqualTo(1);
+        assertThat(failureLedger.of(IngestFailureKind.BLOB, blobKey)).singleElement()
+                .satisfies(event -> assertThat(event.reason()).isEqualTo(IngestFailureReason.MAPPING_ERROR));
+        assertThat(failures.outstanding()).singleElement()
+                .satisfies(entry -> assertThat(entry.state()).isEqualTo(IngestFailureState.PARKED));
+    }
+
+    /** A day whose listing fails is recorded as a pending day failure; a later good run of it resolves it. */
+    @Test
+    void failedDayIsRecordedAndLaterGoodRunResolvesIt() {
+        BlobClient unreachable = mock(BlobClient.class);
+        when(unreachable.listWithMetadata(anyString()))
+                .thenThrow(new BlobAccessException("store unreachable", new RuntimeException()));
+        IngestFailureService failures = failureLedger.service(ledger);
+        DataSyncService down = new DataSyncService(unreachable, ingestor, writer, syncProps,
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
+                ledger, failures);
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+
+        assertThat(down.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.BACKFILL, DataSyncService.IngestProgressListener.NO_OP)
+                .success()).isFalse();
+
+        assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).singleElement().satisfies(event -> {
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.LISTING_FAILED);
+            assertThat(event.path()).isEqualTo("backfill");
+        });
+        assertThat(failures.outstanding()).singleElement()
+                .satisfies(entry -> assertThat(entry.state()).isEqualTo(IngestFailureState.PENDING));
+
+        assertThat(service.runForDate(today).success()).isTrue();
+
+        assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).extracting(IngestFailureEvent::type)
+                .containsExactly(IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.RESOLVED);
+        assertThat(failures.outstanding()).isEmpty();
+    }
+
+    /** A day refused for lack of disk space is recorded under its own reason. */
+    @Test
+    void storageExhaustionIsRecordedAsStorageFull() {
+        DataSyncService diskFull = serviceWritingWith(new IllegalStateException("wrapped",
+                new ClickHouseStorageFullException("out of space", new ServerException(243, "not enough space", 500, "q"))));
+
+        diskFull.runOnce();
+
+        assertThat(failureLedger.events).singleElement().satisfies(event -> {
+            assertThat(event.kind()).isEqualTo(IngestFailureKind.DAY);
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.STORAGE_FULL);
+        });
+    }
+
+    /**
+     * A blob failure that cannot be recorded fails the day, like a failed ledger write; the day failure it then
+     * raises cannot be written either, so it is held in memory for the next sweep.
+     */
+    @Test
+    void blobFailureThatCannotBeRecordedFailsTheDayAndHoldsTheDayFailure() throws Exception {
+        String corrupt = blobKey.substring(0, blobKey.lastIndexOf('/') + 1) + "a-corrupt.log.gz";
+        Files.write(baseDir.resolve(BUCKET).resolve(corrupt), "not gzip at all".getBytes(StandardCharsets.UTF_8));
+        failureLedger.failAppends = true;
+        IngestFailureService failures = failureLedger.service(ledger);
+        DataSyncService down = new DataSyncService(blobClient, ingestor, writer, syncProps,
+                new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
+                ledger, failures);
+
+        DataSyncService.RunSummary summary = down.runForDate(LocalDate.now(ZoneOffset.UTC));
+
+        assertThat(summary.success()).isFalse();
+        assertThat(failures.unwrittenCount()).isEqualTo(1);
+
+        failureLedger.failAppends = false;
+        assertThat(failures.drainUnwritten()).isEqualTo(1);
+        assertThat(failureLedger.events).singleElement().satisfies(event -> {
+            assertThat(event.kind()).isEqualTo(IngestFailureKind.DAY);
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.WRITE_FAILED);
+        });
+        assertThat(failures.unwrittenCount()).isZero();
     }
 
     private static void writeGzip(Path file, String content) throws Exception {

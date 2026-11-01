@@ -24,7 +24,7 @@ public final class IngestPathsTestAccess {
             PollProperties pollProps, IngestLedger ledger) {
         BlobPollingService poller = new BlobPollingService(blobClient, ingestor, writer, syncProps, pollProps,
                 new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
-                ledger);
+                ledger, new InMemoryIngestFailureLedger().service(ledger));
         return poller.runOnce().success();
     }
 
@@ -33,7 +33,7 @@ public final class IngestPathsTestAccess {
             SyncProperties syncProps, IngestLedger ledger, LocalDate day) {
         DataSyncService service = new DataSyncService(blobClient, ingestor, writer, syncProps,
                 new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()), new SimpleMeterRegistry(), TestClientSpanTracer.noop(),
-                ledger);
+                ledger, new InMemoryIngestFailureLedger().service(ledger));
         return service.runForDate(day);
     }
 }

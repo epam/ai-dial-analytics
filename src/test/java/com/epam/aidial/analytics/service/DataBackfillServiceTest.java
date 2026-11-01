@@ -40,12 +40,12 @@ import static org.mockito.Mockito.when;
 class DataBackfillServiceTest {
 
     private static final DataSyncService.RunSummary OK =
-            new DataSyncService.RunSummary(1, 5, Map.of("dial_usage_log", 5L), 0, 0, 0, true, false);
+            new DataSyncService.RunSummary(1, 5, Map.of("dial_usage_log", 5L), 0, 0, 0, 0, true, false);
     private static final DataSyncService.RunSummary FAIL =
-            new DataSyncService.RunSummary(0, 0, Map.of(), 0, 0, 0, false, false);
+            new DataSyncService.RunSummary(0, 0, Map.of(), 0, 0, 0, 0, false, false);
     /** A day that failed because ClickHouse is out of disk space — a store-level fault, not this day's. */
     private static final DataSyncService.RunSummary DISK_FULL =
-            new DataSyncService.RunSummary(0, 0, Map.of(), 0, 0, 0, false, true);
+            new DataSyncService.RunSummary(0, 0, Map.of(), 0, 0, 0, 0, false, true);
 
     private final DataSyncService syncService = mock(DataSyncService.class);
     private DataBackfillService service;
@@ -107,7 +107,7 @@ class DataBackfillServiceTest {
 
     @Test
     void acceptsRangeExactlyAtCap() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 3);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03"); // span == 3 == cap
@@ -125,7 +125,7 @@ class DataBackfillServiceTest {
 
     @Test
     void ingestsEveryDayAndAccumulatesCounts() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -143,8 +143,8 @@ class DataBackfillServiceTest {
 
     @Test
     void isolatesFailingDayAndContinues() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(FAIL);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -157,14 +157,62 @@ class DataBackfillServiceTest {
     }
 
     /**
+     * A day whose listing and writes succeeded but which skipped a failed blob is incomplete: it is named as failed,
+     * its blob is counted, and the next day still runs.
+     */
+    @Test
+    void dayWithFailedBlobIsNamedAsFailedAndCountsTheBlob() {
+        DataSyncService.RunSummary blobFailed =
+                new DataSyncService.RunSummary(2, 4, Map.of("dial_usage_log", 4L), 0, 0, 0, 1, true, false);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(blobFailed);
+        DataBackfillService svc = newService(true, 366);
+
+        BackfillRun run = svc.start("2026-06-01", "2026-06-03");
+
+        await().untilAsserted(() ->
+                assertThat(svc.status(run.runId()).state()).isEqualTo(BackfillRun.State.COMPLETED));
+        BackfillRun.Snapshot s = svc.status(run.runId());
+        assertThat(s.daysCompleted()).isEqualTo(2);
+        assertThat(s.daysFailed()).isEqualTo(1);
+        assertThat(s.failedDates()).containsExactly(LocalDate.parse("2026-06-02"));
+        assertThat(s.failedBlobs()).isEqualTo(1);
+        assertThat(meterRegistry.counter("backfill.blobs.failed").count()).isEqualTo(1);
+        verify(syncService).runForDate(eq(LocalDate.parse("2026-06-02")), any(), eq(IngestPath.BACKFILL), any());
+    }
+
+    @Test
+    void countsFailedBlobsBeforeTheDayCompletes() throws Exception {
+        CountDownLatch blobsReported = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(syncService.runForDate(any(), any(), any(), any())).thenAnswer(invocation -> {
+            DataSyncService.IngestProgressListener listener = invocation.getArgument(3);
+            listener.onBlobFailed();
+            listener.onBlobFailed();
+            blobsReported.countDown();
+            release.await();
+            return new DataSyncService.RunSummary(0, 0, Map.of(), 0, 0, 0, 2, true, false);
+        });
+        DataBackfillService svc = newService(true, 366);
+
+        BackfillRun run = svc.start("2026-06-01", "2026-06-01");
+        blobsReported.await();
+
+        assertThat(svc.status(run.runId()).failedBlobs()).isEqualTo(2);
+        release.countDown();
+        await().untilAsserted(() -> assertThat(svc.status(run.runId()).state()).isEqualTo(BackfillRun.State.FAILED));
+        assertThat(svc.status(run.runId()).failedBlobs()).isEqualTo(2);
+    }
+
+    /**
      * Per-day isolation stops at disk exhaustion: it is a store-level fault, so every remaining day would fail
      * the same way. The run must stop rather than work through the range — the behavior four real backfills
      * lacked when they each hammered a full disk for their whole span.
      */
     @Test
     void stopsTheRangeWhenClickHouseIsOutOfDiskSpace() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any())).thenReturn(DISK_FULL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(DISK_FULL);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-05");
@@ -180,20 +228,20 @@ class DataBackfillServiceTest {
         assertThat(s.failedDates()).containsExactly(LocalDate.parse("2026-06-02"));
         assertThat(s.finishedAt()).isNotNull();
         assertThat(s.currentDate()).isNull();
-        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-03")), any(), any());
-        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-05")), any(), any());
+        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-03")), any(), any(), any());
+        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-05")), any(), any(), any());
     }
 
     /** The guard is released by the stop, so the operator can re-trigger the range once space is back. */
     @Test
     void allowsRetriggerAfterStoppingOnDiskExhaustion() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(DISK_FULL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(DISK_FULL);
         DataBackfillService svc = newService(true, 366);
         BackfillRun stopped = svc.start("2026-06-01", "2026-06-03");
         await().untilAsserted(() ->
                 assertThat(svc.status(stopped.runId()).state()).isEqualTo(BackfillRun.State.FAILED));
 
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         BackfillRun retried = startWhenFree(svc, "2026-06-01", "2026-06-03");
 
         await().untilAsserted(() ->
@@ -203,7 +251,7 @@ class DataBackfillServiceTest {
 
     @Test
     void allDaysFailingYieldsFailedState() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(FAIL);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-02");
@@ -216,7 +264,7 @@ class DataBackfillServiceTest {
     @Test
     void rejectsConcurrentBackfill() {
         CountDownLatch release = new CountDownLatch(1);
-        when(syncService.runForDate(any(), any(), any())).thenAnswer(invocation -> {
+        when(syncService.runForDate(any(), any(), any(), any())).thenAnswer(invocation -> {
             release.await();
             return OK;
         });
@@ -241,8 +289,8 @@ class DataBackfillServiceTest {
     void reflectsPerBlobProgressBeforeDayCompletes() throws Exception {
         CountDownLatch blobsReported = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(syncService.runForDate(any(), any(), any())).thenAnswer(invocation -> {
-            DataSyncService.IngestProgressListener listener = invocation.getArgument(2);
+        when(syncService.runForDate(any(), any(), any(), any())).thenAnswer(invocation -> {
+            DataSyncService.IngestProgressListener listener = invocation.getArgument(3);
             listener.onBlobIngested(5, 1, 2);
             listener.onBlobIngested(3, 0, 0);
             blobsReported.countDown();
@@ -285,8 +333,8 @@ class DataBackfillServiceTest {
 
     private void assertAbortReportsFailed(Throwable fault) {
         LocalDate abortDay = LocalDate.parse("2026-06-05");
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(abortDay), any(), any())).thenThrow(fault);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(abortDay), any(), any(), any())).thenThrow(fault);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-10");
@@ -302,7 +350,7 @@ class DataBackfillServiceTest {
         // The aborted day is counted in the metric, and its null summary leaves the four completed days' rows as they stood.
         assertThat(meterRegistry.counter("backfill.days", "outcome", "failure").count()).isEqualTo(1);
         assertThat(s.rowsInserted()).isEqualTo(20);
-        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-06")), any(), any());
+        verify(syncService, never()).runForDate(eq(LocalDate.parse("2026-06-06")), any(), any(), any());
 
         // The guard is released however the run ended.
         BackfillRun next = startWhenFree(svc, "2026-06-01", "2026-06-01");
@@ -314,8 +362,8 @@ class DataBackfillServiceTest {
     @Test
     void abortOnLastDayReportsFailed() {
         LocalDate lastDay = LocalDate.parse("2026-06-03");
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(lastDay), any(), any())).thenThrow(new IllegalStateException("boom"));
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(lastDay), any(), any(), any())).thenThrow(new IllegalStateException("boom"));
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -331,9 +379,9 @@ class DataBackfillServiceTest {
 
     @Test
     void namesFailedDatesInOrderOnCompletedRun() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any())).thenReturn(FAIL);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-04")), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-04")), any(), any(), any())).thenReturn(FAIL);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-05");
@@ -346,7 +394,7 @@ class DataBackfillServiceTest {
 
     @Test
     void cleanRunNamesNoFailedDates() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -359,9 +407,9 @@ class DataBackfillServiceTest {
     /** The disk-full day is named with the earlier failure; the unattempted remainder is not. */
     @Test
     void diskFullStopNamesOnlyAttemptedFailedDays() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any())).thenReturn(FAIL);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-04")), any(), any())).thenReturn(DISK_FULL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-04")), any(), any(), any())).thenReturn(DISK_FULL);
         DataBackfillService svc = newService(true, 366);
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-05");
@@ -395,7 +443,7 @@ class DataBackfillServiceTest {
      */
     @Test
     void faultAfterCompletingDayDoesNotCountItTwice() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 366, registryThrowingOn("success"));
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -422,8 +470,8 @@ class DataBackfillServiceTest {
     @Test
     void secondFaultWhileAbortingStillStopsTheRun() {
         LocalDate abortDay = LocalDate.parse("2026-06-02");
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(abortDay), any(), any())).thenThrow(new IllegalStateException("boom"));
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(abortDay), any(), any(), any())).thenThrow(new IllegalStateException("boom"));
         DataBackfillService svc = newService(true, 366, registryThrowingOn("failure"));
 
         BackfillRun run = svc.start("2026-06-01", "2026-06-03");
@@ -454,8 +502,8 @@ class DataBackfillServiceTest {
 
     @Test
     void listsRunsNewestFirstAndFiltersByState() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
-        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any())).thenReturn(FAIL);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(eq(LocalDate.parse("2026-06-02")), any(), any(), any())).thenReturn(FAIL);
         DataBackfillService svc = newService(true, 366);
 
         String first = runToEnd(svc, "2026-06-01");
@@ -475,7 +523,7 @@ class DataBackfillServiceTest {
     void listsTheActiveRunWhileItRuns() throws Exception {
         CountDownLatch dayStarted = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(syncService.runForDate(any(), any(), any())).thenAnswer(invocation -> {
+        when(syncService.runForDate(any(), any(), any(), any())).thenAnswer(invocation -> {
             dayStarted.countDown();
             // Bounded, so a failed assertion before the release cannot wedge the worker until tearDown.
             release.await(10, TimeUnit.SECONDS);
@@ -501,7 +549,7 @@ class DataBackfillServiceTest {
     /** One retention governs both reads: a run evicted from the list is unknown to the by-id read too. */
     @Test
     void evictsTheOldestRunBeyondRetention() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 366);
 
         List<String> started = runsToEnd(svc, DataBackfillService.MAX_RETAINED_RUNS + 1);
@@ -514,7 +562,7 @@ class DataBackfillServiceTest {
     /** At full retention, a refused trigger must not push out the oldest run it never replaced. */
     @Test
     void refusedTriggerAtFullRetentionEvictsNothing() {
-        when(syncService.runForDate(any(), any(), any())).thenReturn(OK);
+        when(syncService.runForDate(any(), any(), any(), any())).thenReturn(OK);
         DataBackfillService svc = newService(true, 366);
         List<String> started = runsToEnd(svc, DataBackfillService.MAX_RETAINED_RUNS);
         svc.shutdown();

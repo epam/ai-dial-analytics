@@ -64,6 +64,7 @@ class BlobPollingServiceTest {
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
     /** Shared by every service a test builds, so a second instance stands for a restarted process. */
     private final InMemoryIngestLedger ledger = new InMemoryIngestLedger();
+    private final InMemoryIngestFailureLedger failureLedger = new InMemoryIngestFailureLedger();
     private Path containerDir;
     private String datePath;
     // The date-directory layout the fixtures and the service under test share; see useDateLayout.
@@ -160,6 +161,43 @@ class BlobPollingServiceTest {
         assertThat(service.watermark()).isAfter(initialWatermark);
         // The corrupt blob is not recorded, so it stays eligible for a retry and for reconciliation.
         assertThat(ledger.recordedKeys()).containsExactly(PATH_PREFIX + "/" + datePath + "/good.log.gz");
+        // ...and its failure is recorded, so the retry sweep and the operator know of it past the overlap window.
+        assertThat(failureLedger.of(IngestFailureKind.BLOB, PATH_PREFIX + "/" + datePath + "/corrupt.log.gz")).singleElement()
+                .satisfies(event -> {
+                    assertThat(event.reason()).isEqualTo(IngestFailureReason.CORRUPT_GZIP);
+                    assertThat(event.path()).isEqualTo("poll");
+                });
+    }
+
+    /**
+     * A blob that keeps failing inside the overlap window is retried every cycle but recorded once, so the poller's
+     * own retries do not use up the attempts the retry sweep's backoff is meant to spend.
+     */
+    @Test
+    void blobThatKeepsFailingIsRecordedOncePerVersion() throws Exception {
+        Instant now = Instant.now();
+        writeRawBlob("corrupt.log.gz", "this is not gzip", now);
+        BlobPollingService service = service(new RecordingWriter());
+
+        service.runOnce();
+        service.runOnce();
+
+        assertThat(failureLedger.of(IngestFailureKind.BLOB, PATH_PREFIX + "/" + datePath + "/corrupt.log.gz")).hasSize(1);
+    }
+
+    /** A blob failure that cannot be recorded fails the cycle, so the watermark holds and the blob is retried. */
+    @Test
+    void blobFailureThatCannotBeRecordedHoldsTheWatermark() throws Exception {
+        Instant now = Instant.now();
+        writeRawBlob("corrupt.log.gz", "this is not gzip", now);
+        failureLedger.failAppends = true;
+        BlobPollingService service = service(new RecordingWriter());
+        Instant initialWatermark = service.watermark();
+
+        BlobPollingService.PollSummary summary = service.runOnce();
+
+        assertThat(summary.success()).isFalse();
+        assertThat(service.watermark()).isEqualTo(initialWatermark);
     }
 
     @Test
@@ -550,7 +588,7 @@ class BlobPollingServiceTest {
                 Duration.ofMinutes(10), "day");
         BlobIngestor ingestor = new BlobIngestor(client, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, flushOrder);
         return new BlobPollingService(client, ingestor, writer, syncProps, pollProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                registry, TestClientSpanTracer.noop(), ledger);
+                registry, TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     /**
@@ -564,7 +602,7 @@ class BlobPollingServiceTest {
                 Duration.ofMinutes(10), "day");
         BlobIngestor ingestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, IngestFlushOrder.NONE);
         return new BlobPollingService(blobClient, ingestor, writer, syncProps, pollProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     private BlobPollingService bandService(UsageLogWriter writer, Duration finalizationLag) {
@@ -574,7 +612,7 @@ class BlobPollingServiceTest {
                 finalizationLag, "band");
         BlobIngestor ingestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets, IngestFlushOrder.NONE);
         return new BlobPollingService(blobClient, ingestor, writer, syncProps, pollProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
     }
 
     /**
