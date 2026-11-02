@@ -41,5 +41,9 @@ public record WidgetRequestDto(
         @Schema(description = "Whether a rise in the figure is good news")
         @JsonProperty("change_direction") ChangeDirection changeDirection,
 
+        @Schema(description = "Any JSON object the client keeps with the widget; stored and returned as sent",
+                type = "object")
+        JsonNode settings,
+
         @Schema(description = "Position on the 12-column grid")
         LayoutRequestDto layout) {}

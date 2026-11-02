@@ -6,13 +6,14 @@ import com.epam.aidial.analytics.service.query.saved.model.SavedQueryTime;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JavaType;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Converts a dashboard's JSON payloads — its widgets and its time intent — between their typed form and
+ * Converts a dashboard's JSON payloads — its widgets, time intent and settings — between their typed form and
  * the text stored in the {@code jsonb} columns, with the <strong>application's</strong> mapper, for the
  * reason {@code SavedQueryJson} gives: an inline structured body depends on Jackson 3 wiring that
  * Hibernate's Jackson 2 mapper cannot see.
@@ -58,6 +59,18 @@ public class DashboardJson {
             return jsonMapper.readValue(json, widgetList);
         } catch (JacksonException e) {
             throw new IllegalStateException("stored dashboard widgets are not readable", e);
+        }
+    }
+
+    /** The stored settings object, or null. */
+    public JsonNode readSettings(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return jsonMapper.readTree(json);
+        } catch (JacksonException e) {
+            throw new IllegalStateException("stored dashboard settings are not readable", e);
         }
     }
 

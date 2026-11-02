@@ -27,6 +27,7 @@ data store. A dashboard SHALL consist of:
 - `compare` — the period comparison: `off`, `previous-period`, `previous-month` or `previous-year`; absent
   means off. These tokens are hyphenated, unlike the service's snake_case tokens, because they are the
   wire form the dashboard client already exchanges;
+- `settings` — optional, any JSON object the client keeps with the dashboard (see **Settings**);
 - `widgets` — a required, ordered array of widgets (see **Widget model**), possibly empty;
 - `generation` — a counter incremented on every mutation, and the concurrency token of **Generation-checked
   replace**;
@@ -100,6 +101,7 @@ A widget SHALL consist of:
   query's own view;
 - `value_column` — optional, the aggregate a single-value widget shows;
 - `change_direction` — optional: `higher_is_better` or `lower_is_better`;
+- `settings` — optional, any JSON object the client keeps with the widget (see **Settings**);
 - `layout` — required `{x, y, w, h}`, integers on a 12-column grid;
 - `title`, `description`, `value_column` and `saved_query_id` — each at most 1000 characters.
 
@@ -116,8 +118,47 @@ and renders the widget.
 
 - **WHEN** a dashboard is created with a widget carrying only `id`, `saved_query_id`, `row_limit` and
   `layout`
-- **THEN** the returned widget has no `view`, `title`, `description`, `value_column` or `change_direction`
-  member, rather than members with a `null` value
+- **THEN** the returned widget has no `view`, `title`, `description`, `value_column`, `change_direction` or
+  `settings` member, rather than members with a `null` value
+
+### Requirement: Settings
+
+A dashboard and each of its widgets MAY carry `settings`: any JSON object the client keeps with it, such as
+display preferences. The system SHALL store a `settings` object as sent and return it unchanged on every
+full read, nested objects, arrays and `null` members within it included, and SHALL NOT interpret it,
+validate its members, or derive any behaviour from it. A `settings` that is absent or `null` SHALL be stored
+as absent and omitted from responses; an empty object SHALL be stored and returned as `{}`.
+
+The system SHALL reject, with `422` and machine code `validation_error` and nothing persisted or modified, a
+`settings` that is not a JSON object (an array, string, number or boolean), and a `settings` whose
+serialized form exceeds 64 KiB, on the dashboard or on any widget; a widget's rejection names the widget.
+A widget's `settings` also counts toward the 1 MiB `widgets` limit.
+
+A replace is whole-document, so a replace that omits `settings` removes them. List items SHALL NOT carry
+`settings`.
+
+#### Scenario: Settings round-trip on the dashboard and on a widget
+
+- **WHEN** a dashboard is created with `settings` of `{"theme":"dark","refresh":{"seconds":60},"note":null}`
+  and a widget whose `settings` is `{"value_format":"currency","currency":"EUR"}`
+- **THEN** reading it back returns both objects unchanged, `note` included with its `null` value
+
+#### Scenario: Settings that are not an object are rejected
+
+- **WHEN** a create request carries a dashboard `settings` of `[]`, or a widget whose `settings` is `"dark"`
+- **THEN** the response is `422` with machine code `validation_error`, the widget's message names the
+  widget, and nothing is persisted
+
+#### Scenario: Oversized settings are rejected
+
+- **WHEN** a create request carries a dashboard or widget `settings` whose serialized form exceeds 64 KiB
+- **THEN** the response is `422` with machine code `validation_error`, and nothing is persisted
+
+#### Scenario: A replace without settings removes them
+
+- **GIVEN** a dashboard whose dashboard and widget both carry `settings`
+- **WHEN** it is replaced with a body that carries no `settings` on either
+- **THEN** reading it back returns no `settings` member on the dashboard or the widget
 
 ### Requirement: Exactly one query source per widget
 
@@ -155,7 +196,9 @@ nothing persisted or modified:
 - more than 100 widgets;
 - a `widgets` array whose serialized form exceeds 1 MiB, so that one dashboard cannot hold 100 bodies each
   at the saved-query body maximum;
-- a `time` that fails the saved-query time-intent rule.
+- a `time` that fails the saved-query time-intent rule;
+- a `settings`, on the dashboard or on a widget, that is not a JSON object or whose serialized form exceeds
+  64 KiB (see **Settings**).
 
 The system SHALL NOT reject overlapping widgets: placement and collision on the grid are the client's
 concern.
@@ -690,14 +733,16 @@ contract:
 
 - `GET /v1/dashboards` — every dashboard the caller may see, `private` and `public` together, most recently
   updated first, as `{ "dashboards": [ ... ], "permissions": { create_private, create_public } }`. Each list item SHALL
-  carry `id`, `name`, `description`, `visibility`, `updated_at` and `permissions`, and no widgets.
+  carry `id`, `name`, `description`, `visibility`, `updated_at` and `permissions`, and no widgets or
+  `settings`.
 - `POST /v1/dashboards` — create; responds `201` with the full dashboard.
 - `GET /v1/dashboards/{id}` — the full dashboard.
 - `PUT /v1/dashboards/{id}` — whole-document replace of the caller-supplied fields; responds `200` with the
   full dashboard. `id`, `owner_id`, `owner_email` and `created_at` SHALL be preserved.
 - `DELETE /v1/dashboards/{id}` — responds `204`.
 
-A member with no value SHALL be omitted from a response rather than emitted as `null`. The number of
+A member with no value SHALL be omitted from a response rather than emitted as `null`; the members inside a
+`settings` object are returned as sent, `null` included. The number of
 dashboards in a list is not bounded by this capability; should it need bounding, it SHALL be bounded by
 paging, not by dropping fields from list items.
 
@@ -715,7 +760,7 @@ query result per dashboard.
 
 - **WHEN** a caller lists dashboards
 - **THEN** each item carries `id`, `name`, `visibility`, `updated_at` and `permissions`, its `description`
-  when it has one, and no `widgets` member
+  when it has one, and no `widgets` or `settings` member
 
 #### Scenario: The list is ordered by most recent update
 

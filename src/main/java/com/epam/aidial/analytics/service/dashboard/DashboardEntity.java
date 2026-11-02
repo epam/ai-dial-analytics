@@ -74,6 +74,11 @@ public class DashboardEntity {
     @Column(name = "comparison")
     private DashboardCompare compare;
 
+    /** The client's free-form dashboard settings as JSON object text, stored as sent, or null. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "settings")
+    private String settings;
+
     /** The ordered widget array as JSON text; see the class comment for why it is one document. */
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "widgets", nullable = false)

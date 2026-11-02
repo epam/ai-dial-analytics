@@ -168,6 +168,7 @@ public class DashboardService {
         entity.setVisibility(dashboard.visibility());
         entity.setTimeIntent(json.write(dashboard.time()));
         entity.setCompare(dashboard.compare());
+        entity.setSettings(json.write(dashboard.settings()));
         entity.setWidgets(json.write(dashboard.widgets()));
         entity.setUpdatedAt(now);
     }

@@ -142,6 +142,57 @@ class DashboardValidatorTest {
                 + "\",")), "'value_column'");
     }
 
+    @Test
+    void keepsAnyObjectAsSettingsOnTheDashboardAndOnEachWidget() {
+        final String dashboardSettings = "{\"theme\":\"dark\",\"refresh\":{\"seconds\":60},\"pinned\":[1,\"a\",null],\"note\":null}";
+        final String widgetSettings = "{\"value_format\":\"currency\",\"currency\":\"EUR\"}";
+        final ValidatedDashboard dashboard = validate("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":"
+                + dashboardSettings + ",\"widgets\":[" + withMembers("\"settings\":" + widgetSettings) + "]}");
+
+        assertThat(dashboard.settings()).isEqualTo(MAPPER.readTree(dashboardSettings));
+        assertThat(dashboard.widgets().getFirst().settings()).isEqualTo(MAPPER.readTree(widgetSettings));
+    }
+
+    @Test
+    void keepsAnEmptySettingsObject() {
+        final ValidatedDashboard dashboard = validate("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":{},"
+                + "\"widgets\":[" + withMembers("\"settings\":{}") + "]}");
+        assertThat(dashboard.settings().isObject()).isTrue();
+        assertThat(dashboard.widgets().getFirst().settings().isEmpty()).isTrue();
+    }
+
+    @Test
+    void treatsAbsentOrNullSettingsAsAbsent() {
+        final ValidatedDashboard absent = validate(dashboard(SQL_WIDGET));
+        assertThat(absent.settings()).isNull();
+        assertThat(absent.widgets().getFirst().settings()).isNull();
+
+        final ValidatedDashboard explicitNull = validate("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":null,"
+                + "\"widgets\":[" + withMembers("\"settings\":null") + "]}");
+        assertThat(explicitNull.settings()).isNull();
+        assertThat(explicitNull.widgets().getFirst().settings()).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "[{}]", "\"dark\"", "1", "true"})
+    void rejectsSettingsThatIsNotAnObject(String settings) {
+        assertRejected("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":" + settings + ",\"widgets\":[]}",
+                "'settings'");
+        assertRejected(dashboard(withMembers("\"settings\":" + settings)), "widget w1: 'settings'");
+    }
+
+    @Test
+    void rejectsSettingsOverTheMaximum() {
+        final String atMaximum = settingsOfSize(DashboardValidator.MAX_SETTINGS_BYTES);
+        final String overMaximum = settingsOfSize(DashboardValidator.MAX_SETTINGS_BYTES + 1);
+
+        assertThatCode(() -> validate("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":" + atMaximum
+                + ",\"widgets\":[" + withMembers("\"settings\":" + atMaximum) + "]}")).doesNotThrowAnyException();
+        assertRejected("{\"name\":\"Weekly\",\"visibility\":\"private\",\"settings\":" + overMaximum + ",\"widgets\":[]}",
+                "'settings'");
+        assertRejected(dashboard(withMembers("\"settings\":" + overMaximum)), "widget w1: 'settings'");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"1", "1000"})
     void acceptsTheRowLimitBounds(String rowLimit) {
@@ -284,6 +335,16 @@ class DashboardValidatorTest {
         return IntStream.range(0, count)
                 .mapToObj(i -> SQL_WIDGET.replace("\"w1\"", "\"w" + i + "\""))
                 .collect(Collectors.joining(","));
+    }
+
+    private static String withMembers(String members) {
+        return SQL_WIDGET.replace("{\"id\":\"w1\",", "{\"id\":\"w1\"," + members + ",");
+    }
+
+    /** A settings object whose compact serialization is exactly {@code bytes} long. */
+    private static String settingsOfSize(int bytes) {
+        final String frame = "{\"k\":\"\"}";
+        return "{\"k\":\"" + "x".repeat(bytes - frame.length()) + "\"}";
     }
 
     private static String layout(String layout) {

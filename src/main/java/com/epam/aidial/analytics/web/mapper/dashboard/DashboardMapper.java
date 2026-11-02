@@ -34,6 +34,7 @@ public class DashboardMapper {
                 entity.getOwnerEmail(),
                 json.readTime(entity.getTimeIntent()),
                 entity.getCompare(),
+                json.readSettings(entity.getSettings()),
                 json.readWidgets(entity.getWidgets()),
                 entity.getGeneration(),
                 entity.getCreatedAt(),

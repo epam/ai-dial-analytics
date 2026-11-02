@@ -38,6 +38,10 @@ public record DashboardRequestDto(
         @Schema(description = "Period comparison: off, previous-period, previous-month or previous-year")
         DashboardCompare compare,
 
+        @Schema(description = "Any JSON object the client keeps with the dashboard; stored and returned as sent",
+                type = "object")
+        JsonNode settings,
+
         @Schema(description = "The ordered widgets; required, possibly empty, at most 100")
         @Valid List<WidgetRequestDto> widgets,
 

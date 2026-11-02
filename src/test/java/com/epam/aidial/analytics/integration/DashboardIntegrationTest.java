@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.service.audit.ActivityResourceType;
 import com.epam.aidial.analytics.service.audit.ActivityType;
 import com.epam.aidial.analytics.service.audit.AuditActivityEntity;
@@ -22,6 +23,8 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -55,10 +58,13 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
 
     private static final String BASE = "/v1/dashboards";
 
+    private static final JsonMapper MAPPER = new JsonMapperConfiguration().jsonMapper();
+
     /** A structured inline widget carrying every widget member. */
     private static final String QUERY_WIDGET = """
             {"id":"w1","title":"Chats","description":"Per project","row_limit":100,"view":"time_series",
-             "value_column":"total","change_direction":"higher_is_better","layout":{"x":0,"y":0,"w":6,"h":4},
+             "value_column":"total","change_direction":"higher_is_better",
+             "settings":{"value_format":"currency","currency":"EUR","thresholds":[10,20.5],"legend":null},"layout":{"x":0,"y":0,"w":6,"h":4},
              "inline_query":{"name":"Chats by project",
                "query":{"entity":"dial_usage_log","mode":"row","select":[{"expr":{"type":"field","name":"project_id"}}]},
                "result_view":"chart","chart":{"type":"bar","x_field":"project_id"}}}""";
@@ -134,6 +140,8 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.widgets[0].view").value("time_series"))
                 .andExpect(jsonPath("$.widgets[0].value_column").value("total"))
                 .andExpect(jsonPath("$.widgets[0].change_direction").value("higher_is_better"))
+                .andExpect(jsonPath("$.widgets[0].settings.value_format").value("currency"))
+                .andExpect(jsonPath("$.widgets[0].settings.thresholds[1]").value(20.5))
                 .andExpect(jsonPath("$.widgets[0].layout.w").value(6))
                 .andExpect(jsonPath("$.widgets[0].inline_query.name").value("Chats by project"))
                 .andExpect(jsonPath("$.widgets[0].inline_query.query.entity").value("dial_usage_log"))
@@ -152,6 +160,8 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.widgets[0].title").doesNotExist())
                 .andExpect(jsonPath("$.widgets[0].view").doesNotExist())
                 .andExpect(jsonPath("$.widgets[0].change_direction").doesNotExist())
+                .andExpect(jsonPath("$.settings").doesNotExist())
+                .andExpect(jsonPath("$.widgets[0].settings").doesNotExist())
                 .andExpect(jsonPath("$.widgets[0].saved_query_id").doesNotExist())
                 .andExpect(jsonPath("$.widgets[0].inline_query.result_view").value("table"));
     }
@@ -180,7 +190,7 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     @Test
     void listsItemsWithoutWidgetsMostRecentlyUpdatedFirst() throws Exception {
         final String older = create(body("List older", "private", SQL_WIDGET));
-        final String newer = create(body("List newer", "public", SQL_WIDGET, "\"description\":\"Shown\""));
+        final String newer = create(body("List newer", "public", SQL_WIDGET, "\"description\":\"Shown\",\"settings\":{\"theme\":\"dark\"}"));
 
         mockMvc.perform(get(BASE))
                 .andExpect(status().isOk())
@@ -188,6 +198,7 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.permissions.create_public").value(true))
                 .andExpect(jsonPath("$.dashboards[?(@.id=='" + newer + "')].description").value("Shown"))
                 .andExpect(jsonPath("$.dashboards[?(@.id=='" + newer + "')].widgets").isEmpty())
+                .andExpect(jsonPath("$.dashboards[?(@.id=='" + newer + "')].settings").isEmpty())
                 .andExpect(jsonPath("$.dashboards[?(@.id=='" + older + "')].description").isEmpty())
                 .andExpect(jsonPath("$.dashboards[?(@.id=='" + older + "')].permissions.write").value(true));
 
@@ -524,7 +535,39 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     void theAuditMirrorDoesNotCarryTheGeneration() {
         final List<String> columns = jdbc.queryForList(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = 'dashboard_aud'", String.class);
-        assertThat(columns).contains("widgets", "visibility").doesNotContain("generation");
+        assertThat(columns).contains("widgets", "visibility", "settings").doesNotContain("generation");
+    }
+
+    @Test
+    void storesAndReturnsAnySettingsObjectAsSentOnBothLevels() throws Exception {
+        final String settings = "{\"theme\":\"dark\",\"refresh\":{\"seconds\":60},\"pinned\":[1,\"a\",null],\"note\":null}";
+        final String id = create(body("Configured", "private", QUERY_WIDGET, "\"settings\":" + settings));
+
+        final String read = mockMvc.perform(get(BASE + "/" + id)).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        // Compared as trees after a strict parse: jsonPath alone cannot tell a null member from an absent one.
+        final JsonNode body = MAPPER.readTree(read);
+        assertThat(body.get("settings")).isEqualTo(MAPPER.readTree(settings));
+        assertThat(body.get("widgets").get(0).get("settings")).isEqualTo(MAPPER.readTree(
+                "{\"value_format\":\"currency\",\"currency\":\"EUR\",\"thresholds\":[10,20.5],\"legend\":null}"));
+
+        // A replace is whole-document: settings left out are settings removed.
+        replace(id, body("Configured", "private", SQL_WIDGET), generationOf(id));
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(jsonPath("$.settings").doesNotExist())
+                .andExpect(jsonPath("$.widgets[0].settings").doesNotExist());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "\"dark\"", "1"})
+    void rejectsSettingsThatIsNotAnObject(String settings) throws Exception {
+        mockMvc.perform(json(post(BASE)).content(body("Not an object", "private", "", "\"settings\":" + settings)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
+        final String widget = SQL_WIDGET.replace("\"row_limit\":10", "\"settings\":" + settings + ",\"row_limit\":10");
+        mockMvc.perform(json(post(BASE)).content(body("Not an object", "private", widget)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(startsWith("widget w2: ")));
     }
 
     // ---------------------------------------------------------------- helpers

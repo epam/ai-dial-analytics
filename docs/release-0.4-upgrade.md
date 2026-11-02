@@ -148,6 +148,7 @@ then read only the days the value occurs on instead of all of history.
 | Postgres `V48` | Drops the evaluator archive (`evaluator`, `evaluator_version`), `pipeline.evaluator_name` / `evaluator_version` and their `pipeline_aud` mirrors, and `rule_legacy` / `rule_legacy_aud`. Keeps `pipeline.legacy_rule_id`, which 0.3 still maps; the next release drops it. |
 | Postgres `V50` | Registers `request_cache_control` on `dial_usage_log_payload`, sensitive and heavy, and extends the seeded `request_body` description. |
 | Postgres `V51` | Adds `dashboard` and its audit mirror `dashboard_aud`, for the new `/v1/dashboards` API. Both start empty. |
+| Postgres `V52` | Adds the nullable `settings` column to `dashboard` and `dashboard_aud`. |
 
 The relayout itself is runtime DDL, not a migration: it runs after startup, off the probe path.
 

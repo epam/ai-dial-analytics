@@ -7,6 +7,7 @@ import com.epam.aidial.analytics.service.dashboard.model.DashboardWidget;
 import com.epam.aidial.analytics.service.query.saved.model.SavedQueryTime;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
+import tools.jackson.databind.JsonNode;
 
 import java.time.Instant;
 import java.util.List;
@@ -39,6 +40,9 @@ public record DashboardDto(
 
         @Schema(description = "Period comparison, returned as sent; absent means off")
         DashboardCompare compare,
+
+        @Schema(description = "The client's free-form dashboard settings, returned as sent", type = "object")
+        JsonNode settings,
 
         List<DashboardWidget> widgets,
 

@@ -49,6 +49,13 @@ public class DashboardValidator {
      */
     static final int MAX_WIDGETS_BYTES = 1024 * 1024;
 
+    /**
+     * The largest serialized {@code settings} object, in bytes, on the dashboard and on each widget. The
+     * service never reads settings, so the cap only keeps one row, and each audit revision of it, bounded;
+     * widget settings also count toward {@link #MAX_WIDGETS_BYTES}.
+     */
+    static final int MAX_SETTINGS_BYTES = 64 * 1024;
+
     /** The grid's width in columns. */
     static final int GRID_COLUMNS = 12;
 
@@ -80,13 +87,32 @@ public class DashboardValidator {
             throw new DashboardValidationException("'visibility' is required: 'private' or 'public'");
         }
         final SavedQueryTime time = timeIntent(request.time());
+        final JsonNode settings = settings(request.settings(), "");
         final List<DashboardWidget> widgets = widgets(request.widgets());
         if (json.serializedSize(widgets) > MAX_WIDGETS_BYTES) {
             throw new DashboardValidationException(
                     "the widgets are over the " + MAX_WIDGETS_BYTES + "-byte maximum for one dashboard");
         }
         return new ValidatedDashboard(
-                name, request.description(), request.visibility(), time, request.compare(), widgets);
+                name, request.description(), request.visibility(), time, request.compare(), settings, widgets);
+    }
+
+    /**
+     * Settings are opaque to the service: any JSON object, stored and returned as sent, with only its shape
+     * and size checked. An explicit {@code null} counts as absent.
+     */
+    private JsonNode settings(JsonNode settings, String prefix) {
+        if (settings == null || settings.isNull()) {
+            return null;
+        }
+        if (!settings.isObject()) {
+            throw new DashboardValidationException(prefix + "'settings' must be a JSON object");
+        }
+        if (json.serializedSize(settings) > MAX_SETTINGS_BYTES) {
+            throw new DashboardValidationException(
+                    prefix + "'settings' is over the " + MAX_SETTINGS_BYTES + "-byte maximum");
+        }
+        return settings;
     }
 
     /**
@@ -174,8 +200,9 @@ public class DashboardValidator {
         final int rowLimit = rowLimit(widget.rowLimit(), prefix);
         final WidgetLayout layout = layout(widget.layout(), prefix);
         final InlineQuery inline = widget.inlineQuery() == null ? null : inlineQuery(widget.inlineQuery(), prefix);
+        final JsonNode settings = settings(widget.settings(), prefix);
         return new DashboardWidget(id, savedQueryId, inline, widget.title(), widget.description(), rowLimit,
-                widget.view(), widget.valueColumn(), widget.changeDirection(), layout);
+                widget.view(), widget.valueColumn(), widget.changeDirection(), settings, layout);
     }
 
     private static int rowLimit(JsonNode node, String prefix) {

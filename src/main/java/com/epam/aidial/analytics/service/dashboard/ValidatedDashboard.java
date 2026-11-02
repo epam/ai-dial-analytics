@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.dashboard;
 
 import com.epam.aidial.analytics.service.dashboard.model.DashboardWidget;
 import com.epam.aidial.analytics.service.query.saved.model.SavedQueryTime;
+import tools.jackson.databind.JsonNode;
 
 import java.util.List;
 
@@ -16,4 +17,5 @@ public record ValidatedDashboard(
         DashboardVisibility visibility,
         SavedQueryTime time,
         DashboardCompare compare,
+        JsonNode settings,
         List<DashboardWidget> widgets) {}
