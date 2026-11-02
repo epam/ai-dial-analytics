@@ -21,7 +21,10 @@ import java.util.UUID;
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
  * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do. Each query
- * runs under {@code max_execution_time}, so a lookup never stalls ingest for long.
+ * runs under {@code max_execution_time}. The bound is per query, not per lookup: a flush asks about at most
+ * {@code RequestDeltaEncoder.MAX_TABLE_CANDIDATES} paths in chunks of {@link #CHUNK}, so its lookup can take up to
+ * about 17 times {@link #TIMEOUT_SECONDS}. A query that times out ends the lookup, and its requests are stored as chain
+ * roots.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
 
@@ -29,8 +32,9 @@ public final class ClickHouseParentLookup implements ParentLookup {
     static final int CHUNK = 1000;
 
     /**
-     * Server-side bound on one lookup query. Ingest flushes one batch at a time, so a slow lookup would hold up every
-     * flush behind it; one that times out fails like any other lookup, and its requests are stored as chain roots.
+     * Server-side bound on one lookup query, not on the whole lookup of a flush, which sends one query per chunk.
+     * Ingest flushes one batch at a time, so a slow lookup holds up every flush behind it; a query that times out
+     * fails the lookup like any other error, and its requests are stored as chain roots.
      */
     static final int TIMEOUT_SECONDS = 10;
 

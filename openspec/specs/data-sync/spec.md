@@ -3258,11 +3258,14 @@ body that is not a chat request is (see "A request body that is not a chat reque
 of different tenants never share a chain. One of the two is enough for a scope; API-key traffic, which carries a
 project and no user, chains within its project.
 
-A rebuild reads only rows whose path equals a prefix of the rebuilt row's own history, so everything it reads is
-content the rebuilt request itself carried; it never discloses another request's content. It does need every row of
-the chain, and a chain MAY span rows that differ in anything outside the scope and the history, deployment
-included. A surface that rebuilds bodies SHALL read the chain under the reader's own access, and SHALL report a row
-whose chain it cannot read in full as incomplete rather than fail the read or widen the reader's access.
+A rebuild reads only rows whose path equals a prefix of the rebuilt row's own history, and takes from them only
+their history elements, system keys and `tools`, which the prefix hashes prove equal to the rebuilt request's own. A
+rebuilt body therefore never carries another request's content, though the rows read to assemble it hold their own
+top-level members (`model`, sampling parameters) and cache markers, which a rebuilding surface SHALL NOT return. A
+rebuild does need every row of the chain, and a chain MAY span rows that differ in anything outside the scope and the
+history, deployment included. A surface that rebuilds bodies SHALL read the chain under the reader's own access, and
+SHALL report a row whose chain it cannot read in full as incomplete rather than fail the read or widen the reader's
+access.
 
 Parent resolution SHALL consider, in order: earlier chat requests of the same flush (ordered by
 `request_time`), paths this service instance has already written successfully on the current or the previous UTC

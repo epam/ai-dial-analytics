@@ -60,8 +60,10 @@ another scope or day cannot match.
 - Deployment is left out of the scope: a user switching deployment mid-conversation keeps one chain. The client session
   is left out too: it is client-supplied, may be absent, change or vanish mid-conversation, and in the scope would
   only cut links.
-- A rebuild reads only rows whose path is a prefix of the rebuilt row's own history, so it never reads content the
-  rebuilt request did not carry. Row access still matters for availability: a reader denied a chain row (a row policy
+- A rebuild reads only rows whose path is a prefix of the rebuilt row's own history, and takes from them only the
+  history, system keys and tools, which the hashes prove equal to the rebuilt request's own: a rebuilt body never
+  carries another request's content, though the rows it reads hold their own `model`, parameters and markers, which
+  are not returned. Row access still matters for availability: a reader denied a chain row (a row policy
   narrowing by deployment, say) cannot complete that rebuild. A rebuilding surface reads under the reader's own access
   and reports such a row as incomplete, never widening access and never failing the read.
 - `H` is SHA-256 truncated to 128 bits, from the JDK, so there's no new dependency. A collision would need

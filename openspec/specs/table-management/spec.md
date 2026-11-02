@@ -2789,8 +2789,8 @@ its new history and a parent link"), under the qualified name `"dial_usage_log_p
 It SHALL be added by a later catalog migration as a new `column_mapping` row of type `string`, `nullable`,
 `sensitive` and `heavy`, with a description, placed after the existing columns; for a row whose request body is
 stored whole it reads as `NULL`. The same migration SHALL extend the seeded description of `request_body` to say
-that a chat request in delta form carries only its new history, replacing it only while it is still the seeded
-text.
+that under delta storage a chat request is re-serialized without its history's `cache_control` markers and carries
+only its new history, replacing it only while it is still the seeded text.
 
 **BREAKING**: those five columns SHALL NOT be exposed as columns of `dial_usage_log`. A query naming
 any of them as a bare field of `dial_usage_log` SHALL be rejected as an unknown field, exactly as any

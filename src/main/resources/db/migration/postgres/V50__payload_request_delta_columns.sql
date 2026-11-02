@@ -14,7 +14,9 @@ VALUES ('dial_usage_log_payload', 'request_cache_control', 'request_cache_contro
 -- request_body keeps its name and meaning for a body stored whole; only the seeded description is replaced, so a
 -- description an operator has edited since stays as it is.
 UPDATE column_mapping
-   SET description = 'Raw request body payload. A chat request stored in delta form carries only the history '
-                         || 'elements its parent request did not have, and leaves out the tools it shares with it.'
+   SET description = 'Raw request body payload. Under delta storage a chat request is re-serialized (keys sorted, no '
+                         || 'whitespace) without the cache_control markers of its history, carries only the history '
+                         || 'elements its parent request did not have, and leaves out the system keys and tools it '
+                         || 'shares with it.'
  WHERE table_name = 'dial_usage_log_payload' AND source_name = 'request_body'
    AND description = 'Raw request body payload.';
