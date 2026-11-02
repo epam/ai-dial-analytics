@@ -222,8 +222,9 @@ public class MaterializeService {
         String grainKey = requireNotBlank(resolved.grainKey(), "pipeline '" + pipelineName + "' target has no grain key");
         String target = declaration.target();
         // Read once, up front: every mark written below is qualified by the generation the pipeline had when
-        // this call started, so a mutation racing this materialize invalidates the mark it produces rather
-        // than being recorded as if it had applied to the new definition.
+        // this call started, so a re-declaration racing this materialize invalidates the mark it produces rather
+        // than being recorded as if it had applied to the new definition. A disable racing it does not: it
+        // keeps the generation, and the rows were written under the unchanged declaration, so the mark stands.
         long generation = declaration.generation();
 
         CursorColumns cursorColumns = scanSources.cursorColumns(source);

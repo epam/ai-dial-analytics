@@ -50,8 +50,9 @@ import java.util.stream.Collectors;
  * Manages the pipeline registry — one registry for both kinds: CRUD, the listing that also serves as the
  * Enrichment Runner's sync feed, and the enable/disable gate. Every mutation runs the gate its
  * {@code kind} selects when it leaves the pipeline armed — a disabled pipeline is a draft, and its gate runs
- * when it is armed or previewed — and bumps {@code generation}, which is what a change-detecting consumer
- * diffs.
+ * when it is armed or previewed — and moves {@code updated_at}. Only a change to the declaration bumps
+ * {@code generation}, which is what a change-detecting consumer diffs; {@code enabled} is the run control,
+ * not part of the declaration, so a stop or restart alone keeps it.
  *
  * <p>A pipeline's {@code name} is its identity, is immutable, and takes the identity grammar rather than
  * the catalog's identifier grammar — see {@link Identifiers#requirePipelineName}.
@@ -298,13 +299,20 @@ public class PipelineService implements PipelineTargetCascade {
                 // else, the declaration did change and the generation must say so: the runner keys its
                 // compiled form and queued work on it. Compared through the codec on both sides, since the
                 // stored text is jsonb's normalized form rather than the mapper's.
+                //
+                // Except for a Class-1 (`sql`) enrich pipeline, by the rule PipelineGenerationService
+                // #onTargetColumnsChanged applies to the same re-derivation: the runner never executes it, ADAS
+                // re-resolves it on every materialize call, and a bump would void its materialized position and
+                // clamp every dependent rollup to zero rows until the next materialize. The re-derived mapping
+                // is still stored.
                 if (!validated) {
                     requireArmableTrigger(pipeline);
                     final PipelineSpec stored = specCodec.read(pipeline);
                     final String storedJson = specCodec.write(stored);
                     validateAndStore(pipeline, stored, true, false);
-                    if (!storedJson.equals(pipeline.getSpec())
-                            || !Objects.equals(inputBefore, pipeline.getInputTable())) {
+                    if ((!storedJson.equals(pipeline.getSpec())
+                            || !Objects.equals(inputBefore, pipeline.getInputTable()))
+                            && !isClass1Enrich(pipeline, stored)) {
                         revised = true;
                         actions.add("re-derive");
                     }
@@ -426,8 +434,11 @@ public class PipelineService implements PipelineTargetCascade {
      * Every filter is optional and they apply together; narrowing on one and silently dropping another
      * would return rows the caller did not ask for and look like data rather than a mistake.
      *
-     * <p>The feed asks for {@link PipelineEnabledFilter#ENABLED} and {@code kind=enrich}: a runner must
-     * never be handed a pipeline an operator switched off. An operator listing widens it.
+     * <p>The runner's feed is {@code kind=enrich} with <b>no</b> {@code enabled} filter, on purpose:
+     * {@code enabled} is the pipeline's run control, and the runner has to tell a stopped pipeline (served
+     * with {@code enabled: false}; its held work is kept) from a deleted one (absent). Filtering on
+     * {@link PipelineEnabledFilter#ENABLED} would make the two indistinguishable. The runner executes only
+     * entries carrying {@code enabled: true}, and the write paths refuse a disabled pipeline as the backstop.
      *
      * <p>One ordering for every listing — {@code updated_at ASC, name ASC} — decided in the repository
      * rather than here, so a consumer's ordering guarantee does not depend on which filters it passed.
@@ -1058,6 +1069,19 @@ public class PipelineService implements PipelineTargetCascade {
                     + " /v1/pipelines/" + pipeline.getName() + "?view=source returns them); to start the"
                     + " declaration over, delete and re-register the pipeline");
         }
+    }
+
+    /**
+     * Whether this is an {@code enrich} pipeline whose transform is not {@code llm} — a Class-1 pipeline ADAS
+     * materializes itself, re-resolving its declaration on every call, so no consumer keys queued work on its
+     * {@code generation}.
+     */
+    private static boolean isClass1Enrich(PipelineEntity pipeline, PipelineSpec spec) {
+        return pipeline.getKind() == PipelineKind.ENRICH
+                && spec instanceof EnrichSpec enrich
+                && enrich.getTransform() != null
+                && enrich.getTransform().getType() != null
+                && enrich.getTransform().getType() != TransformType.LLM;
     }
 
     /**

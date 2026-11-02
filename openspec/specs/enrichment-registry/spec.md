@@ -768,8 +768,9 @@ The system SHALL manage pipelines via `POST /v1/pipelines`, `PATCH /v1/pipelines
 `sample_fraction`). The pipeline's **grain SHALL be derived** from the target enrichment's
 `grain` and SHALL NOT be re-declared on the pipeline. The pipeline's **read source MAY be declared** as
 its `inputs` entry and SHALL default to the target enrichment's `source_table` when omitted (see "A
-pipeline's read source is declarable"). Each mutating pipeline operation SHALL bump a `generation`
-counter and `updated_at`. An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
+pipeline's read source is declarable"). Each accepted re-declaration SHALL bump a `generation` counter;
+every accepted mutation, including a change of `enabled` alone, SHALL move `updated_at` (see
+[pipeline-registry](../pipeline-registry/spec.md), "A pipeline has exactly one run control"). An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
 
 **The transform SHALL be one nested block, `transform`**, stored in the pipeline's `spec`, carrying
 `type` (`llm` or `sql`), `model`, `preset`, `params`, `request_template`, `inputs` and `outputs`. It SHALL be
@@ -1534,8 +1535,13 @@ it — since the unfiltered listing carries disabled pipelines, including ones t
 so never passed the declaration gate. The write paths' refusal of a disabled pipeline (see
 [enrichment-runtime](../enrichment-runtime/spec.md), "A disabled pipeline's write paths refuse") stays
 the backstop for a consumer that does not. A pipeline **absent** from the unfiltered listing is either
-deleted or not servable — an incomplete declaration, or one the omission rules above withhold — and a
-consumer SHALL NOT run it.
+deleted or not servable — an incomplete declaration, or one the omission rules above withhold, which
+apply to a stopped pipeline as to an enabled one — and a consumer SHALL NOT run it. **Absence alone is
+not deletion**: a stopped draft that drifts (a patch, or a target column change its mapping does not
+re-derive against) drops out of the listing exactly as a deleted pipeline does, and so can an enabled
+pipeline that becomes unservable. A consumer SHALL therefore discard an absent pipeline's held work only
+once `GET /v1/pipelines/{name}` answers HTTP 404 `unknown_pipeline`, and SHALL otherwise keep that work
+held until the pipeline returns to the listing.
 
 The `inputs` entry the feed reports SHALL be the table the runner is to scan — the pipeline's
 declared read source when it has one, otherwise the target enrichment's `source_table` — so a runner
@@ -1583,6 +1589,14 @@ microseconds, which is what the column holds.
 - **WHEN** `GET /v1/pipelines?kind=enrich&view=compiled` is called
 - **THEN** the disabled pipeline is returned with `enabled: false` and its full resolved entry, and the
   deleted one is absent
+
+#### Scenario: A pipeline absent from the feed is deleted only on a 404
+
+- **GIVEN** a stopped `enrich` pipeline with held work whose declaration a patch has left incomplete
+- **WHEN** `GET /v1/pipelines?kind=enrich&view=compiled` is called
+- **THEN** the pipeline is absent, and `GET /v1/pipelines/{name}` still answers 200
+- **THEN** a consumer keeps its held work rather than discarding it as it does for a pipeline that
+  answers 404 `unknown_pipeline`
 
 #### Scenario: The listing narrows to enabled pipelines
 
