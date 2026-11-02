@@ -138,7 +138,8 @@ public class DashboardService {
             throw new DashboardValidationException("'generation' must be an integer");
         }
         if (generation.longValue() != entity.getGeneration()) {
-            // The current generation is deliberately not named: a publish-only caller cannot read it.
+            // The current generation is not named: the caller must re-read the dashboard to reapply its change
+            // against the current content, not just retry with a fresher number.
             throw new DashboardConflictException("dashboard '" + entity.getId() + "' has changed since generation "
                     + generation.longValue() + "; read it again and reapply your change");
         }

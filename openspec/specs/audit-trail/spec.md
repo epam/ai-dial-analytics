@@ -890,19 +890,18 @@ A saved query's own reads are owner-scoped: a `common`-scope saved query is visi
 holding `SAVED_QUERY_READ`, while a `personal`-scope saved query is visible only to its owner
 (`SavedQueryRepository.findVisible`), with `common` readable by any caller holding `SAVED_QUERY_READ`.
 The activity feed and the saved query snapshot endpoint SHALL
-apply the same rule to `SavedQuery` resource type activities and snapshots: visible to a
-`SAVED_QUERY_PUBLISH` holder unconditionally, to any caller when the saved query's current scope is
-`common`, and otherwise only to the caller recorded as the saved query's owner. `SAVED_QUERY_PUBLISH`
-is the curator authority over shared definitions, and it reproduces today's unconditional bar exactly:
-the `FULL_ADMIN` bundle holds it and `READ_ONLY_ADMIN` does not. This is content narrowing within
-an otherwise-successful feed response, not a denial.
+apply the same rule to `SavedQuery` resource type activities and snapshots: visible to any caller when
+the saved query's current scope is `common`, and otherwise only to the caller recorded as the saved
+query's owner. No privilege SHALL widen it, `SAVED_QUERY_PUBLISH` and the `FULL_ADMIN` bundle included:
+a `personal` saved query is its owner's alone. This is content narrowing within an otherwise-successful
+feed response, not a denial.
 
 This visibility is resolved against the saved query's **current** stored state. A saved query that
 has since been deleted has no current state to resolve ownership or scope from, so its historical
-activity and snapshot SHALL be visible to a `SAVED_QUERY_PUBLISH` holder only — including to the
-caller who was its owner before deletion. This is a deliberate, stated narrowing: reconstructing
-whom a deleted saved query was visible to at each point in its history is out of scope for this
-capability.
+activity and snapshot SHALL be visible to no caller in `oidc` mode — including the caller who was its
+owner before deletion, and whatever its scope was. This is a deliberate, stated narrowing:
+reconstructing whom a deleted saved query was visible to at each point in its history is out of scope
+for this capability.
 
 #### Scenario: Read-only admin sees pipeline activities in the feed
 
@@ -949,8 +948,9 @@ capability.
 
 #### Scenario: A non-owner does not see another caller's personal saved query activity
 
-- **WHEN** an authenticated caller holding the read-only catalog role, who is not the owner of a
-  `personal`-scope saved query, requests the activity feed filtered to that saved query's resource id
+- **WHEN** an authenticated caller holding `AUDIT_READ`, who is not the owner of a `personal`-scope saved
+  query, requests the activity feed filtered to that saved query's resource id — whatever else it holds,
+  the full administrative role included
 - **THEN** the feed is returned successfully with that saved query's activity absent from it
 
 #### Scenario: Any role-holding caller sees a common saved query's activity
@@ -959,12 +959,11 @@ capability.
   filtered to a `common`-scope saved query's resource id
 - **THEN** the feed returns that saved query's activity
 
-#### Scenario: A deleted saved query's activity is visible only to full admin
+#### Scenario: A deleted saved query's activity is visible to no one
 
-- **WHEN** a `personal`-scope saved query is deleted and its former owner, holding `AUDIT_READ` but not
-  `SAVED_QUERY_PUBLISH`, requests the activity feed filtered to that saved query's resource id
-- **THEN** the feed is returned successfully with that saved query's activity absent from it, and is
-  present only when the caller holds `SAVED_QUERY_PUBLISH`
+- **WHEN** a saved query of either scope is deleted and any caller holding `AUDIT_READ` — its former owner
+  or a holder of every privilege — requests the activity feed filtered to that saved query's resource id
+- **THEN** the feed is returned successfully with that saved query's activity absent from it
 
 ### Requirement: Dashboard activities have no parent and no snapshot endpoint
 
@@ -999,10 +998,10 @@ state, but no snapshot endpoint for `Dashboard` is exposed.
 ### Requirement: Dashboard activities are narrowed by dashboard visibility
 
 `Dashboard` resource type activities SHALL be narrowed exactly as `SavedQuery` activities are, in the
-activity feed and in single-activity retrieval: visible to a `SAVED_QUERY_PUBLISH` holder unconditionally,
-to any caller holding `AUDIT_READ` when the dashboard's **current** visibility is `public`, and otherwise
-only to the caller recorded as the dashboard's owner. A dashboard that has since been deleted SHALL have
-its activities visible to a `SAVED_QUERY_PUBLISH` holder only, including to its former owner. This is
+activity feed and in single-activity retrieval: visible to any caller holding `AUDIT_READ` when the
+dashboard's **current** visibility is `public`, and otherwise only to the caller recorded as the
+dashboard's owner, whatever privileges another caller holds. A dashboard that has since been deleted SHALL
+have its activities visible to no caller in `oidc` mode, including its former owner. This is
 content narrowing within an otherwise-successful response, not a denial: a single `Dashboard` activity the
 caller may not see SHALL be answered as an activity that does not exist.
 
@@ -1018,8 +1017,9 @@ query's.
 
 #### Scenario: A non-owner does not see another caller's private dashboard activity
 
-- **WHEN** a caller holding `AUDIT_READ` but not `SAVED_QUERY_PUBLISH`, who is not the owner of a
-  `private` dashboard, requests the activity feed filtered to that dashboard's resource id
+- **WHEN** a caller holding `AUDIT_READ`, who is not the owner of a `private` dashboard, requests the
+  activity feed filtered to that dashboard's resource id — whatever else it holds, the full
+  administrative role included
 - **THEN** the feed is returned successfully with that dashboard's activity absent from it
 
 #### Scenario: A public dashboard's activity is visible to any audit reader
@@ -1028,9 +1028,8 @@ query's.
   resource id
 - **THEN** the feed returns that dashboard's activity
 
-#### Scenario: A deleted dashboard's activity is visible only to a publisher
+#### Scenario: A deleted dashboard's activity is visible to no one
 
-- **WHEN** a `private` dashboard is deleted and its former owner, holding `AUDIT_READ` but not
-  `SAVED_QUERY_PUBLISH`, requests the activity feed filtered to its resource id
-- **THEN** the feed is returned successfully with that activity absent from it, and is present only when
-  the caller holds `SAVED_QUERY_PUBLISH`
+- **WHEN** a dashboard of either visibility is deleted and any caller holding `AUDIT_READ` — its former
+  owner or a holder of every privilege — requests the activity feed filtered to its resource id
+- **THEN** the feed is returned successfully with that activity absent from it

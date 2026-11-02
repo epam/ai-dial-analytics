@@ -33,10 +33,10 @@ state, but no snapshot endpoint for `Dashboard` is exposed.
 ### Requirement: Dashboard activities are narrowed by dashboard visibility
 
 `Dashboard` resource type activities SHALL be narrowed exactly as `SavedQuery` activities are, in the
-activity feed and in single-activity retrieval: visible to a `SAVED_QUERY_PUBLISH` holder unconditionally,
-to any caller holding `AUDIT_READ` when the dashboard's **current** visibility is `public`, and otherwise
-only to the caller recorded as the dashboard's owner. A dashboard that has since been deleted SHALL have
-its activities visible to a `SAVED_QUERY_PUBLISH` holder only, including to its former owner. This is
+activity feed and in single-activity retrieval: visible to any caller holding `AUDIT_READ` when the
+dashboard's **current** visibility is `public`, and otherwise only to the caller recorded as the
+dashboard's owner, whatever privileges another caller holds. A dashboard that has since been deleted SHALL
+have its activities visible to no caller in `oidc` mode, including its former owner. This is
 content narrowing within an otherwise-successful response, not a denial: a single `Dashboard` activity the
 caller may not see SHALL be answered as an activity that does not exist.
 
@@ -52,8 +52,9 @@ query's.
 
 #### Scenario: A non-owner does not see another caller's private dashboard activity
 
-- **WHEN** a caller holding `AUDIT_READ` but not `SAVED_QUERY_PUBLISH`, who is not the owner of a
-  `private` dashboard, requests the activity feed filtered to that dashboard's resource id
+- **WHEN** a caller holding `AUDIT_READ`, who is not the owner of a `private` dashboard, requests the
+  activity feed filtered to that dashboard's resource id — whatever else it holds, the full
+  administrative role included
 - **THEN** the feed is returned successfully with that dashboard's activity absent from it
 
 #### Scenario: A public dashboard's activity is visible to any audit reader
@@ -62,13 +63,11 @@ query's.
   resource id
 - **THEN** the feed returns that dashboard's activity
 
-#### Scenario: A deleted dashboard's activity is visible only to a publisher
+#### Scenario: A deleted dashboard's activity is visible to no one
 
-- **WHEN** a `private` dashboard is deleted and its former owner, holding `AUDIT_READ` but not
-  `SAVED_QUERY_PUBLISH`, requests the activity feed filtered to its resource id
-- **THEN** the feed is returned successfully with that activity absent from it, and is present only when
-  the caller holds `SAVED_QUERY_PUBLISH`
-
+- **WHEN** a dashboard of either visibility is deleted and any caller holding `AUDIT_READ` — its former
+  owner or a holder of every privilege — requests the activity feed filtered to its resource id
+- **THEN** the feed is returned successfully with that activity absent from it
 ## MODIFIED Requirements
 
 ### Requirement: Audited resources
@@ -339,3 +338,113 @@ those rows were rewritten — but it is coarser than a minimal diff on that one 
 - **WHEN** a dashboard is replaced with one widget's layout changed
 - **THEN** one `Update` activity for resource type `Dashboard` is recorded, and no separate resource type
   is used for the widget
+
+### Requirement: Resource-specific narrowing of the audit surface
+
+The feed itself SHALL be gated once, at `AUDIT_READ`. Content narrowing within an
+otherwise-successful response SHALL then be applied per resource type, for any resource whose own read
+authorization is narrower than `AUDIT_READ`.
+
+**The derivation this requirement declared normative is withdrawn, deliberately.** It said the audit
+surface for a resource requires exactly what reading that resource's current state requires, so that a
+future change to the live read would move this surface with it. That rule cannot survive per-table
+authorization: a `Table` activity's live read is now one of four rungs *on a named table*, and a
+`Pipeline`'s is `REGISTRY_READ` — so "exactly what the live read requires" is no longer one authority
+the feed could be gated at, and a feed that pages in SQL cannot apply a per-row authorization predicate
+unless the predicate is part of the query. `AUDIT_READ` is therefore the feed's own bar, and the
+trade-off is stated rather than derived: a caller holding `AUDIT_READ` sees that a table it cannot read
+changed, and sees the resource name and author with it. Adding the per-table visibility predicate to the
+feed's SQL is named as out of scope for the change that introduced privileges, with the reason recorded
+there.
+
+`Pipeline` resource type activities SHALL appear in the activity feed for any caller holding
+`AUDIT_READ`, SHALL be directly readable by activity id by that caller, and the pipeline snapshot
+endpoint SHALL require `REGISTRY_READ` — matching its live read, which is the one place the old
+derivation still lands on a single authority. No `Pipeline`-specific content narrowing SHALL be applied
+to the feed.
+
+A pipeline snapshot SHALL disclose no more than the live read does. It reconstructs a pipeline's own
+stored fields from the audit trail, and the runtime-position fields are `@NotAudited` — excluded from
+the trail precisely so a per-tick cursor write raises no revision — so a snapshot carries no scan
+position at all. Widening it therefore adds no field beyond the declaration, and requires no
+per-caller filtering; see the `pipeline-registry` capability's **A pipeline read carries no row
+values** for why the live read needs none either.
+
+A saved query's own reads are owner-scoped: a `common`-scope saved query is visible to any caller
+holding `SAVED_QUERY_READ`, while a `personal`-scope saved query is visible only to its owner
+(`SavedQueryRepository.findVisible`), with `common` readable by any caller holding `SAVED_QUERY_READ`.
+The activity feed and the saved query snapshot endpoint SHALL
+apply the same rule to `SavedQuery` resource type activities and snapshots: visible to any caller when
+the saved query's current scope is `common`, and otherwise only to the caller recorded as the saved
+query's owner. No privilege SHALL widen it, `SAVED_QUERY_PUBLISH` and the `FULL_ADMIN` bundle included:
+a `personal` saved query is its owner's alone. This is content narrowing within an otherwise-successful
+feed response, not a denial.
+
+This visibility is resolved against the saved query's **current** stored state. A saved query that
+has since been deleted has no current state to resolve ownership or scope from, so its historical
+activity and snapshot SHALL be visible to no caller in `oidc` mode — including the caller who was its
+owner before deletion, and whatever its scope was. This is a deliberate, stated narrowing:
+reconstructing whom a deleted saved query was visible to at each point in its history is out of scope
+for this capability.
+
+#### Scenario: Read-only admin sees pipeline activities in the feed
+
+- **WHEN** an authenticated caller holding the `READ_ONLY_ADMIN` bundle requests the activity feed with
+  no resource-type filter, and a pipeline was recently created
+- **THEN** the feed is returned successfully and that `Pipeline` activity appears in it
+
+#### Scenario: Read-only admin may filter the feed to pipeline activities
+
+- **WHEN** an authenticated caller holding the read-only catalog role requests the activity feed
+  filtered to resource type `Pipeline`
+- **THEN** the feed is returned with the matching pipeline activities, rather than empty or refused
+
+#### Scenario: Full admin sees pipeline activities
+
+- **WHEN** an authenticated caller holding the full administrative role requests the activity feed
+  filtered to resource type `Pipeline`
+- **THEN** the feed is returned, including that caller's own pipeline activities
+
+#### Scenario: A single pipeline activity is directly readable by a read-only admin
+
+- **WHEN** an authenticated caller holding the read-only catalog role requests a `Pipeline` activity
+  by its activity id
+- **THEN** the activity is returned with `resourceType` `Pipeline`, rather than the
+  `activity_not_found` no-disclosure response
+
+#### Scenario: Pipeline snapshot needs only an application role
+
+- **WHEN** an authenticated caller holding the read-only catalog role, rather than the full
+  administrative role, requests a pipeline snapshot at a past revision
+- **THEN** the snapshot is returned
+
+#### Scenario: A caller with no application role still cannot read a pipeline activity
+
+- **WHEN** a caller holding no `AUDIT_READ` requests the activity feed or a `Pipeline` activity by id
+  in `oidc` mode
+- **THEN** the request is refused with HTTP 403 and an `ErrorView` body, unchanged by this widening
+
+#### Scenario: A saved query owner sees their own personal saved query's activity
+
+- **WHEN** the owner of a `personal`-scope saved query requests the activity feed filtered to that
+  saved query's resource id
+- **THEN** the feed returns that saved query's activity
+
+#### Scenario: A non-owner does not see another caller's personal saved query activity
+
+- **WHEN** an authenticated caller holding `AUDIT_READ`, who is not the owner of a `personal`-scope saved
+  query, requests the activity feed filtered to that saved query's resource id — whatever else it holds,
+  the full administrative role included
+- **THEN** the feed is returned successfully with that saved query's activity absent from it
+
+#### Scenario: Any role-holding caller sees a common saved query's activity
+
+- **WHEN** an authenticated caller holding the read-only catalog role requests the activity feed
+  filtered to a `common`-scope saved query's resource id
+- **THEN** the feed returns that saved query's activity
+
+#### Scenario: A deleted saved query's activity is visible to no one
+
+- **WHEN** a saved query of either scope is deleted and any caller holding `AUDIT_READ` — its former owner
+  or a holder of every privilege — requests the activity feed filtered to that saved query's resource id
+- **THEN** the feed is returned successfully with that saved query's activity absent from it

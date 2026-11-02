@@ -32,7 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
  * deliberately no execute endpoint here.
  *
  * <p>Authorization reuses the saved-query privileges. Reads need {@code SAVED_QUERY_READ}, which
- * {@code SAVED_QUERY_WRITE} implies. Writes are deferred to {@code DashboardAccess}, because the request
+ * {@code SAVED_QUERY_WRITE} and {@code SAVED_QUERY_PUBLISH} both imply. Writes are deferred to {@code DashboardAccess}, because the request
  * body's {@code visibility} picks the privilege: {@code SAVED_QUERY_WRITE} for {@code private},
  * {@code SAVED_QUERY_PUBLISH} for {@code public} and for every visibility change. A dashboard the caller may
  * not see answers {@code 404}, never {@code 403}.

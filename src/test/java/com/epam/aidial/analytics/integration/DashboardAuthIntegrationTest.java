@@ -30,7 +30,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * feed's narrowing of {@code Dashboard} activities.
  *
  * <p>Every caller's privileges come from a {@code roles-mapping}, never from injected authorities, so the
- * {@code SAVED_QUERY_WRITE -> SAVED_QUERY_READ} implication under test is the parser's. One provider maps
+ * {@code SAVED_QUERY_WRITE -> SAVED_QUERY_READ} and {@code SAVED_QUERY_PUBLISH -> SAVED_QUERY_READ}
+ * implications under test are the parser's. One provider maps
  * the bundles; another maps single privileges, each alongside {@code TABLE_READ} only so its inline bodies
  * translate — that privilege implies nothing about dashboards.
  *
@@ -149,7 +150,7 @@ class DashboardAuthIntegrationTest {
     // ---------------------------------------------------------------- publishing
 
     @Test
-    void publishOnlyCallerCuratesPublicDashboardsBlind() throws Exception {
+    void publishOnlyCallerCuratesAndReadsPublicDashboards() throws Exception {
         final String created = mockMvc.perform(authored(post(BASE), publisher()).content(body("Curated", "public", WIDGET)))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
@@ -164,8 +165,26 @@ class DashboardAuthIntegrationTest {
         final String others = create(body("Someone else's", "public", WIDGET), admin());
         mockMvc.perform(authored(delete(BASE + "/" + others), publisher())).andExpect(status().isNoContent());
 
-        mockMvc.perform(authored(get(BASE + "/" + own), publisher())).andExpect(status().isForbidden());
-        mockMvc.perform(authored(get(BASE), publisher())).andExpect(status().isForbidden());
+        // SAVED_QUERY_PUBLISH implies SAVED_QUERY_READ, so the publisher reads what it curates.
+        mockMvc.perform(authored(get(BASE + "/" + own), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("Curated, edited"))
+                .andExpect(jsonPath("$.permissions.write").value(true))
+                .andExpect(jsonPath("$.permissions.publish").value(false));
+        mockMvc.perform(authored(get(BASE), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dashboards[?(@.id=='" + own + "')]", hasSize(1)))
+                .andExpect(jsonPath("$.permissions.create_private").value(false))
+                .andExpect(jsonPath("$.permissions.create_public").value(true));
+    }
+
+    @Test
+    void publishOnlyCallerDoesNotSeeAnotherCallersPrivateDashboard() throws Exception {
+        final String id = create(body("Alice's own", "private", WIDGET), alice());
+        mockMvc.perform(authored(get(BASE + "/" + id), publisher())).andExpect(status().isNotFound());
+        mockMvc.perform(authored(get(BASE), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.dashboards[?(@.id=='" + id + "')]", hasSize(0)));
     }
 
     @Test
@@ -348,16 +367,20 @@ class DashboardAuthIntegrationTest {
         mockMvc.perform(authored(post(FEED), bob()).content(resourceFilter(id)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data").isEmpty());
+        // A private dashboard is its owner's alone: a full admin holding every privilege does not see it.
         mockMvc.perform(authored(post(FEED), admin()).content(resourceFilter(id)))
-                .andExpect(jsonPath("$.data[0].resourceType").value("Dashboard"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isEmpty());
 
         // Single-activity retrieval is narrowed the same way: absent, not forbidden.
         final String feed = mockMvc.perform(authored(post(FEED), alice()).content(resourceFilter(id)))
                 .andReturn().getResponse().getContentAsString();
         final String activityId = JsonPath.read(feed, "$.data[0].activityId");
-        mockMvc.perform(authored(get(FEED + "/" + activityId), bob()))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.error").value("activity_not_found"));
+        for (final String other : List.of(bob(), admin())) {
+            mockMvc.perform(authored(get(FEED + "/" + activityId), other))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error").value("activity_not_found"));
+        }
         mockMvc.perform(authored(get(FEED + "/" + activityId), alice())).andExpect(status().isOk());
     }
 
@@ -370,15 +393,25 @@ class DashboardAuthIntegrationTest {
     }
 
     @Test
-    void deletedDashboardsActivityIsVisibleOnlyToPublisher() throws Exception {
-        final String id = create(body("Audited, then deleted", "private", WIDGET), alice());
-        mockMvc.perform(authored(delete(BASE + "/" + id), alice())).andExpect(status().isNoContent());
-
-        mockMvc.perform(authored(post(FEED), alice()).content(resourceFilter(id)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data").isEmpty());
-        mockMvc.perform(authored(post(FEED), admin()).content(resourceFilter(id)))
+    void deletedDashboardsActivityIsVisibleToNoOne() throws Exception {
+        final String shared = create(body("Audited, then deleted", "public", WIDGET), admin());
+        final String own = create(body("Alice's, then deleted", "private", WIDGET), alice());
+        mockMvc.perform(authored(post(FEED), alice()).content(resourceFilter(shared)))
                 .andExpect(jsonPath("$.data[0].resourceType").value("Dashboard"));
+        mockMvc.perform(authored(post(FEED), alice()).content(resourceFilter(own)))
+                .andExpect(jsonPath("$.data[0].resourceType").value("Dashboard"));
+        mockMvc.perform(authored(delete(BASE + "/" + shared), admin())).andExpect(status().isNoContent());
+        mockMvc.perform(authored(delete(BASE + "/" + own), alice())).andExpect(status().isNoContent());
+
+        // No current row to resolve visibility or owner from, so every caller loses both: the public one's
+        // author (the full admin) and reader (alice), and the private one's former owner (alice).
+        for (final String id : List.of(shared, own)) {
+            for (final String caller : List.of(alice(), admin())) {
+                mockMvc.perform(authored(post(FEED), caller).content(resourceFilter(id)))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.data").isEmpty());
+            }
+        }
     }
 
     // ---------------------------------------------------------------- helpers

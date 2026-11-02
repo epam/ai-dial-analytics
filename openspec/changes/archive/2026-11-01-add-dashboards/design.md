@@ -136,53 +136,56 @@ expensive as a replace. The spec says so.
 The visibility lookup is the saved-query one, `visibility = PUBLIC OR owner_id = :author`, with no
 privilege term. Every caller that reaches it may see `public` dashboards: reads are gated on
 `SAVED_QUERY_READ`, and a write passes `requireAnyWriteAuthority` first, so its caller holds
-`SAVED_QUERY_PUBLISH` or `SAVED_QUERY_WRITE`, which now implies `SAVED_QUERY_READ`. Before that edge, a
-caller mapped to `SAVED_QUERY_WRITE` alone got `403` for a `public` id and `404` for an absent one, which
-told it which ids existed, even though it could not read either. Saved queries had the same gap, and no
-bundle exposed it, because every bundle holding `SAVED_QUERY_WRITE` also held `SAVED_QUERY_READ`.
+`SAVED_QUERY_PUBLISH` or `SAVED_QUERY_WRITE`, both of which now imply `SAVED_QUERY_READ`. Before those
+edges, a caller mapped to `SAVED_QUERY_WRITE` alone got `403` for a `public` id and `404` for an absent one,
+which told it which ids existed, even though it could not read either. Saved queries had the same gap, and
+no bundle exposed it, because every bundle holding `SAVED_QUERY_WRITE` also held `SAVED_QUERY_READ`.
 
-### D3a. `SAVED_QUERY_WRITE` implies `SAVED_QUERY_READ`
+### D3a. Both saved-query writes imply `SAVED_QUERY_READ`, and `personal` is the owner's alone
 
-The edge is one more entry in `PrivilegeImplications.DIRECT`. Closure happens once, when a mapping is
+Each edge is one more entry in `PrivilegeImplications.DIRECT`. Closure happens once, when a mapping is
 resolved: `RolesMappingParser` closes each role's set, and `SecurityClaimsExtractor.hasPrivilege` then
 tests exact containment. Every authority source (OIDC, API key, the defaults mapping) goes through the
-parser, and `SystemIdentity` closes its own set. So the edge reaches every `hasPrivilege(SAVED_QUERY_READ)`
-call, and saved queries pick it up with no code change of their own. The three bundles that declared both
-now declare only `SAVED_QUERY_WRITE`, because bundles are stored minimally and `PrivilegeModelTest` asserts
-the minimal form. Their closures are unchanged. The `RoleBundle` Javadoc's "No endpoint widens" stays true
-of the bundles, but it gains a sentence naming the mapping-level widening, as the authentication delta's
-second declared exception does.
+parser, and `SystemIdentity` closes its own set. So the edges reach every `hasPrivilege(SAVED_QUERY_READ)`
+call, and saved queries pick them up with no code change of their own. The three bundles that declared
+both `SAVED_QUERY_READ` and `SAVED_QUERY_WRITE` now declare only the write, because bundles are stored
+minimally and `PrivilegeModelTest` asserts the minimal form. Their closures are unchanged.
 
-The edge does not fit the existing admission rule. A write-only caller does not already see `common`
-saved queries or `public` dashboards, so the edge is not disclosure-monotone. The authentication delta
-therefore adds a second ground. A privilege that edits documents by whole-document replace may imply the
-read privilege for those documents, provided the two held together disclose nothing beyond what the read
-privilege discloses on its own. The ground is stated as policy, not as "cannot be exercised without":
-create and delete need no read, and a saved-query replace carries no generation. Editing is what a write
-grant is for, and a dashboard replace cannot even be formed without the `generation` a read returned.
+The edges do not fit the existing admission rule. A write-only or publish-only caller does not already
+see `common` saved queries or `public` dashboards, so neither edge is disclosure-monotone. The
+authentication delta therefore adds a second ground: a privilege that edits documents by whole-document
+replace implies the read privilege for those documents, because writing a document presupposes reading
+it, provided no read check consults the granting privilege. The ground is stated as policy, not as
+"cannot be exercised without": create and delete need no read, and a saved-query replace carries no
+generation. Editing is what a write grant is for, and a dashboard replace cannot even be formed without
+the `generation` a read returned.
 
-The proviso compares the pair against the read alone, not against the documents the write governs. The
-write governs only the holder's own documents, while the read reaches `common` and `public` ones too, so a
-test against the write's own documents would refuse the edge it is meant to admit. `SAVED_QUERY_WRITE`
-passes: no check keys on `READ` and `WRITE` together, so the pair reads exactly what `READ` reads.
+The proviso is what makes the edge safe for every combination of privileges, not only for the write and
+the read held together. If no read check consults the write, then for any set of privileges a caller
+holds, adding the write adds exactly the read to what it may see. `TABLE_WRITE` edits no document,
+because inserts append, so the ground does not reach it.
 
-The second ground excludes the two privileges that must stay isolated. `TABLE_WRITE` edits no document,
-because inserts append. `SAVED_QUERY_PUBLISH` fails the proviso: `SavedQueryAccess.maySeeEverySavedQuery`
-keys on `PUBLISH`, so `READ` and `PUBLISH` together would open other users' `personal` history at the
-revision endpoint, which `READ` alone does not. A publish-only caller therefore replaces a `public` dashboard only with a `generation` it holds, in
-practice one from its own earlier write. The spec scopes its publish-only scenario to that, and states as
-accepted that a probe with an invalid body can still reveal the current `generation`.
+Before this change the proviso failed for `SAVED_QUERY_PUBLISH`: `SavedQueryAccess.maySeeEverySavedQuery`
+let a publisher past the owner rule on the saved-query revision endpoint and in the activity feed, so a
+`FULL_ADMIN` caller read other users' `personal` history there while `GET /{id}` on the same row answered
+`404`. The maintainers treat a `personal` saved query as visible to its owner alone, so that bypass was a
+disclosure in its own right, not a property of the edge. It is removed: the revision endpoint applies the
+live read's predicate, and both audit narrowings apply theirs, with no privilege term. With it gone, no
+read check consults either write privilege, and both edges pass the proviso.
 
-*Rejected: closing the gap with a privilege term in the dashboard lookup only.* It makes a write-only
-mapping a coherent but useless grant, one that can create a dashboard and then can neither list it nor
-replace it without having remembered its `generation`. It also leaves saved queries with the gap.
+A deleted saved query or dashboard has no current row to resolve scope and owner from. Its activities and
+snapshots were visible to publishers only; without the bypass they are visible to no caller in `oidc`
+mode. *Rejected for now: resolving a deleted resource's visibility from its last audited state.* It would
+keep a shared resource's deletion visible to readers and a personal one's to its former owner, at the
+cost of a subquery on the audit mirror; the maintainers chose the simpler rule first.
 
-The edge widens one kind of deployment: a `roles-mapping` that names `SAVED_QUERY_WRITE` without
-`SAVED_QUERY_READ` starts reading `common` saved queries and `public` dashboards. It also starts reading
-the revisions of every currently-`common` saved query at `/v1/saved-queries/{id}/revision/{rev}`, because
-`requireCurrentlyVisible` resolves visibility against current state, including revisions from before the
-query was published. That is what every `SAVED_QUERY_READ` holder sees today, the intended reading of
-such a mapping, and the proposal states it as a behaviour change.
+The edges widen one kind of deployment: a `roles-mapping` that names `SAVED_QUERY_WRITE` or
+`SAVED_QUERY_PUBLISH` without `SAVED_QUERY_READ` starts reading `common` saved queries and `public`
+dashboards. It also starts reading the revisions of every currently-`common` saved query at
+`/v1/saved-queries/{id}/revision/{rev}`, because `requireCurrentlyVisible` resolves visibility against
+current state, including revisions from before the query was published. That is what every
+`SAVED_QUERY_READ` holder sees today, the intended reading of such a mapping. The bypass removal narrows
+`FULL_ADMIN`. The proposal states both as behaviour changes.
 
 Ownership of a `private` dashboard is enforced by the lookup predicate (`owner_id = :author`), not by
 `requireWritable`. This is why a publisher may withdraw another caller's `public` dashboard: the result is
@@ -309,8 +312,8 @@ saved-query one:
 
 `resourceType <> Dashboard OR EXISTS (dashboard d WHERE d.id = resourceId AND (d.visibility = PUBLIC OR d.owner_id = :author))`
 
-It is skipped for a `SAVED_QUERY_PUBLISH` holder and in `none` mode. A deleted dashboard has no current row,
-so its activities fall to the publisher bypass, which is the stated rule.
+It is skipped only in `none` mode; no privilege skips it (D3a). A deleted dashboard has no current row, so
+its activities are visible to no one, as a deleted saved query's are.
 
 ### D8. Error codes
 
@@ -361,7 +364,7 @@ running it, not assumed:
 | The privilege gate runs after body binding and bean validation | `PrivilegeAuthorizationManager` is an `AuthorizationManager<MethodInvocation>` |
 | Privileges are closed when a mapping is parsed and then tested by exact containment | `RolesMappingParser` callers (`IdentityProviderUtils`, `ApiKeyProperties`, `ProviderRolePrivileges`); `SecurityClaimsExtractor.hasPrivilege` |
 | The saved-query size cap counts `time` | `SavedQueryBodyValidator.validateSize` |
-| `SavedQueryAccess.maySeeEverySavedQuery` keys on `SAVED_QUERY_PUBLISH`, and the revision endpoint and both audit paths consult it | `SavedQueryAccess`, `SavedQueryController.requireCurrentlyVisible`, `AuditActivityService.savedQueryNarrowing` |
+| Before this change, `SavedQueryAccess.maySeeEverySavedQuery` keyed on `SAVED_QUERY_PUBLISH` and was the only read check consulting a saved-query write privilege; the revision endpoint and both audit paths used it | `SavedQueryAccess`, `SavedQueryController.requireCurrentlyVisible`, `AuditActivityService.savedQueryNarrowing` |
 
 Left to tests rather than checked here: the first `generation` value after persist, which the spec does not
 fix, and the outcome of the race scenarios (task 6.3).

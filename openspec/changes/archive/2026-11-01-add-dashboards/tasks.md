@@ -1,9 +1,10 @@
 ## 0. Privilege implication
 
-- [x] 0.1 Add the direct edge `SAVED_QUERY_WRITE → SAVED_QUERY_READ` to `PrivilegeImplications`, and rewrite its class Javadoc for four edges and the second admission ground (a privilege editing documents by whole-document replace may imply their read when the two together disclose nothing beyond what the read discloses alone), keeping the reasons `TABLE_WRITE` and `SAVED_QUERY_PUBLISH` imply nothing and stating that publish-only curation is blind; the Javadoc and the matching comment in `PrivilegeModelTest` state rules and their reasons only
-- [x] 0.2 Drop `SAVED_QUERY_READ` from the declared sets of `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` and `READ_ONLY_SENSITIVE_ANALYTIC` in `RoleBundle`, so they stay minimal, and add to its class Javadoc that a mapping naming `SAVED_QUERY_WRITE` without `SAVED_QUERY_READ` now confers the read, while no bundle's authority changes
-- [x] 0.3 Update `PrivilegeModelTest`: four direct edges, `closureOf(SAVED_QUERY_WRITE)` is `{WRITE, READ}`, `closureOf(SAVED_QUERY_PUBLISH)` stays `{PUBLISH}`, bundle closures unchanged, and the minimal declared set without `SAVED_QUERY_READ`; add a mapping-parser case where a role mapped to `["SAVED_QUERY_WRITE"]` holds both
-- [x] 0.4 Saved-query integration test, in `SavedQueryAuthIntegrationTest`'s style, with a provider whose `roles-mapping` names `["SAVED_QUERY_WRITE"]`, so that the closure under test is the parser's rather than authorities injected directly: a caller mapped to `SAVED_QUERY_WRITE` alone lists and reads its own `personal` and every `common` saved query and reads a `common` saved query's revisions, and is still refused `403` writing a `common` one; existing saved-query tests stay green
+- [x] 0.1 Add the direct edges `SAVED_QUERY_WRITE → SAVED_QUERY_READ` and `SAVED_QUERY_PUBLISH → SAVED_QUERY_READ` to `PrivilegeImplications`, and rewrite its class Javadoc for five edges and the second admission ground (a privilege editing documents by whole-document replace implies their read, provided no read check consults it), keeping the reason `TABLE_WRITE` implies nothing; the Javadoc and the matching comment in `PrivilegeModelTest` state rules and their reasons only
+- [x] 0.2 Drop `SAVED_QUERY_READ` from the declared sets of `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` and `READ_ONLY_SENSITIVE_ANALYTIC` in `RoleBundle`, so they stay minimal, and add to its class Javadoc that a mapping naming either saved-query write without `SAVED_QUERY_READ` now confers the read, and that `FULL_ADMIN` no longer sees other users' `personal` saved queries
+- [x] 0.3 Update `PrivilegeModelTest`: five direct edges, `closureOf(SAVED_QUERY_WRITE)` is `{WRITE, READ}` and `closureOf(SAVED_QUERY_PUBLISH)` is `{PUBLISH, READ}`, bundle closures unchanged, and the minimal declared set without `SAVED_QUERY_READ`; add a mapping-parser case where a role mapped to either write alone also holds the read
+- [x] 0.4 Saved-query integration tests, in `SavedQueryAuthIntegrationTest`'s style, with a provider whose `roles-mapping` names `["SAVED_QUERY_WRITE"]` and `["SAVED_QUERY_WRITE","SAVED_QUERY_PUBLISH"]`, so that the closure under test is the parser's rather than authorities injected directly: a caller mapped to `SAVED_QUERY_WRITE` alone lists and reads its own `personal` and every `common` saved query and reads a `common` saved query's revisions, and is still refused `403` writing a `common` one; neither that publishing mapping nor `FULL_ADMIN` reads another caller's `personal` saved query by id or at a revision; existing saved-query tests stay green
+- [x] 0.5 Remove `SavedQueryAccess.maySeeEverySavedQuery`, the publisher bypass of the owner rule, from `SavedQueryController.requireCurrentlyVisible` and from both narrowings in `AuditActivityService`, so a `personal` saved query and a `private` dashboard are their owner's alone everywhere and a deleted one's activities are visible to no one; update `AuditTrailAuthIntegrationTest` to match
 
 ## 1. Schema and entity
 
@@ -59,7 +60,7 @@
 - [x] 5.2 Integration tests:
   - create, replace and delete record `Create`, `Update` and `Delete` for `Dashboard`, and `dashboard_aud` has no `generation` column;
   - a `409` or a read records nothing;
-  - owner, non-owner, public and deleted-dashboard visibility, both in the feed and in single-activity retrieval, where an invisible activity answers as absent.
+  - owner, non-owner (a full admin included), public and deleted-dashboard visibility (visible to no one), both in the feed and in single-activity retrieval, where an invisible activity answers as absent.
 
 ## 6. Integration tests for the API
 
@@ -75,7 +76,7 @@
     - deleting a table an inline body reads leaves the dashboard unchanged.
 - [x] 6.2 `oidc`-mode authorization tests, with each caller's privileges set through `roles-mapping` properties as `SavedQueryAuthIntegrationTest` does, never as injected authorities:
   - **Visibility:** a private dashboard is invisible to others (`404` on read, replace and delete); a public one is readable with `SAVED_QUERY_READ`; `SAVED_QUERY_READ` is required for reads.
-  - **Publish-only callers:** a caller holding only `SAVED_QUERY_PUBLISH` creates a public dashboard, replaces it with the generation from its create response, and deletes another caller's, while every read is `403`; its withdraw attempt answers `403`.
+  - **Publish-only callers:** a caller holding only `SAVED_QUERY_PUBLISH` creates a public dashboard, replaces it with the generation from its create response, deletes another caller's and reads the public one it created, but does not see another caller's private dashboard; its withdraw attempt answers `403`.
   - **Write-only callers:** a caller mapped to `SAVED_QUERY_WRITE` alone lists and reads a public dashboard but gets `403` deleting it.
   - **Publishing:** public writes need `SAVED_QUERY_PUBLISH`; visibility changes in both directions need it; withdrawing another caller's public dashboard returns it to its owner; withdrawing a public dashboard with a null owner answers `422`.
   - **Write refusals:** callers with no write privilege get `403` before the lookup.
@@ -98,11 +99,11 @@
 - [x] 7.2 Mention `/v1/dashboards` (capability `dashboards`) in `README.md` where the saved-query surface is listed, and in the endpoint overview of `CLAUDE.md`'s "What this is" paragraph
 - [x] 7.2a Update the Javadoc and `docs/configuration.md` for the new edge:
   - the `Privilege` class Javadoc: its "admitted only where it is disclosure-monotone" sentence, for the second admission ground;
-  - the Javadoc of `Privilege.SAVED_QUERY_READ`/`WRITE`/`PUBLISH`: they also govern dashboards, and `SAVED_QUERY_WRITE` implies `SAVED_QUERY_READ`;
+  - the Javadoc of `Privilege.SAVED_QUERY_READ`/`WRITE`/`PUBLISH`: they also govern dashboards, and `SAVED_QUERY_WRITE` and `SAVED_QUERY_PUBLISH` each imply `SAVED_QUERY_READ`;
   - the "Bundle | Declares" table in `docs/configuration.md`: drop `SAVED_QUERY_READ` from its three rows and add no prose: the implication is stated in the authentication spec.
 
   `docs/release-0.2-upgrade.md` describes that release and stays as written.
-- [x] 7.2b Add the `SAVED_QUERY_WRITE → SAVED_QUERY_READ` widening to the upgrade notes of the release this change ships in, following the existing `docs/release-*-upgrade.md` documents and creating the next one if it does not exist yet: a mapping naming `SAVED_QUERY_WRITE` without `SAVED_QUERY_READ` gains the reads the authentication spec lists, and no bundle changes
+- [x] 7.2b Add to the upgrade notes of the release this change ships in, following the existing `docs/release-*-upgrade.md` documents and creating the next one if it does not exist yet: the `SAVED_QUERY_WRITE → SAVED_QUERY_READ` and `SAVED_QUERY_PUBLISH → SAVED_QUERY_READ` widening (a mapping naming either write without `SAVED_QUERY_READ` gains the reads the authentication spec lists, and no bundle widens), and the narrowing: `FULL_ADMIN` and every `SAVED_QUERY_PUBLISH` holder no longer see other users' `personal` saved queries on the revision endpoint or in the activity feed, and a deleted saved query's or dashboard's activities are visible to no one
 - [x] 7.3 Run `openspec validate add-dashboards --strict` and confirm the specs match the shipped behaviour
 - [x] 7.4 Run the public-repo hygiene sweep from `CLAUDE.md` (`git grep -nIP` plus the multiline pass) over the changed files
 - [x] 7.5 Run `./gradlew clean build` and confirm it passes

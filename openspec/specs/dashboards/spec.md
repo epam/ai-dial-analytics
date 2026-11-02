@@ -401,23 +401,19 @@ saved-query privileges:
   replacing or deleting a stored one, SHALL require `SAVED_QUERY_WRITE` and SHALL be possible only on the
   caller's own rows. A publisher withdrawing a `public` dashboard is the one write that leaves another
   caller's `private` row behind (see below).
-- **`public`** — visible to any caller holding `SAVED_QUERY_READ` or `SAVED_QUERY_PUBLISH`.
-  `SAVED_QUERY_WRITE` confers `SAVED_QUERY_READ` by implication (see `authentication`), so every writer
-  sees it. Creating, replacing or deleting one SHALL require `SAVED_QUERY_PUBLISH`.
+- **`public`** — visible to any caller holding `SAVED_QUERY_READ`, which `SAVED_QUERY_WRITE` and
+  `SAVED_QUERY_PUBLISH` both confer by implication (see `authentication`), so every writer sees it.
+  Creating, replacing or deleting one SHALL require `SAVED_QUERY_PUBLISH`.
+
+A `private` dashboard SHALL be visible to its owner alone, whatever privileges another caller holds: a
+publisher, or a holder of every privilege, sees the `public` dashboards and its own `private` ones.
 
 Every `/v1/dashboards` read endpoint SHALL require `SAVED_QUERY_READ`, held directly or through
-`SAVED_QUERY_WRITE`; a caller without it SHALL be refused `403 forbidden` on every read. Visibility is still
-decided for writes, where that gate does not apply, so it names the publisher too: a caller holding
-`SAVED_QUERY_PUBLISH` but neither `SAVED_QUERY_READ` nor `SAVED_QUERY_WRITE` curates `public` dashboards
-blind, as a publish-only caller curates `common` saved queries, while every read endpoint still refuses
-it. It may create and delete `public` dashboards. It may replace one, receiving the replaced document in
-the response, but only with the current `generation`. It cannot read one, so in practice it holds a
-`generation` from its own create or replace response. It can also learn one by probing: a replace with an
-invalid body answers `409` for a stale `generation` and `422` for the current one, and changes nothing.
-That probe is accepted. It reveals only an edit count, and a caller that may delete and recreate any
-`public` dashboard gains nothing by guessing. Every
-caller that reaches a write's lookup holds `SAVED_QUERY_READ` or `SAVED_QUERY_PUBLISH`, so a `public`
-dashboard is visible on every write path that gets that far.
+`SAVED_QUERY_WRITE` or `SAVED_QUERY_PUBLISH`; a caller holding none of them SHALL be refused
+`403 forbidden` on every read. A caller holding `SAVED_QUERY_PUBLISH` alone therefore reads the `public`
+dashboards it curates, as it reads `common` saved queries. Every caller that reaches a write's lookup
+holds `SAVED_QUERY_READ` by implication, so a `public` dashboard is visible on every write path that gets
+that far.
 
 Publishing is reused rather than given a privilege of its own because publishing a dashboard publishes its
 inline queries: a `public` dashboard shows every viewer its inline bodies unredacted, and those are often
@@ -453,8 +449,14 @@ subject to the reader's own table grants, sensitive-column clearance and row pol
 
 - **WHEN** a caller holding `SAVED_QUERY_PUBLISH` only creates a `public` dashboard, replaces it with the
   `generation` its create response returned, and deletes a `public` dashboard another caller created
-- **THEN** the create is `201`, the replace `200` and the delete `204`, while a `GET` of any dashboard by
-  the same caller is `403 forbidden`
+- **THEN** the create is `201`, the replace `200` and the delete `204`, and a `GET` of the `public`
+  dashboard it created is `200`
+
+#### Scenario: A publisher does not see another caller's private dashboard
+
+- **GIVEN** a `private` dashboard owned by one caller
+- **WHEN** a different caller holding `SAVED_QUERY_PUBLISH` reads it by id or lists dashboards
+- **THEN** the read is `404 not_found` and the list omits it
 
 #### Scenario: A publish-only caller cannot withdraw a dashboard
 

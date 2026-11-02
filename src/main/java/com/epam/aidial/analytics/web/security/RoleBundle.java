@@ -14,16 +14,19 @@ import java.util.Set;
  * <p>Each bundle stores its privileges <b>minimally</b> and is closed by {@link PrivilegeImplications} at
  * expansion time, so implication has one source of truth. {@code FULL_ADMIN} and {@code READ_ONLY_ADMIN}
  * expand to exactly the authority the corresponding application role carried before privileges existed,
- * with a single deliberate exception, declared in the {@code authentication} capability:
+ * with two deliberate exceptions, declared in the {@code authentication} capability.
  * {@code GET /v1/tables/{name}/access} now requires {@code TABLE_GRANT}, which {@code READ_ONLY_ADMIN}
- * does not hold, because the grant lists disclose which provider roles exist and what each may do. No
- * endpoint widens: {@code REGISTRY_READ} reproduces the reach the old {@code /v1/**} role rule gave
- * pipeline reads rather than extending it.
+ * does not hold, because the grant lists disclose which provider roles exist and what each may do. And
+ * {@code FULL_ADMIN} no longer sees other users' {@code personal} saved queries anywhere, the revision
+ * endpoint and the activity feed included, and never sees their {@code private} dashboards. No endpoint widens:
+ * {@code REGISTRY_READ} reproduces the reach the old {@code /v1/**} role rule gave pipeline reads rather
+ * than extending it.
  *
  * <p>The three bundles that keep personal saved queries declare {@code SAVED_QUERY_WRITE} alone, because
  * it implies {@code SAVED_QUERY_READ}; they confer exactly what they did when they declared both. The
- * edge does widen one thing outside the bundles: a {@code roles-mapping} that names
- * {@code SAVED_QUERY_WRITE} without {@code SAVED_QUERY_READ} now confers the read as well.
+ * saved-query edges do widen one thing outside the bundles: a {@code roles-mapping} that names
+ * {@code SAVED_QUERY_WRITE} or {@code SAVED_QUERY_PUBLISH} without {@code SAVED_QUERY_READ} now confers
+ * the read as well.
  *
  * <p>Bundle names are not valid grantees in a table's access lists, which name raw provider roles.
  */

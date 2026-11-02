@@ -29,10 +29,10 @@ import java.util.UUID;
  * inherits: {@link ActivityResourceType#SavedQuery}, which is owner/{@code common}-scoped
  * ({@code SavedQueryRepository#findVisible}). The narrowing is a content filter within an
  * otherwise-successful feed response, not an authorization denial — mirroring how the feed already omits
- * rows that do not match a filter rather than refusing the request. It resolves against the resource's
- * <strong>current</strong> stored state, so a deleted saved query's history becomes visible to
- * a {@code SAVED_QUERY_PUBLISH} holder only, including to its former owner — a stated trade-off, not
- * an oversight.
+ * rows that do not match a filter rather than refusing the request. No privilege widens it: a
+ * {@code personal} saved query's activities are visible to its owner alone, administrators included. It
+ * resolves against the resource's <strong>current</strong> stored state, so a deleted saved query's
+ * history is visible to no one, its former owner included — a stated trade-off, not an oversight.
  *
  * <p>{@link ActivityResourceType#Dashboard} is narrowed the same way, by its own visibility and owner.
  *
@@ -125,18 +125,15 @@ public class AuditActivityService {
     }
 
     /**
-     * A {@code SavedQuery}-typed row is included for a {@code SAVED_QUERY_PUBLISH} holder
-     * unconditionally, for any caller
-     * when the saved query's <strong>current</strong> scope is {@code COMMON}, or for the caller recorded
-     * as its <strong>current</strong> owner — the same rule {@code SavedQueryRepository.findVisible}
-     * applies to the live read. A deleted saved query has no current row, so the {@code EXISTS} fails for
-     * every caller but a {@code SAVED_QUERY_PUBLISH} holder, including its former owner — a stated
-     * trade-off, not an
-     * oversight (see the class Javadoc).
+     * A {@code SavedQuery}-typed row is included for any caller when the saved query's
+     * <strong>current</strong> scope is {@code COMMON}, or for the caller recorded as its
+     * <strong>current</strong> owner — the same rule {@code SavedQueryRepository.findVisible} applies to
+     * the live read. A deleted saved query has no current row, so the {@code EXISTS} fails for every
+     * caller, its former owner included — a stated trade-off, not an oversight (see the class Javadoc).
      */
     private Specification<AuditActivityEntity> savedQueryNarrowing() {
         return (root, query, builder) -> {
-            if (!access.isSecurityEnabled() || access.maySeeEverySavedQuery()) {
+            if (!access.isSecurityEnabled()) {
                 return builder.conjunction();
             }
             final Subquery<String> visible = query.subquery(String.class);
@@ -154,16 +151,14 @@ public class AuditActivityService {
     }
 
     /**
-     * The dashboard twin of {@link #savedQueryNarrowing()}: a {@code Dashboard}-typed row is included for a
-     * {@code SAVED_QUERY_PUBLISH} holder unconditionally, for any caller when the dashboard's
-     * <strong>current</strong> visibility is {@code PUBLIC}, or for its <strong>current</strong> owner —
-     * the rule {@code DashboardRepository.findVisible} applies to the live read. Dashboards take their
-     * visibility and privileges from the saved-query model, so the bypass is the same privilege, and a
-     * deleted dashboard's activities fall to it alone, as a deleted saved query's do.
+     * The dashboard twin of {@link #savedQueryNarrowing()}: a {@code Dashboard}-typed row is included for
+     * any caller when the dashboard's <strong>current</strong> visibility is {@code PUBLIC}, or for its
+     * <strong>current</strong> owner — the rule {@code DashboardRepository.findVisible} applies to the live
+     * read. A deleted dashboard's activities are visible to no one, as a deleted saved query's are.
      */
     private Specification<AuditActivityEntity> dashboardNarrowing() {
         return (root, query, builder) -> {
-            if (!access.isSecurityEnabled() || access.maySeeEverySavedQuery()) {
+            if (!access.isSecurityEnabled()) {
                 return builder.conjunction();
             }
             final Subquery<String> visible = query.subquery(String.class);

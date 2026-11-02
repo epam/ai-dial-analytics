@@ -11,7 +11,9 @@ import org.springframework.stereotype.Component;
 import java.util.Locale;
 
 /**
- * Decides who may see and who may write a saved query.
+ * Decides who may write a saved query, and supplies the caller identity the visibility lookup filters by.
+ * Who may <em>see</em> one is the repository's predicate alone ({@code SavedQueryRepository.findVisible}):
+ * no privilege widens it, so a {@code personal} saved query is its owner's alone.
  *
  * <p>The {@code common} gate cannot be an endpoint annotation: the deciding input is the request body's
  * {@code scope}, not the URL, and the annotation would also block a legitimate {@code personal} write on
@@ -69,18 +71,6 @@ public class SavedQueryAccess {
     /** Whether authorization is enforced at all; {@code false} in {@code none} mode. */
     public boolean isSecurityEnabled() {
         return securityEnabled;
-    }
-
-    /**
-     * Whether the caller may see <b>every</b> saved query, regardless of scope or owner — the
-     * administrative visibility the audit feed's narrowing and the revision read both key off.
-     *
-     * <p>{@link Privilege#SAVED_QUERY_PUBLISH}: the authority that curates the shared catalogue is the
-     * closest existing one, and mapping the bypass to it reproduces today's behaviour exactly, since the
-     * {@code FULL_ADMIN} bundle holds it and {@code READ_ONLY_ADMIN} does not.
-     */
-    public boolean maySeeEverySavedQuery() {
-        return claims.hasPrivilege(Privilege.SAVED_QUERY_PUBLISH);
     }
 
     /**

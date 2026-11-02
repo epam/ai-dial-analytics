@@ -12,8 +12,8 @@ package com.epam.aidial.analytics.web.security;
  * prefix does not itself imply table scope ({@code TABLE_CREATE} has no table to be scoped to).
  *
  * <p>Implication between privileges is stated once, in {@link PrivilegeImplications}, and admitted only
- * where it is disclosure-monotone, or where a privilege editing whole documents implies their read and the
- * pair discloses nothing beyond that read. Notably {@code TABLE_WRITE} implies nothing.
+ * where it is disclosure-monotone, or where a privilege editing whole documents implies their read and no
+ * read check consults it. Notably {@code TABLE_WRITE} implies nothing.
  */
 public enum Privilege {
 
@@ -74,7 +74,7 @@ public enum Privilege {
 
     /**
      * Create, replace and delete {@code common} saved queries and {@code public} dashboards, and change a
-     * dashboard's visibility — curate shared definitions. Implies nothing.
+     * dashboard's visibility — curate shared definitions. Implies {@link #SAVED_QUERY_READ}.
      */
     SAVED_QUERY_PUBLISH;
 

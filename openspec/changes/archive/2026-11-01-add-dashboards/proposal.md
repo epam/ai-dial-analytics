@@ -26,22 +26,25 @@ should own dashboards the same way, so Admin's switch is one HTTP client.
   change `visibility` in either direction. A publish-only caller curates `public` dashboards as it curates
   `common` saved queries. A dashboard the caller may not see answers `404`; a refused
   write on a visible one answers `403`.
-- **Behaviour change:** `SAVED_QUERY_WRITE` now implies `SAVED_QUERY_READ`. That is a new edge in the
-  privilege implication DAG, which affects saved queries as well as dashboards. A write is a whole-document
-  replace of something the writer has read, and a dashboard replace needs the `generation` that read
-  returned. No bundle's authority changes, because every bundle with the write already had the read, but
-  the three bundles now declare only the write. A `roles-mapping` naming `SAVED_QUERY_WRITE` without
-  `SAVED_QUERY_READ` starts reading what every `SAVED_QUERY_READ` holder reads:
+- **Behaviour change:** `SAVED_QUERY_WRITE` and `SAVED_QUERY_PUBLISH` now each imply `SAVED_QUERY_READ`.
+  These are new edges in the privilege implication DAG, which affect saved queries as well as dashboards.
+  A write is a whole-document replace of something the writer has read, and a dashboard replace needs the
+  `generation` that read returned. No bundle's authority widens, because every bundle with a write already
+  had the read, but the three bundles that keep personal saved queries now declare only the write. A
+  `roles-mapping` naming either write without `SAVED_QUERY_READ` starts reading what every
+  `SAVED_QUERY_READ` holder reads:
   - `common` saved queries;
   - the full revision history of each currently-`common` saved query, including revisions from before
     it was published;
-  - the caller's own `personal` saved queries and their revisions, which it could already create and
-    replace but not list or read;
+  - the caller's own `personal` saved queries and their revisions;
   - its own `private` dashboards;
   - `public` dashboards.
-
-  `SAVED_QUERY_PUBLISH` still implies nothing, so a publish-only caller replaces a `public` dashboard
-  only with a `generation` from its own earlier write.
+- **Behaviour change:** a `personal` saved query and a `private` dashboard are visible to their owner
+  alone, whatever privileges another caller holds. `SAVED_QUERY_PUBLISH`, and so `FULL_ADMIN`, no longer
+  passes the owner rule on the saved-query revision endpoint or in the activity feed. A deleted saved
+  query's or dashboard's activities and snapshots, which only publishers could see, are now visible to no
+  one in `oidc` mode. That removal is what lets the write privileges imply the read safely: no read check
+  consults a write privilege any more.
 - Optimistic concurrency, new to this kind of object: `PUT` must carry the `generation` it read; a stale
   one answers `409 dashboard_conflict` and changes nothing.
 - Dashboards are `@Audited` from the first release: every create, replace and delete is recorded in the
@@ -60,10 +63,15 @@ should own dashboards the same way, so Admin's switch is one HTTP client.
 ### Modified Capabilities
 
 - `audit-trail`: dashboards join the audited resources; `Dashboard` becomes a resource type of the activity
-  feed, narrowed for each caller by the same visibility rule the dashboard's own reads apply.
+  feed, narrowed for each caller by the same visibility rule the dashboard's own reads apply. Neither
+  narrowing has a publisher bypass any more, and a deleted resource's activities are visible to no one.
 - `authentication`: the `SAVED_QUERY_*` privileges also authorize the dashboards surface, and
-  `SAVED_QUERY_WRITE → SAVED_QUERY_READ` joins the implication DAG on a new admission ground. The closed
-  privilege set is unchanged, and the bundles confer the same authority from smaller declared sets.
+  `SAVED_QUERY_WRITE → SAVED_QUERY_READ` and `SAVED_QUERY_PUBLISH → SAVED_QUERY_READ` join the implication
+  DAG on a new admission ground. The closed privilege set is unchanged, and the bundles confer the same
+  authority from smaller declared sets, except that `FULL_ADMIN` no longer sees other users' `personal`
+  saved queries.
+- `saved-queries`: a `personal` saved query is its owner's alone on every surface, the revision endpoint
+  included; a publish-only caller reads `common` saved queries.
 
 ## Impact
 
@@ -76,7 +84,8 @@ should own dashboards the same way, so Admin's switch is one HTTP client.
   `AuditResourceMapper` / `AuditActivityService` extended for `Dashboard`. Reuses
   `SavedQueryBodyValidator`, `SavedQueryTime`, `SavedQueryChart` and `SavedQueryResultView`.
 - **Config**: none — no new property.
-- **Privileges**: none added; `SAVED_QUERY_*` now also govern dashboards, and `SAVED_QUERY_WRITE` implies
-  `SAVED_QUERY_READ` (`PrivilegeImplications`, `RoleBundle`).
+- **Privileges**: none added; `SAVED_QUERY_*` now also govern dashboards, and `SAVED_QUERY_WRITE` and
+  `SAVED_QUERY_PUBLISH` imply `SAVED_QUERY_READ` (`PrivilegeImplications`, `RoleBundle`); the publisher
+  bypass of the owner rule is removed (`SavedQueryAccess`, `SavedQueryController`, `AuditActivityService`).
 - **Out of scope**: dashboard revision reads (`/v1/dashboards/{id}/revision/{n}`), catalog export/import
   of dashboards, and a query-result flag reporting that a row policy confined a result.

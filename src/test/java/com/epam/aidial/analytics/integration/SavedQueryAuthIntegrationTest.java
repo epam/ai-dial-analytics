@@ -57,7 +57,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "providers.writer.jwk-set-uri=https://issuer.test/writer/jwks",
         "providers.writer.audiences=" + SavedQueryAuthIntegrationTest.AUDIENCE,
         "providers.writer.role-claims=roles",
-        "providers.writer.roles-mapping={\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"]}",
+        "providers.writer.roles-mapping={\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
+                + "\"curator\":[\"SAVED_QUERY_WRITE\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
+                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"]}",
 })
 @AutoConfigureMockMvc
 @Import(TestSecurityConfig.class)
@@ -315,6 +317,49 @@ class SavedQueryAuthIntegrationTest {
                 .andExpect(jsonPath("$.error").value("forbidden"));
     }
 
+    // ---------------------------------------------------------------- personal is the owner's alone
+
+    @Test
+    void noPrivilegeReadsAnotherCallersPersonalHistory() throws Exception {
+        final String id = create(PERSONAL.replace("\"Mine\"", "\"Alice's history\""), alice());
+        final String feed = mockMvc.perform(authored(post("/v1/activities"), alice()).content(resourceFilter(id)))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        final int revision = JsonPath.read(feed, "$.data[0].revision");
+        final String path = BASE + "/" + id + "/revision/" + revision;
+
+        mockMvc.perform(authored(get(path), alice()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("Alice's history"));
+        // A full admin, and a mapping naming both writes but not the read: each holds the read by
+        // implication, and neither sees past the owner rule on the revision route.
+        for (final String other : List.of(admin(), curator())) {
+            mockMvc.perform(authored(get(path), other))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error").value("not_found"));
+            mockMvc.perform(authored(get(BASE + "/" + id), other)).andExpect(status().isNotFound());
+        }
+        // Nor in the activity feed, which the full admin may read and the curator may not at all.
+        mockMvc.perform(authored(post("/v1/activities"), admin()).content(resourceFilter(id)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isEmpty());
+    }
+
+    @Test
+    void publishOnlyMappingReadsWhatItCurates() throws Exception {
+        // `publisher` holds SAVED_QUERY_PUBLISH and no other saved-query privilege, so this read is the
+        // PUBLISH -> SAVED_QUERY_READ edge alone, not one SAVED_QUERY_WRITE would also supply.
+        final String shared = create(COMMON.replace("\"Shared\"", "\"Curated by the publisher\""), publisher());
+        mockMvc.perform(authored(get(BASE + "/" + shared), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.scope").value("common"));
+        mockMvc.perform(authored(get(BASE).param("scope", "common"), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.saved_queries[?(@.name=='Curated by the publisher')]", hasSize(1)));
+        mockMvc.perform(authored(post(BASE), publisher()).content(PERSONAL))
+                .andExpect(status().isForbidden());
+    }
+
     // ---------------------------------------------------------------- sensitive literals
 
     @Test
@@ -507,6 +552,22 @@ class SavedQueryAuthIntegrationTest {
     private static String writer() {
         return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
                 Map.of("sub", "writer", "roles", List.of("writer"), "email", "writer@test"));
+    }
+
+    /** A caller mapped to both saved-query writes and no saved-query read: it reads by implication. */
+    private static String curator() {
+        return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
+                Map.of("sub", "curator", "roles", List.of("curator"), "email", "curator@test"));
+    }
+
+    /** A caller mapped to {@code SAVED_QUERY_PUBLISH} alone among the saved-query privileges. */
+    private static String publisher() {
+        return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
+                Map.of("sub", "publisher", "roles", List.of("publisher"), "email", "publisher@test"));
+    }
+
+    private static String resourceFilter(String resourceId) {
+        return "{\"filters\":[{\"column\":\"resourceId\",\"operator\":\"eq\",\"value\":\"" + resourceId + "\"}]}";
     }
 
     /** A second {@code READ_ONLY_ADMIN}, so the owner filter has two people holding the same role. */

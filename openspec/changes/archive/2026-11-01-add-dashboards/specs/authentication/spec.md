@@ -24,7 +24,6 @@ publish one.
 
 - **WHEN** a caller holding the `READ_ONLY_ANALYTIC` bundle creates a `public` dashboard
 - **THEN** the response is `403 forbidden`
-
 ## MODIFIED Requirements
 
 ### Requirement: Application privileges and bundles
@@ -58,15 +57,18 @@ The service SHALL additionally define **bundles** — reserved names that expand
 A bundle SHALL be expanded when configuration is parsed, and SHALL NOT be observable by any
 authorization check thereafter: no endpoint, filter or evaluator SHALL branch on a bundle name.
 `FULL_ADMIN` and `READ_ONLY_ADMIN` SHALL expand to exactly the authority the corresponding
-application role carries today, with **one declared exception**: `GET /v1/tables/{name}/access` now
+application role carries today, with **declared exceptions**. First, `GET /v1/tables/{name}/access` now
 requires `TABLE_GRANT`, which `READ_ONLY_ADMIN` does not hold, so a caller that could read grant
 lists under that bundle receives `403`. The grant lists disclose which provider roles exist and what
 each may do, which is not a catalog read (see `table-access-control`). `READ_ONLY_ADMIN` and
 `READ_ONLY_ANALYTIC` hold no clearance, so under them the catalog read surface omits sensitive
-columns (see `table-management`). A second declared exception concerns mappings rather than bundles. A
-`roles-mapping` that names `SAVED_QUERY_WRITE` without `SAVED_QUERY_READ` confers `SAVED_QUERY_READ` by
-implication, with the reach **The table read ladder and privilege implication** states. No bundle's
-authority changes. Apart from those two, an unmodified `roles-mapping` changes nothing observable. Bundle names SHALL NOT be valid grantees in a table's access lists, which name raw
+columns (see `table-management`). A second declared exception narrows `FULL_ADMIN`: it no longer sees
+another caller's `personal` saved query anywhere, the saved-query revision endpoint and the activity feed
+included (see `saved-queries` and `audit-trail`), and it never sees another caller's `private` dashboard. A third concerns mappings rather
+than bundles. A `roles-mapping` that names `SAVED_QUERY_WRITE` or `SAVED_QUERY_PUBLISH` without
+`SAVED_QUERY_READ` confers `SAVED_QUERY_READ` by implication, with the reach **The table read ladder and
+privilege implication** states. No other bundle's authority changes. Apart from those three, an unmodified
+`roles-mapping` changes nothing observable. Bundle names SHALL NOT be valid grantees in a table's access lists, which name raw
 provider roles.
 
 Every `roles-mapping` (`security.defaults.roles-mapping`, `providers.<name>.roles-mapping`,
@@ -124,51 +126,41 @@ The three table read privileges SHALL form a ladder — `TABLE_LIST`, then `TABL
 
 Implication SHALL be admitted only where it is **disclosure-monotone** — the implied privilege
 reveals a strict subset of what the granting privilege already reveals — or where the granting
-privilege authorizes **editing documents by whole-document replace** that its holder could only
-edit blind without the implied read, and the two held together disclose nothing beyond what the
-implied privilege discloses on its own. It SHALL be transitive.
+privilege authorizes **editing documents by whole-document replace**, which presupposes reading them,
+and **no read check consults the granting privilege**. Then, whatever else a caller holds, the granting
+privilege adds exactly the implied read to what it may see. It SHALL be transitive.
 The complete set of direct implications SHALL be: `TABLE_GET → TABLE_LIST`,
-`TABLE_READ → TABLE_GET`, `TABLE_MODIFY → TABLE_GET`, and `SAVED_QUERY_WRITE → SAVED_QUERY_READ`.
+`TABLE_READ → TABLE_GET`, `TABLE_MODIFY → TABLE_GET`, `SAVED_QUERY_WRITE → SAVED_QUERY_READ`, and
+`SAVED_QUERY_PUBLISH → SAVED_QUERY_READ`.
 `TABLE_WRITE` SHALL imply nothing: a caller holding only `TABLE_WRITE` on a table SHALL NOT be able
 to list it, read its schema, or read its rows. In particular the service SHALL NOT admit
 `TABLE_WRITE → TABLE_READ`.
 
-`SAVED_QUERY_WRITE → SAVED_QUERY_READ` is admitted on the second ground. Saved queries and dashboards
-are edited by whole-document replace, so an editor has to read the document it replaces, and a
-dashboard replace carries the `generation` that read returned (see `dashboards`). Without the read, a
-write grant could create and delete, but could edit only what its holder remembered. No check keys on
-`SAVED_QUERY_READ` and `SAVED_QUERY_WRITE` together, so the pair discloses exactly what
-`SAVED_QUERY_READ` does on its own. That is:
+`SAVED_QUERY_WRITE → SAVED_QUERY_READ` and `SAVED_QUERY_PUBLISH → SAVED_QUERY_READ` are admitted on the
+second ground. Saved queries and dashboards are edited by whole-document replace, so an editor has to
+read the document it replaces, and a dashboard replace carries the `generation` that read returned (see
+`dashboards`). Without the read, a write grant could create and delete, but could edit only what its
+holder remembered. The proviso holds because every saved-query and dashboard read — the live read, the
+saved-query revision endpoint and the activity feed — decides visibility from scope, visibility and owner
+alone, and no read check consults either write privilege. A `personal` saved query and a `private`
+dashboard SHALL be visible to their owner only, whatever privileges another caller holds. Each edge
+therefore discloses exactly what `SAVED_QUERY_READ` does on its own. That is:
 - `common` saved queries;
 - their revisions at `GET /v1/saved-queries/{id}/revision/{rev}`, including revisions from before a query
   became `common`;
 - the holder's own `personal` saved queries and `private` dashboards;
 - `public` dashboards.
 
-The edge widens a `roles-mapping` that names `SAVED_QUERY_WRITE` without `SAVED_QUERY_READ` to
-that reach. No bundle's authority changes, since every bundle holding the write already held the read.
-`TABLE_WRITE` does not qualify on the same ground: a row insert appends and replaces nothing, so it
-edits no document.
+The edges widen a `roles-mapping` that names `SAVED_QUERY_WRITE` or `SAVED_QUERY_PUBLISH` without
+`SAVED_QUERY_READ` to that reach. No bundle's authority widens, since every bundle holding either write
+already held the read. `TABLE_WRITE` does not qualify on the same ground: a row insert appends and
+replaces nothing, so it edits no document.
 
-`SAVED_QUERY_PUBLISH` SHALL imply nothing, on either ground. An edge
-`SAVED_QUERY_PUBLISH → SAVED_QUERY_READ` fails the first test on inspection: the claim that publishing
-already sees every saved query holds only for the revision endpoint and the audit feed, while
-`GET /v1/saved-queries/{id}` and the listing resolve visibility through a repository predicate with no
-such bypass. It fails the second test for the same reason. The revision endpoint grants a holder of
-both `SAVED_QUERY_READ` and `SAVED_QUERY_PUBLISH` every saved query unconditionally, so the pair would
-disclose more than `SAVED_QUERY_READ` does alone: another user's `personal` saved query at
-`GET /{id}/revision/{rev}`, while `GET /{id}` on the same row still answered `404`. That would be a
-disclosure, and an incoherent one.
-
-A `PUBLISH`-only caller therefore curates blind. It creates, replaces and deletes `common` saved queries,
-whose replace carries no generation check. It creates and deletes `public` dashboards, and it replaces one
-only with the current `generation`, which in practice it holds from its own earlier write.
-
-Nor SHALL it imply `SAVED_QUERY_WRITE`, for the reason `TABLE_WRITE` implies nothing pointed the other
-way: the two name different scopes rather than two rungs of one, and a write privilege is not a
-disclosure. What makes `SAVED_QUERY_PUBLISH` authorize something on its own is that each saved-query
-write endpoint defers its check to the point where the request body's `scope` is known (see
-`saved-queries`).
+`SAVED_QUERY_PUBLISH` SHALL NOT imply `SAVED_QUERY_WRITE`, nor the reverse, for the reason `TABLE_WRITE`
+implies nothing pointed the other way: the two name different scopes rather than two rungs of one, and a
+write privilege is not a disclosure. What makes either authorize a write on its own is that each
+saved-query and dashboard write endpoint defers its check to the point where the request body's `scope`
+or `visibility` is known (see `saved-queries` and `dashboards`).
 
 Implication SHALL be **derived when a check runs**, never materialised into stored grant lists: a
 grant list SHALL return exactly the grantees that were written to it.
@@ -194,11 +186,16 @@ grant list SHALL return exactly the grantees that were written to it.
   `common` scope or `public` visibility is still refused `403 forbidden` because that requires
   `SAVED_QUERY_PUBLISH`
 
-#### Scenario: Publishing confers no read and no personal write
+#### Scenario: Publishing confers the read but no personal write
 - **WHEN** a caller holds only `SAVED_QUERY_PUBLISH`
-- **THEN** it may create, replace and delete `common` saved queries, while a read endpoint is refused
-  `403 forbidden` because that requires `SAVED_QUERY_READ`, and a write at `personal` scope is refused
-  because that requires `SAVED_QUERY_WRITE`
+- **THEN** it may create, replace and delete `common` saved queries and read every `common` saved query
+  and `public` dashboard, while a write at `personal` scope is refused `403 forbidden` because that
+  requires `SAVED_QUERY_WRITE`
+
+#### Scenario: No privilege reads another caller's personal saved query
+- **WHEN** a caller holding every privilege reads another caller's `personal` saved query by id, at a
+  revision, or through the activity feed
+- **THEN** the read answers `404 not_found`, or the feed omits its activities
 
 #### Scenario: Modify confers schema visibility
 - **WHEN** a caller holds only `TABLE_MODIFY` on a table

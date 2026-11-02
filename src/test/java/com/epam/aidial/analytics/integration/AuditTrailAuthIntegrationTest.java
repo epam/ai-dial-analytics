@@ -225,16 +225,17 @@ class AuditTrailAuthIntegrationTest {
     }
 
     @Test
-    void savedQueryOwnerSeesItsPersonalActivityAndFullAdminDoesToo() throws Exception {
+    void savedQueryOwnerSeesItsPersonalActivityAndFullAdminDoesNot() throws Exception {
         // `alice` is the read-only admin token's `sub` — see readOnlyAdmin().
         final String id = createSavedQuery(SavedQueryScope.PERSONAL, "alice");
         try {
             mockMvc.perform(authored(post(FEED), readOnlyAdmin()).content(resourceFilter(id)))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
+            // A personal saved query is its owner's alone: no privilege, FULL_ADMIN's included, widens it.
             mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(id)))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
+                    .andExpect(jsonPath("$.data").isEmpty());
         } finally {
             deleteSavedQuery(id);
         }
@@ -242,16 +243,17 @@ class AuditTrailAuthIntegrationTest {
 
     @Test
     void nonOwnerReadOnlyAdminDoesNotSeeAnothersPersonalSavedQueryActivity() throws Exception {
-        final String id = createSavedQuery(SavedQueryScope.PERSONAL, "someone-else");
+        // Owned by `admin-user`, the full admin's sub, whose own view proves the activity was recorded.
+        final String id = createSavedQuery(SavedQueryScope.PERSONAL, "admin-user");
         try {
+            mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(id)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
             // A content filter within an otherwise-successful response, not an authorization denial — the
             // request still succeeds, with the row simply absent.
             mockMvc.perform(authored(post(FEED), readOnlyAdmin()).content(resourceFilter(id)))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.data").isEmpty());
-            mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(id)))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
         } finally {
             deleteSavedQuery(id);
         }
@@ -273,20 +275,20 @@ class AuditTrailAuthIntegrationTest {
     }
 
     @Test
-    void theSavedQuerySnapshotRouteMatchesTheOwnerCommonFullAdminRule() throws Exception {
-        // `alice` is the read-only admin token's `sub` (see readOnlyAdmin()); owning it by someone else
-        // makes her a non-owner here, so the narrowing — not merely "no such revision" — is what refuses.
+    void theSavedQuerySnapshotRouteMatchesTheOwnerCommonRule() throws Exception {
+        // `alice` is the read-only admin token's `sub` (see readOnlyAdmin()); `admin-user` is the full
+        // admin's. Owning it by someone else makes both non-owners here, so the narrowing — not merely
+        // "no such revision" — is what refuses.
         final String id = createSavedQuery(SavedQueryScope.PERSONAL, "someone-else");
         try {
             final String path = "/v1/saved-queries/" + id + "/revision/1";
 
             mockMvc.perform(get(path)).andExpect(status().isUnauthorized());
-            // FULL_ADMIN gets past the visibility gate; whether revision 1 happens to be this saved
-            // query's own creation is a separate question, and 404 is the honest answer either way.
+            // Invisible and nonexistent share one answer, by the same disclosure rule the live read uses,
+            // and FULL_ADMIN is no exception.
             mockMvc.perform(authored(get(path), fullAdmin()))
                     .andExpect(status().isNotFound())
-                    .andExpect(jsonPath("$.error").value("revision_not_found"));
-            // Invisible and nonexistent share one answer, by the same disclosure rule the live read uses.
+                    .andExpect(jsonPath("$.error").value("not_found"));
             mockMvc.perform(authored(get(path), readOnlyAdmin()))
                     .andExpect(status().isNotFound())
                     .andExpect(jsonPath("$.error").value("not_found"));
@@ -296,18 +298,28 @@ class AuditTrailAuthIntegrationTest {
     }
 
     @Test
-    void deletedSavedQueryActivityIsVisibleOnlyToFullAdmin() throws Exception {
-        final String id = createSavedQuery(SavedQueryScope.PERSONAL, "alice");
-        transactions.executeWithoutResult(status -> savedQueries.deleteById(id));
-
-        // No current row to resolve scope/owner from, so even the caller this row would have belonged
-        // to loses feed visibility the moment it is gone — the stated trade-off, not an oversight.
-        mockMvc.perform(authored(post(FEED), readOnlyAdmin()).content(resourceFilter(id)))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data").isEmpty());
-        mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(id)))
-                .andExpect(status().isOk())
+    void deletedSavedQueryActivityIsVisibleToNoOne() throws Exception {
+        final String personal = createSavedQuery(SavedQueryScope.PERSONAL, "alice");
+        final String common = createSavedQuery(SavedQueryScope.COMMON, null);
+        // Both are visible while they exist, so the empty answers below are the deletion's doing.
+        mockMvc.perform(authored(post(FEED), readOnlyAdmin()).content(resourceFilter(personal)))
                 .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
+        mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(common)))
+                .andExpect(jsonPath("$.data[0].resourceType").value("SavedQuery"));
+        transactions.executeWithoutResult(status -> {
+            savedQueries.deleteById(personal);
+            savedQueries.deleteById(common);
+        });
+
+        // No current row to resolve scope/owner from, so every caller — its former owner and FULL_ADMIN
+        // included — loses feed visibility the moment it is gone: the stated trade-off, not an oversight.
+        for (final String id : List.of(personal, common)) {
+            for (final String caller : List.of(readOnlyAdmin(), fullAdmin())) {
+                mockMvc.perform(authored(post(FEED), caller).content(resourceFilter(id)))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.data").isEmpty());
+            }
+        }
     }
 
     @Test
@@ -343,18 +355,18 @@ class AuditTrailAuthIntegrationTest {
 
     @Test
     void singlePersonalSavedQueryActivityIsNotDirectlyReadableByNonOwner() throws Exception {
-        // `alice` is the read-only admin's sub; owning by someone-else makes her a non-owner.
-        final String id = createSavedQuery(SavedQueryScope.PERSONAL, "someone-else");
+        // Owned by `admin-user`, the full admin's sub, so `alice` (the read-only admin) is the non-owner.
+        final String id = createSavedQuery(SavedQueryScope.PERSONAL, "admin-user");
         try {
             final String activityId = extractFirstActivityId(
                     mockMvc.perform(authored(post(FEED), fullAdmin()).content(resourceFilter(id))).andReturn());
+            mockMvc.perform(authored(get(FEED + "/" + activityId), fullAdmin()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.resourceType").value("SavedQuery"));
             // Non-owner gets 404 — same no-disclosure shape the live saved-query read uses.
             mockMvc.perform(authored(get(FEED + "/" + activityId), readOnlyAdmin()))
                     .andExpect(status().isNotFound())
                     .andExpect(jsonPath("$.error").value("activity_not_found"));
-            mockMvc.perform(authored(get(FEED + "/" + activityId), fullAdmin()))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.resourceType").value("SavedQuery"));
         } finally {
             deleteSavedQuery(id);
         }

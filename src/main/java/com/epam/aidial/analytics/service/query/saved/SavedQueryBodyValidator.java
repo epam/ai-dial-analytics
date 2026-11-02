@@ -180,7 +180,7 @@ public class SavedQueryBodyValidator {
         }
         if (nodeHasParam(query.filter()) || nodeHasParam(query.having()) || selectHasParam(query.select())) {
             throw new SavedQueryValidationException(
-                    "runtime parameter expressions are not supported in a saved query: a parameterized body "
+                    "runtime parameter expressions are not supported in a stored query: a parameterized body "
                             + "cannot be executed, so it would be stored as a query that could never run");
         }
     }
@@ -330,7 +330,7 @@ public class SavedQueryBodyValidator {
                 + serializedSize(chart);
         if (size > maxBodyBytes) {
             throw new SavedQueryValidationException(
-                    "the saved query body is " + size + " bytes, over the " + maxBodyBytes + "-byte maximum");
+                    "the query body is " + size + " bytes, over the " + maxBodyBytes + "-byte maximum");
         }
     }
 
@@ -341,7 +341,7 @@ public class SavedQueryBodyValidator {
         try {
             return jsonMapper.writeValueAsString(value).getBytes(StandardCharsets.UTF_8).length;
         } catch (JacksonException e) {
-            throw new SavedQueryValidationException("the saved query body could not be serialized");
+            throw new SavedQueryValidationException("the query body could not be serialized");
         }
     }
 }

@@ -100,7 +100,7 @@ public class SavedQueryBodyResolver {
             // A statement against INFORMATION_SCHEMA has no entity and cannot be a saved query's body
             // any more than a query-kind one naming a non-queryable entity can.
             case SqlMetadataResult ignored -> throw new QueryValidationException(
-                    "catalog metadata statements have no structured-query equivalent and cannot be saved");
+                    "catalog metadata statements have no structured-query equivalent and cannot be stored as a query body");
         };
     }
 
