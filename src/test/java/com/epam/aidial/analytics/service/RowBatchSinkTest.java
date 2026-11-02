@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link RowBatchSink}'s dual flush trigger: a batch flushes when it reaches either the
@@ -100,5 +102,51 @@ class RowBatchSinkTest {
 
         assertThat(writer.batchSizes).isEmpty();
         assertThat(sink.totalInserted()).isZero();
+    }
+
+    @Test
+    void stageRewritesTheBatchBeforeTheInsertAndLearnsOnlyAfterItSucceeded() {
+        RecordingWriter writer = new RecordingWriter();
+        List<String> events = new ArrayList<>();
+        FlushStage stage = rows -> {
+            events.add("prepare " + rows.size());
+            rows.forEach(row -> row.put("rewritten", true));
+            return () -> events.add("written");
+        };
+        RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, stage);
+
+        sink.add(new HashMap<>(Map.of("a", 1)));
+        sink.add(new HashMap<>(Map.of("a", 2)));
+        sink.flush();
+
+        assertThat(events).containsExactly("prepare 2", "written");
+        assertThat(writer.rowsFor("t")).allSatisfy(row -> assertThat(row).containsEntry("rewritten", true));
+    }
+
+    @Test
+    void failedInsertNeverRunsTheStagesWrittenStep() {
+        RecordingWriter writer = new RecordingWriter();
+        writer.failOnInsertCall = 1;
+        List<String> events = new ArrayList<>();
+        RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, rows -> () -> events.add("written"));
+
+        sink.add(new HashMap<>(Map.of("a", 1)));
+
+        assertThatThrownBy(sink::flush).isInstanceOf(RowBatchSink.FlushException.class);
+        assertThat(events).isEmpty();
+    }
+
+    @Test
+    void failingStageFailsTheFlushLikeFailedInsert() {
+        RecordingWriter writer = new RecordingWriter();
+        RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, rows -> {
+            throw new IllegalStateException("ClickHouse is unreachable");
+        });
+
+        sink.add(new HashMap<>(Map.of("a", 1)));
+
+        assertThatThrownBy(sink::flush).isInstanceOf(RowBatchSink.FlushException.class);
+        assertThat(writer.rowsFor("t")).isEmpty();
+        assertThatThrownBy(sink::flush).isInstanceOf(IllegalStateException.class);
     }
 }

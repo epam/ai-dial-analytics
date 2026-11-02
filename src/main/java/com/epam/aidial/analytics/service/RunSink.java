@@ -94,8 +94,19 @@ class RunSink {
      */
     RunSink(UsageLogWriter writer, Iterable<String> tables, Map<String, String> sourceOf, int batchSize, long maxBatchBytes,
             Consumer<List<BlobListing>> onBlobsWritten) {
+        this(writer, tables, sourceOf, Map.of(), batchSize, maxBatchBytes, onBlobsWritten);
+    }
+
+    /**
+     * @param sourceOf       enrichment target table → the source target table it enriches, for the pairs where
+     *     both are among {@code tables}; every other table is independent
+     * @param stages         target table → the {@link FlushStage} its sink runs on each batch; absent means none
+     * @param onBlobsWritten receives, in one batch per hand-over, the finished blobs whose rows are all written
+     */
+    RunSink(UsageLogWriter writer, Iterable<String> tables, Map<String, String> sourceOf, Map<String, FlushStage> stages,
+            int batchSize, long maxBatchBytes, Consumer<List<BlobListing>> onBlobsWritten) {
         for (String table : tables) {
-            sinks.putIfAbsent(table, new RowBatchSink(writer, table, batchSize, maxBatchBytes));
+            sinks.putIfAbsent(table, new RowBatchSink(writer, table, batchSize, maxBatchBytes, stages.getOrDefault(table, FlushStage.NONE)));
         }
         for (String table : sinks.keySet()) {
             String source = sourceOf.get(table);
