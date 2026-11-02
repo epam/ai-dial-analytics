@@ -258,6 +258,27 @@ class DashboardAuthIntegrationTest {
     }
 
     @Test
+    void publishOnlyOwnerCannotChangeItsWithdrawnDashboard() throws Exception {
+        final String id = create(body("Curated, then withdrawn", "public", WIDGET), publisher());
+        mockMvc.perform(authored(put(BASE + "/" + id), admin())
+                        .content(withGeneration(body("Curated, then withdrawn", "private", WIDGET), generationOf(id, publisher()))))
+                .andExpect(status().isOk());
+
+        // Every write to a private dashboard needs SAVED_QUERY_WRITE, which this owner does not hold.
+        final long generation = generationOf(id, publisher());
+        mockMvc.perform(authored(get(BASE + "/" + id), publisher()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions.write").value(false));
+        mockMvc.perform(authored(put(BASE + "/" + id), publisher())
+                        .content(withGeneration(body("Edited", "private", WIDGET), generation)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(authored(put(BASE + "/" + id), publisher())
+                        .content(withGeneration(body("Re-published", "public", WIDGET), generation)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(authored(delete(BASE + "/" + id), publisher())).andExpect(status().isForbidden());
+    }
+
+    @Test
     void callerWithNoWritePrivilegeLearnsNothingFromWrite() throws Exception {
         final String id = create(body("Probed", "public", WIDGET), admin());
         mockMvc.perform(authored(delete(BASE + "/dash_00000000000000000000000000000000"), reader()))

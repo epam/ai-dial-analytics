@@ -271,6 +271,35 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     }
 
     @Test
+    void aWidgetReadingDeletedTableBlocksEveryReplaceThatKeepsIt() throws Exception {
+        // Stored directly, naming a table with no catalog row: to translation, a deleted table is one that
+        // does not exist.
+        final String table = "dashboard_deleted_table_probe";
+        final String widget = SQL_WIDGET.replace("dial_usage_log", table);
+        final String id = transactions.execute(status -> {
+            final DashboardEntity entity = new DashboardEntity();
+            entity.setId("dash_deletedtableprobe0000000000001");
+            entity.setName("Reads a deleted table");
+            entity.setVisibility(DashboardVisibility.PUBLIC);
+            entity.setWidgets("[" + widget + "]");
+            entity.setCreatedAt(Instant.now());
+            entity.setUpdatedAt(Instant.now());
+            return dashboards.saveAndFlush(entity).getId();
+        });
+        final long generation = generationOf(id);
+
+        // Even a rename re-translates the stored body, and nobody can resolve a table that is gone.
+        mockMvc.perform(json(put(BASE + "/" + id)).content(withGeneration(body("Renamed", "public", widget), generation)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(startsWith("widget w2: ")));
+        assertThat(dashboards.findById(id).orElseThrow().getName()).isEqualTo("Reads a deleted table");
+
+        // Replacing the broken widget is the way out.
+        replace(id, body("Renamed", "public", SQL_WIDGET), generation);
+        assertThat(dashboards.findById(id).orElseThrow().getName()).isEqualTo("Renamed");
+    }
+
+    @Test
     void rejectsAnUntranslatableInlineBodyNamingTheWidget() throws Exception {
         final String widget = SQL_WIDGET.replace("SELECT project_id FROM dial_usage_log", "SELEKT nonsense");
         mockMvc.perform(json(post(BASE)).content(body("Broken", "private", widget)))
@@ -507,8 +536,11 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     }
 
     private void replace(String id, String body, long generation) throws Exception {
-        final String withGeneration = body.substring(0, body.length() - 1) + ",\"generation\":" + generation + "}";
-        mockMvc.perform(json(put(BASE + "/" + id)).content(withGeneration)).andExpect(status().isOk());
+        mockMvc.perform(json(put(BASE + "/" + id)).content(withGeneration(body, generation))).andExpect(status().isOk());
+    }
+
+    private static String withGeneration(String body, long generation) {
+        return body.substring(0, body.length() - 1) + ",\"generation\":" + generation + "}";
     }
 
     private int putStatus(String id, String body) throws Exception {

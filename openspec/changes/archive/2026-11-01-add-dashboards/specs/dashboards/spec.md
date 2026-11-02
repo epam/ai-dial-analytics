@@ -307,6 +307,14 @@ the saved query afterwards, and the service SHALL keep no link between them.
   an entity the caller cannot resolve
 - **THEN** the response is `400` with machine code `bad_request` and the dashboard is unchanged
 
+#### Scenario: A widget reading a deleted table blocks every replace that keeps it
+
+- **GIVEN** a dashboard whose widget's inline body reads a table that has since been deleted
+- **WHEN** a caller allowed to write the dashboard replaces it, keeping that widget and changing only `name`
+- **THEN** the response is `400` naming the widget and the dashboard is unchanged, although the dashboard's
+  `permissions.write` reads `true`, since the flags do not translate bodies; a replace that removes or
+  rewrites that widget succeeds
+
 ### Requirement: A saved-query reference is loose
 
 A `saved_query_id` SHALL be stored as given. The system SHALL NOT check, on write, that the saved query
@@ -422,7 +430,10 @@ A replace that changes `visibility` SHALL satisfy the write rule for **both** th
 visibility, so changing visibility in either direction requires `SAVED_QUERY_PUBLISH`, and a caller without
 it can neither publish its own dashboard nor withdraw a `public` one. Ownership is preserved across the
 change, so a publisher withdrawing another caller's `public` dashboard returns it to its owner as a
-`private` dashboard the publisher can no longer see.
+`private` dashboard the publisher can no longer see. From then on every write to it, re-publishing included,
+needs `SAVED_QUERY_WRITE`. An owner holding `SAVED_QUERY_PUBLISH` without `SAVED_QUERY_WRITE`, which no
+built-in bundle confers, can still read the withdrawn dashboard but SHALL be refused `403 forbidden` on every
+write to it until it is granted `SAVED_QUERY_WRITE`.
 
 A dashboard the caller may not see SHALL be indistinguishable from one that does not exist: for a caller
 that passes the privilege checks preceding the lookup (the read gate, or the write-authority check), a
@@ -513,6 +524,13 @@ subject to the reader's own table grants, sensitive-column clearance and row pol
   `visibility` of `private`
 - **THEN** the response is `200`, the dashboard keeps its original `owner_id`, the owner can read it, and a
   subsequent read by the withdrawing caller is `404 not_found`
+
+#### Scenario: A publish-only owner cannot change its withdrawn dashboard
+
+- **GIVEN** a `public` dashboard owned by a caller holding `SAVED_QUERY_PUBLISH` but not `SAVED_QUERY_WRITE`
+- **WHEN** a different caller holding `SAVED_QUERY_WRITE` and `SAVED_QUERY_PUBLISH` withdraws it to `private`
+- **THEN** the owner can still read it, with `permissions.write` `false`, and the owner's replace, re-publish
+  or delete of it is `403 forbidden`
 
 #### Scenario: Reading without SAVED_QUERY_READ is forbidden
 
