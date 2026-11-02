@@ -810,10 +810,11 @@ class PipelineServiceTest {
         assertThat(stopped.getGeneration()).isEqualTo(4);
         assertThat(stopped.getUpdatedAt()).isAfter(before);
 
-        final Instant afterStop = stopped.getUpdatedAt();
+        // Reset between the two patches, so the restart is held to moving it on its own.
+        stored.setUpdatedAt(before);
         final PipelineEntity restarted = service.patch(NAME, null, true);
         assertThat(restarted.getGeneration()).isEqualTo(4);
-        assertThat(restarted.getUpdatedAt()).isAfterOrEqualTo(afterStop);
+        assertThat(restarted.getUpdatedAt()).isAfter(before);
     }
 
     @Test
@@ -853,8 +854,38 @@ class PipelineServiceTest {
     void enableWhoseGateReDerivesTheMappingBumpsOnce() {
         final PipelineEntity stored = enrichRan(null);
         stored.setEnabled(false);
+        final EnrichSpec llm = enrichSpec();
+        llm.mutableTransform().setType(TransformType.LLM);
+        stored.setSpec(specCodec.write(llm));
+        given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+        reDeriveMappingOnValidate();
+
+        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true)))
+                .containsExactly("pipeline " + ENRICH_NAME + " generation 7 -> 8 (cause=patch(re-derive,enable), actor=-)");
+        assertThat(stored.getGeneration()).isEqualTo(8);
+    }
+
+    /**
+     * A Class-1 pipeline is materialized by ADAS, which re-resolves it on every call, so the re-derived mapping
+     * is stored without a bump — one would void its materialized position and clamp every dependent rollup.
+     */
+    @Test
+    void enableThatReDerivesSqlTransformMappingKeepsTheGeneration() {
+        final PipelineEntity stored = enrichRan(null);
+        stored.setEnabled(false);
+        stored.setMaterializedGeneration(7L);
         stored.setSpec(specCodec.write(enrichSpec()));
         given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+        reDeriveMappingOnValidate();
+
+        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true))).isEmpty();
+        assertThat(stored.getGeneration()).isEqualTo(7);
+        assertThat(stored.getMaterializedGeneration()).isEqualTo(7L);
+        assertThat(specCodec.readEnrich(stored).getOutputBindings()).extracting(OutputBinding::getColumn)
+                .containsExactly("client");
+    }
+
+    private void reDeriveMappingOnValidate() {
         final OutputBinding binding = new OutputBinding();
         binding.setVar("client");
         binding.setColumn("client");
@@ -862,10 +893,6 @@ class PipelineServiceTest {
             ((EnrichDeclaration) inv.getArgument(0)).spec().setOutputBindings(List.of(binding));
             return null;
         }).given(enrichValidator).validate(any());
-
-        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true)))
-                .containsExactly("pipeline " + ENRICH_NAME + " generation 7 -> 8 (cause=patch(re-derive,enable), actor=-)");
-        assertThat(stored.getGeneration()).isEqualTo(8);
     }
 
     @Test

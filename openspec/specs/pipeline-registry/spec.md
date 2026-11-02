@@ -441,7 +441,11 @@ re-declaration. The one exception on an enable-only patch is a derived member: t
 well as refuses, and should it store a derived member (an output mapping, group keys, an SQL-mode input)
 other than the stored one, the declaration did change under the enable, so that patch SHALL bump
 `generation` once, with cause `patch(re-derive,enable)`. A draft save derives the same way, so arming
-normally stores what was already there and does not bump.
+normally stores what was already there and does not bump. That bump SHALL NOT apply to an `enrich`
+pipeline whose transform is not `llm` (Class-1): it SHALL store the re-derived member without bumping,
+by the same rule a target column change applies to it. ADAS materializes a Class-1 pipeline itself and
+re-resolves it on every call, so no consumer needs the signal, while a bump would void its materialized
+position and clamp every dependent rollup to zero rows until the next materialize.
 
 A declaration change SHALL reset **only the execution state ADAS itself owns for that kind**. For a
 kind whose cursor and rebuild anchor are ADAS-owned, the cursor SHALL be reset so the next run reads
@@ -464,10 +468,18 @@ intact: a target that stops being fed is stale, not invalid.
 
 #### Scenario: An enable whose gate re-derives a stored member bumps once
 
-- **GIVEN** a disabled `enrich` pipeline at generation 7 whose stored output mapping differs from the one
-  the arming gate derives
+- **GIVEN** a disabled `enrich` pipeline with an `llm` transform at generation 7 whose stored output
+  mapping differs from the one the arming gate derives
 - **WHEN** `PATCH /v1/pipelines/{name}` with only `enabled: true` is applied
 - **THEN** the response reports generation 8 and the generation-change line names `patch(re-derive,enable)`
+
+#### Scenario: An enable that re-derives a Class-1 pipeline's mapping does not bump
+
+- **GIVEN** a disabled `enrich` pipeline with a `sql` transform at generation 7 whose stored output
+  mapping differs from the one the arming gate derives
+- **WHEN** `PATCH /v1/pipelines/{name}` with only `enabled: true` is applied
+- **THEN** the re-derived mapping is stored, the response reports generation 7, and its materialized
+  position stays current
 
 #### Scenario: A re-declaration that also enables bumps once
 
