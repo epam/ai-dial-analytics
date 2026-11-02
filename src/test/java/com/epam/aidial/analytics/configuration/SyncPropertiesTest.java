@@ -160,6 +160,13 @@ class SyncPropertiesTest {
     }
 
     @Test
+    void requestBodyModeBindsWholeWithPathFromTheEnvironment() {
+        contextRunner.withSystemProperties("SYNC_REQUEST_BODY_MODE=whole-with-path")
+                .run(context ->
+                        assertThat(context.getBean(SyncProperties.class).requestBodyMode()).isEqualTo(RequestBodyMode.WHOLE_WITH_PATH));
+    }
+
+    @Test
     void unknownRequestBodyModeFailsStartupNamingTheSetting() {
         // A typo must not silently mean whole (or delta): the context refuses to start.
         contextRunner.withSystemProperties("SYNC_REQUEST_BODY_MODE=compact")

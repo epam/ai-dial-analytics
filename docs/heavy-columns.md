@@ -110,7 +110,7 @@ The catalog migrations seed four:
 
 | Column | Why |
 |---|---|
-| `dial_usage_log_payload.request_body` | verbatim LLM request body, unbounded per row |
+| `dial_usage_log_payload.request_body` | LLM request body, unbounded per row; verbatim except under `SYNC_REQUEST_BODY_MODE=delta` |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
 | `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
@@ -139,7 +139,12 @@ not stored whole. Every turn of a conversation re-sends the history before it, a
 `request_body` keeps the request with only the history elements this turn added, without the system prompt and the
 tools when the earlier turn it links to already has them, and a hidden link to that turn. The first turn of a
 conversation is stored complete, and every other body (MCP, embeddings, anything that does not parse) is stored
-whole. What that means for a query:
+whole.
+
+Every chat request is rewritten under `delta`, the first turn of a conversation included: its `request_body` is
+re-serialized with keys sorted and no whitespace, and its history's `cache_control` markers move to
+`request_cache_control`. A reader that looks for `cache_control` in `request_body`, or relies on the text as sent,
+reads `request_cache_control` too, or stays on `whole`. What that means for a query:
 
 ```sql
 -- top-level fields read the same way as before
@@ -153,6 +158,10 @@ that starts a new chain, on a new UTC day for example, stores its history again.
 A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`.
 The behaviour is specified in `openspec/specs/data-sync/spec.md` ("A chat request body is stored as its new history
 and a parent link").
+
+To leave `delta`, switch to `whole-with-path`, not `whole`: a turn re-ingested under it keeps the hidden path the
+later turns link to. Under every mode the payload table also stores each row's `project_id` and `user_hash`, which the
+chain is scoped by; the catalog does not expose them, and the table already holds the caller's `jwt_claims`.
 
 ## The payload columns live on their own table
 

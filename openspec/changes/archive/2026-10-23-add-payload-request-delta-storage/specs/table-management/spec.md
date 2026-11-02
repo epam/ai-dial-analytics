@@ -31,8 +31,8 @@ schema discovery under the qualified name. Vacating those ordinals MAY leave gap
 
 The definition's physical columns beyond the exposed ones — its `event_id` grain key,
 `request_time`, `trace_id`, `core_span_id`, its `_updated_at` version column, and the chain columns
-`request_hash`, `request_parent_hash` and `request_ancestor_hashes`, and the identity columns `project_id`,
-`deployment`, `user_hash` and `session_id` — SHALL NOT appear in
+`request_hash`, `request_parent_hash` and `request_ancestor_hashes`, and the identity columns `project_id` and
+`user_hash` — SHALL NOT appear in
 the exposed schema, matching the existing rule that an enrichment's grain key is a hidden physical
 column.
 

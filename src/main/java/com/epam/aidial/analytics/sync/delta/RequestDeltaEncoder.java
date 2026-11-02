@@ -8,6 +8,8 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
+import java.time.Clock;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -26,10 +28,11 @@ import java.util.UUID;
  * chat request is stored whole".
  *
  * <p>Runs once per flush of the payload sink, on the batch about to be inserted, after the mapping (and so after the
- * inline-file rewrite). Under {@link RequestBodyMode#WHOLE} it only stamps each chat request with its path and keeps
- * the body: a row stored whole then still supplies its path's history, so a delta row that names it as parent
- * stays rebuildable when its parent is re-ingested under {@code whole}, and a switch to {@code delta} links onto rows
- * written before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
+ * inline-file rewrite); never under {@link RequestBodyMode#WHOLE}, which parses no body. Under
+ * {@link RequestBodyMode#WHOLE_WITH_PATH} it only stamps each chat request with its path and keeps the body: a row
+ * stored whole then still supplies its path's history, so a delta row that names it as parent stays rebuildable when
+ * its parent is re-ingested under {@code whole-with-path}, and a switch to {@code delta} links onto rows written
+ * before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
  * parent the deepest prefix {@code pk}, {@code k < n}, that some stored request carries as its path, looking in order
  * at earlier requests of the same flush (by {@code request_time}), at the paths this instance has written
  * ({@link PathCache}), and at the payload table. The table is asked once per flush, only for the requests the first two
@@ -43,6 +46,9 @@ import java.util.UUID;
  * the system keys by name and the {@code tools}, so every request on a chain has the same ones: a child leaves them
  * out, and a rebuild copies them from the chain's root. A request whose tools changed finds no parent and is a root.
  *
+ * <p>A row with neither a project nor a user has no scope to chain within, so it is stored whole with no path: chaining
+ * it would put every such row of every tenant in one scope.
+ *
  * <p>Finding no parent is not an error: the request is a chain root and costs space only. That includes a table lookup
  * that fails — it is logged and counted, and the requests it would have resolved become roots, so a read problem never
  * stops ingest.
@@ -51,12 +57,14 @@ import java.util.UUID;
  * the first pass parses each chat body, keeps its hashes (16 bytes per history element, packed) and drops everything
  * else.
  * Writing a row parses its body again for the stored body and markers, which then live only until that row's
- * columns are set. A chat body is therefore parsed twice under {@code delta}, once under {@code whole}: that buys
+ * columns are set. A chat body is therefore parsed twice under {@code delta}, once under {@code whole-with-path}: that buys
  * not holding a second copy of the batch, as history strings and bodies, for the whole flush.
  *
  * <p>The caller inserts the rewritten batch and, only once that insert succeeded, calls {@link Encoding#written()},
  * so a path becomes a parent candidate for later flushes only once its row is stored. Rows in the same insert can
- * link to each other, since they land together.
+ * link to each other, since they land together. Only rows of the current or the previous UTC day enter the cache: a
+ * chain never crosses a day, so an older row can never be the parent of live traffic, and a backfill of past days
+ * would otherwise push the live paths out.
  *
  * <p>Thread-safe: the only shared state is the {@link PathCache}.
  */
@@ -101,30 +109,44 @@ public final class RequestDeltaEncoder {
     private final PathCache cache;
     private final MeterRegistry registry;
     private final String table;
+    private final Clock clock;
 
     /** An encoder under {@link RequestBodyMode#DELTA}. */
     public RequestDeltaEncoder(ParentLookup lookup, int cacheCapacity, MeterRegistry registry, String table) {
         this(RequestBodyMode.DELTA, lookup, cacheCapacity, registry, table);
     }
 
+    /** An encoder on the system clock. */
+    public RequestDeltaEncoder(RequestBodyMode mode, ParentLookup lookup, int cacheCapacity, MeterRegistry registry, String table) {
+        this(mode, lookup, cacheCapacity, registry, table, Clock.systemUTC());
+    }
+
     /**
-     * @param mode          {@code whole} stamps chat requests with their path only; {@code delta} also links and splits them
-     * @param lookup        finds parents stored by earlier flushes, other runs or other instances; unused under {@code whole}
-     * @param cacheCapacity how many written paths this instance remembers; unused under {@code whole}
+     * @param mode          {@code whole-with-path} stamps chat requests with their path only; {@code delta} also links and
+     *                      splits them. Not {@code whole}, which needs no encoder
+     * @param lookup        finds parents stored by earlier flushes, other runs or other instances; unused under
+     *                      {@code whole-with-path}
+     * @param cacheCapacity how many written paths this instance remembers; unused under {@code whole-with-path}
      * @param registry      where the per-outcome row counter is registered
      * @param table         the payload table, tagging the counters
+     * @param clock         decides which UTC days are recent enough to cache
      */
-    public RequestDeltaEncoder(RequestBodyMode mode, ParentLookup lookup, int cacheCapacity, MeterRegistry registry, String table) {
+    public RequestDeltaEncoder(RequestBodyMode mode, ParentLookup lookup, int cacheCapacity, MeterRegistry registry, String table,
+                               Clock clock) {
+        if (mode == RequestBodyMode.WHOLE) {
+            throw new IllegalArgumentException("sync.request-body-mode=whole parses no body and needs no encoder");
+        }
         this.mode = mode;
         this.lookup = lookup;
         this.cache = new PathCache(mode == RequestBodyMode.DELTA ? cacheCapacity : 0);
         this.registry = registry;
         this.table = table;
+        this.clock = clock;
     }
 
     /**
      * Writes the request-delta columns of the chat requests among {@code rows}, in place. Under {@code delta} their
-     * {@code request_body} is cut to what the parent does not supply; under {@code whole} it is kept. Every other row
+     * {@code request_body} is cut to what the parent does not supply; under {@code whole-with-path} it is kept. Every other row
      * is left untouched.
      *
      * @param rows the payload batch about to be inserted
@@ -136,7 +158,7 @@ public final class RequestDeltaEncoder {
             Item item = Item.of(mapper, row);
             if (item == null) {
                 count("whole");
-            } else if (mode == RequestBodyMode.WHOLE) {
+            } else if (mode == RequestBodyMode.WHOLE_WITH_PATH) {
                 item.stampPath();
                 count("whole_with_path");
             } else {
@@ -151,6 +173,7 @@ public final class RequestDeltaEncoder {
         Map<UUID, ChainNode> stored = storedParents(items);
         Map<UUID, ChainNode> written = new HashMap<>();
         List<ChainNode> learned = new ArrayList<>();
+        String oldestCached = LocalDate.now(clock).minusDays(1).toString();
         for (Item item : items) {
             Resolution resolution = resolve(item, written, stored);
             boolean split = item.write(mapper, resolution.parent(), resolution.depth());
@@ -160,7 +183,7 @@ public final class RequestDeltaEncoder {
             // A row left whole carries its path and supplies its history from the body: a parent like any other, with no
             // parent of its own.
             ChainNode node = ChainNode.written(item.path(), split ? resolution.parent() : null);
-            if (written.putIfAbsent(item.path(), node) == null) {
+            if (written.putIfAbsent(item.path(), node) == null && item.day().compareTo(oldestCached) >= 0) {
                 learned.add(node);
             }
             count(split ? resolution.source() : "whole_with_path");
@@ -280,6 +303,9 @@ public final class RequestDeltaEncoder {
             if (!(row.get(REQUEST_BODY) instanceof String body) || !(row.get(REQUEST_TIME) instanceof String time) || !utcText(time)) {
                 return null;
             }
+            if (unscoped(row)) {
+                return null;
+            }
             ChatRequest request = ChatRequest.parse(mapper, body, false);
             if (request == null) {
                 return null;
@@ -297,6 +323,18 @@ public final class RequestDeltaEncoder {
             String project = String.valueOf(row.get(PROJECT_ID));
             // Length-prefixed, so no project id or user hash, whatever characters it holds, can shift the boundary.
             return project.length() + ":" + project + String.valueOf(row.get(USER_HASH));
+        }
+
+        /**
+         * Whether the row has neither a project nor a user: no scope a chain could stay within, so its body is stored
+         * whole with no path.
+         */
+        static boolean unscoped(Map<String, Object> row) {
+            return blank(row.get(PROJECT_ID)) && blank(row.get(USER_HASH));
+        }
+
+        private static boolean blank(Object value) {
+            return value == null || value.toString().isBlank();
         }
 
         /**
@@ -351,7 +389,7 @@ public final class RequestDeltaEncoder {
             return false;
         }
 
-        /** Under {@code whole}: the row keeps its body and carries its path, and is never linked. */
+        /** Under {@code whole-with-path}: the row keeps its body and carries its path, and is never linked. */
         void stampPath() {
             row.put(REQUEST_HASH, path().toString());
         }

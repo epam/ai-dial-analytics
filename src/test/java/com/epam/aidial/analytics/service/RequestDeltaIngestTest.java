@@ -35,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * End to end through {@link BlobIngestor} under {@code sync.request-body-mode}: the payload target's sink stores a
  * chat request's follow-up turn as its new messages + parent link and leaves an MCP body whole, while the usage-log
- * rows still describe the bodies as sent. Under {@code whole} nothing changes.
+ * rows still describe the bodies as sent. Under {@code whole} nothing changes; under {@code whole-with-path} a chat row
+ * also carries its path.
  */
 class RequestDeltaIngestTest {
 
@@ -64,10 +65,26 @@ class RequestDeltaIngestTest {
                 .isEqualTo("{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
         assertThat(payload.get(2).get("request_body")).isEqualTo(MCP);
         assertThat(payload.get(2)).doesNotContainKey("request_hash");
-        // The identity columns are written on every row, whatever the mode or body; the session only when Core sent one.
-        assertThat(payload).allSatisfy(row -> assertThat(row).containsEntry("project_id", "p").containsEntry("deployment", "d")
-                .containsEntry("user_hash", "user-1"));
-        assertThat(payload).extracting(row -> row.get("session_id")).containsExactly("s-1", "s-1", null);
+        // The scope columns are written on every row, whatever the mode or body; deployment and session are not stored here.
+        assertThat(payload).allSatisfy(row -> assertThat(row).containsEntry("project_id", "p").containsEntry("user_hash", "user-1")
+                .doesNotContainKeys("deployment", "session_id"));
+    }
+
+    /** Neither deployment nor session is part of the scope: a turn sent to another deployment, in another session, links. */
+    @Test
+    void deltaLinksAcrossDeploymentAndSessionSwitches(@TempDir Path baseDir) throws Exception {
+        Path blob = baseDir.resolve(BUCKET).resolve(BLOB_KEY);
+        Files.createDirectories(blob.getParent());
+        String content = String.join("\n",
+                line("t1", "/openai/deployments/m/chat/completions", "2026-01-15T10:00:00.000", TURN_1, "d", "s-1"),
+                line("t2", "/openai/deployments/m2/chat/completions", "2026-01-15T10:01:00.000", TURN_2, "d2", null));
+        try (OutputStream out = new GZIPOutputStream(Files.newOutputStream(blob))) {
+            out.write(content.getBytes(StandardCharsets.UTF_8));
+        }
+
+        List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.DELTA).rowsFor("dial_usage_log_payload");
+
+        assertThat(payload.get(1).get("request_parent_hash")).isEqualTo(payload.get(0).get("request_hash"));
     }
 
     @Test
@@ -87,8 +104,19 @@ class RequestDeltaIngestTest {
         List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.WHOLE).rowsFor("dial_usage_log_payload");
 
         assertThat(payload).extracting(row -> row.get("request_body")).containsExactly(TURN_1, TURN_2, MCP);
+        assertThat(payload).allSatisfy(row -> assertThat(row)
+                .doesNotContainKeys("request_hash", "request_parent_hash", "request_ancestor_hashes", "request_cache_control"));
+    }
+
+    @Test
+    void wholeWithPathStampsChatRowsWithTheirPath(@TempDir Path baseDir) throws Exception {
+        writeBlob(baseDir);
+
+        List<Map<String, Object>> payload = ingest(baseDir, RequestBodyMode.WHOLE_WITH_PATH).rowsFor("dial_usage_log_payload");
+
+        assertThat(payload).extracting(row -> row.get("request_body")).containsExactly(TURN_1, TURN_2, MCP);
         assertThat(payload).allSatisfy(row -> assertThat(row).doesNotContainKeys("request_parent_hash", "request_ancestor_hashes"));
-        // A chat row stored whole still carries its path, so it can be a parent once delta is switched on.
+        // A chat row stored whole still carries its path, so it can be a parent of a row stored under delta.
         assertThat(payload.get(1)).containsKey("request_hash");
         assertThat(payload.get(2)).doesNotContainKey("request_hash");
     }
@@ -121,6 +149,12 @@ class RequestDeltaIngestTest {
             public List<GenericRecord> query(String sql, Map<String, Object> params) {
                 return List.of(); // the payload table holds nothing yet
             }
+
+            @Override
+            public Map<String, String> describeTable(String table) {
+                return Map.of("request_hash", "UUID", "request_parent_hash", "UUID", "request_ancestor_hashes", "Array(UUID)",
+                        "request_cache_control", "Nullable(String)");
+            }
         };
         List<SyncTarget> targets = targets(inlineFiles);
         SyncProperties properties = new SyncProperties("-", 0, 1000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd",
@@ -147,11 +181,15 @@ class RequestDeltaIngestTest {
     }
 
     private String line(String traceId, String uri, String time, String requestBody) {
+        return line(traceId, uri, time, requestBody, "d", uri.endsWith("/mcp") ? null : "s-1");
+    }
+
+    private String line(String traceId, String uri, String time, String requestBody, String deployment, String session) {
         ObjectNode record = jsonMapper.createObjectNode();
-        record.put("deployment", "d").putObject("project").put("id", "p");
+        record.put("deployment", deployment).putObject("project").put("id", "p");
         record.putObject("user").put("id", "user-1");
-        if (!uri.endsWith("/mcp")) {
-            record.putObject("session").put("id", "s-1");
+        if (session != null) {
+            record.putObject("session").put("id", session);
         }
         record.putObject("trace").put("trace_id", traceId).put("core_span_id", "s-" + traceId);
         record.putObject("request").put("method", "POST").put("uri", uri).put("time", time).put("body", requestBody);

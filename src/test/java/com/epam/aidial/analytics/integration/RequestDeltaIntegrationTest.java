@@ -52,10 +52,10 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void theMigrationAddsTheColumnsAndTheHashIndex() {
         assertThat(showCreateTable(PAYLOAD))
-                .contains("`project_id` LowCardinality(String)", "`deployment` LowCardinality(String)", "`user_hash` String",
-                        "`session_id` Nullable(String)", "`request_hash` UUID", "`request_parent_hash` UUID",
+                .contains("`project_id` LowCardinality(String)", "`user_hash` String", "`request_hash` UUID", "`request_parent_hash` UUID",
                         "`request_ancestor_hashes` Array(UUID)",
-                        "`request_cache_control` Nullable(String)", "INDEX idx_request_hash request_hash TYPE bloom_filter(0.001) GRANULARITY 1");
+                        "`request_cache_control` Nullable(String)", "INDEX idx_request_hash request_hash TYPE bloom_filter(0.001) GRANULARITY 1")
+                .doesNotContain("`deployment`", "`session_id`");
     }
 
     @Test
@@ -162,10 +162,10 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         String historyA = messages("user:u1");
         String historyB = messages("user:u1", "assistant:a1", "user:u2");
         String historyC = messages("user:u1", "assistant:a1", "user:u2", "assistant:a2", "user:u3");
-        write(newEncoder(RequestBodyMode.WHOLE), row("t1", "10:00:00.000", historyA)); // before delta was switched on
+        write(newEncoder(RequestBodyMode.WHOLE_WITH_PATH), row("t1", "10:00:00.000", historyA)); // before delta was switched on
         write(newEncoder(), row("t2", "10:01:00.000", historyB));                       // delta: links onto the whole row
         write(newEncoder(), row("t3", "10:02:00.000", historyC));
-        write(newEncoder(RequestBodyMode.WHOLE), row("t2", "10:01:00.000", historyB)); // rolled back, B backfilled
+        write(newEncoder(RequestBodyMode.WHOLE_WITH_PATH), row("t2", "10:01:00.000", historyB)); // rolled back, B backfilled
 
         Map<String, Map<String, Object>> rows = storedRows();
 
@@ -283,7 +283,6 @@ class RequestDeltaIntegrationTest extends AbstractClickHouseIntegrationTest {
         row.put("core_span_id", "s-" + traceId);
         row.put("request_body", body(messages, members));
         row.put("project_id", "project-1");
-        row.put("deployment", "deployment-1");
         row.put("user_hash", USER);
         return row;
     }

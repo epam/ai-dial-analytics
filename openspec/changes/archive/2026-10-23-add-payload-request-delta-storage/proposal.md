@@ -20,8 +20,9 @@ and existing blobs are never rewritten, so the repetition can only be removed he
 - Bodies that are not chat-shaped (MCP, embeddings, anything unparseable, bodies truncated at 4 MiB) are
   stored whole in `request_body`, as today.
 - New ingest setting `sync.request-body-mode` (`SYNC_REQUEST_BODY_MODE`): `whole` (default, today's
-  behaviour) or `delta`. Under `whole` a chat row still carries its hidden path, so rolling back to `whole`
-  never breaks a chain and a later switch to `delta` links onto earlier rows.
+  behaviour, no body parsed), `whole-with-path` or `delta`. Under `whole-with-path` a chat row is stored whole and
+  carries its hidden path, so rolling back to it never breaks a chain and a later switch to `delta` links onto
+  earlier rows.
 - ClickHouse migration: new columns (and a skip index for the parent lookup) on the existing
   `dial_usage_log_payload`; its sort key, partitioning and TTL are unchanged. Existing rows are not touched.
 - Catalog migration: the payload enrichment exposes one new sensitive, heavy column, `request_cache_control`,
@@ -62,5 +63,5 @@ None.
 - **Readers:** query surfaces (DSL, REST SQL, Flight SQL), enrichment pipelines, evaluators and aggregate
   refresh see the new qualified column through the existing grain join; nothing in them changes. Under
   `delta`, readers of a later turn's whole message history or tools wait for the rebuild.
-- **Rollback:** setting the mode back to `whole` stops new delta rows; rows already written in delta form
+- **Rollback:** setting the mode to `whole-with-path` stops new delta rows; rows already written in delta form
   keep their cut `request_body` and are not reassembled until the rebuild ships.

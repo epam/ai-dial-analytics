@@ -4,6 +4,9 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -15,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RequestDeltaEncoderTest {
 
@@ -272,7 +276,7 @@ class RequestDeltaEncoderTest {
             }
             if (random.nextInt(5) == 0) {
                 // A restart; now and then onto the other mode, as a rollback and a re-enable would.
-                encoder = newEncoder(random.nextInt(4) == 0 ? RequestBodyMode.WHOLE : RequestBodyMode.DELTA);
+                encoder = newEncoder(random.nextInt(4) == 0 ? RequestBodyMode.WHOLE_WITH_PATH : RequestBodyMode.DELTA);
             }
             flush(batch.toArray(Map[]::new));
             i += size;
@@ -316,8 +320,13 @@ class RequestDeltaEncoderTest {
     }
 
     @Test
-    void wholeKeepsTheBodyAndStampsOnlyThePath() {
-        encoder = newEncoder(RequestBodyMode.WHOLE);
+    void wholeNeedsNoEncoder() {
+        assertThatThrownBy(() -> newEncoder(RequestBodyMode.WHOLE)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void wholeWithPathKeepsTheBodyAndStampsOnlyThePath() {
+        encoder = newEncoder(RequestBodyMode.WHOLE_WITH_PATH);
         String body = chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "]");
         Map<String, Object> row = row("e1", "10:00:00.000", body);
 
@@ -330,8 +339,8 @@ class RequestDeltaEncoderTest {
     }
 
     @Test
-    void switchToDeltaLinksOntoRowsStoredWhole() {
-        encoder = newEncoder(RequestBodyMode.WHOLE);
+    void switchToDeltaLinksOntoRowsStoredWholeWithPath() {
+        encoder = newEncoder(RequestBodyMode.WHOLE_WITH_PATH);
         Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
         flush(a);
         encoder = newEncoder(RequestBodyMode.DELTA);
@@ -346,7 +355,7 @@ class RequestDeltaEncoderTest {
     /** A root stored whole, as sent, supplies its system key and tools to a delta child; the rebuild is JSON-equal. */
     @Test
     void wholeRootSuppliesSystemKeyAndTools() {
-        encoder = newEncoder(RequestBodyMode.WHOLE);
+        encoder = newEncoder(RequestBodyMode.WHOLE_WITH_PATH);
         Map<String, Object> a = row("e1", "10:00:00.000", "{ \"instructions\" : \"be brief\", \"model\":\"m\","
                 + " \"tools\": [ {\"name\":\"t\", \"cache_control\":{\"type\":\"ephemeral\"}} ], \"input\": [ " + msg("user", "u1") + " ] }");
         flush(a);
@@ -362,13 +371,13 @@ class RequestDeltaEncoderTest {
     }
 
     @Test
-    void parentReingestedUnderWholeKeepsItsChildRebuildable() {
+    void parentReingestedUnderWholeWithPathKeepsItsChildRebuildable() {
         String parent = chat("[" + msg("user", "u1") + "]");
         flush(row("e1", "10:00:00.000", parent));
         Map<String, Object> child = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
         flush(child);
 
-        encoder = newEncoder(RequestBodyMode.WHOLE); // rolled back, then the parent's day is backfilled
+        encoder = newEncoder(RequestBodyMode.WHOLE_WITH_PATH); // rolled back, then the parent's day is backfilled
         flush(row("e1", "10:00:00.000", parent));
 
         assertThat(table.row("e1").get("request_body")).isEqualTo(parent);
@@ -554,12 +563,32 @@ class RequestDeltaEncoderTest {
         assertRebuilds(b);
     }
 
-    /** Deployment is not part of the scope: a user who switches deployment mid-conversation keeps one chain. */
+    /** Neither a project nor a user: no scope to chain within, so the body is stored whole with no path. */
     @Test
-    void switchingDeploymentKeepsTheChain() {
+    void rowWithoutProjectAndUserIsStoredWholeWithNoPath() {
+        String body = chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]");
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000", body);
+        for (Map<String, Object> row : List.of(a, b)) {
+            row.put("project_id", "");
+            row.put("user_hash", "");
+        }
+
+        flush(a);
+        flush(b);
+
+        assertThat(b.get("request_body")).isEqualTo(body);
+        assertThat(b).doesNotContainKeys("request_hash", "request_parent_hash");
+        assertThat(outcomes()).containsEntry("whole", 2.0);
+    }
+
+    /** One of the two is enough for a scope: API-key traffic carries a project and no user. */
+    @Test
+    void projectWithoutUserStillChains() {
         Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
         Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
-        b.put("deployment", "deployment-2");
+        a.put("user_hash", "");
+        b.put("user_hash", "");
 
         flush(a);
         flush(b);
@@ -567,18 +596,28 @@ class RequestDeltaEncoderTest {
         assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
     }
 
-    /** The session is not part of the scope: a changed or missing session id keeps the chain. */
+    /** A backfill of an older day must not push live paths out of the cache: its rows are not cached, and still link. */
     @Test
-    void changedSessionKeepsTheChain() {
-        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
-        a.put("session_id", "s-1");
-        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
-        b.put("session_id", null);
-
-        flush(a);
+    void rowsOfOlderDaysDoNotEnterTheCache() {
+        String older = "2026-01-10";
+        flush(row("e1", "10:00:00.000", SCOPE, older, chat("[" + msg("user", "u1") + "]")));
+        Map<String, Object> b = row("e2", "10:01:00.000", SCOPE, older,
+                chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
         flush(b);
 
-        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        assertThat(outcomes()).containsEntry("table", 1.0).doesNotContainKey("cache");
+        assertRebuilds(b);
+    }
+
+    /** Yesterday's rows are cached: a conversation's blobs keep arriving for a while after midnight. */
+    @Test
+    void rowsOfThePreviousDayEnterTheCache() {
+        String yesterday = "2026-01-14";
+        flush(row("e1", "23:58:00.000", SCOPE, yesterday, chat("[" + msg("user", "u1") + "]")));
+        flush(row("e2", "23:59:00.000", SCOPE, yesterday,
+                chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]")));
+
+        assertThat(outcomes()).containsEntry("cache", 1.0);
     }
 
     /** The scope's parts cannot run into each other: project "ab" + user "c" is not project "a" + user "bc". */
@@ -654,7 +693,8 @@ class RequestDeltaEncoderTest {
     }
 
     private RequestDeltaEncoder newEncoder(RequestBodyMode mode) {
-        return new RequestDeltaEncoder(mode, table, 1000, registry, "dial_usage_log_payload");
+        return new RequestDeltaEncoder(mode, table, 1000, registry, "dial_usage_log_payload",
+                Clock.fixed(Instant.parse(DAY + "T12:00:00Z"), ZoneOffset.UTC));
     }
 
     /** Encodes one batch, "inserts" it, and reports it written — what the payload sink does on a successful flush. */
@@ -689,7 +729,6 @@ class RequestDeltaEncoderTest {
         row.put("request_time", day + " " + time);
         row.put("request_body", body);
         row.put("project_id", "project-1");
-        row.put("deployment", "deployment-1");
         row.put("user_hash", scope);
         table.original.putIfAbsent(eventId, body);
         return row;

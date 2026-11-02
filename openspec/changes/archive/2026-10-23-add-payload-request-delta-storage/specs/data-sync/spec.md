@@ -3,34 +3,54 @@
 ### Requirement: The request body storage mode is configurable
 
 The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUEST_BODY_MODE`), set to
-`whole` or `delta`, with default `whole`. Any other value SHALL fail startup.
+`whole`, `whole-with-path` or `delta`, with default `whole`. Any other value SHALL fail startup.
 
-- **Under `whole`,** `request_body` SHALL be stored as it is today. A chat request's row SHALL also carry its
-  `request_hash`, so that a row stored whole can be a parent (see
-  "Rebuild equivalence"); every other request-delta column except the identity columns SHALL keep its default.
+- **Under `whole`,** `request_body` SHALL be stored as it is today, and no request body SHALL be parsed for this
+  setting: every request-delta column except the identity columns SHALL keep its default. A deployment that never
+  opts in pays nothing for request-delta storage on its ingest path.
+- **Under `whole-with-path`,** `request_body` SHALL be stored as under `whole`, and a chat request's row SHALL also
+  carry its `request_hash`, so that a row stored whole can be a parent (see "Rebuild equivalence"); every other
+  request-delta column except the identity columns SHALL keep its default.
 - **Under `delta`,** a chat request body (see "A chat request body is stored as its new history and a parent
   link") SHALL be stored in `request_body` cut to what its parent does not supply, and every other body SHALL be
   stored whole (see "A request body that is not a chat request is stored whole").
 
 The setting SHALL apply to rows written after it takes effect only; it SHALL NOT rewrite, convert or
-re-read rows already stored. Switching from `delta` back to `whole` SHALL leave rows already written in
-delta form as they are, and SHALL keep them rebuildable: a parent re-ingested under `whole` keeps its path.
-Switching from `whole` to `delta` SHALL let new requests link to rows stored whole before the switch.
+re-read rows already stored. Switching from `delta` to either whole mode SHALL leave rows already written in
+delta form as they are. Rolling back from `delta` SHALL go to `whole-with-path`: a parent re-ingested under it keeps
+its path, so its delta children stay rebuildable. A parent re-ingested under `whole` loses its path, and a delta
+child not re-ingested with it then names a path no row carries; avoiding that is the operator's, as for the other
+re-ingest cases under "Rebuild equivalence". Switching from `whole-with-path` to `delta` SHALL let new requests link
+to rows stored before the switch; rows stored under `whole` carry no path and are never parents.
 
 The mode SHALL apply after the inline-file rewrite (see "Inline files are removed from payload bodies in
 drop mode"), so a file removed by that rewrite is absent from the stored body.
 
 The mode SHALL apply to an ingest target whose mapping maps `request_body`, `project_id` and `user_hash` and
-whose table has the request-delta columns; the table SHALL be checked once, on the target's first flush, and
-with startup schema validation off the mapping SHALL be trusted. A target whose table lacks the columns SHALL
-have its bodies stored as mapped, with a warning. Under `delta` with no target qualifying, startup SHALL log a
-warning that the setting has no effect.
+whose table has the request-delta columns. The table SHALL be checked once, on the target's first flush, whether or
+not startup schema validation is on: a body cut on a table that lacks the chain columns could never be rebuilt, and
+validation off is an ordinary setting, not a sign that no table exists. A target whose table lacks the columns SHALL
+have its bodies stored as mapped, with a warning. A check that fails SHALL fail that flush before any body is cut,
+like any other ClickHouse error. Under `delta` with no target qualifying, startup SHALL log a warning that the
+setting has no effect.
 
 #### Scenario: The default stores request bodies whole
 
 - **WHEN** the service starts without `SYNC_REQUEST_BODY_MODE` and ingests a chat request
+- **THEN** the payload row carries the body as received in `request_body`, an all-zero `request_hash` and
+  `request_parent_hash`, an empty `request_ancestor_hashes`, and a `NULL` `request_cache_control`
+
+#### Scenario: whole-with-path stamps a chat request with its path
+
+- **WHEN** the service runs with `SYNC_REQUEST_BODY_MODE=whole-with-path` and ingests a chat request
 - **THEN** the payload row carries the body as received in `request_body` and its `request_hash`,
   an all-zero `request_parent_hash`, an empty `request_ancestor_hashes`, and a `NULL` `request_cache_control`
+
+#### Scenario: The table is checked with schema validation off
+
+- **WHEN** the service runs under `delta` with `sync.validate-schema=false` and the payload table lacks the
+  request-delta columns
+- **THEN** its rows carry `request_body` as mapped and a warning names the table
 
 #### Scenario: A table without the request-delta columns keeps its bodies
 
@@ -43,22 +63,23 @@ warning that the setting has no effect.
 - **WHEN** the service starts with `SYNC_REQUEST_BODY_MODE=compact`
 - **THEN** startup fails, naming the setting and the rejected value
 
-#### Scenario: Switching back to whole leaves delta rows unchanged
+#### Scenario: Switching back to a whole mode leaves delta rows unchanged
 
-- **WHEN** rows were ingested under `delta` and the service is restarted under `whole`
+- **WHEN** rows were ingested under `delta` and the service is restarted under `whole` or `whole-with-path`
 - **THEN** new rows carry their whole body, and the rows written under `delta` still carry their cut
   `request_body` and their chain columns
 
-#### Scenario: A parent re-ingested under whole keeps its child rebuildable
+#### Scenario: A parent re-ingested under whole-with-path keeps its child rebuildable
 
-- **WHEN** A and its child B were stored under `delta`, the service switches to `whole`, and A's event is
+- **WHEN** A and its child B were stored under `delta`, the service switches to `whole-with-path`, and A's event is
   re-ingested
 - **THEN** the surviving A row holds its body whole and carries A's path, and B still rebuilds to its history
   through it
 
-#### Scenario: A switch to delta links onto rows stored whole
+#### Scenario: A switch to delta links onto rows stored with their path
 
-- **WHEN** request A was stored under `whole`, the service switches to `delta`, and A's follow-up B is ingested
+- **WHEN** request A was stored under `whole-with-path`, the service switches to `delta`, and A's follow-up B is
+  ingested
 - **THEN** B's parent is A's path, and B rebuilds through A's whole body
 
 ### Requirement: A chat request body is stored as its new history and a parent link
@@ -99,7 +120,9 @@ and values. The stored row SHALL carry:
 - `request_body` = the canonical JSON of the body with its `cache_control` markers removed from the history,
   its message array holding only the elements of `h(k+1)..hn` that are messages, and, when it has a parent, without
   its top-level system keys (their values are `h1..hs`, within the parent's history) and without
-  `tools` (see "A request inherits its parent's tools"). A root's `request_body` is therefore the whole request.
+  `tools` (see "A request inherits its parent's tools"). A root's `request_body` is therefore the whole request, in
+  canonical form and without its history's markers like every other chat row: under `delta` no chat request, the
+  first turn of a conversation included, is stored as the text it was sent as.
 
 **Rebuild equivalence.** A row's history SHALL be its parent path's history followed by the message array
 elements of its own `request_body`, where a path's history is that of **any** stored row carrying that path, and
@@ -235,10 +258,22 @@ keeps one chain; the history hash alone decides what links. Nor is the client se
 value that can be absent, change or vanish mid-conversation, and in the scope it would only cut links. Two
 conversations of one user with an identical history MAY share rows, which rebuilds correctly.
 
+A row whose `project_id` and `user_hash` are both empty has no scope: it SHALL be stored whole with no path, as a
+body that is not a chat request is (see "A request body that is not a chat request is stored whole"), so such rows
+of different tenants never share a chain. One of the two is enough for a scope; API-key traffic, which carries a
+project and no user, chains within its project.
+
+A rebuild reads only rows whose path equals a prefix of the rebuilt row's own history, so everything it reads is
+content the rebuilt request itself carried; it never discloses another request's content. It does need every row of
+the chain, and a chain MAY span rows that differ in anything outside the scope and the history, deployment
+included. A surface that rebuilds bodies SHALL read the chain under the reader's own access, and SHALL report a row
+whose chain it cannot read in full as incomplete rather than fail the read or widen the reader's access.
+
 Parent resolution SHALL consider, in order: earlier chat requests of the same flush (ordered by
-`request_time`), paths this service instance has already written successfully, then the payload table —
-asked once per flush, about the requests not yet resolved, and about a bounded number of their prefixes in
-all; a request beyond that bound is a root. A path SHALL become a parent candidate only
+`request_time`), paths this service instance has already written successfully on the current or the previous UTC
+day (older paths can never be the parent of live traffic, so a backfill of past days does not displace the live
+ones), then the payload table — asked once per flush, about the requests not yet resolved, and about a bounded
+number of their prefixes in all, each query bounded in execution time; a request beyond that bound is a root. A path SHALL become a parent candidate only
 once its row is written or is in the same insert, so a row never names a parent that was never stored.
 
 A missing parent SHALL NOT be an error. A request whose parent was not found — it arrived before its
@@ -248,9 +283,20 @@ SHALL NOT fail the flush. This costs storage, never correctness.
 
 #### Scenario: A failed lookup stores roots and keeps ingesting
 
-- **WHEN** the payload-table lookup fails during a flush
+- **WHEN** the payload-table lookup fails or times out during a flush
 - **THEN** the requests it would have resolved are stored as roots, the batch is written, and the failure is
   counted
+
+#### Scenario: A backfill does not displace live paths
+
+- **WHEN** a backfill ingests chat requests of a day older than the previous UTC day
+- **THEN** their paths are not remembered by the instance, and their follow-ups still link through the payload
+  table
+
+#### Scenario: A request with neither project nor user is stored whole
+
+- **WHEN** two consecutive turns of a conversation arrive with an empty `project_id` and an empty `user_hash`
+- **THEN** both rows carry their bodies as received and an all-zero `request_hash`, and neither is a parent
 
 A re-ingested event MAY resolve a different parent than its earlier copy did (for example, its parent has
 been stored in the meantime). Both copies carry the same path and rebuild to the same history, so the
@@ -385,11 +431,9 @@ SHALL declare:
   has no `Nullable(JSON)`;
 - the request-delta columns, added by a later migration with defaults so rows written before it read
   them as empty: `request_cache_control` as `Nullable(String)` under the same `AES_256_GCM_SIV` codec as the
-  bodies; the identity columns `project_id` and `deployment`
-  (`LowCardinality(String)`), `user_hash` (`String`) and `session_id` (`Nullable(String)`, the client session id
-  DIAL Core writes as `session.id`, absent when it sent none), written by the mapping on every row; the first three
-  carry the values the record's `dial_usage_log` row carries, while `session_id` is held only here, unencrypted like
-  the other identifiers; the chain columns `request_hash` and
+  bodies; the identity columns `project_id` (`LowCardinality(String)`) and `user_hash` (`String`), written by the
+  mapping on every row with the values the record's `dial_usage_log` row carries, because they are the chain scope (see
+  "A parent never crosses a UTC day or a user scope"); the chain columns `request_hash` and
   `request_parent_hash` (128-bit hashes, all-zero when absent), `request_ancestor_hashes` (an array of path hashes, empty when absent); and a
   skip index on `request_hash` (a low false-positive bloom filter), so a parent lookup asking about a few paths
   within one daily partition can skip granules instead of reading the partition's `request_hash` whole;
@@ -398,8 +442,8 @@ SHALL declare:
 
 `_updated_at` SHALL be the only column of this table left to its ClickHouse default on every row. The
 request-delta columns other than the identity columns are filled by ingest's request-body stage, not by the mapping;
-under `sync.request-body-mode=whole` only a chat request's `request_hash` is set, and for a
-body that is not a chat request every one keeps its default.
+under `sync.request-body-mode=whole` none is set, under `whole-with-path` only a chat request's `request_hash`, and
+for a body that is not a chat request every one keeps its default.
 
 One parsed record SHALL produce a `dial_usage_log` row **and** a `dial_usage_log_payload` row, from two
 mappings evaluated over the same record under the same match-all predicate, carrying the same

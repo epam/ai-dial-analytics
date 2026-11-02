@@ -50,13 +50,20 @@ per `dial_usage_log` row, so the grain join, the flush order and the drop rule a
 `p0 = H(project_id, user_hash, day, tools)`, `pk = H(p(k-1), canonical(hk))`; D9 says why `tools` is there. Putting
 the scope and the UTC day into `p0` makes the "never cross a user or a day" rule structural: there is nothing to filter, because a hash from
 another scope or day cannot match.
-- The payload row carries the record's `project_id`, `deployment`, `user_hash` and `session_id` as plain mapped
-  columns. The encoder hashes `project_id` and `user_hash` into `p0`; the lookup needs no scope filter, since the scope
-  is in every hash. Plain columns rather than a hash of them, because a future session-ordered sort key needs real
-  values to sort and prune on.
+- The payload row carries the record's `project_id` and `user_hash` as plain mapped columns, the only identity this
+  change needs. The encoder hashes them into `p0`; the lookup needs no scope filter, since the scope is in every hash.
+  `deployment` and the session id are not stored on the payload row: nothing here uses them, and a later re-key that
+  wants them adds them then.
+- A row whose project and user are both empty has no scope, and is stored whole with no path: otherwise every such
+  row of every tenant would share one scope. One of the two suffices, so API-key traffic, which has a project and no
+  user, chains within its project.
 - Deployment is left out of the scope: a user switching deployment mid-conversation keeps one chain. The client session
   is left out too: it is client-supplied, may be absent, change or vanish mid-conversation, and in the scope would
-  only cut links. It is stored (`session_id`) for the sort key, where it groups a conversation's turns.
+  only cut links.
+- A rebuild reads only rows whose path is a prefix of the rebuilt row's own history, so it never reads content the
+  rebuilt request did not carry. Row access still matters for availability: a reader denied a chain row (a row policy
+  narrowing by deployment, say) cannot complete that rebuild. A rebuilding surface reads under the reader's own access
+  and reports such a row as incomplete, never widening access and never failing the read.
 - `H` is SHA-256 truncated to 128 bits, from the JDK, so there's no new dependency. A collision would need
   two different histories in one user's day, which is negligible at 128 bits.
 
@@ -81,8 +88,8 @@ each conversation after the deploy becomes a root, and nothing breaks.
 ### D4. Parent resolution runs in the payload sink at flush, after mapping
 
 The mapping stays per-record and stateless. It still emits `request_body` after the inline-file rewrite,
-plus the identity columns. A new request-body encoder runs when the payload sink flushes. Under `whole` it only stamps
-each chat request with its path (D7). Under `delta`, for each flush it:
+plus the identity columns. A new request-body encoder runs when the payload sink flushes; under `whole` there is none
+(D7). Under `whole-with-path` it only stamps each chat request with its path. Under `delta`, for each flush it:
 1. Parses and classifies each `request_body`, and computes its prefix hashes. Non-chat bodies pass
    through untouched.
 2. Sorts chat rows by `request_time`, then resolves each against:
@@ -96,13 +103,18 @@ each chat request with its path (D7). Under `delta`, for each flush it:
      parent is 1–3 elements shallower, so a deeper miss falls back to a root.
 
      The client sends query parameters in the request URI, which the server bounds, so the candidates go out
-     in chunks of 1,000 per query. A lookup that fails is logged and counted, and its rows become roots: a
+     in chunks of 1,000 per query, each under a server-side `max_execution_time`, since one slow lookup would hold up
+     every flush behind it. A lookup that fails or times out is logged and counted, and its rows become roots: a
      read problem never fails a flush. Rejected: failing the flush, because a lookup that fails the same way
      on every retry (a too-long URI, say) would stall ingest until the mode is switched back.
 3. Rewrites each row's request columns (the parent is the deepest match with `k < n`, see D6), cuts `request_body` to what the parent does not supply (D9), and hands the batch to the existing
    writer.
 4. Adds the flush's paths to the cache **only after the INSERT succeeds**. A path therefore becomes a
    parent candidate only once it's stored (step 2a covers the same insert).
+
+Before its first flush the stage describes the table and runs only if the chain columns exist, whether or not
+startup schema validation is on. With validation off and `V16` not applied, cutting bodies anyway would store rows
+with partial bodies and no link, silently, since the insert drops unknown fields.
 
 Rejected: resolving in `MappingEngine`, which is per-record with no access to the batch, the cache or
 ClickHouse. Also rejected: resolving in `BlobIngestor` before the sink, which would duplicate the sink's
@@ -114,7 +126,10 @@ Each cache entry is `(path, parentEntry)`, so ancestors are rebuilt by walking r
 copied per entry. The cache is a bounded LRU keyed by path (`PATH_CACHE_ENTRIES`, 200k). An evicted parent is
 still reachable through its children's references, so walking stays correct. A node read from the table
 carries that row's ancestor hint packed as two longs per path. It enters the cache only as the parent of a
-node written in the flush, never on its own, so the cache holds one small entry per written row. Memory is a
+node written in the flush, never on its own, so the cache holds one small entry per written row. Only rows of the
+current or the previous UTC day enter it: a chain never crosses a day, so an older row can never be the parent of
+live traffic, and a backfill of past days would otherwise evict the live paths and push live ingest onto the table
+lookup. The previous day is kept because a conversation's blobs keep arriving for a while after midnight. Memory is a
 few hundred bytes per entry, plus at most one packed hint (128 paths, 2 KiB) per conversation that was linked
 through the table.
 
@@ -133,20 +148,24 @@ length; even so, its cost under `ORDER BY event_id` was measured at a few percen
 Rejected: an identical retry taking the original as its parent (`k = n`, empty delta). The retry carries the
 original's path, so a rebuild reading "any row with that path" could land on the retry and loop on itself.
 
-### D7. Default `whole`, opt-in `delta`
+### D7. Default `whole`, opt-in `delta`, and `whole-with-path` to roll back to
 
 `delta` changes what `request_body` holds for chat rows, which breaks readers of the message history. An
 upgrade must not do that silently, so operators opt in, as with `drop` for inline files. Switching back
 needs no migration.
 
-Under `whole` the encoder still parses each body and stamps a chat request's row with its path,
-while keeping the body. Without that, rolling back would break chains. A delta row's parent that is
-re-ingested under `whole` (a backfill after the rollback, or a rolling deploy with one replica on each mode)
-would replace the only row carrying the parent's path with a row carrying none, and the child could no
-longer be rebuilt. With it, the whole row carries the path and supplies its history from the body. The same
-stamp lets a switch to `delta` link new requests onto rows stored whole before it. The cost is one parse per
-body under the default mode, which is linear in body size: the encoder test measures tens of MB per second on
-one core. Rejected: parsing only under `delta`, which would leave the documented rollback unsafe.
+Under `whole` nothing is parsed: a deployment that never opts in pays nothing on its single-threaded flush path,
+where chat bodies are often on the order of MiB. Under `whole-with-path` the encoder parses each body and stamps a
+chat request's row with its path, while keeping the body. That is what makes a rollback safe. A delta row's parent
+that is re-ingested under plain `whole` (a backfill after the rollback, or a rolling deploy with one replica on each
+mode) would replace the only row carrying the parent's path with a row carrying none, and the child could no longer
+be rebuilt. Under `whole-with-path` the whole row carries the path and supplies its history from the body. The same
+stamp lets a switch to `delta` link new requests onto rows stored before it. So the documented rollback goes to
+`whole-with-path`, and a canary that will turn `delta` on can run it first.
+
+Rejected: stamping under the default `whole`, which makes every deployment pay a full parse, two canonical copies
+and a hash per chat body for a rollback it may never do; and stamping "whenever `delta` has been on", which needs
+state the service does not keep.
 
 What this does not cover is a re-ingest whose history comes out different: after a change of
 `sync.inline-files-drop-truncated` or `sync.inline-files-max-size`, or a release that changes the canonical form. The new copy then carries a different
@@ -158,7 +177,7 @@ as the operator's to avoid.
 
 - **ClickHouse (next free version):**
   - `ALTER TABLE dial_usage_log_payload ADD COLUMN` for:
-    - `project_id` and `deployment` `LowCardinality(String)`, `user_hash String`, `session_id Nullable(String)`;
+    - `project_id LowCardinality(String)`, `user_hash String`;
     - `request_hash` and `request_parent_hash`, both `UUID`, so they travel as plain strings in `JSONEachRow`;
     - `request_ancestor_hashes Array(UUID)`;
     - `request_cache_control Nullable(String) CODEC(ZSTD(3), AES_256_GCM_SIV)`.
@@ -172,7 +191,7 @@ as the operator's to avoid.
 - **Postgres catalog (next free version):** one `column_mapping` row on `dial_usage_log_payload`,
   `request_cache_control` (`string`, nullable, sensitive, heavy, with a description and display name), and the
   seeded `request_body` description extended while it is still the seeded text.
-- **Mapping:** `dial-usage-log-payload.yaml` gains the four identity columns. The startup schema validation then
+- **Mapping:** `dial-usage-log-payload.yaml` gains the two identity columns. The startup schema validation then
   covers it.
 
 ### D9. One body column, and tools inherited from the parent
@@ -208,14 +227,17 @@ keeps top-level fields where readers already look and lets a text search find ea
 - **[Readers of `request_body` break under `delta`]** → Opt-in mode (D7). The breaking note goes into the
   specs and the proposal; top-level fields stay readable from `request_body`, and a text search finds each
   message once, in the turn that first sent it.
-- **[Ingest CPU: every request body is parsed fully, and canonicalized, under either mode]** → Bodies are
-  already in memory, and the work is linear in body size. A test measures encoder throughput on a large
-  synthetic agent session. Under `whole` nothing is linked or looked up; see D7 for why it still parses.
+- **[Ingest CPU: every chat body is parsed fully, and canonicalized, under `whole-with-path` and `delta`]** →
+  Bodies are already in memory, and the work is linear in body size. A test measures encoder throughput on a large
+  synthetic agent session. Under `whole` nothing is parsed (D7).
+- **[The payload table holds the caller's identity]** → `project_id` and `user_hash` sit on every payload row next
+  to the prompts. The table already held the caller's JWT claims and request headers, which identify the caller at
+  least as well, and the catalog hides both columns; the upgrade note says so.
 - **[Flush memory under `delta`]** → Parents are resolved across the whole batch, so a naive encoder would hold
   every request's history strings and stored body until the flush ends: about two to three times the batch, beyond
   `SYNC_MAX_BATCH_BYTES`, which operators budget per ingest path. Instead the first pass keeps only the prefix hashes
   (16 bytes per history element, packed), and writing a row parses its body again for the stored body and markers. A chat body is parsed twice under
-  `delta`, once under `whole`. The peak is one batch, plus the hashes, plus the table lookup's answers (at most a
+  `delta`, once under `whole-with-path`. The peak is one batch, plus the hashes, plus the table lookup's answers (at most a
   16,384-path lookup, each answer with a hint of up to 2 KiB), plus one body's parse. Should a second parse ever
   disagree with the first, the row is stored whole with its path rather than failing the flush.
 - **[Lookup query cost on a table not sorted by path]** → Partition pruning to the flush's days plus a
@@ -225,16 +247,17 @@ keeps top-level fields where readers already look and lets a text search find ea
   correctness. Sorting within a flush and the cache cover the common case.
 - **[Compression gain is limited by `ORDER BY event_id`]** → Known. The session-ordered re-key is a
   separate later change.
-- **[Rollback]** → Switching the mode to `whole` stops new delta rows. Existing delta rows keep their cut
-  bodies, and the later rebuild can reassemble them.
+- **[Rollback]** → Switching the mode to `whole-with-path` stops new delta rows and keeps re-ingested parents
+  carrying their paths. Existing delta rows keep their cut bodies, and the later rebuild can reassemble them.
 
 ## Migration Plan
 
 1. Deploy with both migrations. The default `whole` changes nothing observable except one new empty
-   column. Chat rows also start carrying their hidden path.
+   column, and the two hidden identity columns now filled on every payload row.
 2. Set `SYNC_REQUEST_BODY_MODE=delta` once no reader needs a later turn's whole history or tools from
    `request_body`.
-3. Roll back by setting `whole`. The migrations stay: the columns are additive and empty on old rows.
+3. Roll back by setting `whole-with-path`, not `whole`, for as long as days stored under `delta` may be re-ingested.
+   The migrations stay: the columns are additive and empty on old rows.
 
 ## Open Questions
 

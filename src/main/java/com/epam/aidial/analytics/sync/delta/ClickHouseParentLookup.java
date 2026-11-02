@@ -20,12 +20,19 @@ import java.util.UUID;
  * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_hash} skip index (ClickHouse
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
- * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do.
+ * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do. Each query
+ * runs under {@code max_execution_time}, so a lookup never stalls ingest for long.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
 
     /** Candidate paths per query: about 37 URI bytes each, so a chunk stays well inside common URI limits. */
     static final int CHUNK = 1000;
+
+    /**
+     * Server-side bound on one lookup query. Ingest flushes one batch at a time, so a slow lookup would hold up every
+     * flush behind it; one that times out fails like any other lookup, and its requests are stored as chain roots.
+     */
+    static final int TIMEOUT_SECONDS = 10;
 
     private final UsageLogWriter writer;
     private final String sql;
@@ -47,7 +54,8 @@ public final class ClickHouseParentLookup implements ParentLookup {
                 + " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
                 + " AND toYYYYMMDD(request_time) IN (SELECT toUInt32(arrayJoin(splitByChar(',', {days:String}))))"
                 + " AND request_hash IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))"
-                + " GROUP BY request_hash";
+                + " GROUP BY request_hash"
+                + " SETTINGS max_execution_time = " + TIMEOUT_SECONDS;
     }
 
     @Override

@@ -19,14 +19,15 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * The request-delta {@link FlushStage}s of the configured targets, under either {@code sync.request-body-mode}.
+ * The request-delta {@link FlushStage}s of the configured targets under {@code sync.request-body-mode=whole-with-path}
+ * or {@code delta}. Under {@code whole} there are none, and no body is parsed.
  *
  * <p>A target gets a stage when its mapping maps {@code request_body}, {@code project_id} and {@code user_hash} and its
  * table has the request-delta columns: that is what a payload mapping and table declare (ClickHouse {@code V16}),
  * whatever the operator named the table. The table is checked once, on the stage's first flush: by then the startup
  * migrations have run, which they have not while this bean is built. One encoder per such table, built once at
  * startup, so its path cache outlives a run and the poller, the scheduled sync and a backfill all see each other's
- * writes. Under {@code whole} the stage only stamps chat requests with their path, so a row
+ * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path, so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
  * startup logs a warning: the setting would otherwise do nothing, silently.
  */
@@ -49,12 +50,14 @@ public class RequestDeltaStages {
     public RequestDeltaStages(SyncProperties properties, List<SyncTarget> targets, UsageLogWriter writer, MeterRegistry registry) {
         Map<String, FlushStage> byTable = new LinkedHashMap<>();
         RequestBodyMode mode = properties.requestBodyMode();
-        for (SyncTarget target : targets) {
-            Set<String> columns = target.mapping().columns().stream().map(ColumnMapping::column).collect(Collectors.toSet());
-            if (columns.containsAll(REQUIRED_COLUMNS)) {
-                RequestDeltaEncoder encoder = new RequestDeltaEncoder(
-                        mode, new ClickHouseParentLookup(writer, target.table()), PATH_CACHE_ENTRIES, registry, target.table());
-                byTable.put(target.table(), new CheckedStage(encoder, properties.validateSchema() ? writer : null, target.table()));
+        if (mode != RequestBodyMode.WHOLE) {
+            for (SyncTarget target : targets) {
+                Set<String> columns = target.mapping().columns().stream().map(ColumnMapping::column).collect(Collectors.toSet());
+                if (columns.containsAll(REQUIRED_COLUMNS)) {
+                    RequestDeltaEncoder encoder = new RequestDeltaEncoder(
+                            mode, new ClickHouseParentLookup(writer, target.table()), PATH_CACHE_ENTRIES, registry, target.table());
+                    byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
+                }
             }
         }
         if (mode == RequestBodyMode.DELTA && byTable.isEmpty()) {
@@ -65,11 +68,11 @@ public class RequestDeltaStages {
 
     /**
      * A stage that first makes sure its table physically has the request-delta columns. The mapping alone is not
-     * enough: a custom target mapping {@code request_body} onto a table without them would have its bodies emptied into
-     * columns that do not exist. The table is described once, on the first flush; a table without the columns gets no
-     * rewriting from then on. With startup schema validation off ({@code writer} null: local runs without ClickHouse)
-     * the mapping is trusted. A failed describe fails that flush like any other ClickHouse error, and is retried on the
-     * next one.
+     * enough: a custom target mapping {@code request_body} onto a table without them, or the payload table before
+     * {@code V16} was applied, would have its bodies cut while the insert drops the chain columns, leaving rows that can
+     * never be rebuilt. The table is described once, on the first flush, whatever {@code sync.validate-schema} says; a
+     * table without the columns gets no rewriting from then on. A failed describe fails that flush like any other
+     * ClickHouse error, before any body is cut, and is retried on the next one.
      */
     private static final class CheckedStage implements FlushStage {
 
@@ -82,7 +85,6 @@ public class RequestDeltaStages {
             this.encoder = encoder;
             this.writer = writer;
             this.table = table;
-            this.hasColumns = writer == null ? Boolean.TRUE : null;
         }
 
         @Override

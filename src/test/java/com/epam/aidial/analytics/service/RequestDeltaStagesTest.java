@@ -47,9 +47,27 @@ class RequestDeltaStagesTest {
         assertThat(flush(stages(true, "request_body"))).doesNotContainKey("request_parent_hash").containsKey("request_body");
     }
 
+    /** Schema validation off is no reason to trust the mapping: on a table without the columns, a cut body is lost. */
     @Test
-    void withoutSchemaValidationTheMappingIsTrusted() {
-        assertThat(flush(stages(false))).containsKey("request_parent_hash");
+    void withoutSchemaValidationTheTableIsStillChecked() {
+        assertThat(flush(stages(false, "request_body"))).doesNotContainKey("request_parent_hash").containsKey("request_body");
+        assertThat(flush(stages(false, TABLE_COLUMNS))).containsKey("request_parent_hash");
+    }
+
+    @Test
+    void wholeGetsNoStage() {
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers));
+        assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.WHOLE), List.of(target), new RecordingWriter(),
+                new SimpleMeterRegistry()).byTable()).isEmpty();
+    }
+
+    @Test
+    void wholeWithPathStampsThePathOnly() {
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers));
+        RequestDeltaStages stages = new RequestDeltaStages(properties(true, RequestBodyMode.WHOLE_WITH_PATH), List.of(target),
+                writerWith(TABLE_COLUMNS), new SimpleMeterRegistry());
+
+        assertThat(flush(stages)).containsKey("request_hash").doesNotContainKey("request_parent_hash");
     }
 
     @Test
@@ -71,7 +89,13 @@ class RequestDeltaStagesTest {
     }
 
     private RequestDeltaStages stages(boolean validateSchema, String... tableColumns) {
-        RecordingWriter writer = new RecordingWriter() {
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers));
+        return new RequestDeltaStages(properties(validateSchema, RequestBodyMode.DELTA), List.of(target), writerWith(tableColumns),
+                new SimpleMeterRegistry());
+    }
+
+    private static RecordingWriter writerWith(String... tableColumns) {
+        return new RecordingWriter() {
             @Override
             public Map<String, String> describeTable(String table) {
                 Map<String, String> columns = new LinkedHashMap<>();
@@ -81,13 +105,15 @@ class RequestDeltaStagesTest {
                 return columns;
             }
         };
-        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers));
-        return new RequestDeltaStages(properties(validateSchema), List.of(target), writer, new SimpleMeterRegistry());
     }
 
     private static SyncProperties properties(boolean validateSchema) {
+        return properties(validateSchema, RequestBodyMode.DELTA);
+    }
+
+    private static SyncProperties properties(boolean validateSchema, RequestBodyMode mode) {
         return new SyncProperties("-", 0, 1000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd",
                 "'date='yyyy-MM-dd", validateSchema, List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")),
-                null, null, RequestBodyMode.DELTA);
+                null, null, mode);
     }
 }

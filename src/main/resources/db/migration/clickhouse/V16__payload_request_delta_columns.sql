@@ -10,9 +10,7 @@
 -- the new build.
 ALTER TABLE dial_usage_log_payload
     ADD COLUMN IF NOT EXISTS project_id LowCardinality(String),
-    ADD COLUMN IF NOT EXISTS deployment LowCardinality(String),
     ADD COLUMN IF NOT EXISTS user_hash String CODEC(ZSTD(1)),
-    ADD COLUMN IF NOT EXISTS session_id Nullable(String) CODEC(ZSTD(1)),
     ADD COLUMN IF NOT EXISTS request_hash UUID,
     ADD COLUMN IF NOT EXISTS request_parent_hash UUID,
     ADD COLUMN IF NOT EXISTS request_ancestor_hashes Array(UUID) CODEC(ZSTD(3)),
