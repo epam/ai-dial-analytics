@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.configuration;
 
+import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -41,6 +42,8 @@ import java.util.List;
  * @param inlineFilesMaxSize    the longest inline-file payload a body column declaring {@code inline-files} keeps, measured in
  *                              characters (bytes, for base64) of its stored text; a longer one is removed. {@code null}
  *                              (unset or blank) means no limit, and a negative value fails binding, and so startup
+ * @param requestBodyMode       how a payload row's request body is stored: whole, or cut to its new history + parent link for a chat
+ *                              request; {@code null} (unset) means {@link RequestBodyMode#WHOLE}. An unknown value fails binding, and so startup
  */
 @Validated
 @ConfigurationProperties(prefix = "sync")
@@ -56,7 +59,8 @@ public record SyncProperties(
         boolean validateSchema,
         @NotEmpty List<@Valid Target> targets,
         Boolean inlineFilesDropTruncated,
-        DataSize inlineFilesMaxSize) {
+        DataSize inlineFilesMaxSize,
+        RequestBodyMode requestBodyMode) {
 
     /** The {@code sync.max-line-bytes} default that {@code application.yml} ships (64 MiB). */
     public static final int DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
@@ -75,6 +79,7 @@ public record SyncProperties(
         if (inlineFilesMaxSize != null && inlineFilesMaxSize.isNegative()) {
             throw new IllegalArgumentException("sync.inline-files-max-size must not be negative: " + inlineFilesMaxSize);
         }
+        requestBodyMode = requestBodyMode == null ? RequestBodyMode.WHOLE : requestBodyMode;
     }
 
     /** The inline-files settings as one policy; an unset size is {@link InlineFilesPolicy#NO_LIMIT}. */
