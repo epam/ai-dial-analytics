@@ -14,7 +14,6 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,9 +25,9 @@ import java.util.Map;
  * unavailable, then attempts the due pending subjects — oldest latest failure first, at most
  * {@code sync.retry.max-per-sweep} — and finally refreshes the outstanding-failure gauges.
  *
- * <p>A blob is listed by its key and ingested through the shared pipeline into a sweep-scoped sink, recorded in the
+ * <p>A blob is listed by its key and ingested through the shared pipeline into a sink of its own, recorded in the
  * ingest ledger once its rows are written, and resolved; a blob the store no longer lists is parked as
- * {@code blob_missing}, and one the ingest ledger already records is resolved without being read. A day is re-run as
+ * {@code blob_missing}, and one the ingest ledger records at the listed version since it failed is resolved without being read. A day is re-run as
  * the reconciliation run would, skipping recorded blobs; the day path records and resolves on its own. Every attempt
  * is idempotent, so a sweep overlapping another path on the same blob or day costs only duplicate work.
  *
@@ -104,15 +103,17 @@ public class IngestRetrySweep {
             return summary;
         }
         failures.resolveIngested(snapshot);
+        boolean threw = false;
         try {
             if (retryProperties.enabled()) {
                 summary = attemptDue(snapshot, written);
             }
         } catch (RuntimeException ex) {
+            threw = true;
             log.error("Retry sweep failed: {}", ex.getMessage(), ex);
         } finally {
             // The snapshot is still current when nothing was attempted, the usual case; otherwise read again.
-            if (summary.attempted() == 0) {
+            if (summary.attempted() == 0 && !threw) {
                 failures.refreshGauges(snapshot);
             } else {
                 failures.refreshGauges();
@@ -130,14 +131,6 @@ public class IngestRetrySweep {
         log.info("Retry sweep attempting {} due failure(s)", due.size());
         int succeeded = 0;
         int failed = 0;
-        List<BlobListing> resolvedUnread = new ArrayList<>();
-        List<BlobListing> ingested = new ArrayList<>();
-        // Blobs share one sink so their rows batch; each is recorded in the ingest ledger once its rows are written,
-        // and resolved after the final flush. A flush failure is a sweep-level fault: nothing it held is resolved.
-        RunSink sink = blobIngestor.newRunSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), written -> {
-            ledger.record(written);
-            ingested.addAll(written);
-        });
         for (IngestFailureEntry entry : due) {
             OpenIngestFailure failure = entry.failure();
             if (failure.kind() == IngestFailureKind.DAY) {
@@ -146,16 +139,12 @@ public class IngestRetrySweep {
                 failed += ok ? 0 : 1;
                 continue;
             }
-            if (retryBlob(failure, sink, resolvedUnread) == BlobOutcome.FAILED) {
-                failed++;
-            } else {
+            if (retryBlob(failure)) {
                 succeeded++;
+            } else {
+                failed++;
             }
         }
-        sink.flush();
-        failures.resolveBlobs(resolvedUnread, IngestPath.RETRY);
-        failures.resolveBlobs(ingested, IngestPath.RETRY);
-        meterRegistry.counter("sync.retry.attempts", "kind", IngestFailureKind.BLOB.wire(), "outcome", "success").increment(ingested.size());
         return new SweepSummary(heldWritten, due.size(), succeeded, failed);
     }
 
@@ -167,7 +156,15 @@ public class IngestRetrySweep {
         return summary.success();
     }
 
-    private BlobOutcome retryBlob(OpenIngestFailure failure, RunSink sink, List<BlobListing> resolvedUnread) {
+    /**
+     * Retries one blob in a sink of its own, flushed before the next blob is read: a sweep holds at most
+     * {@code max-per-sweep} blobs, so batching across them saves little, and a write failure then belongs to this blob
+     * alone. It is recorded as the blob's failed attempt, so the blob backs off and eventually parks instead of failing
+     * every sweep ahead of every other due subject.
+     *
+     * @return whether the blob is now resolved
+     */
+    private boolean retryBlob(OpenIngestFailure failure) {
         String key = failure.subject();
         // Without a fresh listing, a failure keeps the version that failed before: recording no version would let any
         // earlier ingest of the blob count as resolving it, and would move the subject to today's day.
@@ -182,38 +179,49 @@ public class IngestRetrySweep {
             failures.recordBlob(failedVersion, IngestPath.RETRY, IngestFailureReason.BLOB_MISSING,
                     "The store no longer lists the blob");
             attempt("failure");
-            return BlobOutcome.FAILED;
+            return false;
         }
-        Map<String, Instant> recorded = ledger.recorded(key);
-        if (IngestLedger.isRecorded(recorded, listing)) {
-            resolvedUnread.add(listing);
+        if (recordedSinceFailure(listing, failure)) {
+            failures.resolveBlobs(List.of(listing), IngestPath.RETRY);
             attempt("resolved");
-            return BlobOutcome.RESOLVED;
+            return true;
         }
+        List<BlobListing> ingested = new ArrayList<>(1);
         try {
+            RunSink sink = blobIngestor.newRunSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), written -> {
+                ledger.record(written);
+                ingested.addAll(written);
+            });
             blobIngestor.ingest(listing, sink);
-            return BlobOutcome.INGESTED;
-        } catch (RowBatchSink.FlushException fe) {
-            throw fe;
+            sink.flush();
         } catch (Exception ex) {
             return failedBlob(listing, ex);
         }
+        failures.resolveBlobs(ingested, IngestPath.RETRY);
+        attempt("success");
+        return true;
     }
 
-    private BlobOutcome failedBlob(BlobListing listing, Exception ex) {
+    /**
+     * Whether the ingest ledger recorded {@code listing}, at this version, after the blob's latest failure. An entry
+     * written before the failure — the blob ingested once, then failing in a backfill that includes ingested blobs —
+     * says nothing about the failed attempt, so the blob is read again.
+     */
+    private boolean recordedSinceFailure(BlobListing listing, OpenIngestFailure failure) {
+        IngestLedger.Recorded recorded = ledger.recordedAmong(List.of(listing.name())).get(listing.name());
+        return recorded != null
+                && IngestLedger.isRecorded(Map.of(listing.name(), recorded.lastModified()), listing)
+                && recorded.ingestedAt().isAfter(failure.lastFailedAt());
+    }
+
+    private boolean failedBlob(BlobListing listing, Exception ex) {
         failures.recordBlobFailure(listing, IngestPath.RETRY, ex);
         attempt("failure");
-        return BlobOutcome.FAILED;
+        return false;
     }
 
     private void attempt(String outcome) {
         meterRegistry.counter("sync.retry.attempts", "kind", IngestFailureKind.BLOB.wire(), "outcome", outcome).increment();
-    }
-
-    private enum BlobOutcome {
-        INGESTED,
-        RESOLVED,
-        FAILED
     }
 
     /**

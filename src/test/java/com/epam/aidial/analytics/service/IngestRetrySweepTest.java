@@ -103,6 +103,49 @@ class IngestRetrySweepTest {
         assertThat(registry.counter("sync.retry.attempts", "kind", "blob", "outcome", "success").count()).isEqualTo(1);
     }
 
+    /** An ingest-ledger entry written before the failure says nothing about the failed attempt: the blob is read again. */
+    @Test
+    void earlierIngestOfTheSameVersionDoesNotResolveWithoutReading() throws Exception {
+        BlobListing blob = writeBlob("a.log.gz", "p1");
+        ledger.clock = clock::instant;
+        ledger.record(List.of(blob));
+        clock.advance(Duration.ofSeconds(1));
+        failures.recordBlobFailure(blob, IngestPath.BACKFILL, new RecordMappingException("dial_usage_log", new IllegalStateException("x")));
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(failures.outstanding()).singleElement().extracting(IngestFailureEntry::state).isEqualTo(IngestFailureState.PARKED);
+        failures.requeue(IngestFailureFilter.ALL);
+        clock.advance(Duration.ofMinutes(16));
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.succeeded()).isEqualTo(1);
+        assertThat(writer.rows).extracting(row -> row.get("project_id")).containsExactly("p1");
+        assertThat(failures.outstanding()).isEmpty();
+    }
+
+    /**
+     * A write failure is the failed attempt of the blob being written, each in its own sink, so it backs off and parks
+     * rather than aborting the sweep unrecorded and failing every later sweep ahead of the other due subjects.
+     */
+    @Test
+    void writeFailureIsRecordedAsEachBlobsAttempt() throws Exception {
+        BlobListing older = writeBlob("a.log.gz", "p1");
+        BlobListing newer = writeBlob("b.log.gz", "p2");
+        failures.recordBlobFailure(older, IngestPath.POLL, new IOException("reset"));
+        clock.advance(Duration.ofSeconds(1));
+        failures.recordBlobFailure(newer, IngestPath.POLL, new IOException("reset"));
+        clock.advance(Duration.ofMinutes(16));
+        writer.failOnInsertCall = 1;
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.attempted()).isEqualTo(2);
+        assertThat(summary.failed()).isEqualTo(2);
+        assertThat(ledger.recordedKeys()).isEmpty();
+        assertThat(failures.outstanding()).hasSize(2).allSatisfy(entry -> assertThat(entry.failure().attempts()).isEqualTo(2));
+        assertThat(registry.counter("sync.retry.attempts", "kind", "blob", "outcome", "failure").count()).isEqualTo(2);
+    }
+
     @Test
     void blobNotYetDueIsLeftAlone() throws Exception {
         BlobListing blob = writeBlob("a.log.gz", "p1");

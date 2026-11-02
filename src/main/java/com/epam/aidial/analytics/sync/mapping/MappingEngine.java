@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.sync.mapping;
 import com.epam.aidial.analytics.sync.inline.InlineFileRewrite;
 import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
@@ -12,6 +13,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Config-driven engine, walks
@@ -52,24 +54,31 @@ public class MappingEngine {
      * per-row NPE.
      */
     public MappingEngine(MappingConfig config, TransformRegistry transforms, DeriverRegistry derivers) {
-        this(config, transforms, derivers, InlineFilesPolicy.keep(), null, null);
+        this(config, transforms, derivers, InlineFilesPolicy.keep(), "", new SimpleMeterRegistry());
     }
 
     /**
      * Compiles the mapping for a target, with its inline-file handling.
      *
      * @param policy   the inline-files settings; when it {@link InlineFilesPolicy#rewrites() rewrites}, each {@code inline-files} column gets a rewrite
-     * @param table    the target table, tagging the inline-file counters; unused when the policy does not rewrite
-     * @param registry where the inline-file counters are registered; unused when the policy does not rewrite, required otherwise
+     * @param table    the target table, tagging the coercion-failure and inline-file counters
+     * @param registry where those counters are registered
      */
     public MappingEngine(MappingConfig config, TransformRegistry transforms, DeriverRegistry derivers,
                          InlineFilesPolicy policy, String table, MeterRegistry registry) {
+        Objects.requireNonNull(table, "table");
+        Objects.requireNonNull(registry, "registry");
         List<CompiledColumn> compiled = new ArrayList<>(config.columns().size());
         for (ColumnMapping column : config.columns()) {
             InlineFileRewrite rewrite = policy.rewrites() && column.inlineFiles() != null
                     ? new InlineFileRewrite(column.inlineFiles().body(), policy, table, column.column(), registry)
                     : null;
-            compiled.add(CompiledColumn.of(column, transforms, derivers, rewrite));
+            // Only a kind with a failure mode gets a counter, so the string, object and source-file columns do not each
+            // register a series that can never move.
+            CoercionFailures failures = !column.isSourceFile() && canFail(column.kind())
+                    ? new CoercionFailures(table, column.column(), column.kind(), registry)
+                    : null;
+            compiled.add(CompiledColumn.of(column, transforms, derivers, rewrite, failures));
         }
         this.columns = List.copyOf(compiled);
     }
@@ -100,10 +109,20 @@ public class MappingEngine {
                 sources.add(JsonPaths.walk(record, path));
             }
             Object derived = compiled.deriver().derive(sources, column.args());
+            if (derived == Coercion.FAILED) {
+                report(compiled, "DERIVED", sourceFile);
+                derived = null;
+            }
             return applyFallback(column, derived);
         }
         JsonNode node = JsonPaths.walk(record, compiled.sourcePath());
         Object value = (node.isMissingNode() || node.isNull()) ? null : coerce(column.kind(), node);
+        if (value == Coercion.FAILED) {
+            // A value the kind cannot represent is treated as absent: counted, and given the fallback rather than an
+            // invented zero. The transform sees the null an absent value would give it.
+            report(compiled, node.getNodeType().name(), sourceFile);
+            value = null;
+        }
         if (compiled.inlineFiles() != null && value instanceof String body) {
             JsonNode uri = JsonPaths.walk(record, compiled.uriPath());
             value = compiled.inlineFiles().apply(body, uri.isString() ? uri.asString() : null);
@@ -112,6 +131,21 @@ public class MappingEngine {
             value = compiled.transform().apply(value);
         }
         return applyFallback(column, value);
+    }
+
+    /** Whether a present value can fail to be read as {@code kind}: every kind but {@code string} and {@code object}. */
+    private static boolean canFail(ColumnKind kind) {
+        return kind != ColumnKind.STRING && kind != ColumnKind.OBJECT;
+    }
+
+    /**
+     * Counts and logs a coercion failure. A column of a kind with no failure mode has no reporter; a deriver reporting a
+     * failure for one (a mapping pairing a numeric deriver with the {@code string} kind) still takes the fallback.
+     */
+    private static void report(CompiledColumn compiled, String nodeType, String sourceFile) {
+        if (compiled.failures() != null) {
+            compiled.failures().report(nodeType, sourceFile);
+        }
     }
 
     /**
@@ -126,6 +160,7 @@ public class MappingEngine {
      * @param sourcePaths the pre-compiled deriver source paths; empty for a mapped or source-file column
      * @param inlineFiles the inline-file rewrite of a body column under a policy that rewrites; {@code null} otherwise
      * @param uriPath     the pre-compiled request-URI path the rewrite reads; {@code null} when there is no rewrite
+     * @param failures    counts and logs the column's coercion failures; {@code null} for a kind that cannot fail
      */
     private record CompiledColumn(
             ColumnMapping mapping,
@@ -135,11 +170,13 @@ public class MappingEngine {
             Deriver deriver,
             List<JsonPaths.CompiledPath> sourcePaths,
             InlineFileRewrite inlineFiles,
-            JsonPaths.CompiledPath uriPath) {
+            JsonPaths.CompiledPath uriPath,
+            CoercionFailures failures) {
 
-        static CompiledColumn of(ColumnMapping column, TransformRegistry transforms, DeriverRegistry derivers, InlineFileRewrite rewrite) {
+        static CompiledColumn of(ColumnMapping column, TransformRegistry transforms, DeriverRegistry derivers, InlineFileRewrite rewrite,
+                CoercionFailures failures) {
             if (column.isSourceFile()) {
-                return new CompiledColumn(column, true, null, null, null, List.of(), null, null);
+                return new CompiledColumn(column, true, null, null, null, List.of(), null, null, failures);
             }
             if (column.isDerived()) {
                 Deriver deriver = requireResolved(derivers.get(column.derive()), "deriver", column.derive());
@@ -147,14 +184,14 @@ public class MappingEngine {
                 for (String path : column.sources()) {
                     paths.add(JsonPaths.compile(path));
                 }
-                return new CompiledColumn(column, false, null, null, deriver, List.copyOf(paths), null, null);
+                return new CompiledColumn(column, false, null, null, deriver, List.copyOf(paths), null, null, failures);
             }
             Transform transform = column.transform() == null
                     ? null
                     : requireResolved(transforms.get(column.transform()), "transform", column.transform());
             JsonPaths.CompiledPath uriPath = rewrite == null ? null : JsonPaths.compile(column.inlineFiles().uri());
             return new CompiledColumn(
-                    column, false, JsonPaths.compile(column.source()), transform, null, List.of(), rewrite, uriPath);
+                    column, false, JsonPaths.compile(column.source()), transform, null, List.of(), rewrite, uriPath, failures);
         }
 
         private static <T> T requireResolved(T resolved, String kind, String name) {
@@ -167,7 +204,9 @@ public class MappingEngine {
     }
 
     /**
-     * Reads {@code node} as the declared kind. A <em>structured</em> node read as {@code STRING} is
+     * Reads {@code node} as the declared kind, strictly ({@link Coercion}): a value the kind cannot represent is
+     * {@link Coercion#FAILED} rather than an invented {@code 0} or {@code false}, and blank text is absent. A
+     * <em>structured</em> node read as {@code STRING} is
      * serialized back to its JSON text rather than coerced: Jackson yields no string for a container node,
      * so the alternative is the empty string, which the blank fallback then stores as NULL — a producer
      * field that arrived as an object would be recorded as though it had never been sent. That matters for
@@ -177,40 +216,13 @@ public class MappingEngine {
      */
     private static Object coerce(ColumnKind kind, JsonNode node) {
         return switch (kind) {
-            case STRING -> node.isContainer() ? node.toString() : node.asString("");
-            case LONG -> node.asLong(0);
-            case DOUBLE -> decimal(node);
-            case BOOL -> node.asBoolean(false);
-            case ARRAY_STRING -> stringArray(node);
+            case STRING -> Coercion.asText(node);
+            case LONG -> Coercion.toLong(node);
+            case DOUBLE -> Coercion.toDecimal(node);
+            case BOOL -> Coercion.toBool(node);
+            case ARRAY_STRING -> Coercion.toStringArray(node);
             case OBJECT -> node;
         };
-    }
-
-    /**
-     * Reads a numeric node as an exact {@link BigDecimal} via its textual form, preserving the
-     * producer's decimal precision (no binary floating-point round-trip). Returns {@code null} for a
-     * blank value so the nullability fallback applies.
-     */
-    private static BigDecimal decimal(JsonNode node) {
-        String text = node.asString("");
-        if (text.isBlank()) {
-            return null;
-        }
-        try {
-            return new BigDecimal(text);
-        } catch (NumberFormatException ex) {
-            return null;
-        }
-    }
-
-    private static List<String> stringArray(JsonNode node) {
-        List<String> values = new ArrayList<>();
-        if (node.isArray()) {
-            for (JsonNode element : node) {
-                values.add(element.asString(""));
-            }
-        }
-        return values;
     }
 
     private static Object applyFallback(ColumnMapping column, Object value) {

@@ -75,7 +75,7 @@ public class DataSyncFailuresController {
                     + "attempts it. Members are ANDed; at least one is required.")
     @ApiResponse(responseCode = "200", description = "How many failures were requeued",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = IngestFailureRetryResponse.class)))
-    @ApiResponse(responseCode = "400", description = "An empty body, an unknown member, an invalid filter, or more than 1000 subjects")
+    @ApiResponse(responseCode = "400", description = "An empty body, an unknown member, an invalid filter, more than 1000 subjects, or a null or blank subject")
     @ApiResponse(responseCode = "503", description = "ClickHouse is unavailable")
     public IngestFailureRetryResponse retry(@RequestBody IngestFailureRetryRequest request) {
         if (request.kind() == null && request.state() == null && request.reason() == null && request.from() == null
@@ -84,6 +84,9 @@ public class DataSyncFailuresController {
         }
         if (request.subjects() != null && request.subjects().size() > MAX_LIMIT) {
             throw new InvalidRequestParameterException("subjects must hold at most " + MAX_LIMIT + " entries");
+        }
+        if (request.subjects() != null && request.subjects().stream().anyMatch(subject -> subject == null || subject.isBlank())) {
+            throw new InvalidRequestParameterException("subjects must not hold a null or blank entry");
         }
         IngestFailureFilter filter = filter(request.kind(), request.state(), request.reason(), request.from(), request.to(), request.subjects());
         return new IngestFailureRetryResponse(service.requeue(filter));

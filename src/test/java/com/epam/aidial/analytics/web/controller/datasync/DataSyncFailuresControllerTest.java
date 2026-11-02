@@ -169,6 +169,16 @@ class DataSyncFailuresControllerTest {
     }
 
     @Test
+    void nullOrBlankSubjectIsRefused() throws Exception {
+        for (String body : List.of("{\"subjects\":[null]}", "{\"subjects\":[\"a\",\" \"]}")) {
+            mockMvc.perform(post("/v1/data-sync/failures/retry").contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.message").value("subjects must not hold a null or blank entry"));
+        }
+        verifyNoInteractions(service);
+    }
+
+    @Test
     void anInvalidRetryFilterIsRefused() throws Exception {
         mockMvc.perform(post("/v1/data-sync/failures/retry").contentType(MediaType.APPLICATION_JSON).content("{\"kind\":\"file\"}"))
                 .andExpect(status().isBadRequest())

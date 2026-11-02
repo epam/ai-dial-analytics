@@ -36,7 +36,9 @@ types, because the messages of a mapping fault can quote the record.
 Events SHALL be kept for 13 months after the date they belong to and then expire. For a blob that date is the
 blob's last-modified date, so its failure events expire with the ingest-ledger entry that can resolve them. A
 failure whose events outlived that entry would otherwise come back as outstanding. Like the ingest ledger,
-removal MAY lag by up to one month. The table SHALL NOT be registered in the query catalog and SHALL NOT be reachable
+removal MAY lag by up to one month. A failure of a blob or day already older than 13 months, which only a
+backfill reaches, therefore expires as soon as it is written, like the ingest-ledger entry such a backfill
+writes; it shows on the `sync.failures.recorded` counter and in the logs only. The table SHALL NOT be registered in the query catalog and SHALL NOT be reachable
 through any query surface.
 
 A blob failure SHALL be recorded once per failed attempt. There is one exception: the poller retries a failing
@@ -76,8 +78,8 @@ cycle, so no part of it is left for a later path.
 
 #### Scenario: Old events expire
 
-- **WHEN** an event was written more than 13 months ago
-- **THEN** it is removed within one further month, and younger events are kept
+- **WHEN** an event belongs to a date more than 13 months ago
+- **THEN** it is removed within one further month, and events of later dates are kept
 
 ### Requirement: Failures are classified as transient or deterministic
 
@@ -213,11 +215,17 @@ A blob attempt SHALL list the blob by its key. Then:
   resolving it.
 - If the store no longer lists the blob, the sweep SHALL record a `failed` event with the reason
   `blob_missing`, which parks it.
-- If the ingest ledger records the blob as listed, the sweep SHALL write `resolved` without reading it.
+- If the ingest ledger records the blob as listed, in an entry written after the blob's latest failure, the
+  sweep SHALL write `resolved` without reading it. An entry written before the failure says nothing about the
+  failed attempt, so the blob is read again.
 - Otherwise the sweep SHALL ingest the blob through the shared parse → map → batch-insert pipeline, record it
-  in the ingest ledger once its rows are written, and write `resolved`.
+  in the ingest ledger once its rows are written, and write `resolved`. Each blob SHALL be written before the
+  next is read, so a failed batch insert or ingest-ledger write is that blob's failed attempt, not a fault of
+  the sweep.
 
-A failed blob attempt SHALL record a new `failed` event with the path `retry`.
+A failed blob attempt SHALL record a new `failed` event with the path `retry`. A write failure is classified as
+any other blob-level failure, so the blob backs off and eventually parks rather than failing every sweep ahead
+of the other due subjects.
 
 A day attempt SHALL re-run the day exactly as a reconciliation run does. It skips the blobs the ingest ledger
 records, even when the day's original failure happened in a backfill that included already-ingested blobs. A
@@ -236,6 +244,18 @@ Parked subjects SHALL NOT be attempted until an operator requeues them.
 - **WHEN** a blob failed on the poller with a transient error, aged out of the poller's overlap window, and
   its next attempt is due
 - **THEN** the next sweep ingests it, records it in the ingest ledger and writes `resolved`
+
+#### Scenario: A requeued blob is read again despite an older ingest-ledger entry
+
+- **WHEN** a blob was ingested and recorded, a later backfill that includes already-ingested blobs parks it with
+  a mapping error, and an operator requeues it after the mapping is fixed
+- **THEN** the next sweep reads and ingests the blob again before writing `resolved`
+
+#### Scenario: A write failure during a sweep is the blob's attempt
+
+- **WHEN** the batch insert of a retried blob fails
+- **THEN** the blob records a `failed` event with the path `retry` and its attempts grow, and the sweep goes on
+  to the next due subject
 
 #### Scenario: A failed reconciliation day is retried
 
@@ -352,7 +372,8 @@ next sweep that runs after the request is due to attempt it.
 
 The body SHALL accept these optional members, combined with AND:
 - `kind`, `state`, `reason`, `from` and `to`, with the same meaning and validation as the list parameters;
-- `subjects`: an array of at most 1000 blob keys or ISO dates.
+- `subjects`: an array of at most 1000 blob keys or ISO dates; a null or blank entry is rejected with
+  `400 bad_request`.
 
 A body with no member present SHALL be rejected with `400 bad_request`, so that an empty body cannot requeue
 everything by accident. An unknown member is also rejected with `400 bad_request`. Subjects that match nothing

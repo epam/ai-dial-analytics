@@ -2424,7 +2424,8 @@ ADAS owns, disabling SHALL leave the cursor and recorded state untouched, and th
 re-enabling SHALL continue from that cursor; a re-declaration, not a stop, is what resets it. For a kind
 whose cursor the runner holds, the runner keeps its cursor, group state and queued work while the
 pipeline is stopped and continues from them once it is re-enabled. Neither a stop nor a restart moves
-`generation` (see "Register and enable lifecycle"), so nothing qualified by it is invalidated. Re-enabling
+`generation`, except a restart whose arming gate re-derives a stored member (see "Register and enable
+lifecycle"), so nothing qualified by it is invalidated. Re-enabling
 SHALL re-run the declaration gate exactly as the first arming does, so a pipeline whose inputs drifted
 while it was stopped is refused rather than restarted.
 

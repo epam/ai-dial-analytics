@@ -100,8 +100,9 @@ public record PipelineDto(
                 + "that state exists for.", example = "false")
         boolean enabled,
 
-        @Schema(description = "The declaration's revision, bumped once per accepted re-declaration and not by "
-                + "a patch that only changes `enabled`. A consumer detects a re-declaration by comparing it "
+        @Schema(description = "The declaration's revision, bumped once per accepted change to the declaration, a member "
+                + "the arming gate re-derives at enable included, and not by a change of `enabled` alone. A consumer "
+                + "detects a re-declaration by comparing it "
                 + "with the value it last saw; `updated_at` moves on every accepted change.", example = "3")
         long generation,
 
