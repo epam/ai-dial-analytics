@@ -55,8 +55,8 @@ an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can
   queryable tables.
 - **Access control:** OIDC and DIAL API key authentication, per-table grants, sensitive and heavy column
   handling, and row-level security.
-- **Saved queries and audit trail:** shareable saved queries, plus a full revision history of catalog
-  changes.
+- **Saved queries, dashboards and audit trail:** shareable saved queries and dashboards of query widgets,
+  plus a full revision history of catalog changes.
 - **Catalog promotion:** export and import user tables and pipelines between environments.
 - **Grafana dashboards:** ready-made dashboards over DIAL usage data in [`grafana/`](grafana/).
 
@@ -148,6 +148,7 @@ All functional endpoints live under `/v1`. Errors share one JSON shape:
 | Table catalog | `/v1/tables` | [table-management](openspec/specs/table-management/spec.md) |
 | Pipelines | `/v1/pipelines` | [aggregate-pipeline](openspec/specs/aggregate-pipeline/spec.md), [pipeline-registry](openspec/specs/pipeline-registry/spec.md) |
 | Saved queries | `/v1/saved-queries` | [saved-queries](openspec/specs/saved-queries/spec.md) |
+| Dashboards | `/v1/dashboards` | [dashboards](openspec/specs/dashboards/spec.md) |
 | Audit trail | `/v1/activities` | [audit-trail](openspec/specs/audit-trail/spec.md) |
 | Data sync | `POST /v1/data-sync/backfill` | [data-sync-backfill](openspec/specs/data-sync-backfill/spec.md) |
 | OTLP sinks | `/v1/otel/sinks`, `/v1/otel/sink/{name}` | [otel-sink](openspec/specs/otel-sink/spec.md), [Claude Code example](docs/claude-code-telemetry.md) |

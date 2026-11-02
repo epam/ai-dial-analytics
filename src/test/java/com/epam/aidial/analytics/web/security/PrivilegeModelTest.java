@@ -24,7 +24,7 @@ class PrivilegeModelTest {
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
 
     @Test
-    @DisplayName("the DAG has exactly the three admitted direct edges")
+    @DisplayName("the DAG has exactly the four admitted direct edges")
     void directEdges() {
         assertThat(PrivilegeImplications.directlyImplied(Privilege.TABLE_GET))
                 .containsExactly(Privilege.TABLE_LIST);
@@ -32,9 +32,13 @@ class PrivilegeModelTest {
                 .containsExactly(Privilege.TABLE_GET);
         assertThat(PrivilegeImplications.directlyImplied(Privilege.TABLE_MODIFY))
                 .containsExactly(Privilege.TABLE_GET);
+        assertThat(PrivilegeImplications.directlyImplied(Privilege.SAVED_QUERY_WRITE))
+                .containsExactly(Privilege.SAVED_QUERY_READ);
         // Every other privilege implies nothing at all — the sensitivity clearance included.
+        final Set<Privilege> granting = EnumSet.of(
+                Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_MODIFY, Privilege.SAVED_QUERY_WRITE);
         for (final Privilege privilege : Privilege.values()) {
-            if (!EnumSet.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_MODIFY).contains(privilege)) {
+            if (!granting.contains(privilege)) {
                 assertThat(PrivilegeImplications.directlyImplied(privilege))
                         .as("%s must imply nothing", privilege)
                         .isEmpty();
@@ -45,13 +49,24 @@ class PrivilegeModelTest {
     @Test
     @DisplayName("publishing confers nothing; the write endpoints decide against the body's scope")
     void publishImplications() {
-        // An earlier round gave PUBLISH -> SAVED_QUERY_READ on the argument that it already sees every
-        // saved query. Only the revision endpoint and the audit feed do; get and list go through
-        // SavedQueryRepository.findVisible, which has no such bypass. The edge let a PUBLISH-only caller
-        // read another user's personal saved query's history while its current state still answered 404.
+        // PUBLISH -> SAVED_QUERY_READ is not admitted. Only the revision endpoint and the audit feed let a
+        // PUBLISH holder see every saved query; get and list go through SavedQueryRepository.findVisible,
+        // which has no such bypass. The pair would read another user's personal saved query's history
+        // while its current state still answered 404 — more than SAVED_QUERY_READ reads alone.
         assertThat(PrivilegeImplications.closureOf(Privilege.SAVED_QUERY_PUBLISH))
                 .containsExactly(Privilege.SAVED_QUERY_PUBLISH);
+    }
+
+    @Test
+    @DisplayName("the saved-query write implies its read, and nothing implies the write")
+    void savedQueryWriteImpliesRead() {
+        // A saved query or dashboard is replaced whole, and a dashboard replace carries the generation a
+        // read returned, so a write grant without the read could edit only what its holder remembered.
         assertThat(PrivilegeImplications.closureOf(Privilege.SAVED_QUERY_WRITE))
+                .containsExactlyInAnyOrder(Privilege.SAVED_QUERY_WRITE, Privilege.SAVED_QUERY_READ);
+        assertThat(PrivilegeImplications.conferring(Privilege.SAVED_QUERY_READ))
+                .containsExactlyInAnyOrder(Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE);
+        assertThat(PrivilegeImplications.conferring(Privilege.SAVED_QUERY_WRITE))
                 .containsExactly(Privilege.SAVED_QUERY_WRITE);
     }
 
@@ -132,7 +147,23 @@ class PrivilegeModelTest {
         assertThat(RoleBundle.READ_ONLY_SENSITIVE_ANALYTIC.declaredPrivileges())
                 .as("one source of truth for implication: the DAG, not a hand-copied closure")
                 .containsExactlyInAnyOrder(Privilege.TABLE_READ, Privilege.TABLE_SENSITIVE,
-                        Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE);
+                        Privilege.SAVED_QUERY_WRITE);
+        for (final RoleBundle bundle : RoleBundle.values()) {
+            if (bundle != RoleBundle.FULL_ADMIN) {
+                assertThat(bundle.declaredPrivileges())
+                        .as("%s must not declare a privilege it already confers by implication", bundle)
+                        .doesNotContain(Privilege.SAVED_QUERY_READ);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a mapping naming only the saved-query write confers the read as well")
+    void mappingWriteConfersRead() {
+        final Map<String, Set<Privilege>> mapping = RolesMappingParser.parse(jsonMapper,
+                "{\"writer\":[\"SAVED_QUERY_WRITE\"]}", "security.defaults.roles-mapping");
+        assertThat(mapping.get("writer"))
+                .containsExactlyInAnyOrder(Privilege.SAVED_QUERY_WRITE, Privilege.SAVED_QUERY_READ);
     }
 
     @Test

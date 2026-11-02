@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.service.audit;
 
 import com.epam.aidial.analytics.exception.ActivityNotFoundException;
+import com.epam.aidial.analytics.service.dashboard.DashboardEntity;
+import com.epam.aidial.analytics.service.dashboard.DashboardVisibility;
 import com.epam.aidial.analytics.service.query.saved.SavedQueryAccess;
 import com.epam.aidial.analytics.service.query.saved.SavedQueryEntity;
 import com.epam.aidial.analytics.service.query.saved.SavedQueryScope;
@@ -31,6 +33,8 @@ import java.util.UUID;
  * <strong>current</strong> stored state, so a deleted saved query's history becomes visible to
  * a {@code SAVED_QUERY_PUBLISH} holder only, including to its former owner — a stated trade-off, not
  * an oversight.
+ *
+ * <p>{@link ActivityResourceType#Dashboard} is narrowed the same way, by its own visibility and owner.
  *
  * <p>{@link ActivityResourceType#Pipeline} deliberately has <b>no</b> narrowing. The bar for a
  * resource's audit surface is whatever reading that resource's current state requires, and a pipeline's
@@ -102,7 +106,8 @@ public class AuditActivityService {
     public Page<AuditActivityEntity> list(PageRequestDto request) {
         final Specification<AuditActivityEntity> spec = Specification
                 .where(PAGE_MAPPER.toSpecification(request.filtersOrEmpty()))
-                .and(savedQueryNarrowing());
+                .and(savedQueryNarrowing())
+                .and(dashboardNarrowing());
         return activities.findAll(spec, PAGE_MAPPER.toPageRequest(request));
     }
 
@@ -113,7 +118,8 @@ public class AuditActivityService {
                 (root, query, builder) -> builder.equal(root.get("activityId"), activityId);
         final Specification<AuditActivityEntity> spec = Specification
                 .where(idEquals)
-                .and(savedQueryNarrowing());
+                .and(savedQueryNarrowing())
+                .and(dashboardNarrowing());
         return activities.findOne(spec)
                 .orElseThrow(() -> new ActivityNotFoundException("activity '" + activityId + "' not found"));
     }
@@ -143,6 +149,33 @@ public class AuditActivityService {
                             builder.equal(savedQuery.get("ownerId"), access.currentAuthor()))));
             return builder.or(
                     builder.notEqual(root.get("resourceType"), ActivityResourceType.SavedQuery),
+                    builder.exists(visible));
+        };
+    }
+
+    /**
+     * The dashboard twin of {@link #savedQueryNarrowing()}: a {@code Dashboard}-typed row is included for a
+     * {@code SAVED_QUERY_PUBLISH} holder unconditionally, for any caller when the dashboard's
+     * <strong>current</strong> visibility is {@code PUBLIC}, or for its <strong>current</strong> owner —
+     * the rule {@code DashboardRepository.findVisible} applies to the live read. Dashboards take their
+     * visibility and privileges from the saved-query model, so the bypass is the same privilege, and a
+     * deleted dashboard's activities fall to it alone, as a deleted saved query's do.
+     */
+    private Specification<AuditActivityEntity> dashboardNarrowing() {
+        return (root, query, builder) -> {
+            if (!access.isSecurityEnabled() || access.maySeeEverySavedQuery()) {
+                return builder.conjunction();
+            }
+            final Subquery<String> visible = query.subquery(String.class);
+            final Root<DashboardEntity> dashboard = visible.from(DashboardEntity.class);
+            visible.select(dashboard.get("id"));
+            visible.where(builder.and(
+                    builder.equal(dashboard.get("id"), root.get("resourceId")),
+                    builder.or(
+                            builder.equal(dashboard.get("visibility"), DashboardVisibility.PUBLIC),
+                            builder.equal(dashboard.get("ownerId"), access.currentAuthor()))));
+            return builder.or(
+                    builder.notEqual(root.get("resourceType"), ActivityResourceType.Dashboard),
                     builder.exists(visible));
         };
     }

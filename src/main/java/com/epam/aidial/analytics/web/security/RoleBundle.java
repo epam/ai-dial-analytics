@@ -20,6 +20,11 @@ import java.util.Set;
  * endpoint widens: {@code REGISTRY_READ} reproduces the reach the old {@code /v1/**} role rule gave
  * pipeline reads rather than extending it.
  *
+ * <p>The three bundles that keep personal saved queries declare {@code SAVED_QUERY_WRITE} alone, because
+ * it implies {@code SAVED_QUERY_READ}; they confer exactly what they did when they declared both. The
+ * edge does widen one thing outside the bundles: a {@code roles-mapping} that names
+ * {@code SAVED_QUERY_WRITE} without {@code SAVED_QUERY_READ} now confers the read as well.
+ *
  * <p>Bundle names are not valid grantees in a table's access lists, which name raw provider roles.
  */
 public enum RoleBundle {
@@ -32,13 +37,11 @@ public enum RoleBundle {
             Privilege.TABLE_READ,
             Privilege.REGISTRY_READ,
             Privilege.AUDIT_READ,
-            Privilege.SAVED_QUERY_READ,
             Privilege.SAVED_QUERY_WRITE)),
 
     /** An analyst: read every table's non-sensitive values and keep personal saved queries. */
     READ_ONLY_ANALYTIC(EnumSet.of(
             Privilege.TABLE_READ,
-            Privilege.SAVED_QUERY_READ,
             Privilege.SAVED_QUERY_WRITE)),
 
     /**
@@ -48,7 +51,6 @@ public enum RoleBundle {
     READ_ONLY_SENSITIVE_ANALYTIC(EnumSet.of(
             Privilege.TABLE_READ,
             Privilege.TABLE_SENSITIVE,
-            Privilege.SAVED_QUERY_READ,
             Privilege.SAVED_QUERY_WRITE));
 
     private final Set<Privilege> declared;

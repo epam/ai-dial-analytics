@@ -62,7 +62,15 @@ public class SavedQueryBodyResolver {
      * queries. Assumes envelope validation has already run, so exactly one body is present.
      */
     public List<String> resolveSource(SavedQueryRequestDto request) {
-        return request.query() != null ? resolveStructured(request.query()) : resolveSql(request.sql());
+        return resolveSource(request.query(), request.sql());
+    }
+
+    /**
+     * {@link #resolveSource(SavedQueryRequestDto)} for a body held somewhere other than a saved query — a
+     * dashboard widget's inline query. Exactly one of {@code query} and {@code sql} must be present.
+     */
+    public List<String> resolveSource(StructuredQuery query, String sql) {
+        return query != null ? resolveStructured(query) : resolveSql(sql);
     }
 
     /**

@@ -18,6 +18,7 @@ import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
+import com.epam.aidial.analytics.service.query.saved.model.SavedQueryChart;
 import com.epam.aidial.analytics.service.query.saved.model.SavedQueryTime;
 import com.epam.aidial.analytics.service.query.saved.model.SavedQueryTimeMode;
 import com.epam.aidial.analytics.web.dto.query.saved.SavedQueryRequestDto;
@@ -67,11 +68,34 @@ public class SavedQueryBodyValidator {
         }
         rejectServerAssignedFields(request);
         validateName(request.name());
-        validateExactlyOneBody(request);
+        validateExactlyOneBody(request.query(), request.sql());
         rejectParameters(request.query());
         final SavedQueryTime time = timeIntent(request);
         validateTime(time);
-        validateSize(request, time);
+        validateSize(request.query(), request.sql(), request.chart(), serializedSize(time));
+    }
+
+    /**
+     * The body rules alone, for a query body held somewhere other than a saved query — a dashboard
+     * widget's inline query. The one-body rule, blank-{@code sql} normalisation, the parameter-expression
+     * check, and the size cap, applied to {@code query}, {@code sql} and {@code chart} plus
+     * {@code extraBytes}. A saved query passes its serialized {@code time} there, so its cap still counts it.
+     */
+    public void validateBody(StructuredQuery query, String sql, SavedQueryChart chart, int extraBytes) {
+        validateExactlyOneBody(query, sql);
+        rejectParameters(query);
+        validateSize(query, sql, chart, extraBytes);
+    }
+
+    /**
+     * A raw {@code time} node bound <em>and</em> checked by the time-intent rule — what {@link #validate}
+     * applies to a saved query's {@code time}. Binding alone ({@link #timeIntent(JsonNode)}) would accept an
+     * intent the rule rejects.
+     */
+    public SavedQueryTime validTimeIntent(JsonNode time) {
+        final SavedQueryTime intent = timeIntent(time);
+        validateTime(intent);
+        return intent;
     }
 
     /**
@@ -120,9 +144,9 @@ public class SavedQueryBodyValidator {
         }
     }
 
-    private static void validateExactlyOneBody(SavedQueryRequestDto request) {
-        final boolean hasQuery = request.query() != null;
-        final boolean hasSql = sqlBody(request) != null;
+    private static void validateExactlyOneBody(StructuredQuery query, String sql) {
+        final boolean hasQuery = query != null;
+        final boolean hasSql = sqlBody(sql) != null;
         if (hasQuery == hasSql) {
             throw new SavedQueryValidationException(
                     "exactly one of 'query' or 'sql' must be set, not " + (hasQuery ? "both" : "neither"));
@@ -136,7 +160,12 @@ public class SavedQueryBodyValidator {
      * wrote an empty string alongside the structured one, which the table's exactly-one-body CHECK rejects.
      */
     public static String sqlBody(SavedQueryRequestDto request) {
-        return request.sql() == null || request.sql().isBlank() ? null : request.sql();
+        return sqlBody(request.sql());
+    }
+
+    /** {@link #sqlBody(SavedQueryRequestDto)} for a bare SQL body. */
+    public static String sqlBody(String sql) {
+        return sql == null || sql.isBlank() ? null : sql;
     }
 
     /**
@@ -208,7 +237,11 @@ public class SavedQueryBodyValidator {
      * cannot ride along into the metadata database.
      */
     public SavedQueryTime timeIntent(SavedQueryRequestDto request) {
-        final JsonNode time = request.time();
+        return timeIntent(request.time());
+    }
+
+    /** {@link #timeIntent(SavedQueryRequestDto)} for a raw node: binding only, without the time-intent rule. */
+    public SavedQueryTime timeIntent(JsonNode time) {
         if (time == null || time.isNull()) {
             return null;
         }
@@ -290,11 +323,11 @@ public class SavedQueryBodyValidator {
      * caller composes it. A later change that wants the free-text fields bounded must add a limit rather
      * than assume this one already reaches them.
      */
-    private void validateSize(SavedQueryRequestDto request, SavedQueryTime time) {
-        final int size = serializedSize(request.query())
-                + (request.sql() == null ? 0 : request.sql().getBytes(StandardCharsets.UTF_8).length)
-                + serializedSize(time)
-                + serializedSize(request.chart());
+    private void validateSize(StructuredQuery query, String sql, SavedQueryChart chart, int extraBytes) {
+        final int size = serializedSize(query)
+                + (sql == null ? 0 : sql.getBytes(StandardCharsets.UTF_8).length)
+                + extraBytes
+                + serializedSize(chart);
         if (size > maxBodyBytes) {
             throw new SavedQueryValidationException(
                     "the saved query body is " + size + " bytes, over the " + maxBodyBytes + "-byte maximum");

@@ -16,8 +16,12 @@ import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.exception.DashboardConflictException;
+import com.epam.aidial.analytics.exception.DashboardNotFoundException;
+import com.epam.aidial.analytics.exception.DashboardValidationException;
 import com.epam.aidial.analytics.exception.DeclarationUnresolvableException;
 import com.epam.aidial.analytics.exception.IllegalFinalException;
+import com.epam.aidial.analytics.exception.InlineQueryRejectedException;
 import com.epam.aidial.analytics.exception.InvalidCursorException;
 import com.epam.aidial.analytics.exception.InvalidFilterColumnException;
 import com.epam.aidial.analytics.exception.InvalidFilterValueException;
@@ -48,6 +52,7 @@ import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableRelayoutInProgressException;
 import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.exception.UnattributableDashboardException;
 import com.epam.aidial.analytics.exception.UnattributableSavedQueryException;
 import com.epam.aidial.analytics.exception.WriteColumnNotAllowedException;
 import com.epam.aidial.analytics.exception.WriteOutputColumnRequiredException;
@@ -62,6 +67,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -71,6 +77,7 @@ import org.springframework.web.bind.MissingRequestValueException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
@@ -79,6 +86,7 @@ import org.springframework.web.servlet.HandlerMapping;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import tools.jackson.databind.exc.UnrecognizedPropertyException;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -105,6 +113,10 @@ public class DefaultExceptionHandler {
 
     /** Written for the caller or the path pattern when there is none. */
     private static final String NONE = "-";
+
+    /** This advice's own handler methods, for answering a wrapped rejection as it would answer it bare. */
+    private static final ExceptionHandlerMethodResolver HANDLERS =
+            new ExceptionHandlerMethodResolver(DefaultExceptionHandler.class);
 
     /**
      * Looked up rather than injected: web slices build this advice without the service layer, and a refusal
@@ -525,6 +537,65 @@ public class DefaultExceptionHandler {
         // it afterwards is our own inconsistency — a principal claim that yields nothing is deployment
         // misconfiguration the caller cannot fix.
         return new ErrorView(req, HttpStatus.INTERNAL_SERVER_ERROR, "principal_unavailable", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    @ExceptionHandler(DashboardNotFoundException.class)
+    public ErrorView handleDashboardNotFound(HttpServletRequest req, DashboardNotFoundException ex) {
+        // Identical for "does not exist" and "not visible to you", for the saved-query reason.
+        return new ErrorView(req, HttpStatus.NOT_FOUND, "not_found", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(DashboardValidationException.class)
+    public ErrorView handleDashboardValidation(HttpServletRequest req, DashboardValidationException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "validation_error", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(DashboardConflictException.class)
+    public ErrorView handleDashboardConflict(HttpServletRequest req, DashboardConflictException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "dashboard_conflict", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+    @ExceptionHandler(UnattributableDashboardException.class)
+    public ErrorView handleUnattributableDashboard(HttpServletRequest req, UnattributableDashboardException ex) {
+        // 5xx for the saved-query reason: the token authenticated, and its missing principal is deployment
+        // misconfiguration the caller cannot fix.
+        return new ErrorView(req, HttpStatus.INTERNAL_SERVER_ERROR, "principal_unavailable", ex.getMessage());
+    }
+
+    /**
+     * A widget's inline body that translation rejected: answered by the handler that would have answered the
+     * rejection itself, so the status and machine code are exactly the query surface's, with the widget's id
+     * prefixed to the message. Resolved over this class's own handlers rather than by re-mapping types here,
+     * so a rejection type that gains a handler later is covered without a change to this method.
+     */
+    @ExceptionHandler(InlineQueryRejectedException.class)
+    public ResponseEntity<ErrorView> handleInlineQueryRejected(HttpServletRequest req, InlineQueryRejectedException ex) {
+        final ErrorView rejection = answerFor(req, ex.getRejection());
+        final HttpStatus status = HttpStatus.valueOf(rejection.getStatus());
+        return ResponseEntity.status(status).body(new ErrorView(req, status, rejection.getError(),
+                "widget " + ex.getWidgetId() + ": " + rejection.getMessage()));
+    }
+
+    /** The {@link ErrorView} this advice gives {@code rejection} on its own, or the internal-error view. */
+    private ErrorView answerFor(HttpServletRequest req, RuntimeException rejection) {
+        final Method handler = HANDLERS.resolveMethodByThrowable(rejection);
+        if (handler != null
+                && handler.getReturnType() == ErrorView.class
+                && handler.getParameterCount() == 2
+                && handler.getParameterTypes()[0] == HttpServletRequest.class
+                && handler.getParameterTypes()[1].isInstance(rejection)) {
+            try {
+                return (ErrorView) handler.invoke(this, req, rejection);
+            } catch (ReflectiveOperationException e) {
+                log.error("[{}] Request: {} - could not delegate an inline query rejection",
+                        req.getMethod(), req.getServletPath(), e);
+            }
+        }
+        return handleGeneralError(req, rejection);
     }
 
     @ResponseStatus(HttpStatus.NOT_FOUND)

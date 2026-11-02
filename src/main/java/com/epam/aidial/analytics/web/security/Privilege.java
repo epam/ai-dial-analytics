@@ -12,7 +12,8 @@ package com.epam.aidial.analytics.web.security;
  * prefix does not itself imply table scope ({@code TABLE_CREATE} has no table to be scoped to).
  *
  * <p>Implication between privileges is stated once, in {@link PrivilegeImplications}, and admitted only
- * where it is disclosure-monotone. Notably {@code TABLE_WRITE} implies nothing.
+ * where it is disclosure-monotone, or where a privilege editing whole documents implies their read and the
+ * pair discloses nothing beyond that read. Notably {@code TABLE_WRITE} implies nothing.
  */
 public enum Privilege {
 
@@ -62,13 +63,19 @@ public enum Privilege {
     /** Advance ingestion without reference to a stored declaration (backfill). */
     DATA_SYNC_OPERATE,
 
-    /** Read saved queries the caller may see. */
+    /** Read the saved queries and dashboards the caller may see. */
     SAVED_QUERY_READ,
 
-    /** Create, replace and delete the caller's own {@code personal} saved queries. */
+    /**
+     * Create, replace and delete the caller's own {@code personal} saved queries and {@code private}
+     * dashboards. Implies {@link #SAVED_QUERY_READ}.
+     */
     SAVED_QUERY_WRITE,
 
-    /** Create, replace and delete {@code common} saved queries — curate shared definitions. */
+    /**
+     * Create, replace and delete {@code common} saved queries and {@code public} dashboards, and change a
+     * dashboard's visibility — curate shared definitions. Implies nothing.
+     */
     SAVED_QUERY_PUBLISH;
 
 }

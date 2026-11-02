@@ -12,7 +12,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * rather than a resource of its own. {@link #Pipeline} backs the pipeline registry — <b>both</b> kinds,
  * since {@code V36} folded the enrichment control plane's {@code rule} registry into {@code pipeline} as
  * the {@code ENRICH} kind, so one resource type now names what used to need two. {@link #SavedQuery}
- * backs the saved query registry.
+ * backs the saved query registry, and {@link #Dashboard} the dashboards; a dashboard's widgets are part of
+ * its state, so a widget change is an {@link ActivityType#Update} of the dashboard.
  */
 public enum ActivityResourceType {
 
@@ -26,7 +27,10 @@ public enum ActivityResourceType {
     Pipeline,
 
     /** A {@code saved_query} row, identified by its id. */
-    SavedQuery;
+    SavedQuery,
+
+    /** A {@code dashboard} row, identified by its id. */
+    Dashboard;
 
     /**
      * Pins the wire spelling against ADAS's global {@code WRITE_ENUMS_TO_LOWERCASE} — see

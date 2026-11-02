@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.audit;
 
+import com.epam.aidial.analytics.service.dashboard.DashboardEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.query.saved.SavedQueryEntity;
@@ -62,6 +63,9 @@ public class AuditResourceMapper {
         if (SavedQueryEntity.class.equals(entityClass)) {
             return Optional.of(new AuditResource(ActivityResourceType.SavedQuery, String.valueOf(entityId)));
         }
+        if (DashboardEntity.class.equals(entityClass)) {
+            return Optional.of(new AuditResource(ActivityResourceType.Dashboard, String.valueOf(entityId)));
+        }
         return Optional.empty();
     }
 
@@ -91,7 +95,7 @@ public class AuditResourceMapper {
         return switch (resource.type()) {
             case TableColumn -> parentByIdPrefix(resource, ActivityResourceType.Table);
             case Pipeline -> parentOfPipeline(resource);
-            case Table, SavedQuery -> Optional.empty();
+            case Table, SavedQuery, Dashboard -> Optional.empty();
         };
     }
 

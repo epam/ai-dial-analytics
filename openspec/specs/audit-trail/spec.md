@@ -11,7 +11,7 @@ feed plus point-in-time reads of any tracked resource as it stood at any past re
 ### Requirement: Audited resources
 
 The system SHALL track every insert, update, and delete of the catalog state backing tables, and of
-the pipeline registry and the saved query registry:
+the pipeline registry, the saved query registry and the dashboard registry:
 
 - the **table definition** row in its entirety — its type, status, write discipline, scan metadata,
   partitioning, TTL, ordering key, an enrichment's grain key, its role-based `access` lists, and its
@@ -31,7 +31,12 @@ the pipeline registry and the saved query registry:
   or are written by bulk updates the persistence context never sees, so tracking them would either
   flood the feed with entries no one administered or mirror a value that disagrees with the live row;
 - every **saved query** — its identity, name, description, tag, scope, owner, source, its structured
-  or SQL body, time intent, result view, chart configuration, generation counter, and timestamps.
+  or SQL body, time intent, result view, chart configuration, generation counter, and timestamps;
+- every **dashboard** — its identity, name, description, visibility, owner, time intent, comparison, its
+  widgets in full (each widget's query reference or inline body, rendering members and layout), and
+  timestamps. Its `generation`, the optimistic-locking token, SHALL NOT be part of the preserved state,
+  and neither SHALL the per-caller `permissions` a dashboard response carries, which are computed, not
+  stored.
 
 For each tracked change the system SHALL preserve the complete state of the changed entity at that
 point, so the resource can be read back as it stood at that revision. A delete SHALL preserve the
@@ -173,6 +178,13 @@ mean; run state is carried by `last_run_at` and `next_run_at`, which are not aud
 - **THEN** a `Create`, `Update`, or `Delete` activity respectively is recorded for resource type
   `SavedQuery`, and its preserved state carries the saved query's full configuration at that point
 
+#### Scenario: Dashboard mutations are tracked
+
+- **WHEN** a dashboard is created through `POST /v1/dashboards`, replaced through
+  `PUT /v1/dashboards/{id}`, or removed through `DELETE /v1/dashboards/{id}`
+- **THEN** a `Create`, `Update`, or `Delete` activity respectively is recorded for resource type
+  `Dashboard`, and its preserved state carries the dashboard's full configuration at that point
+
 ### Requirement: Dependent removals are recorded
 
 When deleting a resource also removes audited state that belongs to it, the system SHALL record a
@@ -226,14 +238,14 @@ ceased to exist.
 ### Requirement: Every changed entity is its own activity
 
 The system SHALL record one activity per changed entity, naming the entity that changed rather than
-a parent it belongs to. The resource types SHALL be `Table`, `TableColumn`, `Pipeline`, and
-`SavedQuery`, and the activity types `Create`, `Update`, and `Delete`. All SHALL be represented on the
+a parent it belongs to. The resource types SHALL be `Table`, `TableColumn`, `Pipeline`, `SavedQuery`,
+and `Dashboard`, and the activity types `Create`, `Update`, and `Delete`. All SHALL be represented on the
 wire exactly as spelled here.
 
 A resource id SHALL identify the entity uniquely within its resource type. Because a column is
 identified by its table together with its physical name, a `TableColumn` resource id SHALL be those
 two joined by a colon, and SHALL be treated as one opaque string. A `Pipeline` resource id SHALL be
-its name, and a `SavedQuery` resource id SHALL be its identifier.
+its name, and a `SavedQuery` or `Dashboard` resource id SHALL be its identifier.
 
 The enrichment control plane's declarations were tracked under a resource type of their own, keyed by
 a UUID, before the two registries merged into one. Activities recorded then SHALL be readable in the
@@ -308,6 +320,12 @@ those rows were rewritten — but it is coarser than a minimal diff on that one 
   that read that source, and a fourth pipeline reading a different source is unaffected
 - **THEN** three `Update` activities for resource type `Pipeline` are recorded, one per bumped
   pipeline, and none is recorded for the unaffected one
+
+#### Scenario: A widget change is an activity on the dashboard
+
+- **WHEN** a dashboard is replaced with one widget's layout changed
+- **THEN** one `Update` activity for resource type `Dashboard` is recorded, and no separate resource type
+  is used for the widget
 
 ### Requirement: Author identity captured from the security context
 
@@ -947,3 +965,72 @@ capability.
   `SAVED_QUERY_PUBLISH`, requests the activity feed filtered to that saved query's resource id
 - **THEN** the feed is returned successfully with that saved query's activity absent from it, and is
   present only when the caller holds `SAVED_QUERY_PUBLISH`
+
+### Requirement: Dashboard activities have no parent and no snapshot endpoint
+
+A dashboard activity SHALL have resource type `Dashboard`, its resource id SHALL be the dashboard's
+identifier, and it SHALL have no parent: a dashboard belongs to no other audited entity, and a widget is
+part of its dashboard's state rather than an entity of its own, so a change to one widget SHALL be recorded
+as an `Update` of the dashboard.
+
+The preserved state SHALL NOT include `generation`. It is the dashboard's optimistic-locking token, not
+authored state, and a past value is of no use to a client, since a replace must carry the current one.
+It is also redundant: every mutation increments it by one and records a revision, so the trail's own
+revision order already gives it.
+
+A point-in-time read of a dashboard is not part of this capability's surface: the trail preserves the
+state, but no snapshot endpoint for `Dashboard` is exposed.
+
+#### Scenario: A dashboard activity has no parent
+
+- **WHEN** a dashboard is created
+- **THEN** its `Create` activity has the dashboard's identifier as resource id and no parent
+
+#### Scenario: A refused replace records nothing
+
+- **WHEN** a dashboard replace is refused with `409 dashboard_conflict`
+- **THEN** no activity is recorded
+
+#### Scenario: Reading a dashboard records nothing
+
+- **WHEN** a caller lists dashboards or reads one by id
+- **THEN** no activity is recorded
+
+### Requirement: Dashboard activities are narrowed by dashboard visibility
+
+`Dashboard` resource type activities SHALL be narrowed exactly as `SavedQuery` activities are, in the
+activity feed and in single-activity retrieval: visible to a `SAVED_QUERY_PUBLISH` holder unconditionally,
+to any caller holding `AUDIT_READ` when the dashboard's **current** visibility is `public`, and otherwise
+only to the caller recorded as the dashboard's owner. A dashboard that has since been deleted SHALL have
+its activities visible to a `SAVED_QUERY_PUBLISH` holder only, including to its former owner. This is
+content narrowing within an otherwise-successful response, not a denial: a single `Dashboard` activity the
+caller may not see SHALL be answered as an activity that does not exist.
+
+The rule is the saved-query one because dashboards take their visibility and their privileges from the
+saved-query model, and a `private` dashboard's name and author are as personal as a `personal` saved
+query's.
+
+#### Scenario: An owner sees their private dashboard's activity
+
+- **WHEN** the owner of a `private` dashboard, holding `AUDIT_READ`, requests the activity feed filtered
+  to that dashboard's resource id
+- **THEN** the feed returns that dashboard's activity
+
+#### Scenario: A non-owner does not see another caller's private dashboard activity
+
+- **WHEN** a caller holding `AUDIT_READ` but not `SAVED_QUERY_PUBLISH`, who is not the owner of a
+  `private` dashboard, requests the activity feed filtered to that dashboard's resource id
+- **THEN** the feed is returned successfully with that dashboard's activity absent from it
+
+#### Scenario: A public dashboard's activity is visible to any audit reader
+
+- **WHEN** a caller holding `AUDIT_READ` requests the activity feed filtered to a `public` dashboard's
+  resource id
+- **THEN** the feed returns that dashboard's activity
+
+#### Scenario: A deleted dashboard's activity is visible only to a publisher
+
+- **WHEN** a `private` dashboard is deleted and its former owner, holding `AUDIT_READ` but not
+  `SAVED_QUERY_PUBLISH`, requests the activity feed filtered to its resource id
+- **THEN** the feed is returned successfully with that activity absent from it, and is present only when
+  the caller holds `SAVED_QUERY_PUBLISH`
