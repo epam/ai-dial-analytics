@@ -11,7 +11,10 @@ import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
+import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
+import com.epam.aidial.analytics.service.query.model.SortDir;
+import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
@@ -102,7 +105,7 @@ public class AggregateSqlCompiler {
             return CompiledFilter.NONE;
         }
         return new CompiledFilter(filterTranslator.toCondition(query.filter(), model.bindings()),
-                Set.copyOf(StructuredQueryBuilder.referencedFields(query.filter())));
+                Set.copyOf(StructuredQueryBuilder.referencedFields(query.filter())), query.filter());
     }
 
     /** Every entity field the block reads — the widest statement's set, which the enrichment clamp covers. */
@@ -183,6 +186,30 @@ public class AggregateSqlCompiler {
         groupFields.forEach(field -> select.addOrderBy(field.asc()));
         select.addLimit(limit);
         return select;
+    }
+
+    /**
+     * The block as a structured query a caller can run through the query API — the form path's
+     * {@link AggregateCompiler#portablePreview} for an SQL declaration. Every item is aliased by its target column,
+     * never {@code __c<i>}: the positional alias is a device of the sample's own rendering, and where the query path
+     * cannot run an item under its target name it refuses the query, which the preview reports instead. Grouped as
+     * the front end grouped the block, ordered by the keys, read with the entity's own {@code final} default.
+     */
+    public StructuredQuery portablePreview(AggregateSqlValidator.Analysis analysis, int limit) {
+        final StructuredQuery query = analysis.plan().translation().query();
+        final List<OutputColumn> select = new ArrayList<>(query.select().size());
+        for (int i = 0; i < query.select().size(); i++) {
+            select.add(new OutputColumn(query.select().get(i).expr(), analysis.plan().columns().get(i)));
+        }
+        final List<String> groupBy = new ArrayList<>(analysis.keyPositions().size());
+        for (final int position : analysis.keyPositions()) {
+            groupBy.add(query.select().get(position).expr() instanceof FieldExpr(String name)
+                    ? name
+                    : analysis.plan().columns().get(position));
+        }
+        final List<SortItem> sort = groupBy.stream().map(key -> new SortItem(key, SortDir.ASC, null)).toList();
+        return new StructuredQuery(query.entity(), query.filter(), query.mode(), false, select, groupBy,
+                null, sort, new OffsetPage(0L, limit, false));
     }
 
     /**

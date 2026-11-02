@@ -2396,8 +2396,18 @@ The sample SHALL depend on the transform:
 - **A Class-1 `sql` pipeline** SHALL sample the grain key (`grain_key`) and every derived value
   (`output`). Each output carries `type`, the type its translated expression yields (the value the
   registration gate compared against the target column), and `target_type`. `statement` SHALL be the
-  sampling `SELECT`, which shows each output's translated SQL, the filter, and every enrichment join it
-  makes.
+  declaration's portable `SELECT` in the ADAS SQL dialect, with `query` its structured-query DSL document
+  (see the shared shape). It is a row query over the read source's entity that projects the grain key and
+  each output's expression under its target column name, applies the pipeline's `filter` as its `WHERE`,
+  orders by the grain key ascending and is limited to the sample's row cap. An enrichment column an
+  expression or the filter reads is named by its exposed name, with no join. It reproduces what each
+  output computes for a source row, not which rows the preview sampled. It carries none of the sample's
+  window (the newest-first order, the safety lag, a `from`/`to` bound), all of which read the source's
+  version column: ordered by the grain key, two runs of it agree while the source is still being written,
+  and it needs no version column exposed to queries. Its rows therefore need not be the sampled ones. An output the dialect cannot express SHALL leave
+  `statement` and `query` absent and carry `statement_not_portable`; its `subject` names the output where
+  the refusal can be attributed to one (an output named like a source field it does not project), and is
+  absent otherwise.
 - **A row-grain `llm` pipeline** SHALL sample the grain key and each column a `transform.inputs` binding
   reads (`input`), keyed by the source column name the binding names. It SHALL NOT return the
   pipeline's filter or cursor columns. Leaving them out of the projection SHALL NOT take them out of the
@@ -2501,8 +2511,18 @@ remedies it offers SHALL be ones the arm accepts: a narrower `from`/`to` window 
 - **WHEN** `POST /v1/pipelines/{name}/preview` is called for a disabled `schedule` pipeline whose
   `transform.type` is `sql`
 - **THEN** the response carries a bounded sample of computed values, `columns` naming the grain key and
-  each output with its inferred `type` and its `target_type`, and the `statement` that produced them
+  each output with its inferred `type` and its `target_type`, and the portable `statement` and `query`
 - **AND** the target is unchanged
+
+#### Scenario: A Class-1 statement computes the outputs through the query API
+
+- **GIVEN** a Class-1 `sql` pipeline over `dial_usage_log` with grain key `event_id`, an output
+  `deployment_lower` declared as `lower(deployment)`, and a `filter`
+- **WHEN** it is previewed and its `statement` is sent to `POST /v1/queries/execute-sql`
+- **THEN** the statement reads `dial_usage_log`, projects `event_id` and `lower(deployment)` as `deployment_lower`,
+  carries the filter as its `WHERE`, and has no `JOIN` and no `SETTINGS` clause
+- **AND** the query answers HTTP 200, and for each `event_id` it shares with `rows` it answers the same
+  `deployment_lower`
 
 #### Scenario: Preview of an llm pipeline returns the input values only
 

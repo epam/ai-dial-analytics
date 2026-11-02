@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.integration;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -226,7 +227,7 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
     }
 
     @Test
-    void previewCarriesTheSampleStatementWithItsSettingsAndNoRefreshStatement() throws Exception {
+    void previewCarriesThePortableStatementAndNoRefreshStatement() throws Exception {
         register();
         seedEvent("gpt-4", "2026-01-01", 100, 1);
 
@@ -249,18 +250,11 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
                 .andExpect(jsonPath("$.rows[0].__total_groups").doesNotExist())
                 .andReturn().getResponse().getContentAsString();
 
-        final String statement = readStatement(body);
-        assertThat(statement)
-                .as("the sample reads the whole input, so it carries neither a target nor a window")
-                .startsWith("select")
-                .doesNotContain("INSERT INTO")
-                .doesNotContain("now64(3) - toIntervalMillisecond")
-                // Run by hand it reads under the same deduplication and the same budget.
-                .contains(" SETTINGS ")
-                .contains("final = 1")
-                .contains("max_memory_usage = ")
-                .contains("max_execution_time = ")
-                .doesNotContain("query_id");
+        // The declaration as the query API runs it: the catalog entity and the target columns, ordered by the keys,
+        // with none of the sample's helpers, window or settings.
+        assertThat(readStatement(body)).isEqualTo("SELECT \"deployment\", date_trunc('day', \"request_time\") AS \"day\","
+                + " count(*) AS \"call_count\", sum(\"total_tokens\") AS \"tokens\" FROM \"dial_usage_log\" FINAL"
+                + " GROUP BY \"deployment\", \"day\" ORDER BY \"deployment\" ASC, \"day\" ASC LIMIT 5");
     }
 
     @Test
@@ -286,9 +280,9 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
     }
 
     @Test
-    void theSampleStatementReproducesTheSampledRows() throws Exception {
-        // Otherwise the statement is decorative: it has to be the SQL that actually produced `rows`, settings
-        // and all.
+    void thePreviewStatementRunsThroughTheQueryApiAndAnswersTheSampledGroups() throws Exception {
+        // Otherwise the statement is decorative: copied out of the response, it runs unchanged on execute-sql and,
+        // with every group inside the sample, answers exactly the sampled groups.
         register();
         seedEvent("gpt-4", "2026-01-01", 100, 1);
         seedEvent("gpt-4", "2026-01-01", 40, 2);
@@ -298,7 +292,56 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
                 .andExpect(jsonPath("$.rows[0].tokens").value(140))
                 .andReturn().getResponse().getContentAsString();
 
-        assertThat(queryScalar(readStatement(body), "tokens")).isEqualTo("140");
+        final JsonNode sampled = PreviewStatements.body(body).get("rows");
+        assertThat(PreviewStatements.runStatement(mockMvc, body)).isEqualTo(sampled);
+        assertThat(PreviewStatements.runQuery(mockMvc, body)).isEqualTo(sampled);
+        assertThat(PreviewStatements.translateStatement(mockMvc, body)).isEqualTo(PreviewStatements.body(body).get("query"));
+    }
+
+    @Test
+    void statementCarriesFilterAndMeasurePredicateAndOrdersByKeys() throws Exception {
+        seedEvent("alpha", "2026-01-01", 10, 1);
+        seedEvent("omega", "2026-01-03", 20, 2);
+        seedEvent("alpha", "2026-01-01", 30, 3);
+        seedEvent("excluded", "2026-01-02", 99, 4);
+
+        final String body = previewOf("{\"name\":\"" + PIPELINE + "\",\"kind\":\"aggregate\","
+                + "\"filter\":\"deployment <> 'excluded'\"," + DECLARATION.replace(
+                        "{\"name\":\"tokens\",\"fn\":\"sum\",\"column\":\"total_tokens\"}",
+                        "{\"name\":\"tokens\",\"fn\":\"sum\",\"column\":\"total_tokens\",\"where\":\"total_tokens > 15\"}")
+                + "}")
+                .andExpect(status().isOk())
+                // Newest first in the sample; by key in the statement.
+                .andExpect(jsonPath("$.rows[*].deployment", contains("omega", "alpha")))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(readStatement(body)).contains("WHERE \"deployment\" <> 'excluded'")
+                .contains("sum(CASE WHEN \"total_tokens\" > 15 THEN \"total_tokens\" END) AS \"tokens\"");
+        final JsonNode rows = PreviewStatements.runStatement(mockMvc, body);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("deployment").asText()).isEqualTo("alpha");
+        assertThat(rows.get(0).get("call_count").asLong()).isEqualTo(2L);
+        assertThat(rows.get(0).get("tokens").asLong()).isEqualTo(30L);
+        assertThat(rows.get(1).get("deployment").asText()).isEqualTo("omega");
+        assertThat(rows.get(1).get("tokens").asLong()).isEqualTo(20L);
+    }
+
+    @Test
+    void bucketNamedLikeInputFieldPreviewsWithoutStatement() throws Exception {
+        seedEvent("gpt-4", "2026-01-01", 100, 1);
+        mockMvc.perform(delete("/v1/tables/" + ROLLUP));
+        IntegrationTables.upsertSource(mockMvc, ROLLUP, TARGET_COLUMNS.replace(
+                "{\"source_name\":\"day\",\"name\":\"day\"", "{\"source_name\":\"request_time\",\"name\":\"request_time\""),
+                "[\"deployment\",\"request_time\"]");
+
+        previewOf("{\"name\":\"" + PIPELINE + "\",\"kind\":\"aggregate\"," + DECLARATION.replace(
+                        "\"as\":\"day\"", "\"as\":\"request_time\"") + "}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(1)))
+                .andExpect(jsonPath("$.total_rows").value(1))
+                .andExpect(jsonPath("$.statement").doesNotExist())
+                .andExpect(jsonPath("$.query").doesNotExist())
+                .andExpect(jsonPath("$.notes[?(@.code == 'statement_not_portable')].subject", contains("request_time")));
     }
 
     @Test
@@ -1133,7 +1176,7 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
                     .andExpect(jsonPath("$.group_by").doesNotExist())
                     .andExpect(jsonPath("$.columns[0].name").value("deployment"))
                     .andExpect(jsonPath("$.columns[0].role").value("key"))
-                    .andExpect(jsonPath("$.statement").value(containsString("group by \"dial_usage_log\".\"deployment\"")));
+                    .andExpect(jsonPath("$.statement").value(containsString("GROUP BY \"deployment\"")));
         } finally {
             mockMvc.perform(delete(PIPELINES + "/agg-derived"));
             mockMvc.perform(delete("/v1/tables/agg_single"));
@@ -1183,14 +1226,13 @@ class AggregatePipelineIntegrationTest extends AbstractClickHouseIntegrationTest
 
             // The count really compiled to count(*), not count(hop_count): the two differ on NULLs, so
             // this is a numbers question rather than a rendering one.
-            // Asserted on the measure's own alias, since the sample's window count renders count(*) too.
             // The preview echoes no measures — the read above serves the resolution — but its statement
-            // shows the expression each one compiled to.
+            // shows the column each one resolved to.
             mockMvc.perform(post(PIPELINES + "/agg-defaults/preview"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.statement").value(containsString("count(*) \"hop_count\"")))
+                    .andExpect(jsonPath("$.statement").value(containsString("count(*) AS \"hop_count\"")))
                     .andExpect(jsonPath("$.statement").value(
-                            containsString("sum(\"dial_usage_log\".\"total_tokens\") \"total_tokens\"")))
+                            containsString("sum(\"total_tokens\") AS \"total_tokens\"")))
                     .andExpect(jsonPath("$.measures").doesNotExist());
         } finally {
             mockMvc.perform(delete(PIPELINES + "/agg-defaults"));

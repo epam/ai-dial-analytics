@@ -26,12 +26,14 @@ import com.epam.aidial.analytics.service.pipeline.model.AggregateSpec;
 import com.epam.aidial.analytics.service.pipeline.model.GroupKey;
 import com.epam.aidial.analytics.service.pipeline.model.Measure;
 import com.epam.aidial.analytics.service.pipeline.model.RefreshOutcome;
+import com.epam.aidial.analytics.service.pipeline.model.TruncUnit;
 import com.epam.aidial.analytics.service.pipeline.preview.PipelinePreview;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNote;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteCode;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteSeverity;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewValueCapper;
 import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
+import com.epam.aidial.analytics.service.query.PortableRenderers;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
@@ -148,7 +150,8 @@ class AggregateRefreshServiceTest {
                 new AggregateProperties(true, "0 * * * * *", 1, Duration.ofSeconds(5), WINDOW_LIMIT, 20, PREVIEW_BUDGET),
                 READ_BUDGET,
                 new ClientSpanTracer(sdk), new TransitionLog(),
-                new PreviewValueCapper(new JsonMapperConfiguration().jsonMapper()));
+                new PreviewValueCapper(new JsonMapperConfiguration().jsonMapper()),
+                PortableRenderers.over(DialUsageLogTestModel.model()));
 
         given(pipelines.findById(NAME)).willReturn(Optional.of(pipeline()));
         given(scanSources.entityModel(INPUT)).willReturn(DialUsageLogTestModel.model());
@@ -187,6 +190,19 @@ class AggregateRefreshServiceTest {
         final AggregateSpec spec = new AggregateSpec();
         spec.setGroupBy(List.of(key));
         spec.setMeasures(List.of(measure));
+        return spec;
+    }
+
+    /** A day bucket of {@code request_time} written to a column of the same name — a key the DSL cannot tell apart. */
+    private static AggregateSpec shadowingBucketSpec() {
+        final GroupKey.Trunc trunc = new GroupKey.Trunc();
+        trunc.setColumn("request_time");
+        trunc.setUnit(TruncUnit.DAY);
+        final GroupKey key = new GroupKey();
+        key.setTrunc(trunc);
+        key.setAs("request_time");
+        final AggregateSpec spec = spec();
+        spec.setGroupBy(List.of(key));
         return spec;
     }
 
@@ -483,10 +499,12 @@ class AggregateRefreshServiceTest {
 
         final PipelinePreview preview = service.preview(NAME);
 
-        // The gate exists to be usable before enabling; it must never write, and it returns the sample's own
-        // SELECT rather than a refresh statement.
+        // The gate exists to be usable before enabling; it must never write, and it returns the declaration as the
+        // query API runs it — neither a refresh statement nor the physical sample with its helpers and settings.
         assertThat(preview.rows()).hasSize(2);
-        assertThat(preview.statement()).startsWith("select").doesNotContainIgnoringCase("insert");
+        assertThat(preview.statement()).startsWith("SELECT").contains("FROM \"" + INPUT + "\"")
+                .doesNotContainIgnoringCase("insert").doesNotContainIgnoringCase("settings").doesNotContain("__");
+        assertThat(preview.query().entity()).isEqualTo(INPUT);
         // The window count is the target's size once caught up, and both helper columns are stripped.
         assertThat(preview.totalRows()).isEqualTo(7L);
         assertThat(preview.rows().getFirst()).containsOnlyKeys("deployment", "call_count");
@@ -649,22 +667,43 @@ class AggregateRefreshServiceTest {
     }
 
     @Test
-    void previewStatementCarriesTheSettingsItRanUnderAndNoRefreshWindow() {
+    void previewStatementIsThePortableDeclarationAndTheSampleKeepsItsSettings() {
+        given(executor.executeScan(any(), any(), any())).willReturn(List.of());
+        final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
+
+        final PipelinePreview preview = service.preview(NAME);
+
+        // What the caller gets runs on /v1/queries/execute-sql: the catalog entity, the target column names, the
+        // keys as the order, and nothing of the sample's helpers, window or settings.
+        assertThat(preview.statement()).isEqualTo("SELECT \"deployment\", count(*) AS \"call_count\" FROM \"" + INPUT
+                + "\" FINAL GROUP BY \"deployment\" ORDER BY \"deployment\" ASC LIMIT 20");
+        assertThat(preview.query().groupBy()).containsExactly("deployment");
+        // The sample itself still runs under the preview budget, unwindowed.
+        verify(executor).executeScan(any(), settings.capture(), any());
+        assertThat(settings.getValue().getAllSettings())
+                .containsEntry("clickhouse_setting_max_execution_time", String.valueOf(PREVIEW_BUDGET.timeout().toSeconds()))
+                .containsEntry("clickhouse_setting_max_bytes_before_external_group_by",
+                        String.valueOf(PREVIEW_BUDGET.spillThreshold().toBytes()));
+    }
+
+    @Test
+    void bucketNamedLikeInputFieldPreviewsWithoutStatement() {
+        final PipelineEntity shadowing = pipeline();
+        shadowing.setSpec(SPEC_CODEC.write(shadowingBucketSpec()));
+        given(pipelines.findById(NAME)).willReturn(Optional.of(shadowing));
         given(executor.executeScan(any(), any(), any())).willReturn(List.of());
 
-        final String statement = service.preview(NAME).statement();
+        final PipelinePreview preview = service.preview(NAME);
 
-        // Run by hand, it reads the same rows under the same limits: the dedup settings and the preview budget,
-        // sorted, and never the client-side query id. The test model is partition-local, so the per-partition
-        // merge switch is among them.
-        assertThat(statement).endsWith(" SETTINGS do_not_merge_across_partitions_select_final = 1, final = 1, "
-                + "max_bytes_before_external_group_by = "
-                + PREVIEW_BUDGET.spillThreshold().toBytes() + ", max_execution_time = "
-                + PREVIEW_BUDGET.timeout().toSeconds() + ", max_memory_usage = " + PREVIEW_BUDGET.maxMemory().toBytes()
-                + ", transform_null_in = 0");
-        assertThat(statement).doesNotContain("query_id");
-        // The sample is unwindowed: no safety lag, no seek, no refresh statement.
-        assertThat(statement).doesNotContain("now64(3) - toIntervalMillisecond").doesNotContainIgnoringCase("insert");
+        // The sample is unaffected; the statement the query path would refuse is replaced by a note saying why.
+        assertThat(preview.statement()).isNull();
+        assertThat(preview.query()).isNull();
+        assertThat(preview.totalRows()).isZero();
+        assertThat(preview.notes()).filteredOn(note -> note.code() == PreviewNoteCode.STATEMENT_NOT_PORTABLE)
+                .singleElement().satisfies(note -> {
+                    assertThat(note.subject()).isEqualTo("request_time");
+                    assertThat(note.severity()).isEqualTo(PreviewNoteSeverity.INFO);
+                });
     }
 
     @Test

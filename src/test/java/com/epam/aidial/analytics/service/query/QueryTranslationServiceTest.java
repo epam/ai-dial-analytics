@@ -43,11 +43,12 @@ class QueryTranslationServiceTest {
         when(catalog.queryableEntityNames(any())).thenReturn(List.of(DialUsageLogTestModel.ENTITY));
         when(catalog.findModel(eq(DialUsageLogTestModel.ENTITY), any())).thenReturn(Optional.of(DialUsageLogTestModel.model()));
         final ExprTranslator expr = new ExprTranslator(new ValueExprToObjectMapper());
-        return new QueryTranslationService(
+        return new QueryTranslationService(catalog, new PortableQueryRenderer(
                 catalog,
                 new StructuredQueryBuilder(expr, new FilterTranslator(expr)),
                 new QueryDslConfiguration().clickhouseRenderContext(),
-                new StructuredQueryToSqlRenderer(new ValueExprToObjectMapper()));
+                new StructuredQueryToSqlRenderer(new ValueExprToObjectMapper()),
+                null));
     }
 
     @Test

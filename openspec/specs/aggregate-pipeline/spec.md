@@ -78,8 +78,8 @@ declaration has zero group keys.
 Derivation matches by **name**, and cannot detect a name that means something else: an input column
 sharing the ordering key's name but not what the author meant would group the wrong thing silently.
 The derived key SHALL therefore be **echoed expanded** on the pipeline read, where an author sees it
-before the pipeline is armed. The preview does not echo it, and shows instead the expression it compiled
-to in its `statement` (see "Dry-run preview of an aggregate declaration").
+before the pipeline is armed. The preview does not echo it, and shows instead the column it resolved
+to in its portable `statement` (see "Dry-run preview of an aggregate declaration").
 
 **At most one** time bucket SHALL appear in a `trigger.group_by`. A `unit` outside the supported set SHALL be
 rejected with HTTP 422 stating the supported units. The set is narrower than the truncation function the
@@ -923,7 +923,7 @@ configuration that sizes it.
 
 The dry-run preview SHALL execute its sample query under an explicit, configured **resource budget** —
 a wall-clock limit, a memory ceiling, and a spill-to-disk threshold — carried to ClickHouse as query
-settings on the preview statement alone.
+settings on the sampling statement alone.
 
 The budget is required because preview is deliberately **not** window-restricted: the sample answers "are
 these the right numbers", which a window would obscure, so the compiled sample aggregates the pipeline's
@@ -1930,7 +1930,46 @@ produces over the input **as a whole**, deliberately *not* window-restricted. Th
 answers is "are these the right numbers", and a window obscures it: a caller cannot judge a declaration
 from whatever slice happens to remain unread. `columns` SHALL list each group key as `key` and each
 measure as `measure`, with `type` the type the compiled expression yields and `target_type` the type of
-the target column it is written to. `statement` SHALL be the sample's own `SELECT`.
+the target column it is written to.
+
+`statement` SHALL be the declaration's **portable** `SELECT` in the ADAS SQL dialect, with `query` its
+structured-query DSL document (see the shared shape). It SHALL be an aggregate query over the input
+entity that:
+
+- projects each group key under its target column name: a plain key as the field, a `trunc` key as
+  `date_trunc('<unit>', <column>)`;
+- projects each measure under its name as the catalog aggregate over its column (`count(*)` when it has
+  none), with `DISTINCT` where the measure declares it;
+- renders a measure's own `where` as a `CASE WHEN <where> THEN <column> END` operand, or `THEN 1` for a
+  column-less `count`, so the predicate narrows that aggregate alone, as the refresh applies it;
+- applies the pipeline's `filter` as its `WHERE`;
+- groups by the keys, orders by the keys ascending, and is limited to `aggregate.preview-rows`, capped at
+  the query API's row ceiling (1000) so a larger setting still yields a statement the API runs.
+
+The portable statement reproduces what the declaration computes, not how the preview samples it. It
+differs from the sampling statement in three ways, and the response SHALL NOT claim otherwise:
+
+- **Order.** The sample is ordered by each group's latest input row, read from the input's version
+  column. The portable statement orders by the keys instead, so that two runs of it agree: newest first
+  over an input that is still being written returns a different set of groups on every run, and not every
+  input exposes its version column to queries. Its rows
+  are therefore the same groups as `rows` only when `total_rows` is at most `aggregate.preview-rows`.
+  Each group it returns carries the same key and measure values as the sample would for that group.
+- **Counting.** It carries no window count, so running it does not reproduce `total_rows`.
+- **Cells.** A `trunc` key that the sample carries as a calendar date is returned by the query API as
+  its UTC-midnight timestamp.
+
+It also runs under the query budget and the query row limits rather than the preview budget, so a sample
+that fits the preview budget can still be refused when the statement is run.
+
+A declaration the dialect cannot express SHALL preview with `statement` and `query` absent and a
+`statement_not_portable` note. A `trunc` key whose target column name is also a field of the input entity
+is such a declaration: the structured-query DSL resolves a `group_by` name against the entity's fields
+first, so the SQL front end refuses the shape as ambiguous. So is any other output the governed query
+path would not run with the declaration's meaning. The check SHALL be the query path's own validation
+of the rendered query, not a separate list kept beside it. The note's `subject` SHALL name an output whose
+target name shadows an input field, where there is one; it is an attribution, and the message gives the
+query path's own reason.
 
 A column's `type` SHALL be the type the engine produces for it, which the gate derives from the measure's
 function and its input binding:
@@ -1953,7 +1992,7 @@ The sample SHALL hold at most `aggregate.preview-rows` groups, ordered by each g
 row**, newest first: the maximum of the input's version column over the group, qualified with the
 input table so that a joined enrichment's own version column cannot make it ambiguous, with the group
 keys ascending as the tiebreak. The latest-row expression orders the sample and SHALL NOT appear in
-`columns` or `rows`. The sample's statement SHALL also count every group it produced, before its `LIMIT`
+`columns` or `rows`. The sampling statement SHALL also count every group it produced, before its `LIMIT`
 (a window count over the grouped result), and report that count as `total_rows`. That is the number of
 rows the target holds once caught up, and a wrong group key shows up there: tens of millions of rows
 where a few hundred were meant. The count SHALL come from the same statement, under the same budget, and
@@ -1971,8 +2010,9 @@ state**: it depends on where the pipeline is, not on what the declaration says, 
 serves it under `state`. A refresh statement rendered without a probe was neither what a refresh runs nor
 safe to copy out of a response. The two observed failures were that it had no window cap and that it
 dropped the enrichment clamp exactly when the clamp would have stopped the write, so it misled most when
-it mattered most. What the declaration contributes to that statement (the select list, the filter, the
-grouping and the enrichment joins) is in the sample's `statement`.
+it mattered most. What the declaration contributes to that statement (the select list, the filter and the
+grouping) is in the portable `statement`. The enrichment joins are not: the statement names an
+enrichment column by its exposed name, and the query path joins for it.
 
 Preview SHALL carry, besides the shared notes:
 
@@ -2012,8 +2052,8 @@ governance gate rather than by a disabled state.
 echoed here.** The derived values are a `trigger.group_by` derived from the target's `ordering_key`, and
 every measure `column` resolved from its `name`. Both derivations match by name and neither can detect a
 name that means something other than the author intended. The gate derives them on every declaration
-write, and the pipeline read serves them expanded. The sample's `statement` shows the expression each one
-compiled to.
+write, and the pipeline read serves them expanded. The portable `statement` shows the column each one
+resolved to.
 
 #### Scenario: A disabled pipeline cannot be refreshed on demand
 
@@ -2024,8 +2064,8 @@ compiled to.
 
 - **WHEN** `POST /v1/pipelines/{name}/preview` is called on a disabled pipeline
 - **THEN** the response carries a bounded sample of rows, `columns` naming each group key as `key` and
-  each measure as `measure` with its `type` and `target_type`, the sample's `statement`, and
-  `total_rows`
+  each measure as `measure` with its `type` and `target_type`, the portable `statement` and `query`,
+  and `total_rows`
 - **AND** the target row count is unchanged
 
 #### Scenario: Preview of an incomplete declaration names what is missing
@@ -2064,8 +2104,43 @@ compiled to.
 #### Scenario: Preview carries no refresh statement
 
 - **WHEN** `POST /v1/pipelines/{name}/preview` returns a sample
-- **THEN** the response carries the sample's own `statement` and no `INSERT` statement, and no member
+- **THEN** the response carries the portable `statement` and no `INSERT` statement, and no member
   describing a refresh window
+
+#### Scenario: A form declaration's statement returns the sample's groups
+
+- **GIVEN** a disabled form-declared `aggregate` pipeline over `dial_usage_log` that groups by `deployment`
+  and a day `trunc` of `request_time` into `day`, sums `total_tokens` into `tokens`, counts rows into
+  `errors` with a measure `where` of `response_status >= 400`, and declares a `filter`; and an input on which
+  the declaration yields at most `aggregate.preview-rows` groups
+- **WHEN** it is previewed and its `statement` is sent to `POST /v1/queries/execute-sql`
+- **THEN** the statement reads `dial_usage_log`, projects `date_trunc('day', request_time)` as `day`, and
+  carries the measure predicate as a `CASE` inside `errors`' aggregate and the `filter` as its `WHERE`
+- **AND** the query answers the same groups as `rows`, each with the same `deployment`, `tokens` and
+  `errors`, and `day` as the UTC-midnight timestamp of the sample's calendar date
+
+#### Scenario: The statement does not reproduce the sample's order or count
+
+- **GIVEN** an `aggregate` pipeline whose input yields more groups than `aggregate.preview-rows`
+- **WHEN** it is previewed and its `statement` is run through the query API
+- **THEN** the query answers at most `aggregate.preview-rows` groups ordered by the keys ascending, which
+  need not be the groups in `rows`
+- **AND** it carries no count of every group
+
+#### Scenario: A bucket named like an input field has no portable statement
+
+- **GIVEN** an `aggregate` pipeline whose day `trunc` of `request_time` is written to a target column
+  named `request_time`
+- **WHEN** it is previewed
+- **THEN** the preview returns its sample, `columns` and `total_rows`, carries no `statement` and no
+  `query`, and carries a `statement_not_portable` note whose `subject` is `request_time`
+
+#### Scenario: The statement names no column the caller cannot see
+
+- **GIVEN** a caller without sensitive clearance on the input, and a declaration that reads no sensitive
+  column
+- **WHEN** the caller previews it
+- **THEN** `statement` and `query` name only fields the caller's own schema discovery lists
 
 #### Scenario: A drained pipeline still previews its whole input
 
@@ -2141,7 +2216,8 @@ compiled to.
   declared no `column`
 - **WHEN** it is read with `GET /v1/pipelines/{name}` and previewed
 - **THEN** the read carries the expanded group key and the resolved measure column
-- **AND** the preview carries neither, and its `statement` groups by that key and aggregates that column
+- **AND** the preview carries neither, and its portable `statement` groups by that key and aggregates that
+  column
 
 ### Requirement: An aggregate declaration's enrichment references are protected against drop and rename
 
@@ -3164,11 +3240,18 @@ target column's temporal type when the bucket's unit allows it, and `timestamp` 
 `held_by_enrichment`, `enrichment_behind`, `target_type_narrowing`, `value_out_of_target_range` and
 `no_matching_rows` notes SHALL be produced as they are for the form path.
 
-`statement` SHALL be the sample's own `SELECT`. Preview SHALL NOT return the refresh `INSERT`, neither the
-authored text nor ADAS's rendering of it. A select item whose target column name equals a field of the
-input entity that the item does not itself project SHALL be aliased `__c<i>` (its position) in
-`statement`, so the alias cannot shadow that field elsewhere in the sample. The returned rows and
-`columns` SHALL still be named by the target columns.
+`statement` SHALL be the block's portable `SELECT`, as the form path's is: the parsed block's select
+list with each item aliased by its target column (the `INSERT` column at its position), its `WHERE`,
+its `GROUP BY`, ordered by the keys ascending and limited as the form path's is. It differs from
+the sample in order, count and `date` cells exactly as the form path's does. Preview SHALL NOT return the
+refresh `INSERT`, neither the authored text nor ADAS's rendering of it.
+
+The sampling statement SHALL still alias a select item `__c<i>` (its position) when its target column name
+equals a field of the input entity that the item does not itself project, so the alias cannot shadow that
+field elsewhere in the sample. That alias SHALL NOT appear in `statement`, `query`, `columns` or `rows`,
+which name the item by its target column. Where the query path would not run the item under that name
+with its meaning (a computed key, as the form path states), the preview SHALL carry
+`statement_not_portable` in place of `statement` and `query`.
 
 #### Scenario: An SQL declaration previews a bounded sample
 
@@ -3186,15 +3269,23 @@ input entity that the item does not itself project SHALL be aliased `__c<i>` (it
 #### Scenario: An SQL declaration's preview carries no INSERT
 
 - **WHEN** an SQL-declared pipeline is previewed
-- **THEN** `statement` is the sample's own `SELECT` and the response carries no `INSERT` statement, neither
-  the authored `sql` nor its compiled refresh
+- **THEN** `statement` is the block's portable `SELECT` and the response carries no `INSERT` statement,
+  neither the authored `sql` nor its compiled refresh
 
-#### Scenario: A target name shadowing an input field is aliased positionally
+#### Scenario: An SQL declaration's statement runs through the query API
+
+- **GIVEN** an SQL declaration `INSERT INTO usage_daily (day, deployment, tokens) SELECT date_trunc('day', request_time), deployment, sum(total_tokens) FROM dial_usage_log GROUP BY 1, 2`
+- **WHEN** it is previewed and its `statement` is sent to `POST /v1/queries/execute-sql`
+- **THEN** the statement projects the three items as `day`, `deployment` and `tokens`, and the query
+  answers HTTP 200 with those three columns
+
+#### Scenario: A target name shadowing an input field is aliased positionally only in the sample
 
 - **GIVEN** an SQL declaration writing `sum(total_tokens)` to a target column named `prompt_tokens`, a field
   the input also carries
 - **WHEN** it is previewed
-- **THEN** `statement` aliases that select item `__c<i>` rather than `prompt_tokens`, while the rows and
+- **THEN** the sampling statement ADAS executes aliases that select item `__c<i>`
+- **AND** `statement` aliases it `prompt_tokens`, and contains no `__c<i>` alias, while the rows and
   `columns` name it `prompt_tokens`
 
 #### Scenario: An SQL declaration's preview runs the gate

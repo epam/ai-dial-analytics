@@ -1944,8 +1944,8 @@ In `none` mode the check SHALL NOT apply.
 
 `POST /v1/pipelines/{name}/preview` SHALL answer with one response shape for every kind it serves. That
 shape SHALL carry only what a preview alone can know: the sample, the typed columns of that sample,
-the statement that produced it where there is one, the number of rows an `aggregate` target will hold,
-and coded notes about it.
+the declaration as a query a caller can run through the query API where there is one, the number of
+rows an `aggregate` target will hold, and coded notes about it.
 
 A preview SHALL NOT echo any member of the declaration that `GET /v1/pipelines/{name}` serves, whether
 authored or derived:
@@ -1989,18 +1989,39 @@ The response SHALL carry these members:
     column it is the author's hint at what one row or member costs the model.
 - **`total_rows`** (`aggregate` only): the number of groups the declaration produces over the whole
   input, which is the number of rows the target holds once the pipeline has caught up. It SHALL be
-  counted by the statement that produced `rows`, before its `LIMIT`, and not by a second read. It is
+  counted by the sampling statement that produced `rows`, before its `LIMIT`, and not by a second read.
+  The portable `statement` does not reproduce it. It is
   `0`, present rather than absent, when the input yields no group. The preview SHALL carry no row-count
   or "more rows" member on the `enrich` kind, where a count would only measure the source table.
   Preview has no pagination, so a "more rows exist" flag would give a client nothing to act on.
-- **`statement`**: the one `SELECT` that produced `rows`, rendered with its values inlined and ending in
-  a `SETTINGS` clause naming every server setting ADAS set on it. That includes the read-deduplication
-  settings and the budget's ceilings, so the statement run by hand reads the same rows under the same
-  limits. It does not name the client-side `query_id`, nor settings a server profile applies. Run by
-  hand it also returns the helper columns that `rows` and `columns` omit.
-  - Present when one statement produced the sample: an `aggregate` pipeline and a Class-1 `sql` one.
+- **`statement`**: the declaration as one `SELECT` in the **ADAS SQL dialect**, the subset
+  `POST /v1/queries/execute-sql` accepts, with its values inlined. A caller SHALL be able to send it
+  unchanged to that endpoint, or open it in a query builder, and have it execute. It SHALL be written
+  against the catalog: it reads the pipeline's input entity by its catalog name, names that entity's
+  exposed fields (an enrichment column by its exposed name, with no join), and names every output
+  column by the target column it is written to. It SHALL NOT carry:
+  - a physical table or column name that the entity does not expose, or a join;
+  - an engine-only function, an internal alias (such as a positional `__c<i>`), or a `SETTINGS` or
+    `FORMAT` clause;
+  - a helper expression the sampling statement projects only for the preview's own checks.
+
+  The statement ADAS executes to produce `rows` is a different, physical statement. It is not returned,
+  and it is logged at `DEBUG` on the SQL log as a refresh statement is. Each kind states which parts of
+  the sample the portable statement reproduces and where its rows can differ from `rows`.
+  - Present for an `aggregate` pipeline and a Class-1 `sql` one, unless the query path refuses the
+    rendered query (see `statement_not_portable`).
   - Absent for an `llm` pipeline, whose sample is read through the governed scan or group assembly and
     has no single statement.
+- **`query`**: the same query as a structured-query DSL document, accepted as is by
+  `POST /v1/queries/execute`. Present exactly when `statement` is. It SHALL be the document the SQL front
+  end reads `statement` as, so `POST /v1/queries/translate-sql` on `statement` answers exactly `query`,
+  with the defaults the front end spells out (`final`, the null ordering of a sort) spelled out alike.
+  `query` and `statement` are renderings of the declaration for running elsewhere, not echoes of its
+  members, so carrying them does not conflict with the rule above.
+- Running `statement` or `query` SHALL go through the governed query path and grant nothing beyond what
+  the caller already holds: table grants, sensitive-column clearance, row policies, the query budget and
+  the row limits all apply as they do to any other query. A preview SHALL render both against the
+  caller's own column visibility, so neither names a column the caller cannot see.
 - **`group_key`**: the group the sample describes, as a string, for a `group` pipeline only, whether
   the caller named it or the preview chose it.
 - **`notes`**: always present, and `[]` on an unremarkable preview. Each note carries a stable `code`, a
@@ -2044,6 +2065,7 @@ The note codes SHALL be the closed set below. A new code SHALL be added only by 
 | `output_without_description` | info | `llm` | An output composed no `description`; `subject` names the output |
 | `unconstrained_response` | warning | `llm` | The declaration composes no response schema, so the model's answer is held to none |
 | `values_truncated` | info | all | One or more of a column's sampled values exceeded the value cap and were shortened in `rows`; the message gives how many and the cap; `subject` names the column |
+| `statement_not_portable` | info | `aggregate`, Class-1 | The declaration has no statement the query API would run for this caller (inexpressible in the ADAS SQL dialect or structured-query DSL, or refused by the query path's validation), so `statement` and `query` are absent; the sample is unaffected, and the message gives the query path's reason; `subject` names an output whose target name shadows an input field, where there is one |
 
 **Samples SHALL be newest first.** Ordering by key or by oldest input put test traffic and months-old
 rows in front of the author. Most of a
@@ -2089,12 +2111,42 @@ them in, because that is the order the model receives.
 - **WHEN** an `aggregate` preview's input yields no group
 - **THEN** `total_rows` is present and `0`
 
-#### Scenario: The sample's statement reproduces it
+#### Scenario: The preview statement runs through the query API
 
-- **WHEN** a preview of an `aggregate` or Class-1 pipeline returns a sample
-- **THEN** `statement` is the `SELECT` that produced `rows`, ending in a `SETTINGS` clause that names
-  the deduplication settings and the budget's ceilings it ran under
-- **AND** `columns` and `rows` carry none of the helper columns that statement projects
+- **WHEN** a preview of an `aggregate` or Class-1 pipeline returns a sample, and the caller holds
+  `TABLE_READ` on the pipeline's input
+- **THEN** `POST /v1/queries/execute-sql` with `statement` as its `sql` answers HTTP 200, with one column
+  per entry of `columns`, under the same names
+- **AND** `POST /v1/queries/execute` with `query` as its body answers the same columns
+
+#### Scenario: The preview statement carries no physical detail
+
+- **WHEN** a preview of an `aggregate` pipeline that reads an enrichment column returns a sample
+- **THEN** `statement` reads the input entity by its catalog name and the enrichment column by its exposed
+  name, with no `JOIN`
+- **AND** it carries no `SETTINGS` clause, no alias beginning with `__`, and no helper column
+- **AND** `columns` and `rows` carry none of the helper columns the executed sampling statement projects
+
+#### Scenario: Statement and query describe the same query
+
+- **WHEN** a preview returns `statement` and `query`
+- **THEN** `POST /v1/queries/translate-sql` on `statement` answers a `query` equal to the preview's
+
+#### Scenario: Copying the statement grants no access
+
+- **GIVEN** a preview's `statement`, and a caller who holds `TABLE_GET` but no `TABLE_READ` on the pipeline's
+  input
+- **WHEN** that caller sends the statement to `POST /v1/queries/execute-sql`
+- **THEN** the request is refused as any query over a table the caller may not read is: HTTP 400
+  `bad_request` reporting an unknown relation
+
+#### Scenario: A declaration the dialect cannot express previews without a statement
+
+- **GIVEN** an `aggregate` pipeline whose declaration the ADAS SQL dialect cannot express
+- **WHEN** it is previewed
+- **THEN** the preview succeeds with its sample, `columns` and `total_rows`
+- **AND** `statement` and `query` are absent, and `notes` carries `statement_not_portable` whose message
+  gives the reason
 
 #### Scenario: A large value is capped and reported
 
