@@ -211,7 +211,7 @@ blob retention period. The backoffs before the tenth attempt are 15m, 30m, 1h, 2
 - `max-backoff` must be at least `initial-backoff`;
 - `max-attempts` and `max-per-sweep` must be at least 1.
 
-The migration `V16__create_dial_internal_failed_ingest.sql` has a one-line header that links
+The migration `V17__create_dial_internal_failed_ingest.sql` has a one-line header that links
 `openspec/specs/data-sync-failures/spec.md`. It runs on the writer credential, which also needs `INSERT` and
 `SELECT` on the new table, as for `V13`. Startup schema validation covers the table through a `COLUMNS` map,
 the same way the ingest ledger does.
@@ -235,7 +235,7 @@ the same way the ingest ledger does.
 
 ## Migration Plan
 
-1. Deploy. `V16` creates the empty table on startup. The writer grants must include `INSERT` and `SELECT` on
+1. Deploy. `V17` creates the empty table on startup. The writer grants must include `INSERT` and `SELECT` on
    it beforehand, or migration fails startup, as with `V13`.
 2. No backfill of history is needed. Failures from before the deploy are not in the ledger. An operator
    recovers them as before, with a backfill over the affected range.

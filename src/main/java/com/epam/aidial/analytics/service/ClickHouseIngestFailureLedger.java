@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * The {@link IngestFailureLedger} kept in ClickHouse table {@value #TABLE} (ClickHouse migration {@code V16}), beside
+ * The {@link IngestFailureLedger} kept in ClickHouse table {@value #TABLE} (ClickHouse migration {@code V17}), beside
  * the ingest ledger and on the same writer credential.
  *
  * <p>Writes are plain inserts through {@link UsageLogWriter#insert}, each event carrying its own {@code event_at}, so

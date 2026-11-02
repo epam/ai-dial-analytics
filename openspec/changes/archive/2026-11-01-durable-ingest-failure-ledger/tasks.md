@@ -1,6 +1,6 @@
 ## 1. Failure ledger storage
 
-- [x] 1.1 Add ClickHouse migration `V16__create_dial_internal_failed_ingest.sql`.
+- [x] 1.1 Add ClickHouse migration `V17__create_dial_internal_failed_ingest.sql`.
   - Table: append-only `MergeTree`, ordered by `(kind, subject, event_at)`, partitioned by month of
     `event_at`, 13-month TTL, `ttl_only_drop_parts`.
   - Comment: a one-line header linking `openspec/specs/data-sync-failures/spec.md`.

@@ -86,7 +86,7 @@ public class SchemaValidator implements ApplicationRunner {
      * @throws IllegalStateException naming each missing or mistyped column
      */
     void validateFailureLedger(Map<String, String> tableColumns) {
-        validateInternalTable("Failure ledger", ClickHouseIngestFailureLedger.TABLE, ClickHouseIngestFailureLedger.COLUMNS, "V16", tableColumns);
+        validateInternalTable("Failure ledger", ClickHouseIngestFailureLedger.TABLE, ClickHouseIngestFailureLedger.COLUMNS, "V17", tableColumns);
     }
 
     private static void validateInternalTable(String what, String table, Map<String, String> columns, String migration,

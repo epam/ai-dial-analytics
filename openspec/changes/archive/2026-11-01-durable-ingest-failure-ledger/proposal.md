@@ -90,7 +90,7 @@ Out of scope:
   - New: `IngestFailureLedger` and its ClickHouse implementation, the retry sweep service, the failure
     classifier, a controller and DTOs under `web/controller/datasync/` and `web/dto/datasync/`, and
     `SyncRetryProperties`.
-- **Schema**: ClickHouse migration `V16__create_dial_internal_failed_ingest.sql`. The writer credential needs
+- **Schema**: ClickHouse migration `V17__create_dial_internal_failed_ingest.sql`. The writer credential needs
   `INSERT` and `SELECT` on it, as it already has on the ingest ledger.
 - **API**: two new `/v1/data-sync/failures` endpoints, and an additive `failedBlobs` member on the backfill
   status and list entries.

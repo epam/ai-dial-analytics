@@ -33,7 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * The failure ledger against a real ClickHouse: the {@code V16} table, the per-subject aggregation and the latest-event
+ * The failure ledger against a real ClickHouse: the {@code V17} table, the per-subject aggregation and the latest-event
  * read as {@link ClickHouseIngestFailureLedger} issues them, the ingest ledger's keyed read that resolves failed blobs,
  * the two {@code /v1/data-sync/failures} endpoints end to end, and that the table is unreachable through the query surface.
  */
