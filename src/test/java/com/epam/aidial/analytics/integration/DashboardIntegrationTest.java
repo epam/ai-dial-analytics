@@ -271,7 +271,7 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     }
 
     @Test
-    void aWidgetReadingDeletedTableBlocksEveryReplaceThatKeepsIt() throws Exception {
+    void widgetReadingDeletedTableBlocksEveryReplaceThatKeepsIt() throws Exception {
         // Stored directly, naming a table with no catalog row: to translation, a deleted table is one that
         // does not exist.
         final String table = "dashboard_deleted_table_probe";

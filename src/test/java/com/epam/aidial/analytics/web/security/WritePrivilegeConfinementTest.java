@@ -58,7 +58,7 @@ class WritePrivilegeConfinementTest {
     private static final Pattern WRITE_MAPPING = Pattern.compile("@(Post|Put|Delete)Mapping\\b");
 
     @Test
-    void noReadPathConsultsAWritePrivilege() throws IOException {
+    void noReadPathConsultsWritePrivilege() throws IOException {
         final List<String> violations = new ArrayList<>();
         final Path base = MAIN.resolve(Path.of("com", "epam", "aidial", "analytics"));
         try (Stream<Path> files = Files.walk(base)) {
