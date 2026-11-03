@@ -9,7 +9,8 @@ consumers and the underlying data stores, primarily ClickHouse.
 
 ADAS ingests DIAL usage logs from blob storage into ClickHouse, keeps a catalog of queryable tables in
 PostgreSQL, and serves governed queries over them through a structured query DSL, plain SQL over REST, and
-an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can query it directly.
+an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can query it directly. See the
+[architecture overview](docs/architecture.md) for how ADAS fits with the other DIAL Analytics components.
 
 ## Table of Contents
 
@@ -200,6 +201,7 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 
 | Topic | Document |
 |---|---|
+| Architecture overview | [docs/architecture.md](docs/architecture.md) |
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | ClickHouse server setup and grants | [docs/clickhouse-server.md](docs/clickhouse-server.md) |
 | AWS S3 access | [docs/aws-s3-access.md](docs/aws-s3-access.md) |
