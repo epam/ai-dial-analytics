@@ -83,7 +83,7 @@ alone, so no dependency outage restarts the service.
 Readiness SHALL report the readiness state, which is out of service until startup (schema migrations
 included) completes, together with the PostgreSQL catalog connection, so a pod that cannot read the catalog
 leaves rotation. ClickHouse SHALL NOT be a health contributor. Each group answers `200` when `UP` and `503`
-otherwise. The image's Docker `HEALTHCHECK` calls the liveness path.
+otherwise. The image's Docker `HEALTHCHECK` calls the liveness path on the actuator port.
 
 #### Scenario: Probes answer without a credential
 - **WHEN** a caller with no credential calls `GET /actuator/health/liveness` or `/actuator/health/readiness`

@@ -20,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * The opt-in separate management port ({@code management.server.port} set, here to a random port), called over
  * real sockets without a credential in {@code oidc} mode: the probe groups and the Prometheus scrape move to the
- * management port, the API port serves no actuator path, and the management port serves no API path.
+ * management port, the API port serves no actuator path, and the management port serves no API path (checked on
+ * the OpenAPI document, made public here so a refused credential cannot pass for "not served").
  * {@link HealthProbesIntegrationTest} covers the probe bodies in the default layout.
  *
  * <p>Requires Docker.
@@ -31,6 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",
+        // A public API path, so "not served on the management port" is a 404 rather than a refused credential.
+        "security.disable-swagger-authorization=true",
         "providers.full.issuer=https://issuer.test/full",
         "providers.full.jwk-set-uri=https://issuer.test/full/jwks",
 })
@@ -75,7 +78,8 @@ class ManagementPortIntegrationTest {
 
     @Test
     void managementPortServesNoApiPath() throws Exception {
-        assertThat(get(managementPort(), "/v1/tables").statusCode()).isNotEqualTo(200);
+        assertThat(get(serverPort(), "/v3/api-docs").statusCode()).isEqualTo(200);
+        assertThat(get(managementPort(), "/v3/api-docs").statusCode()).isEqualTo(404);
     }
 
     private int serverPort() {

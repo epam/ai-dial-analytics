@@ -198,9 +198,9 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   mode; see [`configuration.md`](configuration.md#api-documentation-springdoc--swagger-ui).
 - `MANAGEMENT_SERVER_PORT` (default unset) — serve the actuator (`/actuator/health` with its probe groups,
   `/actuator/info`, `/actuator/prometheus`) on a port of its own instead of the API port. Unset changes nothing:
-  probes and the Prometheus scrape stay on port 5000. Once set, the actuator answers only on that port and `404`s on
+  probes and the Prometheus scrape stay on the API port. Once set, the actuator answers only on that port and `404`s on
   the API port, so move the probes and the scrape there and declare it as a container port; the image's Docker
-  `HEALTHCHECK` keeps calling port 5000. See [`configuration.md`](configuration.md#server).
+  `HEALTHCHECK` follows it. See [`configuration.md`](configuration.md#server).
 - `SYNC_INLINE_FILES_DROP_TRUNCATED` (default `true`) — cut a payload body truncated at 4 MiB back to before its half
   inline file; see [`column-mapping.md`](column-mapping.md).
 - `SYNC_INLINE_FILES_MAX_SIZE` (default unset) — remove inline files whose stored base64 is longer than this size

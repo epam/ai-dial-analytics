@@ -32,6 +32,6 @@ USER appuser
 EXPOSE 5000 32010
 
 HEALTHCHECK --start-period=30s --interval=1m --timeout=3s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/actuator/health/liveness || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${MANAGEMENT_SERVER_PORT:-${HTTP_PORT:-5000}}/actuator/health/liveness || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]
