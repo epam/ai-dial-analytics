@@ -63,7 +63,8 @@ compose with each other and with `../tables/`. `arrow_client.py` and `describe_c
 `--entity`; `verify_client.py` does not — its checks are written against `dial_usage_log`'s own
 columns, so it stays pinned to that table. `arrow_client.py` works out its columns from the entity:
 its extract is a `SELECT *`, and its `GROUP BY` and governance steps use `event_kind` when the entity
-has that column, else its first text column, or the column you pass with `--group-by`.
+has that column, else its first text column that does not hold JSON, or the column you pass with
+`--group-by` (enrichment columns included).
 
 ```bash
 python arrow_client.py                                    # the example; grpc://localhost:32010

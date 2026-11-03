@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -30,6 +31,7 @@ EXTRACT_COLUMNS = ["event_kind", "deployment", "prompt_tokens", "completion_toke
                    "total_tokens", "request_time"]
 EXTRACT_SQL = f"SELECT {', '.join(EXTRACT_COLUMNS)} FROM {ENTITY} LIMIT 1000"
 MAX_LIMIT = 1000  # the extract's own LIMIT; the server maximum is FLIGHT_MAX_ROWS (10000 by default)
+OVERSIZED_LIMIT = 50000  # above the default FLIGHT_MAX_ROWS, so the server clamps it
 
 
 class EnvironmentFailure(Exception):
@@ -68,6 +70,7 @@ def check_plain_execute(ctx: dict) -> CheckResult:
     being UNIMPLEMENTED — i.e. the ADBC prepare→fallback chain holds end to end."""
     df = ctx["fetch"](f"SELECT count(*) AS n FROM {ENTITY}")
     if len(df) == 1 and int(df.iloc[0]["n"]) >= 0:
+        ctx["total_rows"] = int(df.iloc[0]["n"])  # reused by limit-clamped
         return CheckResult("plain-execute", True, info=[
             f"count(*) = {int(df.iloc[0]['n'])} — ADBC degraded gracefully from "
             "prepare (UNIMPLEMENTED) to ad-hoc statement execution"])
@@ -120,11 +123,34 @@ def check_aggregate_cross(ctx: dict) -> CheckResult:
                        f"server {server}")
 
 
-def check_limit_rejected(ctx: dict) -> CheckResult:
-    """LIMIT above the structured-query maximum is rejected, not silently clamped."""
-    return _expect_rejection(ctx, "limit-rejected",
-                             f"SELECT event_kind FROM {ENTITY} LIMIT 50000",
-                             ("exceeds the maximum", "INVALID_ARGUMENT"))
+def check_limit_clamped(ctx: dict) -> CheckResult:
+    """A LIMIT above the Flight row maximum (FLIGHT_MAX_ROWS) is clamped to it, never rejected for its literal.
+
+    Self-consistent against the table's own count: when the whole result fits under the maximum, every row
+    comes back; when it does not, the call fails naming the maximum, which the count must then exceed. A
+    truncated page is never an acceptable answer.
+    """
+    name = "limit-clamped"
+    total = ctx.get("total_rows")
+    if total is None:
+        return CheckResult(name, False, "plain-execute's row count available", "plain-execute produced no count")
+    expected_rows = min(total, OVERSIZED_LIMIT)
+    try:
+        df = ctx["fetch"](f"SELECT event_kind FROM {ENTITY} LIMIT {OVERSIZED_LIMIT}")
+    except Exception as exc:
+        message = str(exc)
+        match = re.search(r"the result exceeds the maximum of (\d+) rows", message)
+        if match and total > int(match.group(1)):
+            return CheckResult(name, True, info=[
+                f"{total} rows exceed the {match.group(1)}-row maximum; refused rather than truncated: "
+                + message.splitlines()[0][:160]])
+        return CheckResult(name, False,
+                           f"all {expected_rows} rows, or the row-maximum refusal for a table larger than the maximum",
+                           message[:300])
+    if len(df) == expected_rows:
+        return CheckResult(name, True, info=[
+            f"LIMIT {OVERSIZED_LIMIT} accepted; the whole result fits under the maximum ({len(df)} rows)"])
+    return CheckResult(name, False, f"all {expected_rows} rows (no truncated page)", f"{len(df)} rows")
 
 
 def check_unsupported_rejected(ctx: dict) -> CheckResult:
@@ -184,7 +210,7 @@ CHECKS = [
     check_plain_execute,
     check_typed_extract,
     check_aggregate_cross,
-    check_limit_rejected,
+    check_limit_clamped,
     check_unsupported_rejected,
     check_write_rejected,
     check_params_unsupported,

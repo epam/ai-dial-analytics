@@ -75,7 +75,7 @@ public class SqlQueryFrontEnd {
     private static final String EXPECTATION_MARKER = "Was expecting one of:";
 
     /**
-     * Calcite's report of a select item whose definition refers to itself, as {@link #unmaskInjectedAlias} reads it.
+     * Calcite's report of a select item whose definition refers to itself, as {@link #reportSelfReferenceAsUnknownColumn} reads it.
      */
     private static final Pattern SELF_REFERENCE =
             Pattern.compile("The definition of column '([^']+)' depends on itself through the following columns: .*", Pattern.DOTALL);
@@ -268,7 +268,7 @@ public class SqlQueryFrontEnd {
         } catch (SqlParseException e) {
             throw parseError(sql, e);
         } catch (ValidationException e) {
-            throw new SqlTranslationException("SQL validation error: " + unmaskInjectedAlias(rootMessage(e)), e);
+            throw new SqlTranslationException("SQL validation error: " + reportSelfReferenceAsUnknownColumn(rootMessage(e)), e);
         } catch (RelConversionException e) {
             throw new SqlTranslationException("SQL cannot be planned: " + rootMessage(e), e);
         }
@@ -627,15 +627,17 @@ public class SqlQueryFrontEnd {
     /**
      * Reports a self-referencing select item as the unknown column it is.
      *
-     * <p>{@link SqlSelectAliasInjector} names a bare select item {@code x} as {@code x AS x}. When no table in scope has
-     * a column {@code x}, Babel's select-alias lookup resolves the reference to that alias, and Calcite reports
-     * <em>"The definition of column 'x' depends on itself"</em>. The caller wrote neither the alias nor the cycle. A
-     * reference only reaches the alias lookup once no table column matched, so the column is unknown even in a cycle
-     * the caller did write ({@code SELECT b AS a, a AS b}). The message is therefore rewritten into Calcite's own
-     * unknown-column wording, so every SQL surface (REST, Flight SQL, validation) reports it as it reports any other
-     * unknown column.
+     * <p>The cycle is Calcite's own, not one the caller wrote. Calcite derives a bare select item's alias from its name,
+     * so {@code x} is named {@code x}. Under Babel conformance a select-list identifier that no table column resolves is
+     * then looked up among the select aliases ({@code isSelectAlias} is {@code ANY}), where it finds that item's own
+     * alias, and Calcite reports <em>"The definition of column 'x' depends on itself"</em>. That lookup is reached only
+     * after the table lookup found nothing, and the name it reports is that unresolved identifier. So the column is
+     * unknown even in a cycle the caller did write ({@code SELECT b AS a, a AS b}). The message is therefore rewritten
+     * into Calcite's own unknown-column wording, so every SQL surface (REST, Flight SQL, validation) reports it as it
+     * reports any other unknown column. ({@link SqlSelectAliasInjector} plays no part: it leaves a bare identifier as it
+     * is.)
      */
-    static String unmaskInjectedAlias(String message) {
+    static String reportSelfReferenceAsUnknownColumn(String message) {
         final Matcher matcher = SELF_REFERENCE.matcher(message);
         return matcher.matches() ? "Column '" + matcher.group(1) + "' not found in any table" : message;
     }

@@ -42,6 +42,8 @@ import pyarrow as pa
 DEFAULT_FLIGHT_URI = "grpc://localhost:32010"
 DEFAULT_ENTITY = "dial_usage_log"
 PREFERRED_GROUP_KEY = "event_kind"
+# The server's refusal of a result larger than FLIGHT_MAX_ROWS ("the result exceeds the maximum of N rows ...").
+ROW_CEILING_MESSAGE = "the result exceeds the maximum of"
 
 
 def connect(uri: str, api_key: str | None):
@@ -71,25 +73,37 @@ def query(conn, sql: str) -> pd.DataFrame:
 
 
 def quote(name: str) -> str:
-    """Double-quotes an identifier, so dotted enrichment columns and reserved words work too."""
+    """Double-quotes a column name, so dotted enrichment columns and reserved words work too."""
     return '"' + name.replace('"', '""') + '"'
 
 
-def pick_group_key(schema: pa.Schema, requested: str | None) -> str:
-    """The column steps 3-5 group and filter on: the requested one, else `event_kind`, else the first text column.
+def looks_like_json(values: pd.Series) -> bool:
+    """True when every sampled value is a JSON object or array.
 
-    The extract's own Arrow schema is the entity's column list, so the example runs against any entity rather
-    than assuming `dial_usage_log`'s columns.
+    An `object` column travels as Arrow text, exactly like a string column, but it is projection-only:
+    grouping on it is rejected. Its values are what tell the two apart.
     """
-    names = schema.names
+    sample = values.dropna()
+    return len(sample) > 0 and sample.astype(str).str.lstrip().str[:1].isin(["{", "["]).all()
+
+
+def pick_group_key(extract: pa.Table, requested: str | None) -> str:
+    """The column steps 3-5 group and filter on: the requested one, else `event_kind`, else a text column.
+
+    The fallback reads the extract's own Arrow schema, so the example runs against any entity rather than
+    assuming `dial_usage_log`'s columns. A requested column is passed through as is: `SELECT *` lists only an
+    entity's non-heavy source columns, so a valid enrichment column (`deployment_ref.display_name`) is not in
+    the extract, and the server is the one to say whether a name resolves.
+    """
     if requested:
-        if requested not in names:
-            sys.exit(f"--group-by {requested!r} is not a column of the entity; it has: {', '.join(names)}")
         return requested
+    names = extract.schema.names
     if PREFERRED_GROUP_KEY in names:
         return PREFERRED_GROUP_KEY
-    for field in schema:
-        if pa.types.is_string(field.type) or pa.types.is_large_string(field.type):
+    sample = extract.to_pandas()
+    for field in extract.schema:
+        if (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)) \
+                and not looks_like_json(sample[field.name]):
             return field.name
     sys.exit(f"the entity has no text column to group on; pass --group-by (columns: {', '.join(names)})")
 
@@ -109,12 +123,16 @@ def show_row_ceiling(conn, sql: str) -> None:
 
     The LIMIT literal is never rejected: the statement runs clamped to the maximum and fails only if the
     result really holds more rows than that, so a truncated page is never returned. Which of the two
-    happens depends on the entity's size, and both are the expected behaviour.
+    happens depends on the entity's size, and both are the expected behaviour. Any other failure is not,
+    and stops the example.
     """
     try:
         rows = query_arrow(conn, sql).num_rows
     except Exception as exc:
-        print(f"   result exceeds the row maximum, rejected: {str(exc).splitlines()[0]}\n")
+        message = str(exc)
+        if ROW_CEILING_MESSAGE not in message:
+            sys.exit(f"FAIL: expected the row-maximum refusal or a result, got: {message.splitlines()[0]}")
+        print(f"   result exceeds the row maximum, rejected: {message.splitlines()[0]}\n")
         return
     print(f"   accepted: the whole result fits under the row maximum ({rows} rows)\n")
 
@@ -130,10 +148,11 @@ def main() -> None:
     parser.add_argument("--entity", default=DEFAULT_ENTITY,
                         help=f"entity to query (default {DEFAULT_ENTITY}); any queryable entity or table works")
     parser.add_argument("--group-by", default=None,
-                        help=f"column for the GROUP BY and governance steps (default {PREFERRED_GROUP_KEY} when the "
-                             "entity has it, else its first text column)")
+                        help=f"column for the GROUP BY and governance steps, enrichment columns included (default "
+                             f"{PREFERRED_GROUP_KEY} when the entity has it, else its first non-JSON text column)")
     args = parser.parse_args()
-    entity = quote(args.entity)
+    # Left unquoted, so a schema-qualified name (adas.dial_usage_log) still resolves.
+    entity = args.entity
 
     print(f"connecting to {args.flight_uri} "
           f"({'with Api-Key' if args.api_key else 'no credentials -- security.mode=none'})\n")
@@ -148,7 +167,7 @@ def main() -> None:
         print(df.head(3).to_string())
         print(f"   dtypes: {dict(df.dtypes.astype(str))}\n")
 
-        key = pick_group_key(extract.schema, args.group_by)
+        key = pick_group_key(extract, args.group_by)
         column = quote(key)
 
         print(f"3. server-side GROUP BY {key}")
