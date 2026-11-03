@@ -50,6 +50,13 @@ rejected as unknown columns of that entity.
   on every SQL surface, and not with the self-referencing-definition message the validator reports
   when it resolves the item against the alias derived from its own name
 
+#### Scenario: A caller-written alias cycle is reported as an unknown column
+- **WHEN** a client submits `SELECT no_b AS no_a, no_a AS no_b FROM dial_usage_log`, where neither name
+  is a column of the entity
+- **THEN** translation fails with `SQL validation error: Column '<name>' not found in any table`
+  naming one of the two, because each reference reaches the select-alias lookup only after no table
+  column matched
+
 #### Scenario: A bare body column name is rejected
 - **WHEN** a client submits `SELECT request_body FROM dial_usage_log`
 - **THEN** translation fails with a validation error naming `request_body` as an unknown column,

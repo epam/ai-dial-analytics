@@ -5,8 +5,8 @@ external analytical consumer would — pandas over the ADBC Flight SQL driver:
 
 - **`arrow_client.py`** — a small, linear working example: runs a handful of queries and prints
   the results; queries that must be rejected by server-side governance are expected to fail
-  (exits non-zero if one is accepted, if the row-ceiling step fails for another reason, or if the
-  server rejects the `GROUP BY` column).
+  (exits non-zero if one is accepted or rejected for another reason, if the row-ceiling step fails
+  for another reason, or if the server rejects the `GROUP BY` column).
 - **`verify_client.py`** — the self-checking verification client: 7 named PASS/FAIL checks with
   exit codes (`0` all passed, `1` at least one failed, `2` endpoint unreachable). The checks are
   self-consistent (server aggregate vs pandas recomputation of the same extract), so they pass on
@@ -63,9 +63,12 @@ All three take `--flight-uri` (env `ADAS_FLIGHT_URI`) and `--api-key` (env `ADAS
 compose with each other and with `../tables/`. `arrow_client.py` and `describe_client.py` also take
 `--entity`; `verify_client.py` does not — its checks are written against `dial_usage_log`'s own
 columns, so it stays pinned to that table. `arrow_client.py` works out its columns from the entity:
-its extract is a `SELECT *`, and its `GROUP BY` and governance steps use `event_kind` when the entity
-has that column, else its first text column that does not hold JSON, or the column you pass with
-`--group-by` (enrichment columns included).
+its extract is a `SELECT *`, and its `GROUP BY` and row-ceiling steps use the column you pass with
+`--group-by` (enrichment columns included), else `event_kind` when the entity has that column, else
+the text column with the fewest distinct values among the first rows that does not hold JSON. That
+fallback is a guess, so name the column with `--group-by` for a user table. The `length()` governance
+step needs a plain text column: the `--group-by` column when it is one, else such a column from the
+extract; it is skipped when the first rows show none.
 
 ```bash
 python arrow_client.py                                    # the example; grpc://localhost:32010

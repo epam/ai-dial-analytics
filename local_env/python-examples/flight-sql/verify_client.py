@@ -70,7 +70,6 @@ def check_plain_execute(ctx: dict) -> CheckResult:
     being UNIMPLEMENTED — i.e. the ADBC prepare→fallback chain holds end to end."""
     df = ctx["fetch"](f"SELECT count(*) AS n FROM {ENTITY}")
     if len(df) == 1 and int(df.iloc[0]["n"]) >= 0:
-        ctx["total_rows"] = int(df.iloc[0]["n"])  # reused by limit-clamped
         return CheckResult("plain-execute", True, info=[
             f"count(*) = {int(df.iloc[0]['n'])} — ADBC degraded gracefully from "
             "prepare (UNIMPLEMENTED) to ad-hoc statement execution"])
@@ -126,45 +125,55 @@ def check_aggregate_cross(ctx: dict) -> CheckResult:
 def check_limit_clamped(ctx: dict) -> CheckResult:
     """A LIMIT above the Flight row maximum (FLIGHT_MAX_ROWS) is clamped to it, never rejected for its literal.
 
-    Self-consistent against the table's own count: when the whole result fits under the maximum, every row
-    comes back; when it does not, the call fails naming the maximum, which the count must then exceed. A
-    truncated page is never an acceptable answer.
+    Self-consistent against the table's own count, taken right before and right after the fetch so rows
+    ingested meanwhile cannot fail it: when the whole result fits under the maximum, every row comes back;
+    when it does not, the call fails naming the maximum, which the count must then exceed. A truncated page
+    is never an acceptable answer.
     """
     name = "limit-clamped"
-    total = ctx.get("total_rows")
-    if total is None:
-        return CheckResult(name, False, "plain-execute's row count available", "plain-execute produced no count")
-    expected_rows = min(total, OVERSIZED_LIMIT)
+    before = _count(ctx)
     try:
         df = ctx["fetch"](f"SELECT event_kind FROM {ENTITY} LIMIT {OVERSIZED_LIMIT}")
     except Exception as exc:
         message = str(exc)
+        total = max(before, _count(ctx))
         match = re.search(r"the result exceeds the maximum of (\d+) rows", message)
         if match and total > int(match.group(1)):
             return CheckResult(name, True, info=[
                 f"{total} rows exceed the {match.group(1)}-row maximum; refused rather than truncated: "
-                + message.splitlines()[0][:160]])
+                + _first_line(message)[:160]])
         return CheckResult(name, False,
-                           f"all {expected_rows} rows, or the row-maximum refusal for a table larger than the maximum",
-                           message[:300])
-    if len(df) == expected_rows:
+                           "all rows, or the row-maximum refusal for a table larger than the maximum",
+                           f"{total} rows counted; {message[:300]}")
+    after = _count(ctx)
+    low, high = min(before, after, OVERSIZED_LIMIT), min(max(before, after), OVERSIZED_LIMIT)
+    if low <= len(df) <= high:
         return CheckResult(name, True, info=[
             f"LIMIT {OVERSIZED_LIMIT} accepted; {len(df)} rows, the whole result up to the LIMIT, no truncated page"])
-    return CheckResult(name, False, f"all {expected_rows} rows (no truncated page)", f"{len(df)} rows")
+    expected = f"all {low} rows" if low == high else f"all rows, between {low} and {high} (rows were ingested meanwhile)"
+    return CheckResult(name, False, f"{expected} (no truncated page)", f"{len(df)} rows")
+
+
+def _count(ctx: dict) -> int:
+    return int(ctx["fetch"](f"SELECT count(*) AS n FROM {ENTITY}").iloc[0]["n"])
+
+
+def _first_line(message: str) -> str:
+    return message.splitlines()[0] if message else ""
 
 
 def check_unsupported_rejected(ctx: dict) -> CheckResult:
     """A DSL-inexpressible construct fails closed with INVALID_ARGUMENT."""
     return _expect_rejection(ctx, "unsupported-rejected",
                              f"SELECT if(length(deployment) > 0, 'a', 'b') FROM {ENTITY}",
-                             ("cannot be expressed", "INVALID_ARGUMENT"))
+                             ("cannot be expressed in the structured query DSL",))
 
 
 def check_write_rejected(ctx: dict) -> CheckResult:
     """A write statement is rejected at the statement screen."""
     return _expect_rejection(ctx, "write-rejected",
                              f"DELETE FROM {ENTITY}",
-                             ("only SELECT", "INVALID_ARGUMENT"))
+                             ("only SELECT statements are supported",))
 
 
 def check_params_unsupported(ctx: dict) -> CheckResult:
