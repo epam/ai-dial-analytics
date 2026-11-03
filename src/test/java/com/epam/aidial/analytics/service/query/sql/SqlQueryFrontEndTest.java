@@ -120,6 +120,28 @@ class SqlQueryFrontEndTest {
                 .hasMessageContaining("no_such_column");
     }
 
+    /**
+     * A bare select item that names no column has already been given its own name as an alias by the
+     * alias injector, so Calcite resolves it to that alias and reports a self-referencing definition. The
+     * caller wrote no alias and no cycle; the message they get is the unknown column it actually is.
+     */
+    @Test
+    void unknownBareSelectItemIsReportedAsUnknownColumnNotSelfReference() {
+        assertThatThrownBy(() -> frontEnd.translate("SELECT event_kind, no_such_column FROM dial_usage_log"))
+                .isInstanceOf(SqlTranslationException.class)
+                .hasMessage("SQL validation error: Column 'no_such_column' not found in any table");
+    }
+
+    @Test
+    void unknownColumnInJoinSelectListIsReportedAsUnknownColumn() {
+        assertThatThrownBy(() -> frontEnd.translate(
+                "SELECT d.event_kind, no_such_column FROM dial_usage_log d JOIN dial_usage_log e ON d.event_kind = e.event_kind"))
+                .isInstanceOf(SqlTranslationException.class)
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .contains("Column 'no_such_column' not found")
+                        .doesNotContain("depends on itself"));
+    }
+
     @Test
     void unknownTableRejected() {
         assertThatThrownBy(() -> frontEnd.translate("SELECT x FROM no_such_table"))

@@ -44,6 +44,12 @@ rejected as unknown columns of that entity.
 - **WHEN** a client submits `SELECT no_such_column FROM dial_usage_log`
 - **THEN** translation fails with a validation error naming the unknown column, before execution
 
+#### Scenario: An unknown bare select item is reported as an unknown column, not a self-reference
+- **WHEN** a client submits `SELECT event_kind, no_such_column FROM dial_usage_log`
+- **THEN** translation fails with `SQL validation error: Column 'no_such_column' not found in any table`,
+  on every SQL surface, and not with the self-referencing-definition message the validator reports
+  against the alias the select-item naming gave the item
+
 #### Scenario: A bare body column name is rejected
 - **WHEN** a client submits `SELECT request_body FROM dial_usage_log`
 - **THEN** translation fails with a validation error naming `request_body` as an unknown column,
