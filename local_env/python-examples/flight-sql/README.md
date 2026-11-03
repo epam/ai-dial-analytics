@@ -5,7 +5,8 @@ external analytical consumer would — pandas over the ADBC Flight SQL driver:
 
 - **`arrow_client.py`** — a small, linear working example: runs a handful of queries and prints
   the results; queries that must be rejected by server-side governance are expected to fail
-  (exits non-zero if one is accepted).
+  (exits non-zero if one is accepted, if the row-ceiling step fails for another reason, or if the
+  server rejects the `GROUP BY` column).
 - **`verify_client.py`** — the self-checking verification client: 7 named PASS/FAIL checks with
   exit codes (`0` all passed, `1` at least one failed, `2` endpoint unreachable). The checks are
   self-consistent (server aggregate vs pandas recomputation of the same extract), so they pass on

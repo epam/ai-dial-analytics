@@ -31,7 +31,7 @@ EXTRACT_COLUMNS = ["event_kind", "deployment", "prompt_tokens", "completion_toke
                    "total_tokens", "request_time"]
 EXTRACT_SQL = f"SELECT {', '.join(EXTRACT_COLUMNS)} FROM {ENTITY} LIMIT 1000"
 MAX_LIMIT = 1000  # the extract's own LIMIT; the server maximum is FLIGHT_MAX_ROWS (10000 by default)
-OVERSIZED_LIMIT = 50000  # above the default FLIGHT_MAX_ROWS, so the server clamps it
+OVERSIZED_LIMIT = 50000  # above the default FLIGHT_MAX_ROWS (clamped); a cap at or above it honours the LIMIT
 
 
 class EnvironmentFailure(Exception):
@@ -149,7 +149,7 @@ def check_limit_clamped(ctx: dict) -> CheckResult:
                            message[:300])
     if len(df) == expected_rows:
         return CheckResult(name, True, info=[
-            f"LIMIT {OVERSIZED_LIMIT} accepted; the whole result fits under the maximum ({len(df)} rows)"])
+            f"LIMIT {OVERSIZED_LIMIT} accepted; {len(df)} rows, the whole result up to the LIMIT, no truncated page"])
     return CheckResult(name, False, f"all {expected_rows} rows (no truncated page)", f"{len(df)} rows")
 
 

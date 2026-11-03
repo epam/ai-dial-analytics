@@ -21,7 +21,8 @@ Noteworthy behaviors demonstrated along the way:
   the connection is open, matching the default security.mode=none.
 
 Prerequisites: see README.md. Exits non-zero if a query that must be rejected
-is accepted.
+is accepted, if the row-ceiling step fails for any reason other than the row
+maximum, or if the server rejects the GROUP BY column.
 
 Usage:
     python arrow_client.py
@@ -77,14 +78,24 @@ def quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def looks_like_json(values: pd.Series) -> bool:
-    """True when every sampled value is a JSON object or array.
+def is_plain_text(values: pd.Series) -> bool:
+    """True when the sample holds at least one value and not every value is a JSON object or array.
 
     An `object` column travels as Arrow text, exactly like a string column, but it is projection-only:
-    grouping on it is rejected. Its values are what tell the two apart.
+    grouping on it is rejected. Only its values tell the two apart, so a column with no sampled value
+    (all null, or an empty table) is not chosen either: nothing shows it is not JSON.
     """
     sample = values.dropna()
-    return len(sample) > 0 and sample.astype(str).str.lstrip().str[:1].isin(["{", "["]).all()
+    return len(sample) > 0 and not sample.astype(str).str.lstrip().str[:1].isin(["{", "["]).all()
+
+
+def qualified(name: str) -> str:
+    """Quotes each dot-separated part of an entity name: `adas.value` becomes `"adas"."value"`.
+
+    Quoting keeps a table named after a reserved word working; quoting part by part keeps a
+    schema-qualified name resolving.
+    """
+    return ".".join(quote(part) for part in name.split("."))
 
 
 def pick_group_key(extract: pa.Table, requested: str | None) -> str:
@@ -103,9 +114,10 @@ def pick_group_key(extract: pa.Table, requested: str | None) -> str:
     sample = extract.to_pandas()
     for field in extract.schema:
         if (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)) \
-                and not looks_like_json(sample[field.name]):
+                and is_plain_text(sample[field.name]):
             return field.name
-    sys.exit(f"the entity has no text column to group on; pass --group-by (columns: {', '.join(names)})")
+    sys.exit("no text column with plain (non-JSON) values in the first rows to group on; "
+             f"pass --group-by (columns: {', '.join(names)})")
 
 
 def expect_rejected(conn, sql: str) -> None:
@@ -116,6 +128,16 @@ def expect_rejected(conn, sql: str) -> None:
         print(f"   rejected as expected: {str(exc).splitlines()[0]}\n")
         return
     sys.exit(f"FAIL: expected a rejection but the query was accepted: {sql}")
+
+
+def group_by(conn, entity: str, key: str) -> pd.DataFrame:
+    """The step-3 aggregate; a column the server rejects ends the example with its reason, not a traceback."""
+    column = quote(key)
+    try:
+        return query(conn, f"SELECT {column}, count(*) AS n FROM {entity} "
+                           f"GROUP BY {column} ORDER BY n DESC LIMIT 10")
+    except Exception as exc:
+        sys.exit(f"FAIL: cannot group on {key!r} (pass another --group-by): {str(exc).splitlines()[0]}")
 
 
 def show_row_ceiling(conn, sql: str) -> None:
@@ -134,7 +156,7 @@ def show_row_ceiling(conn, sql: str) -> None:
             sys.exit(f"FAIL: expected the row-maximum refusal or a result, got: {message.splitlines()[0]}")
         print(f"   result exceeds the row maximum, rejected: {message.splitlines()[0]}\n")
         return
-    print(f"   accepted: the whole result fits under the row maximum ({rows} rows)\n")
+    print(f"   accepted: {rows} rows, the whole result up to the LIMIT, no truncated page\n")
 
 
 def main() -> None:
@@ -151,8 +173,7 @@ def main() -> None:
                         help=f"column for the GROUP BY and governance steps, enrichment columns included (default "
                              f"{PREFERRED_GROUP_KEY} when the entity has it, else its first non-JSON text column)")
     args = parser.parse_args()
-    # Left unquoted, so a schema-qualified name (adas.dial_usage_log) still resolves.
-    entity = args.entity
+    entity = qualified(args.entity)
 
     print(f"connecting to {args.flight_uri} "
           f"({'with Api-Key' if args.api_key else 'no credentials -- security.mode=none'})\n")
@@ -171,8 +192,7 @@ def main() -> None:
         column = quote(key)
 
         print(f"3. server-side GROUP BY {key}")
-        by_key = query(conn, f"SELECT {column}, count(*) AS n FROM {entity} "
-                             f"GROUP BY {column} ORDER BY n DESC LIMIT 10")
+        by_key = group_by(conn, entity, key)
         print(by_key.to_string(index=False) + "\n")
 
         print("4. row ceiling: a LIMIT above the Flight row maximum is clamped to it, not rejected")

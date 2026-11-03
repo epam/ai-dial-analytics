@@ -153,7 +153,7 @@ class SqlQueryFrontEndTest {
     }
 
     @Test
-    void selfReferenceRewriteNamesTheFirstColumnOfMultiColumnCycle() {
+    void selfReferenceRewriteNamesTheColumnCalciteReportsAsRecurring() {
         assertThat(SqlQueryFrontEnd.reportSelfReferenceAsUnknownColumn(
                 "The definition of column 'no_a' depends on itself through the following columns: 'no_b', 'no_a'"))
                 .isEqualTo("Column 'no_a' not found in any table");

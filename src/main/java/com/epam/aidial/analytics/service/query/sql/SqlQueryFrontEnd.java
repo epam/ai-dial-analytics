@@ -627,7 +627,7 @@ public class SqlQueryFrontEnd {
     /**
      * Reports a self-referencing select item as the unknown column it is.
      *
-     * <p>The cycle is Calcite's own, not one the caller wrote. Calcite derives a bare select item's alias from its name,
+     * <p>For a bare select item the cycle is Calcite's own, not one the caller wrote. Calcite derives its alias from its name,
      * so {@code x} is named {@code x}. Under Babel conformance a select-list identifier that no table column resolves is
      * then looked up among the select aliases ({@code isSelectAlias} is {@code ANY}), where it finds that item's own
      * alias, and Calcite reports <em>"The definition of column 'x' depends on itself"</em>. That lookup is reached only
