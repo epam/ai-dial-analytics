@@ -8,7 +8,7 @@ import java.time.LocalDate;
  * pending or parked, and when it is due, is derived from this and the retry settings
  * ({@link IngestFailureService#derive}); a blob is further resolved by the ingest ledger.
  *
- * @param kind             blob or day
+ * @param kind             blob, day or records
  * @param subject          the blob key or the ISO date
  * @param day              the day of the latest failure
  * @param blobLastModified the blob's last-modified time at its latest failure; {@link Instant#EPOCH} for a day

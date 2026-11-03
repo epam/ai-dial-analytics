@@ -45,7 +45,7 @@ public record BackfillStatusResponse(
         long rowsSkipped,
         @Schema(description = "Rows dropped (missing deduplication key) across all days so far.")
         long rowsDropped,
-        @Schema(description = "Blobs that failed to read or map and were skipped, across all days so far; each is named in "
+        @Schema(description = "Blobs that failed to read or map, or whose rows ClickHouse refused, across all days so far; each is named in "
                 + "the failure ledger (`GET /v1/data-sync/failures`).", example = "0")
         long failedBlobs,
         @Schema(description = "Run start time (UTC, ISO-8601).")

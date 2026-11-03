@@ -46,9 +46,6 @@ final class IngestFailureClassifier {
             if (cause instanceof RecordMappingException) {
                 quoteMessages = false;
             }
-            if (cause.getCause() == cause) {
-                break;
-            }
         }
         return text.toString();
     }

@@ -315,6 +315,33 @@ class IngestRetrySweepTest {
         assertThat(failures.outstanding()).isEmpty();
     }
 
+    /**
+     * A requeued records subject whose blob ClickHouse now refuses parks again: the refusal is recorded on the records
+     * subject too, so it is not left pending with no attempts and re-read by every sweep.
+     */
+    @Test
+    void requeuedRecordsOfRefusedBlobParkAgain() throws Exception {
+        BlobListing blob = writeBlobLines("a.log.gz", record("p1") + "not json\n");
+        ledger.clock = clock::instant;
+        recordSkippedRecords(blob);
+        failures.requeue(IngestFailureFilter.ALL);
+        clock.advance(Duration.ofMinutes(1));
+        writer.rejectRows = true;
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.failed()).isEqualTo(1);
+        assertThat(failureLedger.of(IngestFailureKind.RECORDS, blob.name())).last().satisfies(event -> {
+            assertThat(event.type()).isEqualTo(IngestFailureEvent.Type.FAILED);
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.REJECTED_BY_SERVER);
+            assertThat(event.path()).isEqualTo("retry");
+        });
+        assertThat(failures.outstanding()).hasSize(2).allSatisfy(entry -> assertThat(entry.state()).isEqualTo(IngestFailureState.PARKED));
+
+        clock.advance(Duration.ofMinutes(16));
+        assertThat(sweep(retry(true, 20)).runOnce().attempted()).isZero();
+    }
+
     /** As a reconciliation run would leave it: the blob recorded, its skipped records parked. */
     private void recordSkippedRecords(BlobListing blob) {
         SkippedRecords skips = new SkippedRecords();

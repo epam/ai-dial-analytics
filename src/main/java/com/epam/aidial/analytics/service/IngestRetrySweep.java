@@ -132,30 +132,22 @@ public class IngestRetrySweep {
         }
         log.info("Retry sweep attempting {} due failure(s)", due.size());
         int succeeded = 0;
-        int failed = 0;
         for (IngestFailureEntry entry : due) {
             OpenIngestFailure failure = entry.failure();
-            if (failure.kind() == IngestFailureKind.DAY) {
-                boolean ok = retryDay(LocalDate.parse(failure.subject()));
-                succeeded += ok ? 1 : 0;
-                failed += ok ? 0 : 1;
-                continue;
-            }
-            boolean ok = failure.kind() == IngestFailureKind.RECORDS ? retryRecords(failure) : retryBlob(failure);
-            if (ok) {
-                succeeded++;
-            } else {
-                failed++;
-            }
+            boolean ok = switch (failure.kind()) {
+                case DAY -> retryDay(LocalDate.parse(failure.subject()));
+                case BLOB -> retryBlob(failure);
+                case RECORDS -> retryRecords(failure);
+            };
+            succeeded += ok ? 1 : 0;
         }
-        return new SweepSummary(heldWritten, due.size(), succeeded, failed);
+        return new SweepSummary(heldWritten, due.size(), succeeded, due.size() - succeeded);
     }
 
     private boolean retryDay(LocalDate day) {
         DataSyncService.RunSummary summary = dataSyncService.runForDate(day, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RETRY,
                 DataSyncService.IngestProgressListener.NO_OP);
-        meterRegistry.counter("sync.retry.attempts", "kind", IngestFailureKind.DAY.wire(), "outcome",
-                summary.success() ? "success" : "failure").increment();
+        attempt(IngestFailureKind.DAY, summary.success() ? "success" : "failure");
         return summary.success();
     }
 
@@ -168,40 +160,26 @@ public class IngestRetrySweep {
      * @return whether the blob is now resolved
      */
     private boolean retryBlob(OpenIngestFailure failure) {
-        String key = failure.subject();
-        // Without a fresh listing, a failure keeps the version that failed before: recording no version would let any
-        // earlier ingest of the blob count as resolving it, and would move the subject to today's day.
-        BlobListing failedVersion = new BlobListing(key, failure.blobLastModified());
-        BlobListing listing;
-        try {
-            listing = blobClient.listWithMetadata(key).stream().filter(candidate -> candidate.name().equals(key)).findFirst().orElse(null);
-        } catch (RuntimeException ex) {
-            return failedBlob(failedVersion, ex);
-        }
+        BlobListing listing = listOrRecordFailure(IngestFailureKind.BLOB, failure);
         if (listing == null) {
-            failures.recordBlob(failedVersion, IngestPath.RETRY, IngestFailureReason.BLOB_MISSING,
-                    "The store no longer lists the blob");
-            attempt("failure");
             return false;
         }
         if (recordedSinceFailure(listing, failure)) {
             failures.resolveBlobs(List.of(listing), IngestPath.RETRY);
-            attempt("resolved");
+            attempt(IngestFailureKind.BLOB, "resolved");
             return true;
         }
-        Ingested ingested;
-        try {
-            ingested = ingest(listing);
-        } catch (Exception ex) {
-            return failedBlob(listing, ex);
+        Ingested ingested = ingestOrRecordFailure(IngestFailureKind.BLOB, listing);
+        if (ingested == null) {
+            return false;
         }
-        if (ingested.refused()) {
+        if (ingested.refused() != null) {
             // The hand-over already recorded the blob as rejected_by_server, which parks it.
-            attempt("failure");
+            attempt(IngestFailureKind.BLOB, "failure");
             return false;
         }
         failures.resolveBlobs(ingested.written(), IngestPath.RETRY);
-        attempt("success");
+        attempt(IngestFailureKind.BLOB, "success");
         return true;
     }
 
@@ -209,31 +187,26 @@ public class IngestRetrySweep {
      * Retries the {@code records} of a blob: re-reads it whatever the ingest ledger says — the ingest that skipped its
      * records recorded it there — and records it again. Nothing skipped resolves the subject; anything skipped is recorded
      * by the hand-over as a fresh {@code skipped_records} failure, which parks the subject again with the current counts.
+     * A blob ClickHouse now refuses has its {@code blob} subject recorded by the hand-over, and its {@code records}
+     * subject a {@code rejected_by_server} failure here, which parks it too; left without one, the subject would stay
+     * pending with no attempts and be re-read by every sweep.
      *
      * @return whether the subject is now resolved
      */
     private boolean retryRecords(OpenIngestFailure failure) {
-        String key = failure.subject();
-        BlobListing failedVersion = new BlobListing(key, failure.blobLastModified());
-        BlobListing listing;
-        try {
-            listing = blobClient.listWithMetadata(key).stream().filter(candidate -> candidate.name().equals(key)).findFirst().orElse(null);
-        } catch (RuntimeException ex) {
-            return failedRecords(failedVersion, ex);
-        }
+        BlobListing listing = listOrRecordFailure(IngestFailureKind.RECORDS, failure);
         if (listing == null) {
-            failures.record(IngestFailureKind.RECORDS, failedVersion, IngestPath.RETRY, IngestFailureReason.BLOB_MISSING,
-                    "The store no longer lists the blob");
-            attempt(IngestFailureKind.RECORDS, "failure");
             return false;
         }
-        Ingested ingested;
-        try {
-            ingested = ingest(listing);
-        } catch (Exception ex) {
-            return failedRecords(listing, ex);
+        Ingested ingested = ingestOrRecordFailure(IngestFailureKind.RECORDS, listing);
+        if (ingested == null) {
+            return false;
         }
-        if (ingested.refused() || ingested.skippedAny()) {
+        if (ingested.refused() != null) {
+            failures.record(IngestFailureKind.RECORDS, listing, IngestPath.RETRY, IngestFailureReason.REJECTED_BY_SERVER,
+                    ingested.refused().describe());
+        }
+        if (ingested.refused() != null || ingested.skippedAny()) {
             attempt(IngestFailureKind.RECORDS, "failure");
             return false;
         }
@@ -243,25 +216,63 @@ public class IngestRetrySweep {
     }
 
     /**
+     * Lists the subject's blob by its key. When the listing fails, or the store no longer lists the blob, records the
+     * failed attempt on the subject and returns {@code null}. Without a fresh listing, the failure keeps the version that
+     * failed before: recording no version would let any earlier ingest of the blob count as resolving it, and would move
+     * the subject to today's day.
+     */
+    private BlobListing listOrRecordFailure(IngestFailureKind kind, OpenIngestFailure failure) {
+        String key = failure.subject();
+        BlobListing failedVersion = new BlobListing(key, failure.blobLastModified());
+        BlobListing listing;
+        try {
+            listing = blobClient.listWithMetadata(key).stream().filter(candidate -> candidate.name().equals(key)).findFirst().orElse(null);
+        } catch (RuntimeException ex) {
+            failures.record(kind, failedVersion, IngestPath.RETRY, ex);
+            attempt(kind, "failure");
+            return null;
+        }
+        if (listing == null) {
+            failures.record(kind, failedVersion, IngestPath.RETRY, IngestFailureReason.BLOB_MISSING, "The store no longer lists the blob");
+            attempt(kind, "failure");
+        }
+        return listing;
+    }
+
+    /** Ingests {@code listing}; when that fails, records the failed attempt on the subject and returns {@code null}. */
+    private Ingested ingestOrRecordFailure(IngestFailureKind kind, BlobListing listing) {
+        try {
+            return ingest(listing);
+        } catch (Exception ex) {
+            failures.record(kind, listing, IngestPath.RETRY, ex);
+            attempt(kind, "failure");
+            return null;
+        }
+    }
+
+    /**
      * Ingests one blob in a sink of its own and flushes it. The hand-over records what the blob skipped, or its refusal,
      * in the failure ledger, then the blob in the ingest ledger.
      */
     private Ingested ingest(BlobListing listing) throws Exception {
         List<BlobListing> written = new ArrayList<>(1);
-        boolean[] refused = {false};
+        List<RefusedBlob> refused = new ArrayList<>(1);
         RunSink sink = blobIngestor.newHandOverSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(),
                 handOver -> {
                     failures.recordHandOver(handOver, IngestPath.RETRY);
                     written.addAll(handOver.written());
-                    refused[0] |= !handOver.refused().isEmpty();
+                    refused.addAll(handOver.refused());
                 });
         BlobIngestor.IngestResult result = blobIngestor.ingest(listing, sink);
         sink.flush();
-        return new Ingested(written, refused[0], !result.skipped().isEmpty());
+        return new Ingested(written, refused.isEmpty() ? null : refused.getFirst(), !result.skipped().isEmpty());
     }
 
-    /** What one retried blob's ingest wrote, and whether it was refused or skipped anything. */
-    private record Ingested(List<BlobListing> written, boolean refused, boolean skippedAny) {
+    /**
+     * What one retried blob's ingest wrote, how ClickHouse refused it ({@code null} when it did not), and whether its
+     * read skipped anything.
+     */
+    private record Ingested(List<BlobListing> written, RefusedBlob refused, boolean skippedAny) {
     }
 
     /**
@@ -274,22 +285,6 @@ public class IngestRetrySweep {
         return recorded != null
                 && IngestLedger.isRecorded(Map.of(listing.name(), recorded.lastModified()), listing)
                 && recorded.ingestedAt().isAfter(failure.lastFailedAt());
-    }
-
-    private boolean failedBlob(BlobListing listing, Exception ex) {
-        failures.recordBlobFailure(listing, IngestPath.RETRY, ex);
-        attempt("failure");
-        return false;
-    }
-
-    private boolean failedRecords(BlobListing listing, Exception ex) {
-        failures.record(IngestFailureKind.RECORDS, listing, IngestPath.RETRY, ex);
-        attempt(IngestFailureKind.RECORDS, "failure");
-        return false;
-    }
-
-    private void attempt(String outcome) {
-        attempt(IngestFailureKind.BLOB, outcome);
     }
 
     private void attempt(IngestFailureKind kind, String outcome) {

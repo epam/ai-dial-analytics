@@ -272,7 +272,10 @@ A `records` attempt is pending only after an operator requeued it, because its f
 SHALL list the blob as a blob attempt does, with the same `blob_missing` outcome. It SHALL NOT consult the ingest
 ledger, which always records the blob. It SHALL ingest the blob through the same pipeline and record it in the
 ingest ledger. Then:
-- with no skipped line and no dropped record, it writes `resolved`;
+- when ClickHouse refuses the blob's rows, it records a `rejected_by_server` failure with the path `retry` on the
+  `records` subject as well as on the blob, which parks both; without it the `records` subject would stay pending
+  with no attempts and be re-read by every sweep;
+- otherwise, with no skipped line and no dropped record, it writes `resolved`;
 - otherwise it records a new `skipped_records` failure with the path `retry`, which parks the subject again with
   the current counts.
 
@@ -322,6 +325,12 @@ Parked subjects SHALL NOT be attempted until an operator requeues them.
 - **WHEN** an operator requeues a `records` subject whose blob still holds the same malformed line
 - **THEN** the next sweep re-ingests the blob and records a new `skipped_records` failure, and the subject is
   `parked`
+
+#### Scenario: Requeued records of a refused blob park again
+
+- **WHEN** an operator requeues a `records` subject and ClickHouse now refuses its blob's rows with a data-class error
+- **THEN** the next sweep records a `rejected_by_server` failure on both the blob and its `records` subject, both are
+  `parked`, and later sweeps do not attempt them
 
 #### Scenario: A write failure during a sweep is the blob's attempt
 

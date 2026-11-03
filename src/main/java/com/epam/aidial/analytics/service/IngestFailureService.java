@@ -93,15 +93,6 @@ public class IngestFailureService {
     }
 
     /**
-     * Records a failed attempt on a blob under a known reason.
-     *
-     * @throws RuntimeException if the event cannot be written
-     */
-    public void recordBlob(BlobListing listing, IngestPath path, IngestFailureReason reason, String message) {
-        record(IngestFailureKind.BLOB, listing, path, reason, message);
-    }
-
-    /**
      * Records a failed attempt on a blob-keyed subject — a {@code blob}, or the {@code records} of a blob — under a known
      * reason.
      *

@@ -30,7 +30,7 @@ public interface IngestFailureLedger {
     /**
      * The latest event of one subject.
      *
-     * @param kind    blob or day
+     * @param kind    blob, day or records
      * @param subject the blob key or ISO date
      * @return the latest event's type, or empty when the subject has none
      */

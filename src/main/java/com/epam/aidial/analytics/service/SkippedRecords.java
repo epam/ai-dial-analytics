@@ -50,21 +50,19 @@ public final class SkippedRecords {
      * record content.
      */
     public String describe() {
-        List<String> heads = new ArrayList<>(tallies.size());
-        tallies.forEach((cause, tally) -> heads.add(cause.wire() + ": " + tally.count));
+        Map<Cause, String> heads = new EnumMap<>(Cause.class);
+        tallies.forEach((cause, tally) -> heads.put(cause, cause.wire() + ": " + tally.count));
+        // Room the heads still to come need, with their "; " separators, so line numbers never crowd out a later count.
+        int reserved = heads.values().stream().mapToInt(head -> head.length() + 2).sum();
         StringBuilder out = new StringBuilder();
-        int index = 0;
-        for (Tally tally : tallies.values()) {
-            if (index > 0) {
+        for (Map.Entry<Cause, Tally> entry : tallies.entrySet()) {
+            String head = heads.get(entry.getKey());
+            reserved -= head.length() + 2;
+            if (!out.isEmpty()) {
                 out.append("; ");
             }
-            out.append(heads.get(index));
-            index++;
-            // Room the heads still to come need, so line numbers never crowd out a later cause's count.
-            int reserved = 0;
-            for (int later = index; later < heads.size(); later++) {
-                reserved += heads.get(later).length() + 2;
-            }
+            out.append(head);
+            Tally tally = entry.getValue();
             String label = tally.count == 1 ? " (line " : " (lines ";
             StringBuilder lines = new StringBuilder();
             for (Long line : tally.lines) {
