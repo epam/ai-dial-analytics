@@ -20,13 +20,10 @@ import java.net.http.HttpResponse;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The actuator on its own management port, called over real sockets without a credential in {@code oidc}
- * mode: the probe groups, build info and the Prometheus scrape answer there, liveness reports the
+ * The actuator in its default layout, on the API port, called over a real socket without a credential in
+ * {@code oidc} mode: the probe groups, build info and the Prometheus scrape answer there, liveness reports the
  * application state alone (a one-member group renders as a bare {@code status}), and readiness adds the
- * PostgreSQL catalog. The API port serves no actuator path, and the management port serves no API path.
- *
- * <p>The MockMvc suites put the actuator back on the main port, since MockMvc never starts the management
- * server; this class is the one that boots both ports.
+ * PostgreSQL catalog. {@link ManagementPortIntegrationTest} covers the opt-in separate port.
  *
  * <p>Requires Docker.
  */
@@ -53,13 +50,13 @@ class HealthProbesIntegrationTest {
     }
 
     @Test
-    void managementPortIsSeparateFromTheApiPort() {
-        assertThat(managementPort()).isNotEqualTo(serverPort());
+    void actuatorSharesTheApiPortByDefault() {
+        assertThat(environment.getRequiredProperty("local.management.port", Integer.class)).isEqualTo(serverPort());
     }
 
     @Test
     void livenessIsPublicAndCarriesNoDependency() throws Exception {
-        HttpResponse<String> response = get(managementPort(), "/actuator/health/liveness");
+        HttpResponse<String> response = get(serverPort(), "/actuator/health/liveness");
 
         assertThat(response.statusCode()).isEqualTo(200);
         JsonNode body = JSON.readTree(response.body());
@@ -69,7 +66,7 @@ class HealthProbesIntegrationTest {
 
     @Test
     void readinessIsPublicAndIncludesTheCatalogDatabase() throws Exception {
-        HttpResponse<String> response = get(managementPort(), "/actuator/health/readiness");
+        HttpResponse<String> response = get(serverPort(), "/actuator/health/readiness");
 
         assertThat(response.statusCode()).isEqualTo(200);
         JsonNode body = JSON.readTree(response.body());
@@ -79,31 +76,16 @@ class HealthProbesIntegrationTest {
     }
 
     @Test
-    void infoAndPrometheusArePublicOnTheManagementPort() throws Exception {
-        assertThat(get(managementPort(), "/actuator/info").statusCode()).isEqualTo(200);
+    void infoAndPrometheusArePublicOnTheApiPort() throws Exception {
+        assertThat(get(serverPort(), "/actuator/info").statusCode()).isEqualTo(200);
 
-        HttpResponse<String> prometheus = get(managementPort(), "/actuator/prometheus");
+        HttpResponse<String> prometheus = get(serverPort(), "/actuator/prometheus");
         assertThat(prometheus.statusCode()).isEqualTo(200);
         assertThat(prometheus.body()).contains("jvm_");
     }
 
-    @Test
-    void apiPortServesNoActuatorPath() throws Exception {
-        assertThat(get(serverPort(), "/actuator/health/liveness").statusCode()).isEqualTo(404);
-        assertThat(get(serverPort(), "/actuator/prometheus").statusCode()).isEqualTo(404);
-    }
-
-    @Test
-    void managementPortServesNoApiPath() throws Exception {
-        assertThat(get(managementPort(), "/v1/tables").statusCode()).isNotEqualTo(200);
-    }
-
     private int serverPort() {
         return environment.getRequiredProperty("local.server.port", Integer.class);
-    }
-
-    private int managementPort() {
-        return environment.getRequiredProperty("local.management.port", Integer.class);
     }
 
     private static HttpResponse<String> get(int port, String path) throws IOException, InterruptedException {
