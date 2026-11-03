@@ -34,8 +34,8 @@ import java.util.Map;
  *
  * <p>{@code generation}, {@code created_at} and {@code updated_at} are top-level rather than members of
  * {@code state}: they are declaration facts, not runtime state, and {@code generation} in particular is
- * the only change-detection token an out-of-process consumer has — it cannot live behind a projection a
- * consumer might not read.
+ * the declaration's only change-detection token an out-of-process consumer has — it cannot live behind a
+ * projection a consumer might not read.
  *
  * <h2>Two projections of one stored pipeline, one vocabulary</h2>
  *
@@ -95,13 +95,14 @@ public record PipelineDto(
         @Schema(description = "Trigger: how and at which grain this pipeline fires")
         TriggerRequest trigger,
 
-        @Schema(description = "Whether the pipeline is armed. An `aggregate` pipeline is always created "
+        @Schema(description = "Whether the pipeline is armed: its single run control. An `aggregate` pipeline is always created "
                 + "disabled and runs only after being enabled, because its dry-run preview is the gate "
                 + "that state exists for.", example = "false")
         boolean enabled,
 
-        @Schema(description = "Change-detection token, bumped on every accepted mutation. A consumer "
-                + "detects a re-declaration by comparing it with the value it last saw.", example = "3")
+        @Schema(description = "The declaration's revision, bumped once per accepted re-declaration and not by "
+                + "a patch that only changes `enabled`. A consumer detects a re-declaration by comparing it "
+                + "with the value it last saw; `updated_at` moves on every accepted change.", example = "3")
         long generation,
 
         @JsonProperty("created_at") Instant createdAt,

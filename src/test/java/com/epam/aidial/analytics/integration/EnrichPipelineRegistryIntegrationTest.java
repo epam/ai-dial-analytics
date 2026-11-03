@@ -313,10 +313,49 @@ class EnrichPipelineRegistryIntegrationTest extends AbstractClickHouseIntegratio
     }
 
     /**
+     * {@code enabled} is the run control: the runner reads the unfiltered feed so that a stopped pipeline stays
+     * on it, marked, at the generation its queued work was built against — and a deleted one does not.
+     */
+    @Test
+    void unfilteredFeedKeepsStoppedPipelineAtItsGenerationAndDropsDeletedOne() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content(pipelineBody("rr-pipeline-stop", "schedule", "score > 5")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.generation").value(1));
+
+        mockMvc.perform(patch("/v1/pipelines/rr-pipeline-stop").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.enabled").value(false))
+                .andExpect(jsonPath("$.generation").value(1));
+
+        mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-stop')].enabled").value(hasItem(false)))
+                .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-stop')].generation").value(hasItem(1)))
+                .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-stop')].grain_key")
+                        .value(hasItem("widget_id")));
+        mockMvc.perform(get("/v1/pipelines?kind=enrich&enabled=true&view=compiled"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-stop')]").value(empty()));
+
+        mockMvc.perform(patch("/v1/pipelines/rr-pipeline-stop").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generation").value(1));
+
+        mockMvc.perform(delete("/v1/pipelines/rr-pipeline-stop"))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-stop')]").value(empty()));
+    }
+
+    /**
      * The listing reports the registry as it stands: unfiltered it carries a disabled pipeline too, which is
-     * the only way to see that such a pipeline is registered at all. {@code enabled} narrows it to one flag
-     * or the other, and a consumer that executes pipelines (the Enrichment Runner) passes
-     * {@code enabled=true} rather than relying on the default.
+     * the only way to see that such a pipeline is registered at all, and how the Enrichment Runner tells a
+     * stopped pipeline from a deleted one. {@code enabled} narrows it to one flag or the other.
      */
     @Test
     void listingCarriesDisabledPipelinesAndNarrowsOnTheEnabledFlag() throws Exception {
@@ -345,7 +384,7 @@ class EnrichPipelineRegistryIntegrationTest extends AbstractClickHouseIntegratio
                 .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-off')].inputs[*]").value(hasItem(RATES)))
                 .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-off')].grain_key").value(hasItem("widget_id")));
 
-        // enabled=true: what a runner syncs and executes.
+        // enabled=true: the set a runner executes (it syncs the unfiltered listing and runs only these).
         mockMvc.perform(get("/v1/pipelines?kind=enrich&enabled=true&view=compiled"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.pipelines[?(@.name=='rr-pipeline-on')].name").value(hasItem("rr-pipeline-on")))

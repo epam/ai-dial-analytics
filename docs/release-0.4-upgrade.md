@@ -65,6 +65,13 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   JDBC and ADBC clients show it as the database product name (`DatabaseMetaData.getDatabaseProductName()`).
   Queries and results do not change. The name is fixed, not configurable, so a client that keys a connection
   profile, dialect or driver setting on `analytics-data-access-service` has to match the new name instead.
+- **`enabled` is a pipeline's only run control.** A `PATCH` that only changes `enabled` now moves `updated_at` but
+  no longer bumps `generation`, so stopping and restarting a pipeline leaves the runner's queued work and the
+  pipeline's materialized position valid. The Enrichment Runner build that follows this rule reads the unfiltered
+  feed and drops its own operator pause. Before deploying that runner, list `GET /v1/pipelines/paused` on the
+  runner and set `enabled: false` here for each entry whose `origin` is `operator`, so a pipeline stopped on purpose
+  stays stopped. See [pipeline-registry](../openspec/specs/pipeline-registry/spec.md), "A pipeline has exactly one
+  run control".
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
   stood before the evaluator fold (0.2.2) and of the pre-fold rule revisions. To keep them, dump the four
@@ -184,6 +191,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
 | Payload rows carry the caller's identity | `dial_usage_log_payload` stores `project_id` and `user_hash` on every row, under every mode, next to the bodies. The catalog hides both; the table already holds the caller's `jwt_claims` | Account for it where direct ClickHouse access to the payload table is granted |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
+| A `PATCH` that only changes `enabled` no longer bumps `generation` | `generation` stays put across a stop and restart; the generation-change log line is not written for it | Watch `updated_at` for any change to a pipeline; `generation` tracks declaration revisions only (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
 | Pipeline preview `statement` is now the declaration in the ADAS SQL dialect (aggregate and Class-1 `sql`), with a new `query` member holding the same query as structured-query DSL, and a new note code `statement_not_portable` | `statement` names catalog entities and target columns and carries no `SETTINGS`, joins or `__` helper aliases; it is ordered by the keys, not newest first, and does not reproduce `total_rows`. A client that parsed the ClickHouse text, or showed it as the SQL that produced `rows`, misreads it | Run `statement` on `POST /v1/queries/execute-sql`, or `query` on `POST /v1/queries/execute`; handle `statement_not_portable` (both absent); read the physical sampling statement from the SQL log at `DEBUG` |
 | `SAVED_QUERY_WRITE` and `SAVED_QUERY_PUBLISH` now each imply `SAVED_QUERY_READ` | A `roles-mapping` naming either without `SAVED_QUERY_READ` now also lists and reads `common` saved queries and their revisions, the holder's own `personal` ones and `private` dashboards, and `public` dashboards. No bundle widens | None, unless such a mapping was meant to write without reading; that is no longer expressible |

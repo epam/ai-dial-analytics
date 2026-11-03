@@ -50,8 +50,9 @@ import java.util.stream.Collectors;
  * Manages the pipeline registry — one registry for both kinds: CRUD, the listing that also serves as the
  * Enrichment Runner's sync feed, and the enable/disable gate. Every mutation runs the gate its
  * {@code kind} selects when it leaves the pipeline armed — a disabled pipeline is a draft, and its gate runs
- * when it is armed or previewed — and bumps {@code generation}, which is what a change-detecting consumer
- * diffs.
+ * when it is armed or previewed — and moves {@code updated_at}. Only a change to the declaration bumps
+ * {@code generation}, which is what a change-detecting consumer diffs; {@code enabled} is the run control,
+ * not part of the declaration, so a stop or restart alone keeps it.
  *
  * <p>A pipeline's {@code name} is its identity, is immutable, and takes the identity grammar rather than
  * the catalog's identifier grammar — see {@link Identifiers#requirePipelineName}.
@@ -184,9 +185,15 @@ public class PipelineService implements PipelineTargetCascade {
      *       is precisely why it carries a re-derivation marker and a backfill lane of its own. The invariant
      *       above is not being weakened for this kind; it was never this kind's invariant. Requiring a
      *       disable/enable cycle for a routine runtime edit ({@code cadence}, {@code rate_rpm},
-     *       {@code batch_scan_limit}) would instead cost real work — the runner drops a disabled pipeline
-     *       from its cache, and its dead-letter items lose their stored labels while it is disabled.</li>
+     *       {@code batch_scan_limit}) would instead stop the pipeline for every edit — the runner holds a
+     *       disabled pipeline's queued work unexecuted until it is re-enabled.</li>
      * </ul>
+     *
+     * <p><b>{@code enabled} is the run control, not part of the declaration</b>, so a patch that only changes
+     * it moves {@code updated_at} but not {@code generation}: a stop and restart leaves the runner's held work
+     * and the materialized position qualified by the same generation. The one exception is an enable whose
+     * arming gate stores a derived member other than the one stored — the declaration then did change, and
+     * it bumps once with cause {@code patch(re-derive,enable)}.
      *
      * <p><b>A patch that leaves the pipeline disabled is not gated.</b> Completeness and the kind gate are
      * asked of a declaration about to produce rows, so they run when the patch leaves the pipeline armed —
@@ -221,6 +228,9 @@ public class PipelineService implements PipelineTargetCascade {
         // runs before `enabled` is applied, so the entity still holds the old value there — and a patch
         // that re-declares and enables in one call must be gated as armed, not as a draft save.
         final boolean armed = enabled != null ? enabled : pipeline.isEnabled();
+        // Captured before an enable-only patch may derive it: a derived member the arming gate changes is a
+        // declaration change, which bumps the generation even though the caller sent only the flag.
+        final String inputBefore = pipeline.getInputTable();
         // An enable-only patch never runs apply(), so an SQL-mode draft whose statement named no catalog table
         // when it was saved is given the input it reads now, before anything asks for it.
         if (registration == null && armed && !pipeline.isEnabled()) {
@@ -235,10 +245,12 @@ public class PipelineService implements PipelineTargetCascade {
             requireUnconfinedReads(pipeline.getInputTable(), pipeline.getTarget(), "arm this pipeline");
         }
         // What this patch did, for the generation line: a patch bumps once however much it combines, so the
-        // one line names all of it. The re-declare and enable lines below are logged before that bump, so
-        // they report the generation the patch results in rather than the one it started from.
-        final List<String> actions = new ArrayList<>(2);
-        final long resultingGeneration = pipeline.getGeneration() + 1;
+        // one line names all of it. Only a change to the declaration bumps — `enabled` is the run control, not
+        // part of the declaration — so a flag-only patch keeps its generation unless arming re-derived a stored
+        // member. The re-declare, enable and disable lines below are logged before any bump, so they report the
+        // generation the patch results in.
+        final List<String> actions = new ArrayList<>(3);
+        boolean revised = registration != null;
         if (registration != null) {
             requireDeclarationEditable(pipeline);
             final PipelineRegistration declared = withStickyTarget(registration, pipeline);
@@ -269,7 +281,7 @@ public class PipelineService implements PipelineTargetCascade {
             actions.add("re-declare");
             log.info("Pipeline '{}' re-declared: kind={}, input='{}', target='{}', trigger={}/{}; generation={}", name,
                     pipeline.getKind(), pipeline.getInputTable(), pipeline.getTarget(),
-                    pipeline.getTriggerKind(), pipeline.getTriggerCron(), resultingGeneration);
+                    pipeline.getTriggerKind(), pipeline.getTriggerCron(), pipeline.getGeneration() + 1);
         }
         if (enabled != null && enabled != pipeline.isEnabled()) {
             if (enabled) {
@@ -281,9 +293,29 @@ public class PipelineService implements PipelineTargetCascade {
                 // write asks when it arms — a trigger kind, a cron that is present and parses — is asked
                 // here too. Without it an aggregate draft declaring `schedule` with no cron would reach
                 // AggregateScheduler.nextRun(null) below and answer 500 before any guard could refuse it.
+                //
+                // The gate also derives (output bindings, group keys), and a draft save derives the same way,
+                // best-effort, so arming normally stores what was already there. Should it ever store something
+                // else, the declaration did change and the generation must say so: the runner keys its
+                // compiled form and queued work on it. Compared through the codec on both sides, since the
+                // stored text is jsonb's normalized form rather than the mapper's.
+                //
+                // Except for a Class-1 (`sql`) enrich pipeline, by the rule PipelineGenerationService
+                // #onTargetColumnsChanged applies to the same re-derivation: the runner never executes it, ADAS
+                // re-resolves it on every materialize call, and a bump would void its materialized position and
+                // clamp every dependent rollup to zero rows until the next materialize. The re-derived mapping
+                // is still stored.
                 if (!validated) {
                     requireArmableTrigger(pipeline);
-                    validateAndStore(pipeline, specCodec.read(pipeline), true, false);
+                    final PipelineSpec stored = specCodec.read(pipeline);
+                    final String storedJson = specCodec.write(stored);
+                    validateAndStore(pipeline, stored, true, false);
+                    if ((!storedJson.equals(pipeline.getSpec())
+                            || !Objects.equals(inputBefore, pipeline.getInputTable()))
+                            && !isClass1Enrich(pipeline, stored)) {
+                        revised = true;
+                        actions.add("re-derive");
+                    }
                 }
             }
             pipeline.setNextRunAt(armedAt(pipeline, enabled));
@@ -292,29 +324,36 @@ public class PipelineService implements PipelineTargetCascade {
             actions.add(enabled ? "enable" : "disable");
             if (enabled) {
                 log.info("Pipeline '{}' enabled; next ADAS-driven run at {}; generation={}", name,
-                        pipeline.getNextRunAt(), resultingGeneration);
+                        pipeline.getNextRunAt(), pipeline.getGeneration() + (revised ? 1 : 0));
             } else {
-                // A disabled pipeline leaves the runner's enabled=true feed by design, so the runner
-                // correctly stops calling it. Its runner-contact series is therefore dropped rather than
-                // left to climb: derived at observation time from an instant nothing will move again, it
-                // would report "the runner has stopped calling" forever for a pipeline an operator
-                // deliberately switched off — the intended behaviour raising the loudest alarm on the
-                // dashboard. Re-enabling it re-registers the series on the next call, measured from a
-                // contact that actually happened.
+                // The runner follows `enabled` as the pipeline's run control, so it stops calling a disabled
+                // pipeline by design. Its runner-contact series is therefore dropped rather than left to
+                // climb: derived at observation time from an instant nothing will move again, it would report
+                // "the runner has stopped calling" forever for a pipeline an operator deliberately switched
+                // off — the intended behaviour raising the loudest alarm on the dashboard. Re-enabling it
+                // re-registers the series on the next call, measured from a contact that actually happened.
                 runnerContactMetrics.forget(name);
                 transitions.forget(name);
                 log.info("Pipeline '{}' disabled; it will not write on a trigger or on demand, and its "
-                        + "runner-contact series is dropped", name);
+                        + "runner-contact series is dropped; generation={}", name,
+                        pipeline.getGeneration() + (revised ? 1 : 0));
             }
         }
-        // Exactly one bump per accepted mutation: `generation` is an ETag, so a no-op patch must not move it,
-        // and a patch that both re-declares and enables is still one change to the pipeline.
-        if (mutated) {
+        // At most one bump per accepted mutation, and only when the declaration changed: `generation` is the
+        // declaration's revision, so a no-op patch must not move it, a patch that both re-declares and enables
+        // is still one revision, and a flag-only patch is none. A stop and restart bumping it would make the
+        // runner drop its held work as stale and void the materialized position dependent rollups clamp on.
+        // `updated_at` moves on every accepted mutation, so an `updated_since` reader still sees a flag change.
+        if (revised) {
             stamp(pipeline, PipelineTimestamps.now());
+        } else if (mutated) {
+            pipeline.setUpdatedAt(PipelineTimestamps.now());
         }
         final PipelineEntity saved = save(pipeline);
         if (mutated) {
             lookupIndexes.ensureAfterCommit(saved);
+        }
+        if (revised) {
             logGenerationChange(saved, "patch(" + String.join(",", actions) + ")");
         }
         return saved;
@@ -395,8 +434,11 @@ public class PipelineService implements PipelineTargetCascade {
      * Every filter is optional and they apply together; narrowing on one and silently dropping another
      * would return rows the caller did not ask for and look like data rather than a mistake.
      *
-     * <p>The feed asks for {@link PipelineEnabledFilter#ENABLED} and {@code kind=enrich}: a runner must
-     * never be handed a pipeline an operator switched off. An operator listing widens it.
+     * <p>The runner's feed is {@code kind=enrich} with <b>no</b> {@code enabled} filter, on purpose:
+     * {@code enabled} is the pipeline's run control, and the runner has to tell a stopped pipeline (served
+     * with {@code enabled: false}; its held work is kept) from a deleted one (absent). Filtering on
+     * {@link PipelineEnabledFilter#ENABLED} would make the two indistinguishable. The runner executes only
+     * entries carrying {@code enabled: true}, and the write paths refuse a disabled pipeline as the backstop.
      *
      * <p>One ordering for every listing — {@code updated_at ASC, name ASC} — decided in the repository
      * rather than here, so a consumer's ordering guarantee does not depend on which filters it passed.
@@ -742,13 +784,14 @@ public class PipelineService implements PipelineTargetCascade {
      * Class-1 materialize refuse it with 409, as the aggregate on-demand refresh does. A state conflict, not a
      * validation failure — the call may be perfectly good and only the pipeline's state wrong.
      *
-     * <p>Nothing legitimate relied on the old tolerance. The Enrichment Runner reads only the
-     * {@code enabled=true} feed, drops a disabled pipeline from its cache, and stalls its own backfill of one
-     * until it is re-enabled, so the "paused backfill" these paths once tolerated a disabled pipeline for was
-     * never reachable from it. The honest cost is work already in flight when an operator disables a
-     * pipeline: a runner that has not yet synced the disable has its write refused. Disabling means "stop
-     * now", and that is what it now does. The two read paths — scan and group assembly — stay open, because
-     * they write nothing and a disabled pipeline's preview samples through them.
+     * <p>Nothing legitimate relied on the old tolerance. The Enrichment Runner follows {@code enabled} as the
+     * pipeline's run control: it schedules nothing for a disabled pipeline, holds its queued work and pauses its
+     * backfill until it is re-enabled, so the "paused backfill" these paths once tolerated a disabled pipeline
+     * for was never reachable from it. Work already in flight when an operator disables a pipeline — a runner
+     * that has not yet synced the disable — has its write refused here, and the runner holds it rather than
+     * dead-lettering it. That relies on this being the only {@code pipeline_conflict} these two paths answer,
+     * so another refusal on them must use a code of its own. The two read paths — scan and group assembly —
+     * stay open, because they write nothing and a disabled pipeline's preview samples through them.
      */
     public static void requireEnabledToWrite(PipelineEntity pipeline, String operation) {
         if (!pipeline.isEnabled()) {
@@ -817,7 +860,7 @@ public class PipelineService implements PipelineTargetCascade {
                 : null;
     }
 
-    /** Records that the pipeline changed: one {@code generation} bump and a fresh {@code updated_at}. */
+    /** Records that the declaration changed: one {@code generation} bump and a fresh {@code updated_at}. */
     private static void stamp(PipelineEntity pipeline, Instant at) {
         pipeline.setGeneration(pipeline.getGeneration() + 1);
         pipeline.setUpdatedAt(at);
@@ -1026,6 +1069,19 @@ public class PipelineService implements PipelineTargetCascade {
                     + " /v1/pipelines/" + pipeline.getName() + "?view=source returns them); to start the"
                     + " declaration over, delete and re-register the pipeline");
         }
+    }
+
+    /**
+     * Whether this is an {@code enrich} pipeline whose transform is not {@code llm} — a Class-1 pipeline ADAS
+     * materializes itself, re-resolving its declaration on every call, so no consumer keys queued work on its
+     * {@code generation}.
+     */
+    private static boolean isClass1Enrich(PipelineEntity pipeline, PipelineSpec spec) {
+        return pipeline.getKind() == PipelineKind.ENRICH
+                && spec instanceof EnrichSpec enrich
+                && enrich.getTransform() != null
+                && enrich.getTransform().getType() != null
+                && enrich.getTransform().getType() != TransformType.LLM;
     }
 
     /**

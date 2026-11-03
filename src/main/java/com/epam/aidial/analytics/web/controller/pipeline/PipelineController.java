@@ -59,8 +59,9 @@ import java.util.List;
  * registered enabled; {@code enabled: false}, preview, then enable is its checkpoint.
  *
  * <p>The {@code GET} collection is both the operator's listing of the registry and the runner's sync
- * feed: with no filter it returns the registry as it actually stands, disabled pipelines included, and a
- * consumer that runs pipelines asks for {@code ?kind=enrich&enabled=true&view=compiled}. The projection
+ * feed: with no filter it returns the registry as it actually stands, disabled pipelines included, and the
+ * runner reads it that way — {@code ?kind=enrich&view=compiled} — running only entries with {@code enabled:
+ * true}, so it can tell a stopped pipeline, whose work it keeps, from a deleted one. The projection
  * is what separates the two readings — an operator gets the authored declaration by default, and only
  * the explicit {@code view=compiled} pays for resolution.
  *
@@ -128,8 +129,9 @@ public class PipelineController {
                     + "Completeness is computed, not stored, so there is no filter for it; `enabled=false` "
                     + "is the closest proxy. A `view=compiled` listing omits an entry whose declaration "
                     + "cannot be compiled rather than serving it with empty members. "
-                    + "`kind=enrich&enabled=true&view=compiled` is what the Enrichment Runner's sync "
-                    + "passes, and an `enrich` entry then carries five derived members beside the authored "
+                    + "`kind=enrich&view=compiled` is what the Enrichment Runner's sync passes — it runs "
+                    + "only entries with `enabled: true` and holds a stopped one's work — and an `enrich` "
+                    + "entry then carries five derived members beside the authored "
                     + "declaration: the resolved `response_schema` the model is held to, the derived grain "
                     + "key, version column and output mapping, and the resolved read source; without "
                     + "`view=compiled` the same listing is the authored declaration and costs no "

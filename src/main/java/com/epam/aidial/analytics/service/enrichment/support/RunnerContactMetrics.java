@@ -36,12 +36,14 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>Registered on first contact.</b> A pipeline the runner has never called has no series, rather
  *       than one climbing since startup.
  *   <li><b>Dropped when the pipeline is deleted <em>or disabled</em></b>, by {@link #forget(String)}.
- *       Disabling is the case with no aggregate analogue and it matters more: the runner's feed is
- *       {@code enabled=true}, so a disabled pipeline leaves it and the runner correctly stops calling. A
+ *       Disabling is the case with no aggregate analogue and it matters more: the runner follows
+ *       {@code enabled} as the pipeline's run control, so it correctly stops calling a disabled pipeline. A
  *       climbing "the runner has stopped calling" series for a pipeline an operator deliberately switched
  *       off is a false alarm raised by the intended behaviour — and it would be the loudest series on the
  *       dashboard. Re-enabling or re-creating one re-registers on the next call, measured from a contact
- *       that actually happened.
+ *       that actually happened. A pause the runner's dead-letter circuit breaker imposes is not reported
+ *       here, so the series keeps climbing through one: accurate, since the runner is not calling, and the
+ *       runner's own runtime status names the cause.
  *   <li><b>The refusal counters go the other way and are registered at startup</b>, because they are
  *       untagged by pipeline and a counter that appears only once the condition has happened cannot be
  *       alerted on beforehand.
