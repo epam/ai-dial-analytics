@@ -484,28 +484,6 @@
             "heavy": false
           },
           {
-            "source_name": "dial_cli_version",
-            "name": "dial_cli_version",
-            "type": "string",
-            "nullable": true,
-            "description": "DIAL CLI version: the first space-separated token of the X-DIAL-CLI-Version header, which the DIAL CLI sends as '<version> <harness-name>' on every request it forwards. Empty when the header is absent. Split rather than stored whole, so a change to the header format shows up here; the raw header stays in the captured request tags for the payload retention window.",
-            "display_name": "DIAL CLI version",
-            "tag": "client",
-            "sensitive": false,
-            "heavy": false
-          },
-          {
-            "source_name": "dial_cli_harness_name",
-            "name": "dial_cli_harness_name",
-            "type": "string",
-            "nullable": true,
-            "description": "Agent harness the DIAL CLI forwarded the request for, for example claude-code or codex: the second space-separated token of the X-DIAL-CLI-Version header. Empty when the header is absent or carries only a version. client_type reads dialcli for all of these requests, so this is the column that splits DIAL CLI traffic by harness.",
-            "display_name": "DIAL CLI harness",
-            "tag": "client",
-            "sensitive": false,
-            "heavy": false
-          },
-          {
             "source_name": "jwt_user_id",
             "name": "jwt_user_id",
             "type": "string",
@@ -546,6 +524,28 @@
             "description": "System column stamped by the pipeline that wrote this row, not produced by the model: the pipeline generation that produced it. Read the pipeline's audit trail at that generation to see the declaration — including the prompt — the row was computed under.",
             "display_name": "Pipeline generation",
             "tag": "system",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "dial_cli_version",
+            "name": "dial_cli_version",
+            "type": "string",
+            "nullable": true,
+            "description": "DIAL CLI version: the first space-separated token of the X-DIAL-CLI-Version header, which the DIAL CLI sends as '<version> <harness-name>' on every request it forwards. Empty when the header is absent; NULL on rows the pipeline enriched before it wrote this column. Only the first two tokens are kept, here and in dial_cli_harness_name, so a header in another format is cut without an error; the raw header stays in the captured request tags for the payload retention window.",
+            "display_name": "DIAL CLI version",
+            "tag": "client",
+            "sensitive": false,
+            "heavy": false
+          },
+          {
+            "source_name": "dial_cli_harness_name",
+            "name": "dial_cli_harness_name",
+            "type": "string",
+            "nullable": true,
+            "description": "Agent harness the DIAL CLI forwarded the request for, for example claude-code or codex: the second space-separated token of the X-DIAL-CLI-Version header. Empty when the header is absent or carries only a version; NULL on rows the pipeline enriched before it wrote this column. client_type reads dialcli for all of these requests, so this is the column that splits DIAL CLI traffic by harness.",
+            "display_name": "DIAL CLI harness",
+            "tag": "client",
             "sensitive": false,
             "heavy": false
           }
