@@ -1826,7 +1826,6 @@ this requirement is what makes that unreachable regardless of which caller versi
   value is `null`
 
 ### Requirement: A runner that has stopped calling is visible as a metric
-
 The service SHALL publish, per `enrich` pipeline, the time since the runner last successfully called one
 of that pipeline's data-plane endpoints, and SHALL count contract refusals tagged by reason
 (`required` or `mismatch`). The refusal counters SHALL be registered at startup, so the series exists
@@ -1843,9 +1842,12 @@ pipeline is **deleted or disabled** — by every path that deletes one, includin
 its target table being dropped. A gauge derived at scrape time from an instant nothing will move again
 raises the stall signal forever, so a series must not outlive the thing that moves it: a pipeline the
 runner has never called has no series rather than one climbing since startup, and a pipeline an operator
-switched off leaves the runner's `enabled=true` feed by design, which would otherwise make the intended
-behaviour the loudest alarm on the dashboard. Re-enabling or re-creating a pipeline re-registers the
-series on the next call, measured from a contact that actually happened.
+switched off is one the runner stops calling by design — it follows `enabled` as the pipeline's single run
+control — which would otherwise make the intended behaviour the loudest alarm on the dashboard.
+Re-enabling or re-creating a pipeline re-registers the series on the next call, measured from a contact
+that actually happened. A pause the runner imposes on its own — its dead-letter circuit breaker — is not
+reported to ADAS, so the series keeps climbing through one: that is accurate, since the runner is not
+calling, and the runner's own runtime status names the cause.
 
 This exists because ADAS's own output depends on the runner being alive: a Class-1 enrichment's
 materialized position is what every dependent rollup's freshness clamp reads, so a runner that is down,
@@ -2356,7 +2358,6 @@ separately, by "A disabled pipeline's write paths refuse".
 - **THEN** the endpoint behaves exactly as it does today
 
 ### Requirement: A disabled pipeline's write paths refuse
-
 `POST /v1/pipelines/{name}/rows` and `POST /v1/pipelines/{name}/materialize` SHALL refuse a pipeline
 that is disabled with HTTP 409 `pipeline_conflict`, before reading or writing anything and whatever its
 declaration holds, after the `Adas-Contract-Version` check, `unknown_pipeline` and the caller's
@@ -2365,8 +2366,10 @@ per-target authorization.
 A disabled pipeline writes to its target by no route (see
 [pipeline-registry](../pipeline-registry/spec.md), "Register and enable lifecycle"), and these two were
 the routes that did not enforce it. Their tolerance existed so a paused pipeline could still be
-backfilled, which no consumer relied on: the Enrichment Runner reads only the `enabled=true` feed, drops
-a disabled pipeline from its cache, and stalls its own backfill of one until it is re-enabled. Once a
+backfilled, which no consumer relied on: the Enrichment Runner follows `enabled` as the
+pipeline's single run control — it schedules nothing for a disabled pipeline, holds its queued work
+unexecuted, and pauses its backfill until the pipeline is re-enabled (see
+[pipeline-registry](../pipeline-registry/spec.md), "A pipeline has exactly one run control"). Once a
 declaration may be stored before it passes the gate, the tolerance would also have written a target
 from a declaration that was never armed and so never validated.
 
@@ -2375,8 +2378,13 @@ answer a disabled `aggregate` pipeline's on-demand refresh already gives. The tw
 `…/scan` and `…/group-rows`, SHALL stay open to a disabled pipeline: they write nothing, and the dry-run
 preview of a disabled pipeline samples through them.
 
-The cost is accepted and stated: work the runner already has in flight when an operator disables a
-pipeline, before its next sync, has its write refused, and those labels go to its dead-letter handling.
+**On these two endpoints `pipeline_conflict` SHALL mean only that the pipeline is disabled**, and a
+consumer MAY rely on that. A work item the runner has already started when an operator disables a
+pipeline — its model call made before the runner's next sync observes the flag — has its write refused
+here, and the runner holds that item, as it holds every queued item of a stopped pipeline, instead of
+dead-lettering it or counting it against its circuit breaker; it writes once the pipeline is
+re-enabled. That is only sound while the code is unambiguous, so another refusal on these endpoints
+SHALL use a code of its own rather than `pipeline_conflict`.
 
 #### Scenario: A write-back to a disabled pipeline is refused
 
@@ -2389,6 +2397,12 @@ pipeline, before its next sync, has its write refused, and those labels go to it
   declaration is complete or a draft
 - **THEN** the request is rejected with HTTP 409 `pipeline_conflict`, no statement is executed, and no
   position or drained horizon is recorded
+
+#### Scenario: The write paths' 409 names nothing but the disabled state
+
+- **WHEN** `POST /v1/pipelines/{name}/rows` or `POST /v1/pipelines/{name}/materialize` answers HTTP 409
+  with error `pipeline_conflict`
+- **THEN** the pipeline is disabled; every other refusal on these endpoints carries a different code
 
 #### Scenario: The contract and existence checks still come first
 

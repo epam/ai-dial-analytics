@@ -20,8 +20,9 @@ enabled. It fires at row grain (`schedule`, on its `trigger.cron`) or at **group
 group key, declared with `trigger.group_by` and a `trigger.ready_when` readiness predicate).
 
 The feed the Enrichment Runner syncs is
-`GET /v1/pipelines?kind=enrich&enabled=true&view=compiled`: the same listing every operator reads,
-narrowed to the set a runner is to execute and served in the compiled projection, with each entry
+`GET /v1/pipelines?kind=enrich&view=compiled`: the same listing every operator reads, unfiltered so that a
+stopped pipeline stays on it marked `enabled: false`, of which the runner executes only the entries carrying
+`enabled: true`, served in the compiled projection, with each entry
 carrying its authored `transform` block, the resolved `response_schema` the model is held to, its
 derived grain key and version column, and a `generation` value for change detection.
 ## Requirements
@@ -767,8 +768,9 @@ The system SHALL manage pipelines via `POST /v1/pipelines`, `PATCH /v1/pipelines
 `sample_fraction`). The pipeline's **grain SHALL be derived** from the target enrichment's
 `grain` and SHALL NOT be re-declared on the pipeline. The pipeline's **read source MAY be declared** as
 its `inputs` entry and SHALL default to the target enrichment's `source_table` when omitted (see "A
-pipeline's read source is declarable"). Each mutating pipeline operation SHALL bump a `generation`
-counter and `updated_at`. An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
+pipeline's read source is declarable"). Each accepted re-declaration SHALL bump a `generation` counter;
+every accepted mutation, including a change of `enabled` alone, SHALL move `updated_at` (see
+[pipeline-registry](../pipeline-registry/spec.md), "A pipeline has exactly one run control"). An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
 
 **The transform SHALL be one nested block, `transform`**, stored in the pipeline's `spec`, carrying
 `type` (`llm` or `sql`), `model`, `preset`, `params`, `request_template`, `inputs` and `outputs`. It SHALL be
@@ -1391,7 +1393,6 @@ pipelines that are valid without one.
   entity scoping follows the read source, not the target enrichment's `source_table`
 
 ### Requirement: The enrich feed carries the transform, a resolved schema and a change token
-
 The system SHALL serve the enrich feed as `GET
 /v1/pipelines?kind=enrich[&enabled=…][&updated_since=…]&view=compiled`, returning each
 selected pipeline with its **authored `transform` block**, the **resolved `response_schema`** the model
@@ -1521,10 +1522,26 @@ sequence. `updated_at` alone does not order the set: it is truncated
 to microseconds (below), so pipelines written in one transaction can share a value and shuffle
 between calls.
 
-This one endpoint is therefore both the operator's listing of the registry (no filter) and the
-runner's sync feed (`enabled=true`). A consumer that **executes** pipelines SHALL pass
-`enabled=true` explicitly rather than relying on the default, since the unfiltered listing carries
-disabled pipelines.
+This one endpoint is therefore both the operator's listing of the registry and the runner's sync feed,
+and the runner reads it **unfiltered**: `GET /v1/pipelines?kind=enrich&view=compiled`. A pipeline's
+`enabled` flag is its single run control (see [pipeline-registry](../pipeline-registry/spec.md), "A
+pipeline has exactly one run control"), and a consumer that follows it has to tell a **stopped**
+pipeline, whose cursor and queued work it keeps, from a **deleted** one, whose queued work it discards.
+Under `enabled=true` both are simply absent; the unfiltered listing keeps the stopped one, marked.
+
+A consumer that **executes** pipelines SHALL execute only entries carrying `enabled: true`, and SHALL
+treat an entry carrying `enabled: false` as stopped — scheduling nothing for it and writing nothing for
+it — since the unfiltered listing carries disabled pipelines, including ones that were never armed and
+so never passed the declaration gate. The write paths' refusal of a disabled pipeline (see
+[enrichment-runtime](../enrichment-runtime/spec.md), "A disabled pipeline's write paths refuse") stays
+the backstop for a consumer that does not. A pipeline **absent** from the unfiltered listing is either
+deleted or not servable — an incomplete declaration, or one the omission rules above withhold, which
+apply to a stopped pipeline as to an enabled one — and a consumer SHALL NOT run it. **Absence alone is
+not deletion**: a stopped draft that drifts (a patch, or a target column change its mapping does not
+re-derive against) drops out of the listing exactly as a deleted pipeline does, and so can an enabled
+pipeline that becomes unservable. A consumer SHALL therefore discard an absent pipeline's held work only
+once `GET /v1/pipelines/{name}` answers HTTP 404 `unknown_pipeline`, and SHALL otherwise keep that work
+held until the pipeline returns to the listing.
 
 The `inputs` entry the feed reports SHALL be the table the runner is to scan — the pipeline's
 declared read source when it has one, otherwise the target enrichment's `source_table` — so a runner
@@ -1566,10 +1583,25 @@ microseconds, which is what the column holds.
 - **THEN** every registered pipeline is returned regardless of its `enabled` flag, each with its
   `transform`, its read source and derived grain, its `enabled` value, and a `generation`
 
+#### Scenario: The runner's unfiltered feed tells a stopped pipeline from a deleted one
+
+- **GIVEN** two armed `enrich` pipelines, one then disabled and the other deleted
+- **WHEN** `GET /v1/pipelines?kind=enrich&view=compiled` is called
+- **THEN** the disabled pipeline is returned with `enabled: false` and its full resolved entry, and the
+  deleted one is absent
+
+#### Scenario: A pipeline absent from the feed is deleted only on a 404
+
+- **GIVEN** a stopped `enrich` pipeline with held work whose declaration a patch has left incomplete
+- **WHEN** `GET /v1/pipelines?kind=enrich&view=compiled` is called
+- **THEN** the pipeline is absent, and `GET /v1/pipelines/{name}` still answers 200
+- **THEN** a consumer keeps its held work rather than discarding it as it does for a pipeline that
+  answers 404 `unknown_pipeline`
+
 #### Scenario: The listing narrows to enabled pipelines
 
 - **WHEN** `GET /v1/pipelines?kind=enrich&enabled=true` is called
-- **THEN** only pipelines with `enabled: true` are returned — the set a runner executes
+- **THEN** only pipelines with `enabled: true` are returned — the set a runner runs
 
 #### Scenario: The listing narrows to disabled pipelines
 

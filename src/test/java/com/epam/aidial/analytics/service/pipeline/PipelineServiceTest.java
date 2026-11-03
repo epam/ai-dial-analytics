@@ -8,6 +8,7 @@ import com.epam.aidial.analytics.exception.RowPolicyConfinedException;
 import com.epam.aidial.analytics.observability.LogCapture;
 import com.epam.aidial.analytics.observability.TransitionLog;
 import com.epam.aidial.analytics.service.enrichment.EnrichResolver;
+import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
 import com.epam.aidial.analytics.service.enrichment.model.MemberSelect;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
@@ -47,6 +48,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -787,14 +789,122 @@ class PipelineServiceTest {
     }
 
     @Test
-    void disablingPatchNamesItsCauseAndNoOpPatchLogsNoBump() {
+    void flagOnlyPatchesAndNoOpPatchLogNoBump() {
         given(pipelines.findById(NAME)).willReturn(Optional.of(ran()));
-
-        assertThat(generationLines(() -> service.patch(NAME, null, false)))
-                .containsExactly("pipeline " + NAME + " generation 4 -> 5 (cause=patch(disable), actor=-)");
+        assertThat(generationLines(() -> service.patch(NAME, null, false))).isEmpty();
 
         given(pipelines.findById(NAME)).willReturn(Optional.of(ran()));
         assertThat(generationLines(() -> service.patch(NAME, null, true))).isEmpty();
+    }
+
+    @Test
+    void stoppingAndRestartingKeepsTheGenerationAndMovesUpdatedAt() {
+        final PipelineEntity stored = ran();
+        final Instant before = Instant.parse("2020-01-01T00:00:00Z");
+        stored.setUpdatedAt(before);
+        given(pipelines.findById(NAME)).willReturn(Optional.of(stored));
+
+        // `enabled` is the run control, not the declaration: a stop and restart must leave the runner's held
+        // work and the materialized position qualified by the same generation.
+        final PipelineEntity stopped = service.patch(NAME, null, false);
+        assertThat(stopped.getGeneration()).isEqualTo(4);
+        assertThat(stopped.getUpdatedAt()).isAfter(before);
+
+        // Reset between the two patches, so the restart is held to moving it on its own.
+        stored.setUpdatedAt(before);
+        final PipelineEntity restarted = service.patch(NAME, null, true);
+        assertThat(restarted.getGeneration()).isEqualTo(4);
+        assertThat(restarted.getUpdatedAt()).isAfter(before);
+    }
+
+    @Test
+    void stoppingAndRestartingAnAggregateKeepsItsCursor() {
+        given(pipelines.findById(NAME)).willReturn(Optional.of(ran()));
+
+        service.patch(NAME, null, false);
+        final PipelineEntity restarted = service.patch(NAME, null, true);
+
+        // A stop is not a re-declaration: the next run continues from the kept cursor.
+        assertThat(restarted.getCursorVersion()).isEqualTo(1_700_000_000_000L);
+        assertThat(restarted.getCursorIdentity()).isEqualTo("evt-1");
+        assertThat(restarted.isHasMore()).isTrue();
+        assertThat(restarted.getNextRunAt()).isNotNull();
+    }
+
+    @Test
+    void stoppingAndRestartingAnEnrichPipelineKeepsItsMaterializedPositionCurrent() {
+        final PipelineEntity stored = enrichRan(null);
+        stored.setMaterializedGeneration(7L);
+        given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+
+        service.patch(ENRICH_NAME, null, false);
+        final PipelineEntity restarted = service.patch(ENRICH_NAME, null, true);
+
+        // The position is qualified by the generation; a stop moving it would void the position and hold every
+        // dependent rollup back until the runner writes again.
+        assertThat(restarted.getGeneration()).isEqualTo(7);
+        assertThat(restarted.getMaterializedGeneration()).isEqualTo(restarted.getGeneration());
+    }
+
+    /**
+     * The arming gate derives as well as refuses. Should it store a mapping other than the one the pipeline
+     * stopped with, the declaration changed under the enable, and the runner learns that only from a bump.
+     */
+    @Test
+    void enableWhoseGateReDerivesTheMappingBumpsOnce() {
+        final PipelineEntity stored = enrichRan(null);
+        stored.setEnabled(false);
+        final EnrichSpec llm = enrichSpec();
+        llm.mutableTransform().setType(TransformType.LLM);
+        stored.setSpec(specCodec.write(llm));
+        given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+        reDeriveMappingOnValidate();
+
+        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true)))
+                .containsExactly("pipeline " + ENRICH_NAME + " generation 7 -> 8 (cause=patch(re-derive,enable), actor=-)");
+        assertThat(stored.getGeneration()).isEqualTo(8);
+    }
+
+    /**
+     * A Class-1 pipeline is materialized by ADAS, which re-resolves it on every call, so the re-derived mapping
+     * is stored without a bump — one would void its materialized position and clamp every dependent rollup.
+     */
+    @Test
+    void enableThatReDerivesSqlTransformMappingKeepsTheGeneration() {
+        final PipelineEntity stored = enrichRan(null);
+        stored.setEnabled(false);
+        stored.setMaterializedGeneration(7L);
+        stored.setSpec(specCodec.write(enrichSpec()));
+        given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+        reDeriveMappingOnValidate();
+
+        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true))).isEmpty();
+        assertThat(stored.getGeneration()).isEqualTo(7);
+        assertThat(stored.getMaterializedGeneration()).isEqualTo(7L);
+        assertThat(specCodec.readEnrich(stored).getOutputBindings()).extracting(OutputBinding::getColumn)
+                .containsExactly("client");
+    }
+
+    private void reDeriveMappingOnValidate() {
+        final OutputBinding binding = new OutputBinding();
+        binding.setVar("client");
+        binding.setColumn("client");
+        willAnswer(inv -> {
+            ((EnrichDeclaration) inv.getArgument(0)).spec().setOutputBindings(List.of(binding));
+            return null;
+        }).given(enrichValidator).validate(any());
+    }
+
+    @Test
+    void enableWhoseGateStoresTheSameDeclarationKeepsTheGeneration() {
+        final PipelineEntity stored = enrichRan(null);
+        stored.setEnabled(false);
+        stored.setSpec(specCodec.write(enrichSpec()));
+        given(pipelines.findById(ENRICH_NAME)).willReturn(Optional.of(stored));
+
+        assertThat(generationLines(() -> service.patch(ENRICH_NAME, null, true))).isEmpty();
+        assertThat(stored.getGeneration()).isEqualTo(7);
+        verify(enrichValidator).validate(any());
     }
 
     /** The line reports a bump that was accepted: a write refused at flush rolls it back, so it logs none. */
@@ -931,8 +1041,8 @@ class PipelineServiceTest {
     }
 
     /**
-     * Disabling drops the runner-contact series and nothing else. The runner's feed is
-     * {@code enabled=true}, so a disabled pipeline leaves it and the runner correctly stops calling — a
+     * Disabling drops the runner-contact series and nothing else. The runner follows {@code enabled} as the
+     * pipeline's run control, so it correctly stops calling a disabled pipeline — a
      * climbing "the runner has stopped calling" series would then be the intended behaviour raising the
      * loudest alarm on the dashboard. The aggregate watermark stays: a switched-off rollup still has a
      * last-successful-run position worth reading.

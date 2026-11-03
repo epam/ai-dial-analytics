@@ -58,8 +58,9 @@ import java.time.Instant;
  * {@code PipelineRepository#findDue} and the kind assertion in the refresh service. That failure would
  * write wrong rows rather than fail, which is why one guard is not enough.
  *
- * <p>{@link #generation} is bumped on every mutation and is the Enrichment Runner's <b>only</b>
- * change-detection token.
+ * <p>{@link #generation} is the declaration's revision and the Enrichment Runner's <b>only</b> token for
+ * detecting a declaration change. A patch that only changes {@code enabled} does not bump it: that flag is
+ * the run control, not part of the declaration, and the runner reads it directly.
  */
 @Entity
 @Audited
