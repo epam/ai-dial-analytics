@@ -15,13 +15,14 @@ Arrows point from caller to callee. Dashed arrows are identity checks and LLM ca
 |---|---|
 | **DIAL Admin Frontend** | Web UI for analytics users: dashboards, saved queries, ad-hoc queries, tables, pipelines and the AI query helper. |
 | **ADAS** | Runtime gateway between analytics consumers and the data stores. It serves the structured query DSL, SQL, CSV export and DSL ↔ SQL translation under `/v1/queries`, plus saved queries, dashboards, the table catalog, pipelines and data sync. Arrow Flight SQL is an optional second transport for BI clients. |
-| **DIAL Analytics Enrichment Runner** | A separate service that drives enrichment pipelines. It pages source rows from ADAS, computes enrichment values (LLM or SQL transforms), and writes them back through the pipeline data plane. |
+| **DIAL Analytics Enrichment Runner** | A separate service that drives enrichment pipelines. It pages source rows from ADAS, computes enrichment values (LLM or SQL transforms), and writes them back through the pipeline data plane. It keeps its own state in a separate PostgreSQL database. |
 | **adas-mcp** | MCP server that exposes ADAS schema discovery, translation and query execution as AI tools. It is registered in DIAL Core as a toolset. |
 | **AI Query Helper** | DIAL QuickApp 2.0 application that turns a user's question into an ADAS query, using LLM models and the adas-mcp toolset through DIAL Core. |
 | **DIAL Core** | DIAL platform gateway. It hosts the QuickApp, routes model and toolset calls, introspects DIAL API keys and tokens for ADAS (`/v1/user/info`), and writes usage logs to blob storage. |
 | **Blob storage** | Azure Blob Storage or AWS S3 holding DIAL usage logs as gzip NDJSON files. |
 | **ClickHouse** | Analytics data: ingested usage logs, aggregate rollups and enrichment tables. |
-| **PostgreSQL** | ADAS catalog: table definitions and column exposure, grants and row policies, pipelines, saved queries, dashboards and the audit trail. |
+| **PostgreSQL (ADAS)** | ADAS catalog: table definitions and column exposure, grants and row policies, pipelines, saved queries, dashboards and the audit trail. |
+| **PostgreSQL (Runner)** | The Enrichment Runner's own runtime state: its job queue, per-pipeline scan cursors, group state for group-trigger pipelines, backfill run history, dead-letter items and LLM spend counters. It holds no analytics data, and ADAS does not access it. |
 
 ## Main flows
 
