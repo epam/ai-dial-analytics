@@ -36,6 +36,9 @@ import org.springframework.test.web.servlet.MockMvc;
  * <p>Requires a running Docker daemon.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
+        // MockMvc never starts the management server, so the actuator stays on the main port here;
+        // HealthProbesIntegrationTest covers the separate port.
+        "management.server.port=",
         "poll.enabled=false",
         "security.mode=oidc",
         "security.defaults.email-claim=email",

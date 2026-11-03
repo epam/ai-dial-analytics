@@ -44,6 +44,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * mutation issues a real {@code CREATE TABLE}.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
+        // MockMvc never starts the management server, so the actuator stays on the main port here;
+        // HealthProbesIntegrationTest covers the separate port.
+        "management.server.port=",
         "poll.enabled=false",
         "security.mode=oidc",
         "security.defaults.email-claim=email",

@@ -75,7 +75,7 @@ python local_env/seed/seed_dial_usage_log.py                  # synthetic usage 
 Check that it works:
 
 ```bash
-curl -s localhost:5000/actuator/health
+curl -s localhost:9464/actuator/health
 # {"status":"UP"}
 
 curl -s localhost:5000/v1/queries/execute-sql -H 'Content-Type: application/json' \
@@ -159,8 +159,8 @@ The OpenAPI document is served at `/v3/api-docs`.
 
 ## Monitoring
 
-The actuator serves on the API port, 5000, unless `MANAGEMENT_SERVER_PORT` moves it to a port of its own. Its
-endpoints need no credential in any security mode.
+The actuator serves on its own management port, **9464** (`MANAGEMENT_SERVER_PORT`), separate from the API on
+5000. Its endpoints need no credential in any security mode.
 
 | Endpoint | Use | Checks | Answers |
 |---|---|---|---|
