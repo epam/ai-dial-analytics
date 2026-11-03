@@ -52,10 +52,9 @@ env:
   - { name: FLIGHT_PORT,    value: "32010" }
 ports:
   - { name: http,       containerPort: 5000 }
-  - { name: management, containerPort: 9464 }   # probes and Prometheus scrape; never routed by an Ingress
   - { name: grpc,       containerPort: 32010 }
-livenessProbe:  { httpGet: { path: /actuator/health/liveness,  port: management } }
-readinessProbe: { httpGet: { path: /actuator/health/readiness, port: management } }
+livenessProbe:  { httpGet: { path: /actuator/health/liveness,  port: http } }
+readinessProbe: { httpGet: { path: /actuator/health/readiness, port: http } }
 ```
 
 ## Services
@@ -86,8 +85,8 @@ spec:
 ## REST API Ingress
 
 The declared paths are the exposure allowlist: anything not listed (`/v1/tables`,
-`/v1/data-sync`) is 404 at Traefik and never reaches the pod. The actuator is not on this port at all: it
-serves on the management port (9464), which no Ingress routes to.
+`/v1/data-sync`) is 404 at Traefik and never reaches the pod, the actuator under `/actuator` included. A deployment that
+wants the actuator off the API port entirely sets `MANAGEMENT_SERVER_PORT` and points probes and the scrape there.
 
 The Swagger UI (`/swagger-ui.html` + its static assets under `/swagger-ui`) and the OpenAPI
 document (`/v3/api-docs`) need a credential in `oidc` mode unless `DISABLE_SWAGGER_AUTHORIZATION=true`,
