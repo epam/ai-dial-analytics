@@ -153,11 +153,17 @@ public class BlobPollingService {
         List<BlobListing> ingestedThisCycle = new ArrayList<>();
         // The cycle's new blob failures, written in one append before the final flush.
         List<IngestFailureEvent> blobFailures = new ArrayList<>();
+        // Blobs ClickHouse refused once their batch was split by blob, recorded in the failure ledger by the hand-over.
+        // They stay in the seen-set like any blob read this cycle, so the overlap window does not refuse them again.
+        List<RefusedBlob> refused = new ArrayList<>();
         try {
             // One sink per cycle so rows batch across blobs (a cycle of many tiny blobs → a few inserts). Built
             // inside the try so a failed catalog read behind it is a failed cycle, with its metrics recorded.
             // Each blob is recorded in the ledger as soon as its rows are all written (usually at the final flush).
-            sink = blobIngestor.newRunSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), ledger::record);
+            sink = blobIngestor.newHandOverSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), handOver -> {
+                failures.recordHandOver(handOver, IngestPath.POLL);
+                refused.addAll(handOver.refused());
+            });
             List<String> prefixes = activePrefixes(now, cutoff);
             log.info("Poll cycle starting: mode={}, watermark={}, prefixes={}",
                     pollProperties.listingMode(), watermark, prefixes);
@@ -230,6 +236,9 @@ public class BlobPollingService {
                 log.error("Poll cycle failed; watermark held at {}: {}", watermark, ex.getMessage(), ex);
             }
         } finally {
+            // A refused blob was read in full, so it was counted as ingested; it is a failed one.
+            ingested -= refused.size();
+            failed += refused.size();
             durationTimer.record(Duration.ofNanos(System.nanoTime() - startNanos));
             meterRegistry.counter("poll.cycles", "outcome", success ? "success" : "failure").increment();
             meterRegistry.counter("poll.blobs.discovered").increment(discovered);

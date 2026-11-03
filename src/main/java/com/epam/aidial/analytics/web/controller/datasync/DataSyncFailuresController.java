@@ -59,7 +59,7 @@ public class DataSyncFailuresController {
     @ApiResponse(responseCode = "503", description = "ClickHouse is unavailable")
     public IngestFailureListResponse list(
             @Parameter(description = "`pending` or `parked`") @RequestParam(name = "state", required = false) String state,
-            @Parameter(description = "`blob` or `day`") @RequestParam(name = "kind", required = false) String kind,
+            @Parameter(description = "`blob`, `day` or `records`") @RequestParam(name = "kind", required = false) String kind,
             @Parameter(description = "Reason code of the latest failure") @RequestParam(name = "reason", required = false) String reason,
             @Parameter(description = "Inclusive lower bound on the day (ISO date)") @RequestParam(name = "from", required = false) String from,
             @Parameter(description = "Inclusive upper bound on the day (ISO date)") @RequestParam(name = "to", required = false) String to,

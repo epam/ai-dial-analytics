@@ -98,7 +98,26 @@ public class IngestFailureService {
      * @throws RuntimeException if the event cannot be written
      */
     public void recordBlob(BlobListing listing, IngestPath path, IngestFailureReason reason, String message) {
-        recordBlobFailures(List.of(IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), path, reason, message, clock.instant())));
+        record(IngestFailureKind.BLOB, listing, path, reason, message);
+    }
+
+    /**
+     * Records a failed attempt on a blob-keyed subject — a {@code blob}, or the {@code records} of a blob — under a known
+     * reason.
+     *
+     * @throws RuntimeException if the event cannot be written
+     */
+    public void record(IngestFailureKind kind, BlobListing listing, IngestPath path, IngestFailureReason reason, String message) {
+        recordBlobFailures(List.of(IngestFailureEvent.failed(kind, listing.name(), listing.lastModified(), path, reason, message, clock.instant())));
+    }
+
+    /**
+     * Records a failed attempt on a blob-keyed subject, classified from {@code error} as a blob's failure is.
+     *
+     * @throws RuntimeException if the event cannot be written
+     */
+    public void record(IngestFailureKind kind, BlobListing listing, IngestPath path, Throwable error) {
+        record(kind, listing, path, IngestFailureClassifier.classifyBlob(error), IngestFailureClassifier.describe(error));
     }
 
     /**
@@ -112,7 +131,52 @@ public class IngestFailureService {
     }
 
     /**
-     * Writes blob failure events in one append.
+     * The failure event for the skipped records of a blob that was otherwise ingested, stamped now.
+     *
+     * @param skipped what the blob's ingest skipped; must not be empty
+     */
+    public IngestFailureEvent recordsFailure(BlobListing listing, IngestPath path, SkippedRecords skipped) {
+        return IngestFailureEvent.recordsFailed(listing.name(), listing.lastModified(), path, skipped.describe(), clock.instant());
+    }
+
+    /**
+     * The failure event for a blob whose rows ClickHouse refused with a data-class error, stamped now.
+     */
+    public IngestFailureEvent refusedBlobFailure(BlobListing listing, IngestPath path, RefusedBlob refused) {
+        return IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), path, IngestFailureReason.REJECTED_BY_SERVER,
+                refused.describe(), clock.instant());
+    }
+
+    /**
+     * The failure events a sink hand-over calls for: a {@code records} failure for each written blob whose read skipped
+     * something, and a {@code rejected_by_server} failure for each refused blob. The caller writes them with
+     * {@link #recordBlobFailures} before recording the written blobs in the ingest ledger.
+     */
+    List<IngestFailureEvent> handOverFailures(RunSink.HandOver handOver, IngestPath path) {
+        List<IngestFailureEvent> events = new ArrayList<>(handOver.skipped().size() + handOver.refused().size());
+        handOver.skipped().forEach((listing, skips) -> events.add(recordsFailure(listing, path, skips)));
+        for (RefusedBlob refused : handOver.refused()) {
+            events.add(refusedBlobFailure(refused.listing(), path, refused));
+        }
+        return events;
+    }
+
+    /**
+     * Records a sink hand-over: its failures first, in one append, then its written blobs in {@code ingestLedger}. So a
+     * blob recorded as ingested always has its skipped records on record, and a failure to write them leaves the blob
+     * unrecorded.
+     *
+     * @throws RuntimeException if either write fails; the sink turns it into a fault of the run
+     */
+    void recordHandOver(RunSink.HandOver handOver, IngestPath path) {
+        recordBlobFailures(handOverFailures(handOver, path));
+        if (!handOver.written().isEmpty()) {
+            ingestLedger.record(handOver.written());
+        }
+    }
+
+    /**
+     * Writes blob, {@code records} and refused-blob failure events in one append.
      *
      * @throws RuntimeException if they cannot be written; the caller fails its cycle or day
      */
@@ -122,8 +186,9 @@ public class IngestFailureService {
         }
         failures.append(events);
         for (IngestFailureEvent event : events) {
-            counted(IngestFailureKind.BLOB, event.path(), event.reason());
-            log.warn("Recorded {} failure of blob {} on the {} path: {}", event.reason().wire(), event.subject(), event.path(), event.message());
+            counted(event.kind(), event.path(), event.reason());
+            log.warn("Recorded {} failure of {} {} on the {} path: {}", event.reason().wire(), event.kind().wire(), event.subject(), event.path(),
+                    event.message());
         }
     }
 
@@ -164,10 +229,23 @@ public class IngestFailureService {
      * @throws RuntimeException if the events cannot be written
      */
     public void resolveBlobs(Collection<BlobListing> listings, IngestPath path) {
+        resolve(IngestFailureKind.BLOB, listings, path);
+    }
+
+    /**
+     * Writes {@code resolved} for blob-keyed subjects of {@code kind}: blobs a retry ingested, or the {@code records} of
+     * blobs a retry ingested with nothing skipped.
+     *
+     * @throws RuntimeException if the events cannot be written
+     */
+    public void resolve(IngestFailureKind kind, Collection<BlobListing> listings, IngestPath path) {
+        if (listings.isEmpty()) {
+            return;
+        }
         Instant now = clock.instant();
         List<IngestFailureEvent> events = new ArrayList<>(listings.size());
         for (BlobListing listing : listings) {
-            events.add(IngestFailureEvent.resolved(IngestFailureKind.BLOB, listing.name(),
+            events.add(IngestFailureEvent.resolved(kind, listing.name(),
                     IngestFailureEvent.blobDay(listing.lastModified(), now), listing.lastModified(), path.wire(), now));
         }
         failures.append(events);
@@ -224,6 +302,8 @@ public class IngestFailureService {
      */
     public Snapshot snapshot() {
         List<OpenIngestFailure> open = failures.open();
+        // Only a blob subject resolves through the ingest ledger: the very ingest that skipped a blob's records also records
+        // the blob there, so a records subject would resolve the moment it was written.
         List<String> blobKeys = open.stream().filter(failure -> failure.kind() == IngestFailureKind.BLOB).map(OpenIngestFailure::subject).toList();
         Map<String, IngestLedger.Recorded> ingested = ingestLedger.recordedAmong(blobKeys);
         List<IngestFailureEntry> entries = new ArrayList<>(open.size());

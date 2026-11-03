@@ -2,10 +2,14 @@ package com.epam.aidial.analytics.service;
 
 import java.util.Locale;
 
-/** What a failure-ledger subject is: one log blob, or one UTC day of a day-scoped ingest path. */
+/**
+ * What a failure-ledger subject is: one log blob that failed to ingest, one UTC day of a day-scoped ingest path, or the
+ * skipped records of a blob that was otherwise ingested. A blob can be a {@code blob} and a {@code records} subject at once.
+ */
 public enum IngestFailureKind {
     BLOB,
-    DAY;
+    DAY,
+    RECORDS;
 
     /** The lower-case spelling stored and reported. */
     public String wire() {

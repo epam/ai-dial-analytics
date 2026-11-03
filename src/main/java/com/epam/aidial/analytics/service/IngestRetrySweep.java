@@ -27,7 +27,9 @@ import java.util.Map;
  *
  * <p>A blob is listed by its key and ingested through the shared pipeline into a sink of its own, recorded in the
  * ingest ledger once its rows are written, and resolved; a blob the store no longer lists is parked as
- * {@code blob_missing}, and one the ingest ledger records at the listed version since it failed is resolved without being read. A day is re-run as
+ * {@code blob_missing}, and one the ingest ledger records at the listed version since it failed is resolved without being read. The
+ * {@code records} of a blob — reached only after an operator requeue, since their failure is deterministic — are re-read
+ * whatever the ingest ledger says, and resolve only when the blob now ingests with nothing skipped. A day is re-run as
  * the reconciliation run would, skipping recorded blobs; the day path records and resolves on its own. Every attempt
  * is idempotent, so a sweep overlapping another path on the same blob or day costs only duplicate work.
  *
@@ -139,7 +141,8 @@ public class IngestRetrySweep {
                 failed += ok ? 0 : 1;
                 continue;
             }
-            if (retryBlob(failure)) {
+            boolean ok = failure.kind() == IngestFailureKind.RECORDS ? retryRecords(failure) : retryBlob(failure);
+            if (ok) {
                 succeeded++;
             } else {
                 failed++;
@@ -186,20 +189,79 @@ public class IngestRetrySweep {
             attempt("resolved");
             return true;
         }
-        List<BlobListing> ingested = new ArrayList<>(1);
+        Ingested ingested;
         try {
-            RunSink sink = blobIngestor.newRunSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), written -> {
-                ledger.record(written);
-                ingested.addAll(written);
-            });
-            blobIngestor.ingest(listing, sink);
-            sink.flush();
+            ingested = ingest(listing);
         } catch (Exception ex) {
             return failedBlob(listing, ex);
         }
-        failures.resolveBlobs(ingested, IngestPath.RETRY);
+        if (ingested.refused()) {
+            // The hand-over already recorded the blob as rejected_by_server, which parks it.
+            attempt("failure");
+            return false;
+        }
+        failures.resolveBlobs(ingested.written(), IngestPath.RETRY);
         attempt("success");
         return true;
+    }
+
+    /**
+     * Retries the {@code records} of a blob: re-reads it whatever the ingest ledger says — the ingest that skipped its
+     * records recorded it there — and records it again. Nothing skipped resolves the subject; anything skipped is recorded
+     * by the hand-over as a fresh {@code skipped_records} failure, which parks the subject again with the current counts.
+     *
+     * @return whether the subject is now resolved
+     */
+    private boolean retryRecords(OpenIngestFailure failure) {
+        String key = failure.subject();
+        BlobListing failedVersion = new BlobListing(key, failure.blobLastModified());
+        BlobListing listing;
+        try {
+            listing = blobClient.listWithMetadata(key).stream().filter(candidate -> candidate.name().equals(key)).findFirst().orElse(null);
+        } catch (RuntimeException ex) {
+            return failedRecords(failedVersion, ex);
+        }
+        if (listing == null) {
+            failures.record(IngestFailureKind.RECORDS, failedVersion, IngestPath.RETRY, IngestFailureReason.BLOB_MISSING,
+                    "The store no longer lists the blob");
+            attempt(IngestFailureKind.RECORDS, "failure");
+            return false;
+        }
+        Ingested ingested;
+        try {
+            ingested = ingest(listing);
+        } catch (Exception ex) {
+            return failedRecords(listing, ex);
+        }
+        if (ingested.refused() || ingested.skippedAny()) {
+            attempt(IngestFailureKind.RECORDS, "failure");
+            return false;
+        }
+        failures.resolve(IngestFailureKind.RECORDS, List.of(listing), IngestPath.RETRY);
+        attempt(IngestFailureKind.RECORDS, "success");
+        return true;
+    }
+
+    /**
+     * Ingests one blob in a sink of its own and flushes it. The hand-over records what the blob skipped, or its refusal,
+     * in the failure ledger, then the blob in the ingest ledger.
+     */
+    private Ingested ingest(BlobListing listing) throws Exception {
+        List<BlobListing> written = new ArrayList<>(1);
+        boolean[] refused = {false};
+        RunSink sink = blobIngestor.newHandOverSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(),
+                handOver -> {
+                    failures.recordHandOver(handOver, IngestPath.RETRY);
+                    written.addAll(handOver.written());
+                    refused[0] |= !handOver.refused().isEmpty();
+                });
+        BlobIngestor.IngestResult result = blobIngestor.ingest(listing, sink);
+        sink.flush();
+        return new Ingested(written, refused[0], !result.skipped().isEmpty());
+    }
+
+    /** What one retried blob's ingest wrote, and whether it was refused or skipped anything. */
+    private record Ingested(List<BlobListing> written, boolean refused, boolean skippedAny) {
     }
 
     /**
@@ -220,8 +282,18 @@ public class IngestRetrySweep {
         return false;
     }
 
+    private boolean failedRecords(BlobListing listing, Exception ex) {
+        failures.record(IngestFailureKind.RECORDS, listing, IngestPath.RETRY, ex);
+        attempt(IngestFailureKind.RECORDS, "failure");
+        return false;
+    }
+
     private void attempt(String outcome) {
-        meterRegistry.counter("sync.retry.attempts", "kind", IngestFailureKind.BLOB.wire(), "outcome", outcome).increment();
+        attempt(IngestFailureKind.BLOB, outcome);
+    }
+
+    private void attempt(IngestFailureKind kind, String outcome) {
+        meterRegistry.counter("sync.retry.attempts", "kind", kind.wire(), "outcome", outcome).increment();
     }
 
     /**

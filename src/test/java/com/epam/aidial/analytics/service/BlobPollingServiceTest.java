@@ -4,6 +4,7 @@ import com.clickhouse.client.api.ServerException;
 import com.epam.aidial.analytics.blob.BlobClient;
 import com.epam.aidial.analytics.blob.BlobListing;
 import com.epam.aidial.analytics.blob.TestBlobSpans;
+import com.epam.aidial.analytics.clickhouse.ClickHouseDataRejectedException;
 import com.epam.aidial.analytics.clickhouse.TestClickHouseSpans;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import com.epam.aidial.analytics.configuration.BlobProperties;
@@ -110,6 +111,43 @@ class BlobPollingServiceTest {
         // Only the fresh blob's rows were ingested (the old blob is below the watermark less overlap).
         assertThat(writer.rows).extracting(row -> row.get("project_id")).containsExactly("p1", "p2", "p3");
         // Watermark advanced to the fresh blob's last-modified time.
+        assertThat(service.watermark()).isAfter(initialWatermark);
+    }
+
+    /**
+     * A row ClickHouse refuses for its data costs its own blob, not the cycle: the batch is split by blob, the other blob
+     * is written and recorded, the refused one is parked as rejected_by_server, and the watermark advances.
+     */
+    @Test
+    void refusedBlobDoesNotStallTheCycle() throws Exception {
+        Instant now = Instant.now();
+        writeBlob("good.log.gz", now.minusSeconds(2));
+        writeBlob("bad.log.gz", now);
+        RecordingWriter writer = new RecordingWriter() {
+            @Override
+            public void insert(String table, List<Map<String, Object>> batch) {
+                if (batch.stream().anyMatch(row -> String.valueOf(row.get("_source_file")).endsWith("bad.log.gz"))) {
+                    throw new ClickHouseDataRejectedException(table, 41, new RuntimeException("cannot parse"));
+                }
+                super.insert(table, batch);
+            }
+        };
+        BlobPollingService service = service(writer);
+        Instant initialWatermark = service.watermark();
+
+        BlobPollingService.PollSummary summary = service.runOnce();
+
+        assertThat(summary.success()).isTrue();
+        assertThat(summary.ingested()).isEqualTo(1);
+        assertThat(summary.failed()).isEqualTo(1);
+        assertThat(writer.rows).hasSize(3).allMatch(row -> String.valueOf(row.get("_source_file")).endsWith("good.log.gz"));
+        assertThat(ledger.recordedKeys()).singleElement().satisfies(key -> assertThat(key).endsWith("good.log.gz"));
+        assertThat(failureLedger.events).singleElement().satisfies(event -> {
+            assertThat(event.kind()).isEqualTo(IngestFailureKind.BLOB);
+            assertThat(event.subject()).endsWith("bad.log.gz");
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.REJECTED_BY_SERVER);
+            assertThat(event.path()).isEqualTo("poll");
+        });
         assertThat(service.watermark()).isAfter(initialWatermark);
     }
 

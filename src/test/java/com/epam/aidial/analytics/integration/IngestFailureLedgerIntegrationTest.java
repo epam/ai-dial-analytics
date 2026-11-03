@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.blob.BlobListing;
+import com.epam.aidial.analytics.clickhouse.ClickHouseDataRejectedException;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import com.epam.aidial.analytics.service.ClickHouseIngestFailureLedger;
 import com.epam.aidial.analytics.service.ClickHouseIngestLedger;
@@ -21,10 +22,13 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -161,6 +165,50 @@ class IngestFailureLedgerIntegrationTest extends AbstractClickHouseIntegrationTe
         // Compaction writes the resolution, so the blob leaves the open set for good.
         assertThat(failures.resolveIngested(snapshot)).isEqualTo(1);
         assertThat(failureLedger.open()).extracting(open -> open.subject()).containsExactly("logs/f.log.gz");
+    }
+
+    /**
+     * Skipped records are recorded in the hand-over that records their blob, so the ingest ledger always holds a later
+     * entry for it: a records subject must not resolve through it, while a blob subject on the same key still does.
+     */
+    @Test
+    void recordsSubjectIsNotResolvedByTheIngestLedgerButItsBlobSubjectIs() {
+        failureLedger.append(List.of(
+                failed("logs/r.log.gz", T0, IngestFailureReason.CORRUPT_GZIP, "poll", T0),
+                new IngestFailureEvent(IngestFailureKind.RECORDS, "logs/r.log.gz", T0.atZone(ZoneOffset.UTC).toLocalDate(), T0,
+                        IngestFailureEvent.Type.FAILED, "poll", IngestFailureReason.SKIPPED_RECORDS, "malformed_line: 1 (line 3)", T0)));
+        ingestLedger.record(List.of(new BlobListing("logs/r.log.gz", T0)));
+
+        IngestFailureService.Snapshot snapshot = failures.snapshot();
+
+        assertThat(snapshot.outstanding()).singleElement().satisfies(entry -> {
+            assertThat(entry.failure().kind()).isEqualTo(IngestFailureKind.RECORDS);
+            assertThat(entry.failure().reason()).isEqualTo("skipped_records");
+            assertThat(entry.failure().failureClass()).isEqualTo("deterministic");
+            assertThat(entry.state()).isEqualTo(IngestFailureState.PARKED);
+        });
+        assertThat(snapshot.resolvedByLedger()).extracting(open -> open.kind()).containsExactly(IngestFailureKind.BLOB);
+    }
+
+    /** Every data-class code the write path splits on is the code the supported server gives that name. */
+    @Test
+    void dataClassCodesMatchTheServersNames() {
+        ClickHouseDataRejectedException.DATA_CLASS_CODES.forEach((code, name) ->
+                assertThat(queryScalar("SELECT errorCodeToName(" + code + ") AS n", "n")).as("code %d", code).isEqualTo(name));
+    }
+
+    /** A value the table cannot parse is refused with a data-class code, which is what lets the write path split by blob. */
+    @Test
+    void anUnparseableValueIsRefusedAsDataClass() {
+        Map<String, Object> bad = new LinkedHashMap<>();
+        bad.put("project_id", "p");
+        bad.put("trace_id", "refused-" + UUID.randomUUID());
+        bad.put("core_span_id", "s");
+        bad.put("request_time", "not a time");
+
+        assertThatThrownBy(() -> usageLogWriter.insert("dial_usage_log", List.of(bad)))
+                .isInstanceOfSatisfying(ClickHouseDataRejectedException.class,
+                        refused -> assertThat(ClickHouseDataRejectedException.DATA_CLASS_CODES).containsKey(refused.code()));
     }
 
     /** An entry written before the failure — an earlier ingest of the same version — does not resolve it. */

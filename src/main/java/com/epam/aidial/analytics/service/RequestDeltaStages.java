@@ -88,9 +88,9 @@ public class RequestDeltaStages {
         }
 
         @Override
-        public Runnable prepare(List<Map<String, Object>> rows) {
+        public Written prepare(List<Map<String, Object>> rows) {
             if (!hasColumns()) {
-                return () -> { };
+                return Written.NONE;
             }
             return encoder.encode(rows)::written;
         }

@@ -10,7 +10,7 @@ import java.util.Locale;
  * requeued it. The ledger is append-only, and a subject's state is derived from its events (see
  * {@link IngestFailureService}).
  *
- * @param kind             blob or day
+ * @param kind             blob, day or records
  * @param subject          the blob's full key, or the day's ISO date
  * @param day              the UTC date the event belongs to: the day itself, or a blob's last-modified date
  * @param blobLastModified the blob's listed last-modified time; {@link Instant#EPOCH} for a day
@@ -43,7 +43,18 @@ public record IngestFailureEvent(
 
     /** A failed attempt on a blob. */
     static IngestFailureEvent blobFailed(String key, Instant lastModified, IngestPath path, IngestFailureReason reason, String message, Instant at) {
-        return new IngestFailureEvent(IngestFailureKind.BLOB, key, blobDay(lastModified, at), lastModified, Type.FAILED, path.wire(), reason, message, at);
+        return failed(IngestFailureKind.BLOB, key, lastModified, path, reason, message, at);
+    }
+
+    /** A failed attempt on a blob-keyed subject: a {@code blob}, or the {@code records} of a blob. */
+    static IngestFailureEvent failed(IngestFailureKind kind, String key, Instant lastModified, IngestPath path, IngestFailureReason reason,
+            String message, Instant at) {
+        return new IngestFailureEvent(kind, key, blobDay(lastModified, at), lastModified, Type.FAILED, path.wire(), reason, message, at);
+    }
+
+    /** The skipped records of a blob that was otherwise ingested: always {@link IngestFailureReason#SKIPPED_RECORDS}. */
+    static IngestFailureEvent recordsFailed(String key, Instant lastModified, IngestPath path, String message, Instant at) {
+        return failed(IngestFailureKind.RECORDS, key, lastModified, path, IngestFailureReason.SKIPPED_RECORDS, message, at);
     }
 
     /** A failed run of a day. */

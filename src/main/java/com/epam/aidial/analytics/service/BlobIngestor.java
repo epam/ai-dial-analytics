@@ -108,8 +108,17 @@ public class BlobIngestor {
      * @param onBlobsWritten receives the blobs whose rows are all written, one batch per hand-over
      */
     public RunSink newRunSink(UsageLogWriter writer, int batchSize, long maxBatchBytes, Consumer<List<BlobListing>> onBlobsWritten) {
+        return newHandOverSink(writer, batchSize, maxBatchBytes, handOver -> onBlobsWritten.accept(handOver.written()));
+    }
+
+    /**
+     * As {@link #newRunSink(UsageLogWriter, int, long, Consumer)}, handing over, beside the written blobs, what their reads
+     * skipped and the blobs ClickHouse refused — what the ingest paths record in the failure ledger before the ingest
+     * ledger (see {@link RunSink}).
+     */
+    RunSink newHandOverSink(UsageLogWriter writer, int batchSize, long maxBatchBytes, RunSink.HandOverListener onHandOver) {
         final List<String> tables = targets.stream().map(SyncTarget::table).toList();
-        return new RunSink(writer, tables, flushOrder.sourceOf(tables), deltaStages.byTable(), batchSize, maxBatchBytes, onBlobsWritten);
+        return new RunSink(writer, tables, flushOrder.sourceOf(tables), deltaStages.byTable(), batchSize, maxBatchBytes, onHandOver);
     }
 
     /**
@@ -126,7 +135,7 @@ public class BlobIngestor {
     public IngestResult ingest(BlobListing listing, RunSink sink) throws IOException {
         sink.startBlob(listing);
         IngestResult result = ingest(listing.name(), sink);
-        sink.finishBlob();
+        sink.finishBlob(result.skipped());
         return result;
     }
 
@@ -144,9 +153,21 @@ public class BlobIngestor {
      */
     public IngestResult ingest(String blobName, RunSink sink) throws IOException {
         Counters counters = new Counters();
+        SkippedRecords skipped = new SkippedRecords();
+        LogParser.SkipListener skips = new LogParser.SkipListener() {
+            @Override
+            public void malformed(long line) {
+                skipped.add(SkippedRecords.Cause.MALFORMED_LINE, line);
+            }
+
+            @Override
+            public void oversized(long line) {
+                skipped.add(SkippedRecords.Cause.OVERSIZED_LINE, line);
+            }
+        };
         long malformed;
         try (InputStream stream = blobClient.openStream(blobName)) {
-            malformed = logParser.parse(stream, blobName, node -> {
+            malformed = logParser.parse(stream, blobName, (line, node) -> {
                 // Every target maps the record before any of its rows reaches the sink, so a mapping fault on one
                 // target drops the whole record. Adding row by row would leave the rows of the targets mapped before
                 // the fault in the sink, to be written with the rest — a usage-log row without the payload row an
@@ -155,6 +176,7 @@ public class BlobIngestor {
                 for (SyncTarget target : targets) {
                     rows.add(map(target, node, blobName));
                 }
+                boolean keyless = false;
                 for (int i = 0; i < targets.size(); i++) {
                     SyncTarget target = targets.get(i);
                     Map<String, Object> row = rows.get(i);
@@ -163,6 +185,7 @@ public class BlobIngestor {
                     }
                     if (missingDedupKey(row)) {
                         counters.dropped++;
+                        keyless = true;
                         log.warn("Dropping record without a complete dedup key "
                                 + "(trace_id/core_span_id/request_time) for target '{}' in {}",
                                 target.table(), blobName);
@@ -171,11 +194,15 @@ public class BlobIngestor {
                     sink.add(target.table(), row);
                     counters.accepted++;
                 }
-            });
+                if (keyless) {
+                    // Once per record, however many targets dropped it: the failure ledger counts lost records, not rows.
+                    skipped.add(SkippedRecords.Cause.MISSING_DEDUP_KEY, line);
+                }
+            }, skips);
         }
         log.info("Ingested {}: {} rows accepted, {} malformed lines skipped, {} records dropped",
                 blobName, counters.accepted, malformed, counters.dropped);
-        return new IngestResult(counters.accepted, malformed, counters.dropped);
+        return new IngestResult(counters.accepted, malformed, counters.dropped, skipped);
     }
 
     /**
@@ -217,7 +244,8 @@ public class BlobIngestor {
      * @param rowsInserted rows from the blob accepted into the sink across all targets (written by the sink's batching)
      * @param rowsSkipped  malformed lines skipped
      * @param rowsDropped  target rows dropped for lacking a deduplication key
+     * @param skipped      the lines skipped and records dropped, by cause, with their first line numbers; empty when none
      */
-    public record IngestResult(long rowsInserted, long rowsSkipped, long rowsDropped) {
+    public record IngestResult(long rowsInserted, long rowsSkipped, long rowsDropped, SkippedRecords skipped) {
     }
 }

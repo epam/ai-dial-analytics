@@ -11,7 +11,6 @@ import tools.jackson.databind.node.JsonNodeFactory;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -172,7 +171,8 @@ public final class RequestDeltaEncoder {
 
         Map<UUID, ChainNode> stored = storedParents(items);
         Map<UUID, ChainNode> written = new HashMap<>();
-        List<ChainNode> learned = new ArrayList<>();
+        // Each learned node with the row that carries its path, so a row that ends up not stored teaches nothing.
+        List<Learned> learned = new ArrayList<>();
         String oldestCached = LocalDate.now(clock).minusDays(1).toString();
         for (Item item : items) {
             Resolution resolution = resolve(item, written, stored);
@@ -184,7 +184,7 @@ public final class RequestDeltaEncoder {
             // parent of its own.
             ChainNode node = ChainNode.written(item.path(), split ? resolution.parent() : null);
             if (written.putIfAbsent(item.path(), node) == null && item.day().compareTo(oldestCached) >= 0) {
-                learned.add(node);
+                learned.add(new Learned(node, item.row));
             }
             count(split ? resolution.source() : "whole_with_path");
         }
@@ -256,12 +256,16 @@ public final class RequestDeltaEncoder {
     private record Resolution(ChainNode parent, int depth, String source) {
     }
 
+    /** A node to remember once the batch is stored, with the row that carries its path. */
+    private record Learned(ChainNode node, Map<String, Object> row) {
+    }
+
     /** The outcome of {@link #encode}: the nodes to remember once the batch is stored. */
     public final class Encoding {
 
-        private final Collection<ChainNode> learned;
+        private final List<Learned> learned;
 
-        private Encoding(Collection<ChainNode> learned) {
+        private Encoding(List<Learned> learned) {
             this.learned = learned;
         }
 
@@ -271,7 +275,20 @@ public final class RequestDeltaEncoder {
          * the cache holds one small entry per written row.
          */
         public void written() {
-            cache.putAll(learned);
+            cache.putAll(learned.stream().map(Learned::node).toList());
+        }
+
+        /**
+         * As {@link #written()}, for a batch that was stored in part: the paths of the rows in {@code notStored}, compared
+         * by identity, are not recorded, so a request of a later flush never takes a row that is not in the table as its
+         * parent. A path that some stored row also carries is left out too; that costs a later table lookup, nothing more.
+         */
+        public void written(Set<Map<String, Object>> notStored) {
+            if (notStored.isEmpty()) {
+                written();
+                return;
+            }
+            cache.putAll(learned.stream().filter(entry -> !notStored.contains(entry.row())).map(Learned::node).toList());
         }
     }
 

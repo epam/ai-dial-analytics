@@ -449,8 +449,11 @@ class DataSyncServiceTest {
         DataSyncService.RunSummary summary = service.runForDate(LocalDate.now(ZoneOffset.UTC));
 
         assertThat(summary.blobsFailed()).isEqualTo(2);
-        assertThat(failureLedger.events).hasSize(2);
-        assertThat(failureLedger.appends).isEqualTo(1);
+        assertThat(failureLedger.events).filteredOn(event -> event.kind() == IngestFailureKind.BLOB).hasSize(2);
+        // One append for the day's two blob failures, and one for the hand-over that recorded the fixture blob, whose
+        // read skipped a malformed line and two keyless records.
+        assertThat(failureLedger.events).filteredOn(event -> event.kind() == IngestFailureKind.RECORDS).hasSize(1);
+        assertThat(failureLedger.appends).isEqualTo(2);
     }
 
     /**
@@ -525,7 +528,8 @@ class DataSyncServiceTest {
 
         assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).extracting(IngestFailureEvent::type)
                 .containsExactly(IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.RESOLVED);
-        assertThat(failures.outstanding()).isEmpty();
+        // The good run's fixture blob skipped records, which stay parked on their own subject.
+        assertThat(failures.outstanding()).extracting(entry -> entry.failure().kind()).containsExactly(IngestFailureKind.RECORDS);
     }
 
     /** A day refused for lack of disk space is recorded under its own reason. */

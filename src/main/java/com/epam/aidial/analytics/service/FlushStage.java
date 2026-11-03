@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A step a {@link RowBatchSink} runs on each batch right before inserting it, for a rewrite that needs the whole batch
@@ -12,13 +13,29 @@ import java.util.Map;
 interface FlushStage {
 
     /** The stage that changes nothing. */
-    FlushStage NONE = rows -> () -> { };
+    FlushStage NONE = rows -> Written.NONE;
 
     /**
      * Rewrites {@code rows} in place before they are inserted.
      *
      * @param rows the batch about to be inserted
-     * @return what to run once the insert carrying the batch has succeeded; never run after a failed insert
+     * @return what to run once the batch is stored; never run when its flush failed
      */
-    Runnable prepare(List<Map<String, Object>> rows);
+    Written prepare(List<Map<String, Object>> rows);
+
+    /** Told once a prepared batch is stored, and which of its rows were not. */
+    @FunctionalInterface
+    interface Written {
+
+        /** Does nothing. */
+        Written NONE = notStored -> { };
+
+        /**
+         * Called once the batch is stored. A batch split by blob stores some rows and not others (see
+         * {@link RowBatchSink}); a row of {@code notStored} must not be taken as stored.
+         *
+         * @param notStored the rows of the prepared batch that were not stored, compared by identity; empty when all were
+         */
+        void written(Set<Map<String, Object>> notStored);
+    }
 }

@@ -3,7 +3,7 @@ package com.epam.aidial.analytics.service;
 import java.util.Locale;
 
 /**
- * The stable reason codes of the failure ledger, each with the class it is recorded under. Only the three
+ * The stable reason codes of the failure ledger, each with the class it is recorded under. Only the
  * {@linkplain #deterministic() deterministic} reasons park a subject on its first failure; see
  * {@code openspec/specs/data-sync-failures/spec.md} for why an early end of a gzip stream is not among them.
  */
@@ -11,6 +11,10 @@ public enum IngestFailureReason {
     CORRUPT_GZIP(true),
     MAPPING_ERROR(true),
     BLOB_MISSING(true),
+    /** ClickHouse refused the blob's rows with a data-class error, isolated by splitting their batch by blob. */
+    REJECTED_BY_SERVER(true),
+    /** The blob was ingested, but some of its lines were skipped or records dropped; {@code records} subjects only. */
+    SKIPPED_RECORDS(true),
     READ_ERROR(false),
     LISTING_FAILED(false),
     PREPARE_FAILED(false),

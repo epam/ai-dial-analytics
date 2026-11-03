@@ -193,6 +193,8 @@ public class DataSyncService {
         boolean storageFull = false;
         String prefix = null;
         RunSink sink = null;
+        // Blobs ClickHouse refused once their batch was split by blob; recorded in the failure ledger by the hand-over.
+        AtomicLong blobsRefused = new AtomicLong();
         try {
             // Preparing the day (prefix, and the catalog read behind the sink) sits inside the try so a failure
             // there fails this day like any other, instead of escaping and breaking the never-throws contract.
@@ -201,7 +203,15 @@ public class DataSyncService {
             // One sink for the whole run so rows batch across blobs instead of one insert per blob.
             // Each blob is recorded the moment its rows are all written, so a day that fails part-way keeps what it
             // finished and a backfill of it afterwards ingests only the rest.
-            sink = blobIngestor.newRunSink(usageLogWriter, properties.batchSize(), properties.maxBatchBytes(), ledger::record);
+            // The hand-over records what the written blobs skipped and the refused blobs in the failure ledger first, then
+            // the written blobs in the ingest ledger.
+            sink = blobIngestor.newHandOverSink(usageLogWriter, properties.batchSize(), properties.maxBatchBytes(), handOver -> {
+                failures.recordHandOver(handOver, path);
+                for (RefusedBlob ignored : handOver.refused()) {
+                    blobsRefused.incrementAndGet();
+                    progressListener.onBlobFailed();
+                }
+            });
             failingStep = IngestFailureReason.LISTING_FAILED;
             List<BlobListing> blobs = blobClient.listWithMetadata(prefix);
             failingStep = IngestFailureReason.WRITE_FAILED;
@@ -265,7 +275,7 @@ public class DataSyncService {
         // A sink that was never built (the day failed while preparing) inserted nothing.
         RunSummary summary = new RunSummary(
                 filesProcessed, sink == null ? 0 : sink.totalInserted(), sink == null ? Map.of() : sink.insertedByTable(),
-                rowsSkipped, rowsDropped, blobsSkipped, blobsFailed, success, storageFull);
+                rowsSkipped, rowsDropped, blobsSkipped, blobsFailed + blobsRefused.get(), success, storageFull);
         log.info("Data-sync run finished: {}", summary);
         return summary;
     }
@@ -294,7 +304,8 @@ public class DataSyncService {
      * @param rowsSkipped         malformed lines skipped across all files
      * @param rowsDropped         records dropped for lacking a deduplication key across all files
      * @param blobsSkipped        listed blobs not read because the ingest ledger records them
-     * @param blobsFailed         blobs that failed to read or map, each recorded in the failure ledger and skipped
+     * @param blobsFailed         blobs that failed to read or map, or whose rows ClickHouse refused, each recorded in the
+     *                            failure ledger and not recorded in the ingest ledger
      * @param success             whether the day completed without a day-level fault; blob failures do not clear it,
      *                            see {@link #complete()}
      * @param storageFull         whether the run failed because ClickHouse refused a write for lack of disk space;

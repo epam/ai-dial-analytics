@@ -252,6 +252,92 @@ class IngestRetrySweepTest {
         return new SyncRetryProperties(enabled, "-", Duration.ofMinutes(15), Duration.ofHours(24), 10, maxPerSweep);
     }
 
+    /** A blob's skipped records, requeued once the producer rewrote it without its bad line, are re-read and resolve. */
+    @Test
+    void requeuedRecordsOfRewrittenBlobAreReadAgainAndResolve() throws Exception {
+        BlobListing blob = writeBlobLines("a.log.gz", record("p1") + "not json\n");
+        ledger.clock = clock::instant;
+        recordSkippedRecords(blob);
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(failures.outstanding()).singleElement().satisfies(entry -> {
+            assertThat(entry.failure().kind()).isEqualTo(IngestFailureKind.RECORDS);
+            assertThat(entry.state()).isEqualTo(IngestFailureState.PARKED);
+        });
+        writeBlobLines("a.log.gz", record("p1"));
+        failures.requeue(IngestFailureFilter.ALL);
+        clock.advance(Duration.ofMinutes(1));
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.succeeded()).isEqualTo(1);
+        // Read again although the ingest ledger records the blob.
+        assertThat(writer.rows).extracting(row -> row.get("project_id")).containsExactly("p1");
+        assertThat(failureLedger.of(IngestFailureKind.RECORDS, blob.name())).extracting(IngestFailureEvent::type)
+                .containsExactly(IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.REQUEUED, IngestFailureEvent.Type.RESOLVED);
+        assertThat(failures.outstanding()).isEmpty();
+        assertThat(registry.counter("sync.retry.attempts", "kind", "records", "outcome", "success").count()).isEqualTo(1);
+    }
+
+    /** A requeued blob that still holds its bad line parks again, under a fresh failure from the retry. */
+    @Test
+    void requeuedRecordsOfAnUnchangedBlobParkAgain() throws Exception {
+        BlobListing blob = writeBlobLines("a.log.gz", record("p1") + "not json\n");
+        ledger.clock = clock::instant;
+        recordSkippedRecords(blob);
+        failures.requeue(IngestFailureFilter.ALL);
+        clock.advance(Duration.ofMinutes(1));
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.failed()).isEqualTo(1);
+        assertThat(failureLedger.of(IngestFailureKind.RECORDS, blob.name())).last().satisfies(event -> {
+            assertThat(event.type()).isEqualTo(IngestFailureEvent.Type.FAILED);
+            assertThat(event.reason()).isEqualTo(IngestFailureReason.SKIPPED_RECORDS);
+            assertThat(event.path()).isEqualTo("retry");
+            assertThat(event.message()).isEqualTo("malformed_line: 1 (line 2)");
+        });
+        assertThat(failures.outstanding()).singleElement().extracting(IngestFailureEntry::state).isEqualTo(IngestFailureState.PARKED);
+    }
+
+    /** A requeued blob ClickHouse refused is ingested once the cause is gone, like any requeued blob. */
+    @Test
+    void requeuedRefusedBlobIsIngestedOnceTheCauseIsGone() throws Exception {
+        BlobListing blob = writeBlob("a.log.gz", "p1");
+        failures.recordBlobFailures(List.of(failures.refusedBlobFailure(blob, IngestPath.POLL,
+                new RefusedBlob(blob, "dial_usage_log", 53, "TYPE_MISMATCH"))));
+        assertThat(failures.outstanding()).singleElement().extracting(IngestFailureEntry::state).isEqualTo(IngestFailureState.PARKED);
+        failures.requeue(IngestFailureFilter.ALL);
+        clock.advance(Duration.ofMinutes(1));
+
+        assertThat(sweep(retry(true, 20)).runOnce().succeeded()).isEqualTo(1);
+
+        assertThat(ledger.recordedKeys()).containsExactly(blob.name());
+        assertThat(failures.outstanding()).isEmpty();
+    }
+
+    /** As a reconciliation run would leave it: the blob recorded, its skipped records parked. */
+    private void recordSkippedRecords(BlobListing blob) {
+        SkippedRecords skips = new SkippedRecords();
+        skips.add(SkippedRecords.Cause.MALFORMED_LINE, 2);
+        failures.recordHandOver(new RunSink.HandOver(List.of(blob), Map.of(blob, skips), List.of()), IngestPath.RECONCILE);
+    }
+
+    private static String record(String project) {
+        return "{\"project\":{\"id\":\"" + project + "\"},\"request\":{\"time\":\"2026-06-18T00:00:01\"},"
+                + "\"trace\":{\"trace_id\":\"" + project + "\",\"core_span_id\":\"s1\"}}\n";
+    }
+
+    private BlobListing writeBlobLines(String fileName, String content) throws Exception {
+        String key = dayDir + fileName;
+        Path file = baseDir.resolve(BUCKET).resolve(key);
+        Files.createDirectories(file.getParent());
+        try (OutputStream out = Files.newOutputStream(file); GZIPOutputStream gzip = new GZIPOutputStream(out)) {
+            gzip.write(content.getBytes(StandardCharsets.UTF_8));
+        }
+        Instant lastModified = blobClient.listWithMetadata(key).getFirst().lastModified();
+        return new BlobListing(key, lastModified.truncatedTo(ChronoUnit.MILLIS));
+    }
+
     /** Writes a blob holding one keyed record and returns it as the store lists it. */
     private BlobListing writeBlob(String fileName, String project) throws Exception {
         String key = dayDir + fileName;

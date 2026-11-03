@@ -111,7 +111,7 @@ class RowBatchSinkTest {
         FlushStage stage = rows -> {
             events.add("prepare " + rows.size());
             rows.forEach(row -> row.put("rewritten", true));
-            return () -> events.add("written");
+            return notStored -> events.add("written");
         };
         RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, stage);
 
@@ -128,7 +128,7 @@ class RowBatchSinkTest {
         RecordingWriter writer = new RecordingWriter();
         writer.failOnInsertCall = 1;
         List<String> events = new ArrayList<>();
-        RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, rows -> () -> events.add("written"));
+        RowBatchSink sink = new RowBatchSink(writer, "t", 10, 268_435_456L, rows -> notStored -> events.add("written"));
 
         sink.add(new HashMap<>(Map.of("a", 1)));
 

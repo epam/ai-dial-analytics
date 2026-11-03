@@ -8,7 +8,7 @@ import java.util.List;
 /** Selects the outstanding subjects to requeue; every member is optional, present members are ANDed, at least one is required. */
 @Schema(description = "Filters selecting the outstanding failures to requeue. At least one member is required.")
 public record IngestFailureRetryRequest(
-        @JsonProperty("kind") @Schema(description = "`blob` or `day`.") String kind,
+        @JsonProperty("kind") @Schema(description = "`blob`, `day` or `records`.") String kind,
         @JsonProperty("state") @Schema(description = "`pending` or `parked`.") String state,
         @JsonProperty("reason") @Schema(description = "Reason code of the latest failure.", example = "mapping_error") String reason,
         @JsonProperty("from") @Schema(description = "Inclusive lower bound on the subject's day (ISO date).") String from,

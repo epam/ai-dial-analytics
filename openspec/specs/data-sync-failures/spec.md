@@ -12,12 +12,17 @@ failures are listed and requeued over HTTP, and counted by gauges an operator ca
 
 The service SHALL record every blob that fails to ingest, on any ingest path (the poller, the reconciliation
 run, the backfill and the retry sweep), and every day whose reconciliation run, backfill day or retry fails as
-a whole. The record SHALL be kept in a ClickHouse table `_dial_internal_failed_ingest` in the same database as
-the ingest ledger, so the record of what failed shares a failure domain with the record of what was ingested.
+a whole. It SHALL also record every blob that is ingested but whose records were not all written, because some
+lines were skipped or some records dropped. The record SHALL be kept in a ClickHouse table
+`_dial_internal_failed_ingest` in the same database as the ingest ledger, so the record of what failed shares a
+failure domain with the record of what was ingested.
 
-The table SHALL be an append-only log of events. Each event names a **subject**:
-- a blob, identified by its full key in the container and the last-modified time the store listed for it; or
-- a day, identified by its ISO `yyyy-MM-dd` UTC date.
+The table SHALL be an append-only log of events. Each event names a **subject** of one of three kinds:
+- `blob`: a blob that failed to ingest, identified by its full key in the container and the last-modified time
+  the store listed for it;
+- `day`: identified by its ISO `yyyy-MM-dd` UTC date;
+- `records`: the skipped records of a blob that was otherwise ingested, identified like a blob. A blob can have a
+  `blob` subject and a `records` subject at the same time; they are independent.
 
 Each event SHALL be one of three kinds:
 - `failed`: an attempt failed. It carries the failure class, a stable reason code, a message and the ingest
@@ -26,12 +31,14 @@ Each event SHALL be one of three kinds:
 - `requeued`: an operator asked for the subject to be attempted again.
 
 An event SHALL also carry the UTC date it belongs to, and the time it was written. For a day that date is the
-day itself. For a blob it is the UTC date of the blob's listed last-modified time, or the date of the event when
-the store listed none.
+day itself. For a blob or a `records` subject it is the UTC date of the blob's listed last-modified time, or the
+date of the event when the store listed none.
 
 A message SHALL be at most 512 characters. It SHALL be taken from the failure's exception chain and SHALL NOT
 contain record content. For a mapping fault it SHALL therefore name only the target table and the exception
-types, because the messages of a mapping fault can quote the record.
+types, because the messages of a mapping fault can quote the record. For a `records` subject it SHALL list each
+cause that occurred (`malformed_line`, `oversized_line`, `missing_dedup_key`), with its count and its first line
+numbers, as many as fit.
 
 Events SHALL be kept for 13 months after the date they belong to and then expire. For a blob that date is the
 blob's last-modified date, so its failure events expire with the ingest-ledger entry that can resolve them. A
@@ -50,6 +57,15 @@ The blob failures of one poll cycle, or of one reconciliation or backfill day, S
 insert before the cycle's or day's final flush. Writing them one at a time would add a part to the table per
 failing blob, and a fault such as a mapping regression fails every blob.
 
+A `records` failure SHALL be written in the hand-over that records its blob in the ingest ledger, before the
+ingest-ledger entry is written. The `rejected_by_server` failure of a blob refused by a flush SHALL be written in the
+hand-over that follows that flush. The `records` and `rejected_by_server` failures of one hand-over SHALL be written in
+a single insert, which is issued only when the hand-over has any. A blob recorded as ingested therefore always has its skipped records on record, even if the service stops
+right after recording it. A failure to write them SHALL fail the poll cycle or day, exactly as a failed
+ingest-ledger write does, and the blobs of that hand-over SHALL NOT be recorded. A blob whose ingest failed records
+no `records` failure: its `blob` failure covers it, and the attempt that ingests it records its skipped records
+then.
+
 The poller SHALL NOT record day failures. A failed poll cycle holds its watermark and is retried by the next
 cycle, so no part of it is left for a later path.
 
@@ -59,6 +75,18 @@ cycle, so no part of it is left for a later path.
 - **THEN** the failure ledger holds a `failed` event for that blob carrying its key, its listed
   last-modified time, the class `deterministic`, the reason `corrupt_gzip`, the path `reconcile` and a
   message
+
+#### Scenario: Skipped records are recorded before the blob is
+
+- **WHEN** a poll cycle ingests a blob with two malformed lines and one oversized line
+- **THEN** the failure ledger holds a `records` failure for the blob with the class `deterministic`, the reason
+  `skipped_records`, the path `poll`, and a message naming two `malformed_line` and one `oversized_line` with their
+  line numbers. That failure is written before the blob's ingest-ledger entry
+
+#### Scenario: A failed write of skipped records leaves the blob unrecorded
+
+- **WHEN** writing a blob's `records` failure fails during a poll cycle
+- **THEN** the cycle fails, the blob is not recorded in the ingest ledger, and the watermark holds
 
 #### Scenario: A day failure is recorded
 
@@ -88,11 +116,13 @@ Every recorded failure SHALL carry one class, `transient` or `deterministic`, an
 The service SHALL classify a failure as `deterministic` only when repeating the attempt cannot succeed with
 the same blob and the same configuration:
 
-| Reason code     | Failure |
-|-----------------|---------|
-| `corrupt_gzip`  | The blob's gzip stream is invalid: a bad header, a bad CRC or an invalid deflate block. |
-| `mapping_error` | Mapping a record, or a deriver or transform applied to it, raised an error. |
-| `blob_missing`  | The blob is no longer listed by the store, so it was deleted or has expired. |
+| Reason code          | Failure |
+|----------------------|---------|
+| `corrupt_gzip`       | The blob's gzip stream is invalid: a bad header, a bad CRC or an invalid deflate block. |
+| `mapping_error`      | Mapping a record, or a deriver or transform applied to it, raised an error. |
+| `blob_missing`       | The blob is no longer listed by the store, so it was deleted or has expired. |
+| `rejected_by_server` | ClickHouse refused the blob's rows with a data-class error, isolated by splitting the batch. |
+| `skipped_records`    | The blob was ingested, but some of its lines were skipped or records dropped. It applies only to `records` subjects. |
 
 Every other failure SHALL be `transient`. In particular, a gzip stream that ends early (an end-of-input
 `EOF`) SHALL be `transient`, because a read that was cut short cannot be told apart from a truncated blob. The
@@ -103,15 +133,21 @@ transient reason codes are:
 | `read_error`     | Opening or reading a blob failed, or another blob-level failure occurred. |
 | `listing_failed` | Listing a day's prefix failed. |
 | `prepare_failed` | Preparing a day failed: resolving its prefix, or reading the catalog for its write path. |
-| `write_failed`   | During the blob loop, a batch insert, a read or write of the ingest ledger, or a failure-event write failed. |
+| `write_failed`   | During the blob loop, a batch insert that was not split by blob, a read or write of the ingest ledger, or a failure-event write failed. |
 | `storage_full`   | ClickHouse refused a write for lack of disk space. |
 
-The last four apply only to days.
+The last four apply only to days. A failed retry of a `records` subject is classified as a blob's would be.
 
 #### Scenario: A mapping fault is deterministic
 
 - **WHEN** a deriver raises an error while a record of a blob is mapped
 - **THEN** the blob's failure is recorded with the class `deterministic` and the reason `mapping_error`
+
+#### Scenario: A refused blob is deterministic
+
+- **WHEN** a batch split isolates a blob whose rows ClickHouse still refuses with `TYPE_MISMATCH`
+- **THEN** the blob's failure is recorded with the class `deterministic`, the reason `rejected_by_server`, and a
+  message naming the target table and `53 TYPE_MISMATCH`
 
 #### Scenario: An early end of the gzip stream is transient
 
@@ -136,7 +172,8 @@ The derivation SHALL work as follows.
   ingest ledger holds an entry for its key that was written after the blob's latest failure, with a last-modified
   time at or after the one that failure carried. A blob that is rewritten and then ingested therefore resolves its
   earlier failure. An entry written before the failure does not resolve it: that is a blob ingested once and
-  failing again, for example in a backfill that includes already-ingested blobs.
+  failing again, for example in a backfill that includes already-ingested blobs. The ingest ledger SHALL NOT
+  resolve a `records` subject, because the very ingest that skipped its records also records its blob there.
 - **Pending after a requeue.** An unresolved subject with no `failed` event after its reset point, which means
   it was requeued, is `pending`.
 - **Parked.** Any other unresolved subject is `parked` when the class of its latest failure is
@@ -146,13 +183,14 @@ The derivation SHALL work as follows.
   `sync.retry.initial-backoff × 2^(attempts − 1)`, capped at `sync.retry.max-backoff`. A pending subject whose
   latest event is `requeued` is due at once.
 
-The service SHALL write a `resolved` event in four cases:
+The service SHALL write a `resolved` event in five cases:
 - a run of a day that has an unresolved day failure completes its day without a day-level failure;
 - a retry of a blob succeeds;
 - a retry finds the blob already recorded in the ingest ledger;
 - a sweep finds an unresolved blob that the ingest ledger has resolved since it failed. This keeps the set of
   unresolved subjects to what is actually missing, rather than letting it grow with every blob that recovered on
-  its own path.
+  its own path;
+- a retry of a `records` subject ingests its blob with no skipped line and no dropped record.
 
 A day run with failed blobs still resolves its day failure. Its blobs stay outstanding on their own entries.
 
@@ -166,6 +204,12 @@ entries.
 - **WHEN** a blob was ingested and recorded, and a later backfill that includes already-ingested blobs fails it
   with a mapping error
 - **THEN** the blob is `parked` and listed, rather than resolved by the entry written before it failed
+
+#### Scenario: Skipped records stay parked although the blob is ingested
+
+- **WHEN** a blob is ingested and recorded in the ingest ledger, and its `records` failure was written in the same
+  hand-over
+- **THEN** the `records` subject is `parked`, and a later sweep does not resolve it through the ingest ledger
 
 #### Scenario: A blob ingested later resolves its failure
 
@@ -207,7 +251,8 @@ The service SHALL run a retry sweep on the schedule `sync.retry.cron`, in-proces
 SHALL NOT start a sweep while the previous one is still running.
 
 Each sweep SHALL take the `pending` subjects whose next attempt is due, oldest latest failure first, and
-attempt at most `sync.retry.max-per-sweep` of them. A blob and a day each count as one attempt.
+attempt at most `sync.retry.max-per-sweep` of them. A blob, a day and a `records` subject each count as one
+attempt.
 
 A blob attempt SHALL list the blob by its key. Then:
 - If the listing fails, or the store no longer lists the blob, the new `failed` event SHALL carry the version
@@ -223,9 +268,18 @@ A blob attempt SHALL list the blob by its key. Then:
   next is read, so a failed batch insert or ingest-ledger write is that blob's failed attempt, not a fault of
   the sweep.
 
+A `records` attempt is pending only after an operator requeued it, because its failures are deterministic. It
+SHALL list the blob as a blob attempt does, with the same `blob_missing` outcome. It SHALL NOT consult the ingest
+ledger, which always records the blob. It SHALL ingest the blob through the same pipeline and record it in the
+ingest ledger. Then:
+- with no skipped line and no dropped record, it writes `resolved`;
+- otherwise it records a new `skipped_records` failure with the path `retry`, which parks the subject again with
+  the current counts.
+
 A failed blob attempt SHALL record a new `failed` event with the path `retry`. A write failure is classified as
 any other blob-level failure, so the blob backs off and eventually parks rather than failing every sweep ahead
-of the other due subjects.
+of the other due subjects. A `records` attempt that fails to read or write its blob is recorded the same way, on
+its `records` subject.
 
 A day attempt SHALL re-run the day exactly as a reconciliation run does. It skips the blobs the ingest ledger
 records, even when the day's original failure happened in a backfill that included already-ingested blobs. A
@@ -250,6 +304,24 @@ Parked subjects SHALL NOT be attempted until an operator requeues them.
 - **WHEN** a blob was ingested and recorded, a later backfill that includes already-ingested blobs parks it with
   a mapping error, and an operator requeues it after the mapping is fixed
 - **THEN** the next sweep reads and ingests the blob again before writing `resolved`
+
+#### Scenario: A requeued blob refused by the server is ingested after a fix
+
+- **WHEN** a blob is parked with `rejected_by_server`, the cause is fixed, and an operator requeues it
+- **THEN** the next sweep ingests it, records it in the ingest ledger and writes `resolved`
+
+#### Scenario: A rewritten blob resolves its skipped records
+
+- **WHEN** a blob's `records` subject is parked, the producer rewrote the blob without the bad lines, and an
+  operator requeues the subject
+- **THEN** the next sweep re-ingests the blob although the ingest ledger records it, finds nothing skipped, and
+  writes `resolved`
+
+#### Scenario: Unchanged skipped records park again
+
+- **WHEN** an operator requeues a `records` subject whose blob still holds the same malformed line
+- **THEN** the next sweep re-ingests the blob and records a new `skipped_records` failure, and the subject is
+  `parked`
 
 #### Scenario: A write failure during a sweep is the blob's attempt
 
@@ -315,10 +387,10 @@ The service SHALL expose `GET /v1/data-sync/failures`. It returns the outstandin
 - a `truncated` member: whether more subjects matched than were returned.
 
 Each entry SHALL carry:
-- `kind`: `blob` or `day`;
+- `kind`: `blob`, `day` or `records`;
 - `subject`: the blob key or the ISO date;
 - `day`;
-- `blob_last_modified`: for blobs only;
+- `blob_last_modified`: for blobs and `records` subjects only;
 - `state`: `pending` or `parked`;
 - `failure_class`, `reason` and `message`: from the latest failure;
 - `path`: the path of the latest failure;
@@ -331,7 +403,7 @@ listed.
 
 The endpoint SHALL accept these optional query parameters:
 - `state` (`pending` or `parked`, case-insensitive);
-- `kind` (`blob` or `day`, case-insensitive);
+- `kind` (`blob`, `day` or `records`, case-insensitive);
 - `reason` (a reason code);
 - `from` and `to` (inclusive ISO dates on `day`);
 - `limit` (1 to 1000, default 100).
@@ -347,6 +419,13 @@ empty `failures` array and `truncated` set to `false`. A failure to read ClickHo
   resolved, and the caller requests `GET /v1/data-sync/failures`
 - **THEN** the response lists the three outstanding subjects ordered by latest failure, newest first, and does
   not list the resolved one
+
+#### Scenario: Blobs with skipped records are listed
+
+- **WHEN** two blobs have parked `records` subjects and the caller requests
+  `GET /v1/data-sync/failures?kind=records`
+- **THEN** both are listed with `kind` `records`, `state` `parked`, `reason` `skipped_records`, and the counts and
+  line numbers in `message`
 
 #### Scenario: Parked failures are filtered
 

@@ -95,7 +95,7 @@ class DataSyncFailuresControllerTest {
     @CsvSource(delimiter = '|', value = {
         "state|resolved|state must be one of [pending, parked]",
         "state|''|state must be one of",
-        "kind|file|kind must be one of [blob, day]",
+        "kind|file|kind must be one of [blob, day, records]",
         "reason|oops|reason must be one of",
         "from|yesterday|from must be an ISO date",
         "limit|0|limit must be an integer from 1 to 1000",

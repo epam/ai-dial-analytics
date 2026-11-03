@@ -71,6 +71,20 @@ public class LogParser {
      * @throws IOException if the stream cannot be read or decompressed
      */
     public long parse(InputStream rawGzipStream, String sourceFile, Consumer<JsonNode> recordConsumer) throws IOException {
+        return parse(rawGzipStream, sourceFile, (line, node) -> recordConsumer.accept(node), SkipListener.NONE);
+    }
+
+    /**
+     * As {@link #parse(InputStream, String, Consumer)}, also telling the consumer each record's line number and
+     * {@code skipListener} each skipped line's, so the ingest paths can name the lines a blob lost. Line numbers count
+     * every line of the decompressed stream from 1, blank lines included.
+     *
+     * @param recordConsumer receives each successfully parsed record with its line number
+     * @param skipListener   told of each malformed or oversized line, after its warning is logged
+     * @return the number of malformed or oversized lines skipped
+     * @throws IOException if the stream cannot be read or decompressed
+     */
+    public long parse(InputStream rawGzipStream, String sourceFile, RecordConsumer recordConsumer, SkipListener skipListener) throws IOException {
         long skipped = 0;
         long lineNumber = 0;
         try (GZIPInputStream gzip = new GZIPInputStream(rawGzipStream)) {
@@ -82,6 +96,7 @@ public class LogParser {
                     oversizedLines.increment();
                     log.warn("Skipping oversized NDJSON line {} in {}: {} bytes exceeds sync.max-line-bytes ({})",
                             lineNumber, sourceFile, reader.overflowBytes(), maxLineBytes);
+                    skipListener.oversized(lineNumber);
                     continue;
                 }
                 // Decoded leniently (malformed UTF-8 becomes U+FFFD) rather than handed to Jackson as bytes, which
@@ -98,12 +113,40 @@ public class LogParser {
                     // the consumer below must propagate, not be miscounted as benign parse skips.
                     skipped++;
                     log.warn("Skipping malformed NDJSON line {} in {}: {}", lineNumber, sourceFile, ex.getMessage());
+                    skipListener.malformed(lineNumber);
                     continue;
                 }
-                recordConsumer.accept(node);
+                recordConsumer.accept(lineNumber, node);
             }
         }
         return skipped;
+    }
+
+    /** Receives a parsed record and its 1-based line number. */
+    @FunctionalInterface
+    public interface RecordConsumer {
+        void accept(long line, JsonNode node);
+    }
+
+    /** Told of each line the parser skips, by its 1-based line number. */
+    public interface SkipListener {
+
+        /** Ignores every skip. */
+        SkipListener NONE = new SkipListener() {
+            @Override
+            public void malformed(long line) {
+            }
+
+            @Override
+            public void oversized(long line) {
+            }
+        };
+
+        /** The line does not parse as JSON. */
+        void malformed(long line);
+
+        /** The line is longer than {@code sync.max-line-bytes}. */
+        void oversized(long line);
     }
 
     /**

@@ -13,7 +13,7 @@ import java.time.Instant;
 @Schema(description = "An outstanding failed blob or day.")
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record IngestFailureView(
-        @JsonProperty("kind") @Schema(description = "`blob` or `day`.", example = "blob") String kind,
+        @JsonProperty("kind") @Schema(description = "`blob`, `day` or `records`.", example = "blob") String kind,
         @JsonProperty("subject") @Schema(description = "The blob's full key, or the day's ISO date.") String subject,
         @JsonProperty("day") @Schema(description = "UTC date: the day itself, or the blob's last-modified date.", example = "2026-05-26") String day,
         @JsonProperty("blob_last_modified") @Schema(description = "The blob's listed last-modified time at its latest failure; absent for a day.")
@@ -32,7 +32,7 @@ public record IngestFailureView(
 
     public static IngestFailureView of(IngestFailureEntry entry) {
         OpenIngestFailure failure = entry.failure();
-        boolean blob = failure.kind() == IngestFailureKind.BLOB;
+        boolean blob = failure.kind() != IngestFailureKind.DAY;
         return new IngestFailureView(
                 failure.kind().wire(),
                 failure.subject(),

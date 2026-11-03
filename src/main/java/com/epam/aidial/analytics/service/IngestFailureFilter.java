@@ -6,7 +6,7 @@ import java.util.Set;
 /**
  * Selects outstanding failure-ledger subjects; every member is optional and present members are ANDed.
  *
- * @param kind     blob or day
+ * @param kind     blob, day or records
  * @param state    pending or parked
  * @param reason   the reason code of the latest failure
  * @param from     inclusive lower bound on the subject's day
