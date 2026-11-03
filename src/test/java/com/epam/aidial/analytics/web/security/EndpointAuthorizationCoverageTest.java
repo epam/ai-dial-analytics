@@ -68,14 +68,18 @@ class EndpointAuthorizationCoverageTest {
      * <p>An allowlist rather than a blanket rule, because {@code deferred} on a global-only privilege
      * makes the endpoint authenticated-only and nothing in the annotation says where enforcement went.
      * For a table-scoped privilege the shape is self-describing — the tables are resolved downstream — so
-     * it needs no entry. These three are the case where the request body picks the privilege: a saved
-     * query's {@code scope} selects {@code SAVED_QUERY_WRITE} or {@code SAVED_QUERY_PUBLISH}, which the
-     * gate cannot see, and {@code SavedQueryAccess.requireWritable} decides both.
+     * it needs no entry. These are the cases where the request body picks the privilege: a saved query's
+     * {@code scope} selects {@code SAVED_QUERY_WRITE} or {@code SAVED_QUERY_PUBLISH}, which the gate cannot
+     * see, and {@code SavedQueryAccess.requireWritable} decides both; a dashboard's {@code visibility} does
+     * the same, decided by {@code DashboardAccess.requireWritable}.
      */
     private static final Set<String> DEFERRED_GLOBAL_ALLOWLIST = Set.of(
             "SavedQueryController#create",
             "SavedQueryController#replace",
-            "SavedQueryController#delete");
+            "SavedQueryController#delete",
+            "DashboardController#create",
+            "DashboardController#replace",
+            "DashboardController#delete");
 
     /** Every declaration problem for one handler, so one run reports them all. */
     private static List<String> check(Class<?> controller, Method method) {

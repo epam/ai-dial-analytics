@@ -127,10 +127,9 @@ public class SavedQueryController {
             description = "Returns the saved query's own stored fields reconstructed from the audit trail "
                     + "at the end of the given revision. 404 if the saved query did not exist at that "
                     + "revision, the revision is unknown, or the caller may not currently see it (visibility "
-                    + "is resolved against the saved query's current scope/owner, not its historical one; a "
-                    + "deleted saved query's history is visible to SAVED_QUERY_PUBLISH holders only, "
-                    + "including its former "
-                    + "owner). Revision ids come from the activity feed.")
+                    + "is resolved against the saved query's current scope/owner, not its historical one, so "
+                    + "a personal saved query's history is readable by its owner alone and a deleted saved "
+                    + "query's history by no one). Revision ids come from the activity feed.")
     public SavedQueryDto snapshot(
             @PathVariable String id,
             @Parameter(description = "Revision id, as carried by an activity") @PathVariable String revision) {
@@ -140,11 +139,12 @@ public class SavedQueryController {
 
     /**
      * Mirrors the live read's own visibility rule ({@code SavedQueryService#loadVisible}) rather than the
-     * historical state at the requested revision: a {@code SAVED_QUERY_PUBLISH} holder unconditionally,
-     * any caller when the
-     * saved query's <strong>current</strong> scope is {@code common}, or the caller recorded as its
-     * <strong>current</strong> owner. A saved query invisible to the caller and one that never existed
-     * answer the same way here, for the same disclosure reason {@code loadVisible} does.
+     * historical state at the requested revision: any caller when the saved query's <strong>current</strong>
+     * scope is {@code common}, or the caller recorded as its <strong>current</strong> owner. No privilege
+     * widens it: a {@code personal} saved query is visible to its owner alone, administrators included.
+     * A saved query invisible to the caller and one that never existed answer the same way here, for the
+     * same disclosure reason {@code loadVisible} does, and a deleted one has no current state, so its
+     * history is visible to no one.
      *
      * <p>Unconditionally passes in {@code none} mode — fails open, the same way every other
      * authorization check in the application does when security is off ({@link SavedQueryAccess}
@@ -153,7 +153,7 @@ public class SavedQueryController {
      * legitimate historical read whose subject no longer exists by definition.
      */
     private void requireCurrentlyVisible(String id) {
-        if (!access.isSecurityEnabled() || access.maySeeEverySavedQuery()) {
+        if (!access.isSecurityEnabled()) {
             return;
         }
         if (repository.findVisible(id, access.currentAuthor()).isEmpty()) {

@@ -237,6 +237,8 @@ a mapping `kind` that does not match. The DIAL Core fields the shipped mappings 
 | Postgres `V48` | Drops the evaluator archive (`evaluator`, `evaluator_version`), `pipeline.evaluator_name` / `evaluator_version` and their `pipeline_aud` mirrors, and `rule_legacy` / `rule_legacy_aud`. Keeps `pipeline.legacy_rule_id`, which 0.3 still maps; the next release drops it. |
 | Postgres `V49` | Adds the catalog rows of the two route columns (`V15`), so they are queryable. |
 | Postgres `V50` | Registers `request_cache_control` on `dial_usage_log_payload`, sensitive and heavy, and extends the seeded `request_body` description. |
+| Postgres `V51` | Adds `dashboard` and its audit mirror `dashboard_aud`, for the new `/v1/dashboards` API. Both start empty. |
+| Postgres `V52` | Adds the nullable `settings` column to `dashboard` and `dashboard_aud`. |
 
 The relayout itself is runtime DDL, not a migration: it runs after startup, off the probe path.
 
@@ -293,6 +295,8 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
 | A `PATCH` that only changes `enabled` no longer bumps `generation` | `generation` stays put across a stop and restart; the generation-change log line is not written for it | Watch `updated_at` for any change to a pipeline; `generation` tracks declaration revisions only (§1) |
 | `AGGREGATE_PREVIEW_ROWS` default lowered from `20` to `5` | An aggregate preview returns fewer rows | Set it back to `20` if wanted |
 | Pipeline preview `statement` is now the declaration in the ADAS SQL dialect (aggregate and Class-1 `sql`), with a new `query` member holding the same query as structured-query DSL, and a new note code `statement_not_portable` | `statement` names catalog entities and target columns and carries no `SETTINGS`, joins or `__` helper aliases; it is ordered by the keys, not newest first, and does not reproduce `total_rows`. A client that parsed the ClickHouse text, or showed it as the SQL that produced `rows`, misreads it | Run `statement` on `POST /v1/queries/execute-sql`, or `query` on `POST /v1/queries/execute`; handle `statement_not_portable` (both absent); read the physical sampling statement from the SQL log at `DEBUG` |
+| `SAVED_QUERY_WRITE` and `SAVED_QUERY_PUBLISH` now each imply `SAVED_QUERY_READ` | A `roles-mapping` naming either without `SAVED_QUERY_READ` now also lists and reads `common` saved queries and their revisions, the holder's own `personal` ones and `private` dashboards, and `public` dashboards. No bundle widens | None, unless such a mapping was meant to write without reading; that is no longer expressible |
+| A `personal` saved query and a `private` dashboard are visible to their owner alone | `FULL_ADMIN`, and any `SAVED_QUERY_PUBLISH` holder, no longer reads other users' `personal` saved queries at `GET /v1/saved-queries/{id}/revision/{rev}` (now `404`) or sees their activities in `/v1/activities`. The new dashboards follow the same rule from the start. A deleted saved query's activities, visible only to such holders before, are now visible to no one | None; a client that showed administrators other users' personal history loses it |
 
 ## 7. New configuration
 

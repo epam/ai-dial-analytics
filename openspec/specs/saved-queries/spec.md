@@ -671,12 +671,18 @@ inventing agreement between them would mean interpreting the period after all.
 
 A saved query SHALL have one of two scopes, with these rules in `oidc` mode:
 
-- **`personal`** — readable only by the caller whose identity equals its `owner_id`. Reading a
-  `personal` saved query SHALL require `SAVED_QUERY_READ`; creating, replacing, and deleting one
-  SHALL require `SAVED_QUERY_WRITE`, and SHALL be permitted only on the caller's own rows.
+- **`personal`** — readable only by the caller whose identity equals its `owner_id`, whatever
+  privileges any other caller holds, on every surface while it stays `personal`: the live read, the
+  revision endpoint and the activity feed (see `audit-trail`). Visibility follows the current scope, so
+  once its owner makes it `common`, its earlier revisions are readable as a `common` query's are. Reading a `personal` saved query SHALL require `SAVED_QUERY_READ`;
+  creating, replacing, and deleting one SHALL require `SAVED_QUERY_WRITE`, and SHALL be permitted only on
+  the caller's own rows.
 - **`common`** — readable by any caller holding `SAVED_QUERY_READ`. Creating, replacing, or deleting
   a `common` saved query SHALL require `SAVED_QUERY_PUBLISH`; a caller without it SHALL receive
   `403 forbidden`.
+
+`SAVED_QUERY_READ` MAY be held directly or by implication from `SAVED_QUERY_WRITE` or
+`SAVED_QUERY_PUBLISH` (see `authentication`).
 
 `owner_id` SHALL be the author in both scopes. Changing a saved query's scope SHALL require
 satisfying the write rule for **both** the stored scope and the requested scope, so a caller without
@@ -702,6 +708,12 @@ saved query is returned as written, and executing it remains subject to the read
 - **GIVEN** a `personal` saved query owned by one caller
 - **WHEN** a different authenticated caller reads it by id
 - **THEN** the response is `404` with machine code `not_found`, not `403`
+
+#### Scenario: A full administrator does not see another caller's personal saved query
+
+- **GIVEN** a `personal` saved query owned by one caller
+- **WHEN** a different caller holding every privilege reads it by id or at one of its revisions
+- **THEN** the response is `404` with machine code `not_found`
 
 #### Scenario: Personal rows of others are absent from the list
 
@@ -761,8 +773,8 @@ whose entire purpose is curating the shared catalogue authorized nothing on its 
 
 - **WHEN** a caller holding only `SAVED_QUERY_PUBLISH` creates, replaces or deletes a `common` saved
   query
-- **THEN** the request succeeds — and the same caller is still refused `403 forbidden` on every read
-  endpoint, because `SAVED_QUERY_PUBLISH` confers no read (see `authentication`)
+- **THEN** the request succeeds, and the same caller may read every `common` saved query, because
+  `SAVED_QUERY_PUBLISH` implies `SAVED_QUERY_READ` (see `authentication`)
 
 #### Scenario: A publish-only caller may not write a personal query
 

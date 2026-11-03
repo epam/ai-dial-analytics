@@ -12,7 +12,9 @@ surface is added incrementally as spec-driven changes. The querying surface is t
 `POST /v1/queries/execute-sql` (capability `rest-sql-endpoint`, same governed pipeline), their CSV-download twins `execute-csv` /
 `execute-sql-csv` (capability `query-csv-export`, same pipeline, RFC 4180 body), and the
 translation-only pair `POST /v1/queries/translate` / `translate-sql` (capability
-`query-translation-endpoint`, DSL ↔ SQL without execution); the `data-sync` path ingests DIAL
+`query-translation-endpoint`, DSL ↔ SQL without execution). Saved queries (`/v1/saved-queries`, capability
+`saved-queries`) and dashboards of query widgets (`/v1/dashboards`, capability `dashboards`) store authored
+intent the client runs through those endpoints; the `data-sync` path ingests DIAL
 usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic
 retry or operator requeue under `/v1/data-sync/failures` (capability `data-sync-failures`). `POST /v1/catalog/export` / `import` (each with a `/preview`
 twin; capability `catalog-export-import`) promote user tables and pipelines (never grants) between environments.

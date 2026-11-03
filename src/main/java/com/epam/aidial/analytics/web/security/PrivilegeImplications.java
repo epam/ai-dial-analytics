@@ -8,16 +8,25 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The privilege implication DAG, stated once as three direct edges and closed transitively on demand.
+ * The privilege implication DAG, stated once as five direct edges and closed transitively on demand.
  *
- * <p>An edge is admitted only where it is <b>disclosure-monotone</b>: the implied privilege reveals a
- * strict subset of what the granting privilege already reveals. Applied per edge rather than per
- * intuition, that rule yields exactly:
+ * <p>An edge is admitted on one of two grounds. The first is <b>disclosure-monotonicity</b>: the implied
+ * privilege reveals a strict subset of what the granting privilege already reveals. The second covers a
+ * privilege that <b>edits documents by whole-document replace</b>: writing a document presupposes reading
+ * it, so the privilege implies that read, provided <b>no read check consults the granting privilege</b>.
+ * Then, whatever else a caller holds, the granting privilege adds exactly the implied read to what it may
+ * see and nothing more. Applied per edge rather than per intuition, the two grounds yield exactly:
  *
  * <ul>
  *   <li>{@code TABLE_GET → TABLE_LIST} — a definition read contains the list entry.</li>
  *   <li>{@code TABLE_READ → TABLE_GET} — reading values presupposes knowing the columns.</li>
  *   <li>{@code TABLE_MODIFY → TABLE_GET} — evolving a schema requires seeing it.</li>
+ *   <li>{@code SAVED_QUERY_WRITE → SAVED_QUERY_READ} and {@code SAVED_QUERY_PUBLISH → SAVED_QUERY_READ} —
+ *   on the second ground. Saved queries and dashboards are replaced whole, and a dashboard replace carries
+ *   the {@code generation} a read returned. Every saved-query and dashboard read, the revision endpoint and
+ *   the activity feed included, decides visibility from scope, visibility and owner alone, never from a
+ *   write privilege: a {@code personal} saved query and a {@code private} dashboard are visible to their
+ *   owner only, whatever the caller holds.</li>
  * </ul>
  *
  * <p>and no others. <b>{@code TABLE_SENSITIVE} has no edge in either direction</b>: it is a clearance that
@@ -30,18 +39,12 @@ import java.util.Set;
  * guessed, so {@code WRITE} leaks the inventory without containing it. Admitting {@code WRITE → READ} is
  * the confusion that produced the rule-path read escalation this model closes, and keeping {@code WRITE}
  * isolated is also the better operational result — an ingest-only identity stays invisible in the catalog.
+ * Nor does the second ground reach it: a row insert appends and replaces nothing, so it edits no document.
  *
- * <p><b>{@code SAVED_QUERY_PUBLISH} implies nothing either</b>, and one review round briefly gave it
- * {@code → SAVED_QUERY_READ} on the argument that it already sees every saved query. That argument does
- * not hold: only the revision endpoint and the audit feed consult
- * {@code SavedQueryAccess.maySeeEverySavedQuery}, while {@code get} and {@code list} go through
- * {@code SavedQueryRepository.findVisible}, whose predicate has no such bypass. The edge therefore let a
- * {@code PUBLISH}-only caller read another user's <em>personal</em> saved query at
- * {@code GET /{id}/revision/{rev}} while {@code GET /{id}} on the same row still answered {@code 404} —
- * a disclosure, and an incoherent one. It does not imply {@code SAVED_QUERY_WRITE} either: the two name
- * different scopes rather than two rungs of one, and a write privilege is not a disclosure. What makes
- * {@code PUBLISH} authorize something on its own is the deferred gate on each saved-query write endpoint,
- * where {@code SavedQueryAccess.requireWritable} decides against the scope in the request body.
+ * <p>{@code SAVED_QUERY_PUBLISH} does not imply {@code SAVED_QUERY_WRITE}: the two name different scopes
+ * rather than two rungs of one, and a write privilege is not a disclosure. What makes either authorize a
+ * write on its own is the deferred gate on each saved-query and dashboard write endpoint, where the access
+ * check decides against the scope or visibility in the request body.
  *
  * <p>Implication is derived when a check runs and is never materialised into a stored grant list: a read
  * of the lists returns exactly the grantees that were written to them.
@@ -56,6 +59,8 @@ public final class PrivilegeImplications {
         direct.put(Privilege.TABLE_GET, EnumSet.of(Privilege.TABLE_LIST));
         direct.put(Privilege.TABLE_READ, EnumSet.of(Privilege.TABLE_GET));
         direct.put(Privilege.TABLE_MODIFY, EnumSet.of(Privilege.TABLE_GET));
+        direct.put(Privilege.SAVED_QUERY_WRITE, EnumSet.of(Privilege.SAVED_QUERY_READ));
+        direct.put(Privilege.SAVED_QUERY_PUBLISH, EnumSet.of(Privilege.SAVED_QUERY_READ));
         DIRECT = Map.copyOf(direct);
     }
 

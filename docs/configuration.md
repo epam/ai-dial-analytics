@@ -250,7 +250,7 @@ neither.
 
 | Variable                       | Property                       | Default | Required | Description                                                                                                                        |
 |--------------------------------|--------------------------------|---------|----------|------------------------------------------------------------------------------------------------------------------------------------|
-| `SAVED_QUERIES_MAX_BODY_BYTES` | `saved-queries.max-body-bytes` | `65536` | No       | Maximum combined serialized UTF-8 size of a saved query's `query`, `sql`, `time` and `chart` payload; larger is rejected with 422. |
+| `SAVED_QUERIES_MAX_BODY_BYTES` | `saved-queries.max-body-bytes` | `65536` | No       | Maximum combined serialized UTF-8 size of a saved query's `query`, `sql`, `time` and `chart` payload, and of each dashboard inline query's `query`, `sql` and `chart`; larger is rejected with 422. |
 
 ### Arrow Flight SQL endpoint
 
@@ -540,9 +540,9 @@ be mixed in one list. A value that names neither **fails startup**.
 | Bundle | Declares |
 |---|---|
 | `FULL_ADMIN` | every privilege |
-| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_READ`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE` |
 
 `READ_ONLY_SENSITIVE_ANALYTIC` is what makes reading a `sensitive` column reachable without
 administrative authority. `TABLE_SENSITIVE` is a clearance, not a verb: it confers nothing alone and
