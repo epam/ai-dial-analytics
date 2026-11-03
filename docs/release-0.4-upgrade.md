@@ -8,9 +8,10 @@ Three things make this release more than a redeploy:
 - a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `3` to `4`;
 - an **automatic relayout** of existing row-grain enrichments, which holds their writers for two to three
   minutes each, ten minutes after the deploy;
-- **new writer grants**: the system-table reads of the relayout, and a new ClickHouse table, the failure ledger
-  `_dial_internal_failed_ingest`, which every ingest path writes. Without them the relayout fails, and a writer
-  narrowed per table either fails startup or stops ingesting at the first failed blob (§1).
+- **new writer grants**: `SELECT` on `system.parts` and `system.data_skipping_indices`, which
+  `<database>.*` does not cover, and access to the new failure-ledger table `_dial_internal_failed_ingest`,
+  which every ingest path writes. Without the system-table grants the relayout fails; without the ledger
+  grant a writer narrowed per table either fails startup or stops ingesting at the first failed blob (§1).
 
 There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build writes aligned tables with no
 `request_time`, so its rows land in the 1970 partition, which the inherited TTL drops at the next merge.
