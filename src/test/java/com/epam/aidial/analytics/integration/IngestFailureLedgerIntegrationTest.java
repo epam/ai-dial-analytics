@@ -7,6 +7,7 @@ import com.epam.aidial.analytics.service.ClickHouseIngestFailureLedger;
 import com.epam.aidial.analytics.service.ClickHouseIngestLedger;
 import com.epam.aidial.analytics.service.IngestFailureEvent;
 import com.epam.aidial.analytics.service.IngestFailureKind;
+import com.epam.aidial.analytics.service.IngestFailureLedger;
 import com.epam.aidial.analytics.service.IngestFailureReason;
 import com.epam.aidial.analytics.service.IngestFailureService;
 import com.epam.aidial.analytics.service.IngestFailureState;
@@ -113,6 +114,22 @@ class IngestFailureLedgerIntegrationTest extends AbstractClickHouseIntegrationTe
         assertThat(failureLedger.open()).isEmpty();
         assertThat(failureLedger.latest(IngestFailureKind.DAY, day.toString())).contains(IngestFailureEvent.Type.RESOLVED);
         assertThat(failureLedger.latest(IngestFailureKind.DAY, "2026-05-27")).isEmpty();
+    }
+
+    /** A failed day keeps the ledger mode its run took, so its retry runs the same way. */
+    @Test
+    void failedDayKeepsItsLedgerMode() {
+        LocalDate day = LocalDate.parse("2026-05-26");
+        failureLedger.append(List.of(
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "backfill",
+                        IngestFailureReason.WRITE_FAILED, "down", T0, IngestLedger.Mode.INGEST_ALL.wire()),
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.REQUEUED, "operator",
+                        null, "", T0.plusSeconds(60))));
+
+        assertThat(failureLedger.open()).singleElement()
+                .satisfies(open -> assertThat(open.ledgerMode()).isEqualTo(IngestLedger.Mode.INGEST_ALL));
+        assertThat(failureLedger.latestOf(IngestFailureKind.DAY, day.toString()))
+                .contains(new IngestFailureLedger.Latest(IngestFailureEvent.Type.REQUEUED, "ingest_all"));
     }
 
     @Test

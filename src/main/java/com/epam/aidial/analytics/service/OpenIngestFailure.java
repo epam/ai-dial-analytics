@@ -20,6 +20,7 @@ import java.time.LocalDate;
  * @param reason           the reason code of the latest failure
  * @param message          the message of the latest failure
  * @param path             the path of the latest failure
+ * @param mode             the ledger mode of the latest failure: for a day, how its retry runs; empty otherwise
  */
 public record OpenIngestFailure(
         IngestFailureKind kind,
@@ -33,5 +34,17 @@ public record OpenIngestFailure(
         String failureClass,
         String reason,
         String message,
-        String path) {
+        String path,
+        String mode) {
+
+    /** A subject whose latest failure records no ledger mode. */
+    public OpenIngestFailure(IngestFailureKind kind, String subject, LocalDate day, Instant blobLastModified, Instant resetAt, int attempts,
+            Instant firstFailedAt, Instant lastFailedAt, String failureClass, String reason, String message, String path) {
+        this(kind, subject, day, blobLastModified, resetAt, attempts, firstFailedAt, lastFailedAt, failureClass, reason, message, path, "");
+    }
+
+    /** The ledger mode a retry of this subject takes. */
+    public IngestLedger.Mode ledgerMode() {
+        return IngestLedger.Mode.fromWire(mode);
+    }
 }

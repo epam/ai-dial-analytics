@@ -14,11 +14,14 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 
 /**
  * Writes the request-delta columns of payload rows. Specified in {@code openspec/specs/data-sync/spec.md}: "The request
@@ -61,7 +64,11 @@ import java.util.UUID;
  *
  * <p>The caller inserts the rewritten batch and, only once that insert succeeded, calls {@link Encoding#written()},
  * so a path becomes a parent candidate for later flushes only once its row is stored. Rows in the same insert can
- * link to each other, since they land together. Only rows of the current or the previous UTC day enter the cache: a
+ * link to each other, since they land together. A batch the caller has to split into several inserts no longer lands
+ * together, so before splitting it the caller asks {@link Encoding#isolate} to re-root every row linked to a row of
+ * another part: each part then links only within itself or to rows already stored, and a part that is not stored leaves
+ * no stored child naming its rows. For that the original body of each row linked within the flush is kept until the
+ * batch is stored. Only rows of the current or the previous UTC day enter the cache: a
  * chain never crosses a day, so an older row can never be the parent of live traffic, and a backfill of past days
  * would otherwise push the live paths out.
  *
@@ -96,6 +103,8 @@ public final class RequestDeltaEncoder {
     static final UUID NO_PARENT = new UUID(0L, 0L);
 
     private static final String METER = "ingest.request.delta.rows";
+    /** The resolution source of a parent found among the earlier requests of the same flush. */
+    private static final String FLUSH = "flush";
     private static final String LOOKUP_FAILURES = "ingest.request.delta.lookup.failures";
 
     /** Exact floats, and a duplicate member fails the parse: kept, the last copy would silently replace the others. */
@@ -171,11 +180,15 @@ public final class RequestDeltaEncoder {
 
         Map<UUID, ChainNode> stored = storedParents(items);
         Map<UUID, ChainNode> written = new HashMap<>();
+        // The row whose node `written` holds for each path: the parent row of a request linked within the flush.
+        Map<UUID, Map<String, Object>> writtenRows = new HashMap<>();
         // Each learned node with the row that carries its path, so a row that ends up not stored teaches nothing.
         List<Learned> learned = new ArrayList<>();
+        List<Link> links = new ArrayList<>();
         String oldestCached = LocalDate.now(clock).minusDays(1).toString();
         for (Item item : items) {
             Resolution resolution = resolve(item, written, stored);
+            Object original = item.row.get(REQUEST_BODY);
             boolean split = item.write(mapper, resolution.parent(), resolution.depth());
             if (!split) {
                 log.warn("A request body in {} parsed differently the second time; its row is stored whole with its path", table);
@@ -183,12 +196,18 @@ public final class RequestDeltaEncoder {
             // A row left whole carries its path and supplies its history from the body: a parent like any other, with no
             // parent of its own.
             ChainNode node = ChainNode.written(item.path(), split ? resolution.parent() : null);
-            if (written.putIfAbsent(item.path(), node) == null && item.day().compareTo(oldestCached) >= 0) {
-                learned.add(new Learned(node, item.row));
+            if (split && FLUSH.equals(resolution.source())) {
+                links.add(new Link(item.row, writtenRows.get(resolution.parent().path()), (String) original, item.path()));
+            }
+            if (written.putIfAbsent(item.path(), node) == null) {
+                writtenRows.put(item.path(), item.row);
+                if (item.day().compareTo(oldestCached) >= 0) {
+                    learned.add(new Learned(node, item.row));
+                }
             }
             count(split ? resolution.source() : "whole_with_path");
         }
-        return new Encoding(learned);
+        return new Encoding(learned, links);
     }
 
     /**
@@ -234,7 +253,7 @@ public final class RequestDeltaEncoder {
             UUID prefix = item.prefix(k);
             ChainNode node = written.get(prefix);
             if (node != null) {
-                return new Resolution(node, k, "flush");
+                return new Resolution(node, k, FLUSH);
             }
             node = cache.get(prefix);
             if (node != null) {
@@ -260,13 +279,75 @@ public final class RequestDeltaEncoder {
     private record Learned(ChainNode node, Map<String, Object> row) {
     }
 
+    /**
+     * A request linked to the row of an earlier request of the same flush, with the body it was sent with, so it can be
+     * re-rooted should the two land in different inserts.
+     */
+    private record Link(Map<String, Object> child, Map<String, Object> parent, String original, UUID path) {
+    }
+
     /** The outcome of {@link #encode}: the nodes to remember once the batch is stored. */
     public final class Encoding {
 
         private final List<Learned> learned;
+        private final List<Link> links;
+        /** The rows {@link #isolate} re-rooted or re-linked, with their new nodes, compared by identity. */
+        private final Map<Map<String, Object>, ChainNode> relinked = new IdentityHashMap<>();
 
         private Encoding(List<Learned> learned) {
+            this(learned, List.of());
+        }
+
+        private Encoding(List<Learned> learned, List<Link> links) {
             this.learned = learned;
+            this.links = links;
+        }
+
+        /**
+         * Prepares the batch for being inserted in parts: every row linked to the row of an earlier request of the flush
+         * that lies in another part is re-rooted — stored whole, in canonical form, with no parent — so no stored row can
+         * name a row that a refused part kept out of the table. A row linked within its own part keeps its link, its
+         * ancestors hint following any re-rooting above it. A row linked to a row the cache or the table supplied is
+         * linked to a stored row already and is left as it is. Call before any part is inserted, at most once.
+         *
+         * @param partOf the part each row of the batch is inserted with, compared with {@link Objects#equals}
+         * @return how many rows were re-rooted
+         */
+        public int isolate(Function<Map<String, Object>, ?> partOf) {
+            int rerooted = 0;
+            // Links are in time order, so a parent's new node is known before any of its children is visited.
+            for (Link link : links) {
+                if (!Objects.equals(partOf.apply(link.child()), partOf.apply(link.parent()))) {
+                    reroot(link);
+                    relinked.put(link.child(), ChainNode.written(link.path(), null));
+                    rerooted++;
+                    continue;
+                }
+                ChainNode parent = relinked.get(link.parent());
+                if (parent != null) {
+                    link.child().put(REQUEST_ANCESTOR_HASHES, parent.lineage(ANCESTORS_HINT).stream().map(UUID::toString).toList());
+                    relinked.put(link.child(), ChainNode.written(link.path(), parent));
+                }
+            }
+            if (rerooted > 0) {
+                registry.counter(METER, "table", table, "outcome", "rerooted").increment(rerooted);
+                log.info("Re-rooted {} request(s) in {} linked across the parts of a batch inserted in parts", rerooted, table);
+            }
+            return rerooted;
+        }
+
+        private void reroot(Link link) {
+            Map<String, Object> row = link.child();
+            ChatRequest request = ChatRequest.parse(mapper, link.original(), true);
+            row.put(REQUEST_PARENT_HASH, NO_PARENT.toString());
+            row.put(REQUEST_ANCESTOR_HASHES, List.of());
+            if (request == null) {
+                // Parsed twice already, so this cannot happen; should it, the row is stored as it was sent, a root.
+                row.put(REQUEST_BODY, link.original());
+                row.put(REQUEST_CACHE_CONTROL, null);
+                return;
+            }
+            row.put(REQUEST_BODY, request.stored(0));
         }
 
         /**
@@ -275,7 +356,7 @@ public final class RequestDeltaEncoder {
          * the cache holds one small entry per written row.
          */
         public void written() {
-            cache.putAll(learned.stream().map(Learned::node).toList());
+            cache.putAll(learned.stream().map(this::node).toList());
         }
 
         /**
@@ -288,7 +369,11 @@ public final class RequestDeltaEncoder {
                 written();
                 return;
             }
-            cache.putAll(learned.stream().filter(entry -> !notStored.contains(entry.row())).map(Learned::node).toList());
+            cache.putAll(learned.stream().filter(entry -> !notStored.contains(entry.row())).map(this::node).toList());
+        }
+
+        private ChainNode node(Learned entry) {
+            return relinked.getOrDefault(entry.row(), entry.node());
         }
     }
 
@@ -339,7 +424,7 @@ public final class RequestDeltaEncoder {
         static String scope(Map<String, Object> row) {
             String project = String.valueOf(row.get(PROJECT_ID));
             // Length-prefixed, so no project id or user hash, whatever characters it holds, can shift the boundary.
-            return project.length() + ":" + project + String.valueOf(row.get(USER_HASH));
+            return project.length() + ":" + project + row.get(USER_HASH);
         }
 
         /**

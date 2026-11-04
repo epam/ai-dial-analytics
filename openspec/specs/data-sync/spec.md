@@ -29,8 +29,10 @@ A failure to ingest a single blob SHALL NOT abort the run. Such failures include
 - mapping one of its records raises an error.
 
 The run SHALL record the blob's failure in the failure ledger (see `data-sync-failures`), count it, and continue
-with the day's remaining blobs. Rows that the failing blob had already buffered MAY still be written. They are
-collapsed when the blob is ingested again, because the blob is not recorded in the ingest ledger.
+with the day's remaining blobs. Rows that the failing blob still had buffered SHALL be discarded, unwritten.
+Rows of it that an earlier batch already wrote, because a batch filled while the blob was read, stay written: the
+blob is not recorded in the ingest ledger, and they are collapsed only if the blob is ingested again. A blob whose
+failure is deterministic is parked rather than retried, so until an operator requeues it those rows stay as written.
 
 The run SHALL fail its day only on a day-level fault:
 - listing the prefix fails;
@@ -1354,10 +1356,19 @@ than fail the flush. A data-class error is one whose numeric server error code i
 | 70   | `CANNOT_CONVERT_TYPE` |
 | 72   | `CANNOT_PARSE_NUMBER` |
 | 117  | `INCORRECT_DATA` |
+| 128  | `TOO_LARGE_ARRAY_SIZE` |
+| 130  | `CANNOT_READ_ARRAY_FROM_TEXT` |
 | 131  | `TOO_LARGE_STRING_SIZE` |
 | 321  | `VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE` |
 | 349  | `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` |
+| 376  | `CANNOT_PARSE_UUID` |
+| 407  | `DECIMAL_OVERFLOW` |
+| 441  | `CANNOT_PARSE_DOMAIN_VALUE_FROM_STRING` |
+| 467  | `CANNOT_PARSE_BOOL` |
 | 469  | `VIOLATED_CONSTRAINT` |
+| 563  | `CANNOT_READ_MAP_FROM_TEXT` |
+| 675  | `CANNOT_PARSE_IPV4` |
+| 676  | `CANNOT_PARSE_IPV6` |
 | 691  | `UNKNOWN_ELEMENT_OF_ENUM` |
 
 Recognition SHALL be by the code, never by message text. Every other failure SHALL fail the flush as before,
@@ -1382,12 +1393,19 @@ A refused blob's rows that the run still holds unwritten, in this table or any o
 written. Any further rows read from it SHALL be dropped too. A source row, such as a usage-log row, is therefore
 not written in this run for a blob whose enrichment rows, such as its payload rows, were refused. Rows of the blob
 that earlier batches already wrote stay written, as for any blob that fails part-way. They collapse on the
-deduplication key when the blob is ingested again.
+deduplication key only if the blob is ingested again; a refused blob is parked, so until an operator requeues it
+those rows stay as written.
 
 The rows a flush stage rewrote, such as a request-delta rewrite, SHALL be split and inserted as rewritten. They
-SHALL NOT be rewritten a second time. The flush stage SHALL learn which rows were not stored, so the request path
-of a refused row never becomes a parent candidate for later flushes. A stored row of the same batch that took a
-refused row as its parent keeps that link, and can be rebuilt once the refused blob is ingested again.
+SHALL NOT be prepared a second time. Before the first sub-insert, though, the stage SHALL be told which blob each row
+belongs to, and every request-delta row whose parent is the row of another blob of the same batch SHALL be re-rooted:
+stored as a chain root, its whole request in canonical form with an all-zero parent and no ancestors. A row linked
+to a row of its own blob keeps that link, since the two are stored or refused together, and its ancestors hint
+follows any re-rooting above it. A row linked to a parent that an earlier flush, the path cache or the payload table
+supplied keeps that link, since its parent is already stored. So no stored row ever names a refused row as its
+parent, whether or not the refused blob is ever ingested again. Re-rooting costs space only, and only on a batch
+ClickHouse refused. The flush stage SHALL also learn which rows were not stored, so the request path of a refused row
+never becomes a parent candidate for later flushes.
 
 Rows that a refused insert partly committed, and that a later sub-insert or retry writes again, collapse on the
 table's deduplication key like any other re-ingest.
@@ -1398,6 +1416,13 @@ table's deduplication key like any other re-ingest.
   `CANNOT_PARSE_DATETIME` because of one row of one blob
 - **THEN** the rows of the other 39 blobs are written and those blobs are recorded in the ingest ledger, the one
   blob is parked with the reason `rejected_by_server`, the cycle succeeds, and the watermark advances
+
+#### Scenario: A child is never stored linked to a refused blob's row
+
+- **WHEN** under `sync.request-body-mode=delta` one payload batch holds request A from blob 1 and its follow-up B from
+  blob 2, B is linked to A within the flush, and ClickHouse refuses the batch because of a row of blob 1
+- **THEN** blob 1 is refused, B is stored as a chain root carrying its whole request in canonical form, and no stored
+  row names A's path as its parent
 
 #### Scenario: A refused payload row withholds its blob's usage-log rows
 

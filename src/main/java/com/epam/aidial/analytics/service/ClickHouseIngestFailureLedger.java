@@ -33,17 +33,18 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
     public static final String TABLE = "_dial_internal_failed_ingest";
 
     /** The ledger's columns, for startup schema validation. */
-    public static final Map<String, String> COLUMNS = Map.of(
-            "kind", "LowCardinality(String)",
-            "subject", "String",
-            "day", "Date",
-            "blob_last_modified", "DateTime64(3, 'UTC')",
-            "event", "LowCardinality(String)",
-            "path", "LowCardinality(String)",
-            "failure_class", "LowCardinality(String)",
-            "reason", "LowCardinality(String)",
-            "message", "String",
-            "event_at", "DateTime64(3, 'UTC')");
+    public static final Map<String, String> COLUMNS = Map.ofEntries(
+            Map.entry("kind", "LowCardinality(String)"),
+            Map.entry("subject", "String"),
+            Map.entry("day", "Date"),
+            Map.entry("blob_last_modified", "DateTime64(3, 'UTC')"),
+            Map.entry("event", "LowCardinality(String)"),
+            Map.entry("path", "LowCardinality(String)"),
+            Map.entry("mode", "LowCardinality(String)"),
+            Map.entry("failure_class", "LowCardinality(String)"),
+            Map.entry("reason", "LowCardinality(String)"),
+            Map.entry("message", "String"),
+            Map.entry("event_at", "DateTime64(3, 'UTC')"));
 
     private static final String FAILED = "event = 'failed'";
     private static final String NOT_FAILED = "event != 'failed'";
@@ -58,12 +59,14 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             + " argMaxIf(failure_class, event_at, " + FAILED + ") AS latest_class,"
             + " argMaxIf(reason, event_at, " + FAILED + ") AS latest_reason,"
             + " argMaxIf(message, event_at, " + FAILED + ") AS latest_message,"
-            + " argMaxIf(path, event_at, " + FAILED + ") AS latest_path"
+            + " argMaxIf(path, event_at, " + FAILED + ") AS latest_path,"
+            + " argMaxIf(mode, event_at, " + FAILED + ") AS latest_mode"
             + " FROM " + TABLE
             + " GROUP BY kind, subject"
             + " HAVING argMax(event, event_at) != 'resolved' AND countIf(" + FAILED + ") > 0";
 
-    private static final String LATEST_SQL = "SELECT argMax(event, event_at) AS latest, count() AS events FROM " + TABLE
+    private static final String LATEST_SQL = "SELECT argMax(event, event_at) AS latest, argMaxIf(mode, event_at, " + FAILED + ") AS failed_mode,"
+            + " count() AS events FROM " + TABLE
             + " WHERE kind = {kind:String} AND subject = {subject:String}";
 
     /** The {@code DateTime64(3)} spelling the row-write path also hands ClickHouse. */
@@ -85,6 +88,7 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             row.put("blob_last_modified", STORAGE.format(event.blobLastModified().truncatedTo(ChronoUnit.MILLIS)));
             row.put("event", event.type().wire());
             row.put("path", event.path());
+            row.put("mode", event.mode());
             row.put("failure_class", event.reason() == null ? "" : event.reason().failureClass());
             row.put("reason", event.reason() == null ? "" : event.reason().wire());
             row.put("message", event.message());
@@ -114,13 +118,14 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
                     row.getString("latest_class"),
                     row.getString("latest_reason"),
                     row.getString("latest_message"),
-                    row.getString("latest_path")));
+                    row.getString("latest_path"),
+                    row.getString("latest_mode")));
         }
         return open;
     }
 
     @Override
-    public Optional<IngestFailureEvent.Type> latest(IngestFailureKind kind, String subject) {
+    public Optional<Latest> latestOf(IngestFailureKind kind, String subject) {
         for (GenericRecord row : writer.query(LATEST_SQL, Map.of("kind", kind.wire(), "subject", subject))) {
             if (row.getLong("events") == 0) {
                 return Optional.empty();
@@ -128,7 +133,7 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             String latest = row.getString("latest");
             for (IngestFailureEvent.Type type : IngestFailureEvent.Type.values()) {
                 if (type.wire().equals(latest)) {
-                    return Optional.of(type);
+                    return Optional.of(new Latest(type, row.getString("failed_mode")));
                 }
             }
         }

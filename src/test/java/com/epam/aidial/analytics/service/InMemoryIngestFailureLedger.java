@@ -67,17 +67,21 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
             open.add(new OpenIngestFailure(latest.kind(), latest.subject(), latest.day(), latest.blobLastModified(), resetAt,
                     (int) failed.stream().filter(event -> event.eventAt().isAfter(resetAt)).count(),
                     failed.getFirst().eventAt(), latest.eventAt(), latest.reason().failureClass(), latest.reason().wire(),
-                    latest.message(), latest.path()));
+                    latest.message(), latest.path(), latest.mode()));
         }
         return open;
     }
 
     @Override
-    public Optional<IngestFailureEvent.Type> latest(IngestFailureKind kind, String subject) {
+    public Optional<Latest> latestOf(IngestFailureKind kind, String subject) {
+        String failedMode = events.stream()
+                .filter(event -> event.kind() == kind && event.subject().equals(subject) && event.type() == IngestFailureEvent.Type.FAILED)
+                .max(Comparator.comparing(IngestFailureEvent::eventAt))
+                .map(IngestFailureEvent::mode).orElse("");
         return events.stream()
                 .filter(event -> event.kind() == kind && event.subject().equals(subject))
                 .max(Comparator.comparing(IngestFailureEvent::eventAt))
-                .map(IngestFailureEvent::type);
+                .map(event -> new Latest(event.type(), failedMode));
     }
 
     /** The events of one subject, in writing order. */

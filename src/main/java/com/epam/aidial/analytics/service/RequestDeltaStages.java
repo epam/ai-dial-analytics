@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -92,7 +93,18 @@ public class RequestDeltaStages {
             if (!hasColumns()) {
                 return Written.NONE;
             }
-            return encoder.encode(rows)::written;
+            RequestDeltaEncoder.Encoding encoding = encoder.encode(rows);
+            return new Written() {
+                @Override
+                public void written(Set<Map<String, Object>> notStored) {
+                    encoding.written(notStored);
+                }
+
+                @Override
+                public void isolate(Function<Map<String, Object>, ?> partOf) {
+                    encoding.isolate(partOf);
+                }
+            };
         }
 
         private boolean hasColumns() {

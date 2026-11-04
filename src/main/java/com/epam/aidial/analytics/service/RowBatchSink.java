@@ -45,7 +45,9 @@ import java.util.Set;
  * set of blobs and inserts each half, recursively: a half that is accepted is stored, and a single blob whose rows are
  * still refused is <em>refused</em> — its rows are not stored, and {@link #flush()} returns it so the caller can keep it
  * out of the ingest ledger and record it in the failure ledger. The sub-inserts send the rows as the stage rewrote them,
- * never preparing them again, and the stage learns which rows were not stored. A sub-insert failing for any other
+ * never preparing them again. Before the first of them the stage is told how the rows are grouped by blob
+ * ({@link FlushStage.Written#isolate}), so it can undo any rewrite that tied a row to another blob's row, and it learns
+ * which rows were not stored. A sub-insert failing for any other
  * reason fails the flush as a whole. Isolating {@code k} refused blobs among {@code b} costs at most about
  * {@code 2k·log2(b)} sub-inserts; refused ones create no parts. See {@code openspec/specs/data-sync/spec.md}, "A batch
  * ClickHouse refuses for its data is split by blob".
@@ -122,7 +124,7 @@ class RowBatchSink {
             try {
                 writer.insert(table, buffer);
             } catch (ClickHouseDataRejectedException rejected) {
-                refused = split(rejected, notStored);
+                refused = split(rejected, written, notStored);
             }
             totalInserted += buffer.size() - notStored.size();
         } catch (Exception ex) {
@@ -163,8 +165,10 @@ class RowBatchSink {
      * @param notStored receives the rows not stored
      * @return the blobs refused on their own
      */
-    private List<RefusedBlob> split(ClickHouseDataRejectedException rejected, Set<Map<String, Object>> notStored) {
+    private List<RefusedBlob> split(ClickHouseDataRejectedException rejected, FlushStage.Written written,
+            Set<Map<String, Object>> notStored) {
         Map<BlobListing, List<Map<String, Object>>> byBlob = new LinkedHashMap<>();
+        Map<Map<String, Object>, BlobListing> originOf = new IdentityHashMap<>();
         for (int i = 0; i < buffer.size(); i++) {
             BlobListing origin = origins.get(i);
             if (origin == null) {
@@ -172,8 +176,11 @@ class RowBatchSink {
                 throw new FlushException("ClickHouse refused a batch whose rows do not all name their blob", rejected);
             }
             byBlob.computeIfAbsent(origin, ignored -> new ArrayList<>()).add(buffer.get(i));
+            originOf.put(buffer.get(i), origin);
         }
         List<BlobListing> blobs = new ArrayList<>(byBlob.keySet());
+        // Each blob's rows may be inserted apart from the others' from here on, so none may depend on another blob's.
+        written.isolate(originOf::get);
         if (blobs.size() == 1) {
             // A batch of one blob is already split as far as it goes.
             notStored.addAll(byBlob.get(blobs.getFirst()));

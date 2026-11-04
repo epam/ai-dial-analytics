@@ -209,6 +209,45 @@ class IngestRetrySweepTest {
         assertThat(registry.counter("sync.retry.attempts", "kind", "day", "outcome", "success").count()).isEqualTo(1);
     }
 
+    /**
+     * A day that failed while a backfill ingested every blob is retried the same way: the blobs after its fault are
+     * recorded from an earlier ingest, and a retry that skipped them would resolve the day with their old rows in place.
+     */
+    @Test
+    void dayThatFailedIngestingEveryBlobIsRetriedTheSameWay() throws Exception {
+        BlobListing blob = writeBlob("a.log.gz", "p1");
+        ledger.record(List.of(blob));
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        failures.recordDayFailure(today, IngestPath.BACKFILL, IngestLedger.Mode.INGEST_ALL, IngestFailureReason.WRITE_FAILED,
+                new IllegalStateException("insert failed"));
+        clock.advance(Duration.ofMinutes(16));
+
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.succeeded()).isEqualTo(1);
+        assertThat(writer.rows).extracting(row -> row.get("project_id")).containsExactly("p1");
+        assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).extracting(IngestFailureEvent::type)
+                .containsExactly(IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.RESOLVED);
+    }
+
+    /** A run that skips recorded blobs, such as the scheduled one, does not resolve such a day. */
+    @Test
+    void skippingRunLeavesOpenTheDayThatFailedIngestingEveryBlob() throws Exception {
+        BlobListing blob = writeBlob("a.log.gz", "p1");
+        ledger.record(List.of(blob));
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        failures.recordDayFailure(today, IngestPath.BACKFILL, IngestLedger.Mode.INGEST_ALL, IngestFailureReason.WRITE_FAILED,
+                new IllegalStateException("insert failed"));
+
+        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RECONCILE,
+                DataSyncService.IngestProgressListener.NO_OP);
+
+        assertThat(run.success()).isTrue();
+        assertThat(writer.rows).isEmpty();
+        assertThat(failures.outstanding()).singleElement().satisfies(entry ->
+                assertThat(entry.failure().ledgerMode()).isEqualTo(IngestLedger.Mode.INGEST_ALL));
+    }
+
     @Test
     void theSweepIsBounded() throws Exception {
         BlobListing older = writeBlob("a.log.gz", "p1");

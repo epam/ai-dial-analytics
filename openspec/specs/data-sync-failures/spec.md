@@ -26,7 +26,8 @@ The table SHALL be an append-only log of events. Each event names a **subject** 
 
 Each event SHALL be one of three kinds:
 - `failed`: an attempt failed. It carries the failure class, a stable reason code, a message and the ingest
-  path that made the attempt.
+  path that made the attempt. A failed day also carries the ingest-ledger mode its run took: `skip_recorded`, or
+  `ingest_all` for a backfill that included already-ingested blobs.
 - `resolved`: the subject no longer needs recovery.
 - `requeued`: an operator asked for the subject to be attempted again.
 
@@ -36,7 +37,9 @@ date of the event when the store listed none.
 
 A message SHALL be at most 512 characters. It SHALL be taken from the failure's exception chain and SHALL NOT
 contain record content. For a mapping fault it SHALL therefore name only the target table and the exception
-types, because the messages of a mapping fault can quote the record. For a `records` subject it SHALL list each
+types, because the messages of a mapping fault can quote the record. From the first exception of the ClickHouse
+client in the chain on, it SHALL keep only the exception types and the server error code, never the server's
+message, because an insert error's message often quotes the offending input. For a `records` subject it SHALL list each
 cause that occurred (`malformed_line`, `oversized_line`, `missing_dedup_key`), with its count and its first line
 numbers, as many as fit.
 
@@ -172,8 +175,12 @@ The derivation SHALL work as follows.
   ingest ledger holds an entry for its key that was written after the blob's latest failure, with a last-modified
   time at or after the one that failure carried. A blob that is rewritten and then ingested therefore resolves its
   earlier failure. An entry written before the failure does not resolve it: that is a blob ingested once and
-  failing again, for example in a backfill that includes already-ingested blobs. The ingest ledger SHALL NOT
-  resolve a `records` subject, because the very ingest that skipped its records also records its blob there.
+  failing again, for example in a backfill that includes already-ingested blobs. The comparison is across two
+  clocks: ClickHouse stamps the ingest-ledger entry, and the service stamps the failure event, which keeps the time
+  it happened even when it is written later. Skew between them can at most make a blob re-ingested right after its
+  failure look ingested before it. That blob is then retried once more, and its rows collapse on the dedup key. The
+  ingest ledger SHALL NOT resolve a `records` subject, because the very ingest that skipped its records also records
+  its blob there.
 - **Pending after a requeue.** An unresolved subject with no `failed` event after its reset point, which means
   it was requeued, is `pending`.
 - **Parked.** Any other unresolved subject is `parked` when the class of its latest failure is
@@ -184,7 +191,9 @@ The derivation SHALL work as follows.
   latest event is `requeued` is due at once.
 
 The service SHALL write a `resolved` event in five cases:
-- a run of a day that has an unresolved day failure completes its day without a day-level failure;
+- a run of a day that has an unresolved day failure completes its day without a day-level failure, unless the
+  run skipped recorded blobs and the failure was recorded by a run that ingested every blob (see the day attempt
+  below);
 - a retry of a blob succeeds;
 - a retry finds the blob already recorded in the ingest ledger;
 - a sweep finds an unresolved blob that the ingest ledger has resolved since it failed. This keeps the set of
@@ -284,9 +293,16 @@ any other blob-level failure, so the blob backs off and eventually parks rather 
 of the other due subjects. A `records` attempt that fails to read or write its blob is recorded the same way, on
 its `records` subject.
 
-A day attempt SHALL re-run the day exactly as a reconciliation run does. It skips the blobs the ingest ledger
-records, even when the day's original failure happened in a backfill that included already-ingested blobs. A
-blob that fails within that day SHALL record its own failure, as on every path.
+A day attempt SHALL re-run the day in the ingest-ledger mode its latest failure recorded. A day that failed in a
+reconciliation run or a default backfill is re-run as a reconciliation run does, skipping the blobs the ingest
+ledger records. A day that failed in a backfill that included already-ingested blobs is re-run ingesting every
+blob again. Skipping would be wrong there: the blobs after the fault are recorded from their earlier ingest, so a
+skipping retry would leave their earlier rows in place and still mark the day resolved. A blob that fails within
+that day SHALL record its own failure, as on every path.
+
+For the same reason, a run of a day that skips recorded blobs, such as the scheduled reconciliation run, SHALL NOT
+resolve a day failure recorded by a run that ingested every blob. The failure stays open until a run in that mode
+succeeds: its retry, or a backfill of the day with `includeIngested`.
 
 With `sync.retry.enabled` set to `false`:
 - the sweep SHALL attempt nothing;
@@ -295,6 +311,13 @@ With `sync.retry.enabled` set to `false`:
 - the endpoints SHALL keep working.
 
 Parked subjects SHALL NOT be attempted until an operator requeues them.
+
+#### Scenario: A day that failed while ingesting every blob is retried the same way
+
+- **WHEN** a backfill with `includeIngested` fails a day part-way through, after a mapping change, and the blobs after
+  the fault are recorded in the ingest ledger from their earlier ingest
+- **THEN** the scheduled reconciliation run of that day does not resolve its failure, and the retry sweep re-runs the
+  day ingesting every blob again, so those blobs are rewritten under the new mapping before the day is resolved
 
 #### Scenario: A transient blob failure is recovered after the overlap window
 

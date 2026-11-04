@@ -28,10 +28,19 @@ public class ClickHouseDataRejectedException extends RuntimeException {
             Map.entry(70, "CANNOT_CONVERT_TYPE"),
             Map.entry(72, "CANNOT_PARSE_NUMBER"),
             Map.entry(117, "INCORRECT_DATA"),
+            Map.entry(128, "TOO_LARGE_ARRAY_SIZE"),
+            Map.entry(130, "CANNOT_READ_ARRAY_FROM_TEXT"),
             Map.entry(131, "TOO_LARGE_STRING_SIZE"),
             Map.entry(321, "VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE"),
             Map.entry(349, "CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN"),
+            Map.entry(376, "CANNOT_PARSE_UUID"),
+            Map.entry(407, "DECIMAL_OVERFLOW"),
+            Map.entry(441, "CANNOT_PARSE_DOMAIN_VALUE_FROM_STRING"),
+            Map.entry(467, "CANNOT_PARSE_BOOL"),
             Map.entry(469, "VIOLATED_CONSTRAINT"),
+            Map.entry(563, "CANNOT_READ_MAP_FROM_TEXT"),
+            Map.entry(675, "CANNOT_PARSE_IPV4"),
+            Map.entry(676, "CANNOT_PARSE_IPV6"),
             Map.entry(691, "UNKNOWN_ELEMENT_OF_ENUM"));
 
     private final String table;

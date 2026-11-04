@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -52,6 +53,34 @@ class BlobSplitTest {
 
     private static Map<String, Object> poison(String blob) {
         return Map.of("blob", blob, "poison", true);
+    }
+
+    /** The stage is told each row's blob before the first sub-insert, so it can undo links between blobs. */
+    @Test
+    void theStageIsIsolatedByBlobBeforeAnySubInsert() {
+        PoisonWriter writer = new PoisonWriter();
+        List<String> events = new ArrayList<>();
+        Map<String, Object> first = row("b0", 1);
+        Map<String, Object> second = poison("b1");
+        RowBatchSink sink = new RowBatchSink(writer, SOURCE, 1000, Long.MAX_VALUE, rows -> new FlushStage.Written() {
+            @Override
+            public void written(Set<Map<String, Object>> notStored) {
+                events.add("written " + notStored.size());
+            }
+
+            @Override
+            public void isolate(Function<Map<String, Object>, ?> partOf) {
+                events.add("isolate after " + writer.attemptSizes.size() + " insert(s): "
+                        + ((BlobListing) partOf.apply(first)).name() + "," + ((BlobListing) partOf.apply(second)).name());
+            }
+        });
+        sink.offer(first, blob("b0"));
+        sink.offer(second, blob("b1"));
+
+        sink.flush();
+
+        assertThat(events).containsExactly("isolate after 1 insert(s): b0,b1", "written 1");
+        assertThat(writer.attemptSizes).containsExactly(2, 1, 1);
     }
 
     @Test

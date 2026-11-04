@@ -53,8 +53,8 @@ import java.util.function.Consumer;
  * callback (the ingest ledger) once none does — right after the flush that writes its last buffered row, or
  * at once when it finished with nothing buffered (a blob that produced no rows included). Blobs written by
  * the same flush are handed over as one batch, and {@link #flush()} always hands over, so a trailing blob is
- * never left behind. A blob whose read never finished (its ingest threw) is never handed over, and neither is
- * any blob after a failed flush. Tracking only decides when to call back; it never forces a flush, so batching
+ * never left behind. A blob whose read never finished (its ingest threw) is never handed over, and its rows
+ * still buffered are discarded ({@link #abandonBlob()}); neither is any blob after a failed flush. Tracking only decides when to call back; it never forces a flush, so batching
  * is unchanged.
  *
  * <p><b>Refused blobs and skipped records.</b> A per-table flush that ClickHouse refuses for its data splits by blob
@@ -136,11 +136,29 @@ class RunSink {
 
     /**
      * Starts reading {@code listing}: rows added until {@link #finishBlob()} belong to it. A blob started while
-     * another's read never finished (its ingest threw) abandons the earlier one, which is never handed over.
+     * another's read never finished (its ingest threw) {@linkplain #abandonBlob() abandons} the earlier one.
      */
     void startBlob(BlobListing listing) {
         ensureUsable();
+        abandonBlob();
         reading = listing;
+        readingTables = new HashSet<>();
+    }
+
+    /**
+     * Abandons the blob being read, whose read failed: its rows still buffered in any table are discarded, and it is
+     * never handed over. Rows of it that an earlier batch already wrote stay written. Does nothing when no read is open,
+     * or once the sink is unusable, so a caller can call it on any failure without masking the original one.
+     */
+    void abandonBlob() {
+        if (failed || reading == null) {
+            return;
+        }
+        Set<BlobListing> abandoned = Set.of(reading);
+        for (RowBatchSink sink : sinks.values()) {
+            sink.discard(abandoned);
+        }
+        reading = null;
         readingTables = new HashSet<>();
     }
 

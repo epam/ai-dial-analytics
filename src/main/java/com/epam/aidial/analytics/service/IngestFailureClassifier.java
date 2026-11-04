@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service;
 
+import com.clickhouse.client.api.ServerException;
 import com.epam.aidial.analytics.exception.CauseChain;
 
 import java.io.EOFException;
@@ -27,9 +28,15 @@ final class IngestFailureClassifier {
         return IngestFailureReason.READ_ERROR;
     }
 
+    /** The package of the ClickHouse client, whose exceptions carry the server's message. */
+    private static final String CLICKHOUSE_CLIENT_PACKAGE = "com.clickhouse.";
+
     /**
-     * A short description of the failure for the ledger: each exception in the chain by type, with its message
-     * except under a mapping fault, whose causes may quote the record being mapped.
+     * A short description of the failure for the ledger: each exception in the chain by type, with its message up to the
+     * first exception whose message may quote record content — a mapping fault, whose causes may quote the record being
+     * mapped, and an exception of the ClickHouse client, which carries the server's message, and an insert error's
+     * server message often quotes the offending input. From there on only the types are kept, with the server error
+     * code of a {@link ServerException}.
      */
     static String describe(Throwable error) {
         StringBuilder text = new StringBuilder();
@@ -40,7 +47,12 @@ final class IngestFailureClassifier {
                 text.append(" <- ");
             }
             text.append(cause.getClass().getSimpleName());
-            if (quoteMessages && cause.getMessage() != null) {
+            if (cause.getClass().getName().startsWith(CLICKHOUSE_CLIENT_PACKAGE)) {
+                quoteMessages = false;
+            }
+            if (cause instanceof ServerException server) {
+                text.append(": code ").append(server.getCode());
+            } else if (quoteMessages && cause.getMessage() != null) {
                 text.append(": ").append(cause.getMessage());
             }
             if (cause instanceof RecordMappingException) {

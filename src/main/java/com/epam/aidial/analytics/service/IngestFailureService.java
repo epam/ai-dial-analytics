@@ -183,12 +183,17 @@ public class IngestFailureService {
         }
     }
 
-    /**
-     * Records a failed run of a day. Never throws: an event that cannot be written is held in memory for the next
-     * sweep, with its original time.
-     */
+    /** As {@link #recordDayFailure(LocalDate, IngestPath, IngestLedger.Mode, IngestFailureReason, Throwable)}, for a run that skipped recorded blobs. */
     public void recordDayFailure(LocalDate day, IngestPath path, IngestFailureReason reason, Throwable error) {
-        IngestFailureEvent event = IngestFailureEvent.dayFailed(day, path, reason, IngestFailureClassifier.describe(error), clock.instant());
+        recordDayFailure(day, path, IngestLedger.Mode.SKIP_RECORDED, reason, error);
+    }
+
+    /**
+     * Records a failed run of a day, with the ledger mode it ran in, so its retry runs the same way. Never throws: an event
+     * that cannot be written is held in memory for the next sweep, with its original time.
+     */
+    public void recordDayFailure(LocalDate day, IngestPath path, IngestLedger.Mode mode, IngestFailureReason reason, Throwable error) {
+        IngestFailureEvent event = IngestFailureEvent.dayFailed(day, path, mode, reason, IngestFailureClassifier.describe(error), clock.instant());
         counted(IngestFailureKind.DAY, path.wire(), reason);
         try {
             failures.append(List.of(event));
@@ -198,13 +203,26 @@ public class IngestFailureService {
         }
     }
 
-    /**
-     * Writes {@code resolved} for a day that has an unresolved day failure, after a run of it completed without a
-     * day-level fault. Never throws: a day left unresolved is retried by the sweep, which resolves it then.
-     */
+    /** As {@link #resolveDayIfOpen(LocalDate, IngestPath, IngestLedger.Mode)}, for a run that skipped recorded blobs. */
     public void resolveDayIfOpen(LocalDate day, IngestPath path) {
+        resolveDayIfOpen(day, path, IngestLedger.Mode.SKIP_RECORDED);
+    }
+
+    /**
+     * Writes {@code resolved} for a day that has an unresolved day failure, after a run of it in {@code mode} completed
+     * without a day-level fault. A run that skipped recorded blobs does not resolve a failure of a run that ingested every
+     * blob: the blobs after that failure's fault are recorded from an earlier ingest, so it skipped them, and they still
+     * hold their rows from before. Never throws: a day left unresolved is retried by the sweep, which resolves it then.
+     */
+    public void resolveDayIfOpen(LocalDate day, IngestPath path, IngestLedger.Mode mode) {
         try {
-            if (failures.latest(IngestFailureKind.DAY, day.toString()).filter(type -> type != IngestFailureEvent.Type.RESOLVED).isEmpty()) {
+            IngestFailureLedger.Latest latest = failures.latestOf(IngestFailureKind.DAY, day.toString()).orElse(null);
+            if (latest == null || latest.type() == IngestFailureEvent.Type.RESOLVED) {
+                return;
+            }
+            if (mode == IngestLedger.Mode.SKIP_RECORDED && latest.failedLedgerMode() == IngestLedger.Mode.INGEST_ALL) {
+                log.info("Left the failure of day {} open: it failed while ingesting every blob, and the {} run skipped recorded ones", day,
+                        path.wire());
                 return;
             }
             failures.append(List.of(IngestFailureEvent.resolved(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, path.wire(), clock.instant())));

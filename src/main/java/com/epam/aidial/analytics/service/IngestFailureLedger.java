@@ -34,5 +34,30 @@ public interface IngestFailureLedger {
      * @param subject the blob key or ISO date
      * @return the latest event's type, or empty when the subject has none
      */
-    Optional<IngestFailureEvent.Type> latest(IngestFailureKind kind, String subject);
+    default Optional<IngestFailureEvent.Type> latest(IngestFailureKind kind, String subject) {
+        return latestOf(kind, subject).map(Latest::type);
+    }
+
+    /**
+     * The latest event of one subject, with the ledger mode of its latest failure.
+     *
+     * @param kind    blob, day or records
+     * @param subject the blob key or ISO date
+     * @return the latest event, or empty when the subject has none
+     */
+    Optional<Latest> latestOf(IngestFailureKind kind, String subject);
+
+    /**
+     * A subject's latest event.
+     *
+     * @param type       the latest event's type
+     * @param failedMode the ledger mode its latest failure recorded; empty when none
+     */
+    record Latest(IngestFailureEvent.Type type, String failedMode) {
+
+        /** The ledger mode of the latest failure. */
+        public IngestLedger.Mode failedLedgerMode() {
+            return IngestLedger.Mode.fromWire(failedMode);
+        }
+    }
 }

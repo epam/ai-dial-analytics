@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * A step a {@link RowBatchSink} runs on each batch right before inserting it, for a rewrite that needs the whole batch
@@ -37,5 +38,15 @@ interface FlushStage {
          * @param notStored the rows of the prepared batch that were not stored, compared by identity; empty when all were
          */
         void written(Set<Map<String, Object>> notStored);
+
+        /**
+         * Called before a prepared batch is inserted in parts rather than whole (see {@link RowBatchSink}): rewrites the
+         * rows again, where needed, so that whether one part is stored never changes what a row of another part means.
+         * Rows of one part land together, as a whole batch does.
+         *
+         * @param partOf the part each row is inserted with, compared with {@link Object#equals}
+         */
+        default void isolate(Function<Map<String, Object>, ?> partOf) {
+        }
     }
 }

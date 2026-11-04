@@ -131,6 +131,19 @@ class DataSyncServiceTest {
         assertThat(writer.insertCalls).isEqualTo(2);
     }
 
+    /** A blob ClickHouse refuses was read in full, yet it is a failed blob, not a processed one. */
+    @Test
+    void refusedBlobIsCountedAsFailedNotProcessed() {
+        writer.rejectRows = true;
+
+        DataSyncService.RunSummary summary = service.runOnce();
+
+        assertThat(summary.success()).isTrue();
+        assertThat(summary.filesProcessed()).isZero();
+        assertThat(summary.blobsFailed()).isEqualTo(1);
+        assertThat(ledger.recorded(PATH_PREFIX)).isEmpty();
+    }
+
     @Test
     void secondRunOverTheSameDayInsertsNothingAndCountsTheSkip() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

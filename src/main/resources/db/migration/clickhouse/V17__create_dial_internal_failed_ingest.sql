@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS _dial_internal_failed_ingest
     blob_last_modified DateTime64(3, 'UTC'),
     event              LowCardinality(String),
     path               LowCardinality(String),
+    mode               LowCardinality(String),
     failure_class      LowCardinality(String),
     reason             LowCardinality(String),
     message            String,

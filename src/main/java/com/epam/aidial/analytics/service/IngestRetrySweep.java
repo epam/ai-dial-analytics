@@ -135,7 +135,7 @@ public class IngestRetrySweep {
         for (IngestFailureEntry entry : due) {
             OpenIngestFailure failure = entry.failure();
             boolean ok = switch (failure.kind()) {
-                case DAY -> retryDay(LocalDate.parse(failure.subject()));
+                case DAY -> retryDay(failure);
                 case BLOB -> retryBlob(failure);
                 case RECORDS -> retryRecords(failure);
             };
@@ -144,8 +144,12 @@ public class IngestRetrySweep {
         return new SweepSummary(heldWritten, due.size(), succeeded, due.size() - succeeded);
     }
 
-    private boolean retryDay(LocalDate day) {
-        DataSyncService.RunSummary summary = dataSyncService.runForDate(day, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RETRY,
+    /**
+     * Re-runs a failed day in the ledger mode its failed run took: a day that failed while a backfill ingested every blob
+     * is ingested in full again, since the blobs after its fault are recorded from an earlier ingest and would be skipped.
+     */
+    private boolean retryDay(OpenIngestFailure failure) {
+        DataSyncService.RunSummary summary = dataSyncService.runForDate(LocalDate.parse(failure.subject()), failure.ledgerMode(), IngestPath.RETRY,
                 DataSyncService.IngestProgressListener.NO_OP);
         attempt(IngestFailureKind.DAY, summary.success() ? "success" : "failure");
         return summary.success();

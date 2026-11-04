@@ -124,7 +124,7 @@ public class BlobIngestor {
     /**
      * As {@link #ingest(String, RunSink)}, telling the sink which blob the rows belong to and when its read
      * ended, so the sink can report the blob once its rows are all written. A blob whose read throws is never
-     * reported.
+     * reported, and its rows still buffered are discarded.
      *
      * @param listing the listed blob: its key and last-modified time
      * @param sink    the run-scoped fan-out sink to append rows to
@@ -134,7 +134,15 @@ public class BlobIngestor {
      */
     public IngestResult ingest(BlobListing listing, RunSink sink) throws IOException {
         sink.startBlob(listing);
-        IngestResult result = ingest(listing.name(), sink);
+        IngestResult result;
+        try {
+            result = ingest(listing.name(), sink);
+        } catch (IOException | RuntimeException ex) {
+            // The rows the blob buffered before its read failed must not be written with the next batch: the blob is
+            // recorded as failed, and a deterministic failure is not retried until an operator requeues it.
+            sink.abandonBlob();
+            throw ex;
+        }
         sink.finishBlob(result.skipped());
         return result;
     }

@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service;
 
+import com.clickhouse.client.api.ServerException;
 import org.junit.jupiter.api.Test;
 
 import java.io.EOFException;
@@ -61,5 +62,16 @@ class IngestFailureClassifierTest {
     @Test
     void theDescriptionQuotesReadFaults() {
         assertThat(IngestFailureClassifier.describe(new ZipException("Not in GZIP format"))).isEqualTo("ZipException: Not in GZIP format");
+    }
+
+    @Test
+    void theDescriptionNeverQuotesClickHouseInsertErrorMessages() {
+        ServerException server = new ServerException(376, "Cannot parse uuid 'secret prompt': while executing 'insert'", 500, "q");
+        String description = IngestFailureClassifier.describe(
+                new RowBatchSink.FlushException(new IllegalStateException("ClickHouse insert failed", server)));
+
+        assertThat(description)
+                .isEqualTo("FlushException: Failed to insert a row batch <- IllegalStateException: ClickHouse insert failed <- ServerException: code 376")
+                .doesNotContain("secret prompt");
     }
 }

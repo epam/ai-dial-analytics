@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.blob.BlobListing;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -74,6 +75,16 @@ public interface IngestLedger {
         /** Skip the blobs the ledger records — the scheduled run, the poller and a default backfill. */
         SKIP_RECORDED,
         /** Ingest every listed blob, recorded or not — a backfill with {@code includeIngested: true}. */
-        INGEST_ALL
+        INGEST_ALL;
+
+        /** The lower-case spelling stored in the failure ledger. */
+        public String wire() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+
+        /** The mode a stored spelling names; {@link #SKIP_RECORDED} for an empty or unknown one. */
+        public static Mode fromWire(String wire) {
+            return INGEST_ALL.wire().equals(wire) ? INGEST_ALL : SKIP_RECORDED;
+        }
     }
 }

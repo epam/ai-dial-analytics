@@ -267,14 +267,15 @@ public class DataSyncService {
         }
 
         if (success) {
-            failures.resolveDayIfOpen(targetDate, path);
+            failures.resolveDayIfOpen(targetDate, path, mode);
         } else {
-            failures.recordDayFailure(targetDate, path, storageFull ? IngestFailureReason.STORAGE_FULL : failingStep, dayFault);
+            failures.recordDayFailure(targetDate, path, mode, storageFull ? IngestFailureReason.STORAGE_FULL : failingStep, dayFault);
         }
 
-        // A sink that was never built (the day failed while preparing) inserted nothing.
+        // A sink that was never built (the day failed while preparing) inserted nothing. A refused blob was read in full,
+        // so it was counted as processed; it is a failed one.
         RunSummary summary = new RunSummary(
-                filesProcessed, sink == null ? 0 : sink.totalInserted(), sink == null ? Map.of() : sink.insertedByTable(),
+                filesProcessed - blobsRefused.get(), sink == null ? 0 : sink.totalInserted(), sink == null ? Map.of() : sink.insertedByTable(),
                 rowsSkipped, rowsDropped, blobsSkipped, blobsFailed + blobsRefused.get(), success, storageFull);
         log.info("Data-sync run finished: {}", summary);
         return summary;

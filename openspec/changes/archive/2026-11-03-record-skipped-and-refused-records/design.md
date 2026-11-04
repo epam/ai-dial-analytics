@@ -146,8 +146,10 @@ The path records each one's `blob` failure with the reason `rejected_by_server` 
 as the `records` failures and ahead of the ingest-ledger write. The poller, the day path and the sweep then share one
 recording step (`IngestFailureService.recordHandOver`) and no per-path collection.
 
-Rows of the blob that earlier flushes already wrote stay written. This matches a blob that throws mid-read, which
-change 1 already accepts. The retry rewrites them, and they collapse on the dedup key.
+Rows of the blob that earlier flushes already wrote stay written. This matches a blob that throws mid-read (see
+`openspec/specs/data-sync/spec.md`, the requirement that a failure to ingest a single blob does not abort the run,
+introduced by `2026-11-01-durable-ingest-failure-ledger`). They collapse on the dedup key only if the blob is ingested
+again; a refused blob is parked, so until an operator requeues it they stay as written.
 
 ### 7. The flush stage learns which rows were not stored
 
