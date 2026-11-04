@@ -178,7 +178,8 @@ class DataBackfillServiceTest {
         assertThat(s.failedDates()).containsExactly(LocalDate.parse("2026-06-02"));
         assertThat(s.failedBlobs()).isEqualTo(1);
         assertThat(meterRegistry.counter("backfill.blobs.failed").count()).isEqualTo(1);
-        verify(syncService).runForDate(eq(LocalDate.parse("2026-06-02")), any(), eq(IngestPath.BACKFILL), any());
+        // The day runs as this backfill run, so the failures it records are attributed to the run.
+        verify(syncService).runForDate(eq(LocalDate.parse("2026-06-02")), any(), eq(IngestSource.backfill(run.runId())), any());
     }
 
     @Test

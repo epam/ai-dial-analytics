@@ -67,7 +67,7 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
             open.add(new OpenIngestFailure(latest.kind(), latest.subject(), latest.day(), latest.blobLastModified(), resetAt,
                     (int) failed.stream().filter(event -> event.eventAt().isAfter(resetAt)).count(),
                     failed.getFirst().eventAt(), latest.eventAt(), latest.reason().failureClass(), latest.reason().wire(),
-                    latest.message(), latest.path(), retryMode(sorted)));
+                    latest.message(), latest.path(), retryMode(sorted), backfillRuns(sorted)));
         }
         return open;
     }
@@ -90,6 +90,15 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
             return ingestAll;
         }
         return failed.isEmpty() ? "" : failed.getLast().mode();
+    }
+
+    /** The backfill runs whose failures came after the latest {@code resolved}, sorted. */
+    private static List<String> backfillRuns(List<IngestFailureEvent> sorted) {
+        Instant resolvedAt = sorted.stream().filter(event -> event.type() == IngestFailureEvent.Type.RESOLVED)
+                .map(IngestFailureEvent::eventAt).max(Comparator.naturalOrder()).orElse(Instant.EPOCH);
+        return sorted.stream()
+                .filter(event -> event.type() == IngestFailureEvent.Type.FAILED && event.eventAt().isAfter(resolvedAt) && !event.backfillRunId().isEmpty())
+                .map(IngestFailureEvent::backfillRunId).distinct().sorted().toList();
     }
 
     /** The events of one subject, in writing order. */

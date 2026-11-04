@@ -161,7 +161,7 @@ public class DataSyncService {
      * @return a summary of the day's ingestion
      */
     public RunSummary runForDate(LocalDate targetDate, IngestLedger.Mode mode, IngestProgressListener progressListener) {
-        return runForDate(targetDate, mode, IngestPath.RECONCILE, progressListener);
+        return runForDate(targetDate, mode, IngestSource.of(IngestPath.RECONCILE), progressListener);
     }
 
     /**
@@ -169,16 +169,18 @@ public class DataSyncService {
      * failure-ledger events are recorded under. A day that fails as a whole is recorded as a day failure, which the
      * retry sweep retries; a day that completes without a day-level fault resolves an earlier failure of it.
      *
-     * @param path the path running the day: the reconciliation run, a backfill or the retry sweep
+     * @param source the path running the day — the reconciliation run, a backfill or the retry sweep — and, for a backfill,
+     *               the run its failures are attributed to
      */
-    public RunSummary runForDate(LocalDate targetDate, IngestLedger.Mode mode, IngestPath path, IngestProgressListener progressListener) {
+    public RunSummary runForDate(LocalDate targetDate, IngestLedger.Mode mode, IngestSource source, IngestProgressListener progressListener) {
         // One INTERNAL parent span per day so the CLIENT spans this cycle triggers (blob list/get,
         // ClickHouse inserts) nest under a single trace instead of each becoming a disconnected root.
         Attributes attributes = Attributes.builder().put("sync.date", targetDate.toString()).build();
-        return clientSpanTracer.internalSpan("data-sync run", attributes, () -> ingestDate(targetDate, mode, path, progressListener));
+        return clientSpanTracer.internalSpan("data-sync run", attributes, () -> ingestDate(targetDate, mode, source, progressListener));
     }
 
-    private RunSummary ingestDate(LocalDate targetDate, IngestLedger.Mode mode, IngestPath path, IngestProgressListener progressListener) {
+    private RunSummary ingestDate(LocalDate targetDate, IngestLedger.Mode mode, IngestSource source, IngestProgressListener progressListener) {
+        IngestPath path = source.path();
         long filesProcessed = 0;
         long blobsSkipped = 0;
         long blobsFailed = 0;
@@ -206,7 +208,7 @@ public class DataSyncService {
             // The hand-over records what the written blobs skipped and the refused blobs in the failure ledger first, then
             // the written blobs in the ingest ledger.
             sink = blobIngestor.newHandOverSink(usageLogWriter, properties.batchSize(), properties.maxBatchBytes(), handOver -> {
-                failures.recordHandOver(handOver, path);
+                failures.recordHandOver(handOver, source);
                 for (RefusedBlob ignored : handOver.refused()) {
                     blobsRefused.incrementAndGet();
                     progressListener.onBlobFailed();
@@ -236,7 +238,7 @@ public class DataSyncService {
                 } catch (Exception ex) {
                     // One bad blob must not stop its day: record it and go on with the rest. The failures are written
                     // together below; a failed write fails the day, like a failed ledger write.
-                    blobFailures.add(failures.blobFailure(listing, path, ex));
+                    blobFailures.add(failures.blobFailure(listing, source, ex));
                     blobsFailed++;
                     progressListener.onBlobFailed();
                     continue;
@@ -269,7 +271,7 @@ public class DataSyncService {
         if (success) {
             failures.resolveDayIfOpen(targetDate, path, mode);
         } else {
-            failures.recordDayFailure(targetDate, path, mode, storageFull ? IngestFailureReason.STORAGE_FULL : failingStep, dayFault);
+            failures.recordDayFailure(targetDate, source, mode, storageFull ? IngestFailureReason.STORAGE_FULL : failingStep, dayFault);
         }
 
         // A sink that was never built (the day failed while preparing) inserted nothing. A refused blob was read in full,

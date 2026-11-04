@@ -12,6 +12,7 @@ import com.epam.aidial.analytics.service.IngestFailureReason;
 import com.epam.aidial.analytics.service.IngestFailureService;
 import com.epam.aidial.analytics.service.IngestFailureState;
 import com.epam.aidial.analytics.service.IngestLedger;
+import com.epam.aidial.analytics.service.OpenIngestFailure;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +31,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -114,6 +116,34 @@ class IngestFailureLedgerIntegrationTest extends AbstractClickHouseIntegrationTe
         assertThat(failureLedger.open()).isEmpty();
         assertThat(failureLedger.latest(IngestFailureKind.DAY, day.toString())).contains(IngestFailureEvent.Type.RESOLVED);
         assertThat(failureLedger.latest(IngestFailureKind.DAY, "2026-05-27")).isEmpty();
+    }
+
+    /** A subject names the backfill runs that failed it since its latest resolution, each once, sorted. */
+    @Test
+    void openNamesTheBackfillRunsSinceTheLatestResolution() {
+        LocalDate day = LocalDate.parse("2026-05-26");
+        String runA = "00000000-0000-4000-8000-00000000000a";
+        String runB = "00000000-0000-4000-8000-00000000000b";
+        String runC = "00000000-0000-4000-8000-00000000000c";
+        failureLedger.append(List.of(
+                dayFailed(day, runA, T0),
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.RESOLVED, "retry",
+                        null, "", T0.plusSeconds(60)),
+                dayFailed(day, runC, T0.plusSeconds(120)),
+                dayFailed(day, runB, T0.plusSeconds(180)),
+                dayFailed(day, runC, T0.plusSeconds(240)),
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "reconcile",
+                        IngestFailureReason.LISTING_FAILED, "down", T0.plusSeconds(300)),
+                failed("logs/a.log.gz", T0, IngestFailureReason.READ_ERROR, "poll", T0)));
+
+        assertThat(failureLedger.open()).extracting(OpenIngestFailure::subject, OpenIngestFailure::backfillRunIds).containsExactlyInAnyOrder(
+                tuple(day.toString(), List.of(runB, runC)),
+                tuple("logs/a.log.gz", List.of()));
+    }
+
+    private static IngestFailureEvent dayFailed(LocalDate day, String runId, Instant at) {
+        return new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "backfill",
+                IngestFailureReason.LISTING_FAILED, "down", at, IngestLedger.Mode.SKIP_RECORDED.wire(), runId);
     }
 
     /** A failed day keeps the ledger mode its run took, so its retry runs the same way. */

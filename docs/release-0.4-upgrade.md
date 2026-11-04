@@ -189,10 +189,13 @@ while it stayed inside the overlap window.
   operator backfill recovered it.
 - **Operator surface:**
   - `GET /v1/data-sync/failures` (`REGISTRY_READ`) lists `pending` and `parked` entries, newest first, filtered by
-    `state`, `kind`, `reason`, `from`/`to` and `limit`.
+    `state`, `kind`, `reason`, `from`/`to`, `backfill_run_id` and `limit`. It reports the `total` matched (with the
+    filters of a retry, the count that retry would requeue), the `by_state` counts, and `retry_sweep`: whether the
+    sweep runs and when it next starts.
   - `POST /v1/data-sync/failures/retry` (`DATA_SYNC_OPERATE`) requeues the matching outstanding entries with their
-    attempts reset, for example `{"state": "parked", "reason": "mapping_error"}` after a mapping fix. An empty body
-    is `400`, so nothing is requeued by accident.
+    attempts reset, for example `{"state": "parked", "reason": "mapping_error"}` after a mapping fix, or the failures
+    of one backfill run with `{"backfill_run_id": "<runId>"}`. `targets` names exact `{kind, subject}` pairs, since a
+    blob's `blob` and `records` entries share its key. An empty body is `400`, so nothing is requeued by accident.
 - **Backfill status** adds `failedBlobs`. A day with a failed blob is still named in `failedDates`, but its other
   blobs are now ingested.
 - **Metrics:** gauge `sync.failures.outstanding{kind,state}`, counters `sync.failures.recorded{kind,path,reason}` and

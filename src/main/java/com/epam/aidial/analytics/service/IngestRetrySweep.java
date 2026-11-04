@@ -149,7 +149,7 @@ public class IngestRetrySweep {
      * is ingested in full again, since the blobs after its fault are recorded from an earlier ingest and would be skipped.
      */
     private boolean retryDay(OpenIngestFailure failure) {
-        DataSyncService.RunSummary summary = dataSyncService.runForDate(LocalDate.parse(failure.subject()), failure.ledgerMode(), IngestPath.RETRY,
+        DataSyncService.RunSummary summary = dataSyncService.runForDate(LocalDate.parse(failure.subject()), failure.ledgerMode(), IngestSource.of(IngestPath.RETRY),
                 DataSyncService.IngestProgressListener.NO_OP);
         attempt(IngestFailureKind.DAY, summary.success() ? "success" : "failure");
         return summary.success();
