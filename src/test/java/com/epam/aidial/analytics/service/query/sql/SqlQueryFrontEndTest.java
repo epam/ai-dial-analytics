@@ -120,6 +120,51 @@ class SqlQueryFrontEndTest {
                 .hasMessageContaining("no_such_column");
     }
 
+    /**
+     * Calcite derives a bare select item's alias from its name, and under Babel conformance an identifier no
+     * table resolves is looked up among the select aliases, where it finds its own. Calcite then reports a
+     * self-referencing definition. The caller wrote no alias and no cycle; the message they get is the unknown
+     * column it actually is.
+     */
+    @Test
+    void unknownBareSelectItemIsReportedAsUnknownColumnNotSelfReference() {
+        assertThatThrownBy(() -> frontEnd.translate("SELECT event_kind, no_such_column FROM dial_usage_log"))
+                .isInstanceOf(SqlTranslationException.class)
+                .hasMessage("SQL validation error: Column 'no_such_column' not found in any table");
+    }
+
+    @Test
+    void unknownColumnInJoinSelectListIsReportedAsUnknownColumn() {
+        assertThatThrownBy(() -> frontEnd.translate(
+                "SELECT d.event_kind, no_such_column FROM dial_usage_log d JOIN dial_usage_log e ON d.event_kind = e.event_kind"))
+                .isInstanceOf(SqlTranslationException.class)
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .contains("Column 'no_such_column' not found")
+                        .doesNotContain("depends on itself"));
+    }
+
+    /** A cycle the caller did write still names a column no table has, so it is reported as unknown too. */
+    @Test
+    void callerWrittenAliasCycleIsReportedAsUnknownColumn() {
+        assertThatThrownBy(() -> frontEnd.translate("SELECT no_b AS no_a, no_a AS no_b FROM dial_usage_log"))
+                .isInstanceOf(SqlTranslationException.class)
+                .satisfies(ex -> assertThat(ex.getMessage())
+                        .matches("SQL validation error: Column 'no_[ab]' not found in any table"));
+    }
+
+    @Test
+    void selfReferenceRewriteNamesTheColumnCalciteReportsAsRecurring() {
+        assertThat(SqlQueryFrontEnd.reportSelfReferenceAsUnknownColumn(
+                "The definition of column 'no_a' depends on itself through the following columns: 'no_b', 'no_a'"))
+                .isEqualTo("Column 'no_a' not found in any table");
+    }
+
+    @Test
+    void selfReferenceRewriteLeavesOtherMessagesAlone() {
+        assertThat(SqlQueryFrontEnd.reportSelfReferenceAsUnknownColumn("Column 'event_kind' is ambiguous"))
+                .isEqualTo("Column 'event_kind' is ambiguous");
+    }
+
     @Test
     void unknownTableRejected() {
         assertThatThrownBy(() -> frontEnd.translate("SELECT x FROM no_such_table"))

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -30,6 +31,7 @@ EXTRACT_COLUMNS = ["event_kind", "deployment", "prompt_tokens", "completion_toke
                    "total_tokens", "request_time"]
 EXTRACT_SQL = f"SELECT {', '.join(EXTRACT_COLUMNS)} FROM {ENTITY} LIMIT 1000"
 MAX_LIMIT = 1000  # the extract's own LIMIT; the server maximum is FLIGHT_MAX_ROWS (10000 by default)
+OVERSIZED_LIMIT = 50000  # above the default FLIGHT_MAX_ROWS (clamped); a cap at or above it honours the LIMIT
 
 
 class EnvironmentFailure(Exception):
@@ -120,25 +122,58 @@ def check_aggregate_cross(ctx: dict) -> CheckResult:
                        f"server {server}")
 
 
-def check_limit_rejected(ctx: dict) -> CheckResult:
-    """LIMIT above the structured-query maximum is rejected, not silently clamped."""
-    return _expect_rejection(ctx, "limit-rejected",
-                             f"SELECT event_kind FROM {ENTITY} LIMIT 50000",
-                             ("exceeds the maximum", "INVALID_ARGUMENT"))
+def check_limit_clamped(ctx: dict) -> CheckResult:
+    """A LIMIT above the Flight row maximum (FLIGHT_MAX_ROWS) is clamped to it, never rejected for its literal.
+
+    Self-consistent against the table's own count, taken right before and right after the fetch so rows
+    ingested meanwhile cannot fail it: when the whole result fits under the maximum, every row comes back;
+    when it does not, the call fails naming the maximum, which the count must then exceed. A truncated page
+    is never an acceptable answer.
+    """
+    name = "limit-clamped"
+    before = _count(ctx)
+    try:
+        df = ctx["fetch"](f"SELECT event_kind FROM {ENTITY} LIMIT {OVERSIZED_LIMIT}")
+    except Exception as exc:
+        message = str(exc)
+        total = max(before, _count(ctx))
+        match = re.search(r"the result exceeds the maximum of (\d+) rows", message)
+        if match and total > int(match.group(1)):
+            return CheckResult(name, True, info=[
+                f"{total} rows exceed the {match.group(1)}-row maximum; refused rather than truncated: "
+                + _first_line(message)[:160]])
+        return CheckResult(name, False,
+                           "all rows, or the row-maximum refusal for a table larger than the maximum",
+                           f"{total} rows counted; {message[:300]}")
+    after = _count(ctx)
+    low, high = min(before, after, OVERSIZED_LIMIT), min(max(before, after), OVERSIZED_LIMIT)
+    if low <= len(df) <= high:
+        return CheckResult(name, True, info=[
+            f"LIMIT {OVERSIZED_LIMIT} accepted; {len(df)} rows, the whole result up to the LIMIT, no truncated page"])
+    expected = f"all {low} rows" if low == high else f"all rows, between {low} and {high} (rows were ingested meanwhile)"
+    return CheckResult(name, False, f"{expected} (no truncated page)", f"{len(df)} rows")
+
+
+def _count(ctx: dict) -> int:
+    return int(ctx["fetch"](f"SELECT count(*) AS n FROM {ENTITY}").iloc[0]["n"])
+
+
+def _first_line(message: str) -> str:
+    return message.splitlines()[0] if message else ""
 
 
 def check_unsupported_rejected(ctx: dict) -> CheckResult:
     """A DSL-inexpressible construct fails closed with INVALID_ARGUMENT."""
     return _expect_rejection(ctx, "unsupported-rejected",
                              f"SELECT if(length(deployment) > 0, 'a', 'b') FROM {ENTITY}",
-                             ("cannot be expressed", "INVALID_ARGUMENT"))
+                             ("cannot be expressed in the structured query DSL",))
 
 
 def check_write_rejected(ctx: dict) -> CheckResult:
     """A write statement is rejected at the statement screen."""
     return _expect_rejection(ctx, "write-rejected",
                              f"DELETE FROM {ENTITY}",
-                             ("only SELECT", "INVALID_ARGUMENT"))
+                             ("only SELECT statements are supported",))
 
 
 def check_params_unsupported(ctx: dict) -> CheckResult:
@@ -184,7 +219,7 @@ CHECKS = [
     check_plain_execute,
     check_typed_extract,
     check_aggregate_cross,
-    check_limit_rejected,
+    check_limit_clamped,
     check_unsupported_rejected,
     check_write_rejected,
     check_params_unsupported,
