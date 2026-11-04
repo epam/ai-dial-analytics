@@ -49,6 +49,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The SQL front end for the SQL surfaces: screens the statement (exactly one read-only SELECT, optionally
@@ -71,6 +73,12 @@ public class SqlQueryFrontEnd {
      * before it locates the mistake; everything after it is the grammar, which no caller can act on.
      */
     private static final String EXPECTATION_MARKER = "Was expecting one of:";
+
+    /**
+     * Calcite's report of a select item whose definition refers to itself, as {@link #reportSelfReferenceAsUnknownColumn} reads it.
+     */
+    private static final Pattern SELF_REFERENCE =
+            Pattern.compile("The definition of column '([^']+)' depends on itself through the following columns: .*", Pattern.DOTALL);
 
     /** The refusal of a window function in an aggregate SQL declaration, shared with the pipeline gate. */
     public static final String WINDOW_REFUSAL = "a window function is not supported in an aggregate SQL declaration; "
@@ -260,7 +268,7 @@ public class SqlQueryFrontEnd {
         } catch (SqlParseException e) {
             throw parseError(sql, e);
         } catch (ValidationException e) {
-            throw new SqlTranslationException("SQL validation error: " + rootMessage(e), e);
+            throw new SqlTranslationException("SQL validation error: " + reportSelfReferenceAsUnknownColumn(rootMessage(e)), e);
         } catch (RelConversionException e) {
             throw new SqlTranslationException("SQL cannot be planned: " + rootMessage(e), e);
         }
@@ -614,6 +622,24 @@ public class SqlQueryFrontEnd {
         final String nested = SqlNestedTrailingClause.hint(sql, e);
         final String hint = nested != null ? nested : SqlReservedWords.aliasHint(sql, e);
         return new SqlTranslationException(hint == null ? message : message + " " + hint, e);
+    }
+
+    /**
+     * Reports a self-referencing select item as the unknown column it is.
+     *
+     * <p>For a bare select item the cycle is Calcite's own, not one the caller wrote. Calcite derives its alias from its name,
+     * so {@code x} is named {@code x}. Under Babel conformance a select-list identifier that no table column resolves is
+     * then looked up among the select aliases ({@code isSelectAlias} is {@code ANY}), where it finds that item's own
+     * alias, and Calcite reports <em>"The definition of column 'x' depends on itself"</em>. That lookup is reached only
+     * after the table lookup found nothing, and the name it reports is that unresolved identifier. So the column is
+     * unknown even in a cycle the caller did write ({@code SELECT b AS a, a AS b}). The message is therefore rewritten
+     * into Calcite's own unknown-column wording, so every SQL surface (REST, Flight SQL, validation) reports it as it
+     * reports any other unknown column. ({@link SqlSelectAliasInjector} plays no part: it leaves a bare identifier as it
+     * is.)
+     */
+    static String reportSelfReferenceAsUnknownColumn(String message) {
+        final Matcher matcher = SELF_REFERENCE.matcher(message);
+        return matcher.matches() ? "Column '" + matcher.group(1) + "' not found in any table" : message;
     }
 
     /** The most specific message in the chain — Calcite nests the useful context inside wrappers. */
