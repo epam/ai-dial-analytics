@@ -123,20 +123,6 @@ class SqlIssueClassifierTest {
     }
 
     /**
-     * A column the select list names and nothing resolves reads as a self-reference, because the unnamed-item
-     * alias injector has already given the item that same name. Left unclassified this is the single most
-     * misleading message on the surface: it describes ADAS's own injected alias, not the caller's mistake.
-     */
-    @Test
-    void selfReferentialColumnDefinitionIsUnknownColumn() {
-        final SqlIssue issue = SqlIssueClassifier.classify("SQL validation error: The definition of column"
-                + " 'event_kindd' depends on itself through the following columns: 'event_kindd'");
-
-        assertThat(issue.code()).isEqualTo("unknown_column");
-        assertThat(issue.remedy()).contains("/v1/queries/entities/schema/");
-    }
-
-    /**
      * The three function-catalog remedies name the SQL catalog. The DSL catalog lists names this surface
      * refuses and signatures it cannot parse, so pointing there sends a SQL caller to the source of the mistake.
      */

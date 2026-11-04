@@ -5,7 +5,8 @@ external analytical consumer would — pandas over the ADBC Flight SQL driver:
 
 - **`arrow_client.py`** — a small, linear working example: runs a handful of queries and prints
   the results; queries that must be rejected by server-side governance are expected to fail
-  (exits non-zero if one is accepted).
+  (exits non-zero if one is accepted or rejected for another reason, if the row-ceiling step fails
+  for another reason, or if the server rejects the `GROUP BY` column).
 - **`verify_client.py`** — the self-checking verification client: 7 named PASS/FAIL checks with
   exit codes (`0` all passed, `1` at least one failed, `2` endpoint unreachable). The checks are
   self-consistent (server aggregate vs pandas recomputation of the same extract), so they pass on
@@ -24,9 +25,11 @@ What they demonstrate/verify:
    falls back to ad-hoc execution
 2. Typed results — timestamps arrive as tz-aware `datetime64` columns, no epoch-millis parsing
 3. Server-side `GROUP BY` aggregation
-4. Governance rejections: `LIMIT 50000` (above the Flight row maximum, `FLIGHT_MAX_ROWS`, 10000 by
-   default), SQL the structured-query DSL cannot express (a comparison as an `if` condition), and
-   write statements — all fail with `INVALID_ARGUMENT`
+4. The row ceiling: `LIMIT 50000` is above the Flight row maximum (`FLIGHT_MAX_ROWS`, 10000 by
+   default), and the server clamps it rather than rejecting it. The call fails only when the
+   result really holds more rows than the maximum, so a truncated page is never returned
+5. Governance rejections: SQL the structured-query DSL cannot express (a comparison as an `if`
+   condition) and write statements both fail with `INVALID_ARGUMENT`
 
 ## Authentication
 
@@ -59,11 +62,18 @@ pip install -r requirements.txt
 All three take `--flight-uri` (env `ADAS_FLIGHT_URI`) and `--api-key` (env `ADAS_API_KEY`), so they
 compose with each other and with `../tables/`. `arrow_client.py` and `describe_client.py` also take
 `--entity`; `verify_client.py` does not — its checks are written against `dial_usage_log`'s own
-columns, so it stays pinned to that table.
+columns, so it stays pinned to that table. `arrow_client.py` works out its columns from the entity:
+its extract is a `SELECT *`, and its `GROUP BY` and row-ceiling steps use the column you pass with
+`--group-by` (enrichment columns included), else `event_kind` when the entity has that column, else
+the text column with the fewest distinct values among the first rows that does not hold JSON. That
+fallback is a guess, so name the column with `--group-by` for a user table. The `length()` governance
+step needs a plain text column: the `--group-by` column when it is one, else such a column from the
+extract; it is skipped when the first rows show none.
 
 ```bash
 python arrow_client.py                                    # the example; grpc://localhost:32010
 python arrow_client.py --flight-uri grpc://host:port      # other endpoint
+python arrow_client.py --entity my_table --group-by region   # any entity or user table
 ADAS_API_KEY=dial_xxx python arrow_client.py              # authenticate (security.mode=oidc)
 python verify_client.py                                   # the PASS/FAIL verification checks
 python describe_client.py                                 # schema introspection examples
