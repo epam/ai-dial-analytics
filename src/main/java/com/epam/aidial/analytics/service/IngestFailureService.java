@@ -183,14 +183,11 @@ public class IngestFailureService {
         }
     }
 
-    /** As {@link #recordDayFailure(LocalDate, IngestPath, IngestLedger.Mode, IngestFailureReason, Throwable)}, for a run that skipped recorded blobs. */
-    public void recordDayFailure(LocalDate day, IngestPath path, IngestFailureReason reason, Throwable error) {
-        recordDayFailure(day, path, IngestLedger.Mode.SKIP_RECORDED, reason, error);
-    }
-
     /**
-     * Records a failed run of a day, with the ledger mode it ran in, so its retry runs the same way. Never throws: an event
-     * that cannot be written is held in memory for the next sweep, with its original time.
+     * Records a failed run of a day, with the ledger mode it ran in, so its retry runs the same way. A later failure of a
+     * skipping run does not lower an {@code ingest_all} day: the ledger reads the mode across every failure since the day
+     * was last resolved. Never throws: an event that cannot be written is held in memory for the next sweep, with its
+     * original time.
      */
     public void recordDayFailure(LocalDate day, IngestPath path, IngestLedger.Mode mode, IngestFailureReason reason, Throwable error) {
         IngestFailureEvent event = IngestFailureEvent.dayFailed(day, path, mode, reason, IngestFailureClassifier.describe(error), clock.instant());
@@ -201,11 +198,6 @@ public class IngestFailureService {
         } catch (RuntimeException ex) {
             hold(event, ex);
         }
-    }
-
-    /** As {@link #resolveDayIfOpen(LocalDate, IngestPath, IngestLedger.Mode)}, for a run that skipped recorded blobs. */
-    public void resolveDayIfOpen(LocalDate day, IngestPath path) {
-        resolveDayIfOpen(day, path, IngestLedger.Mode.SKIP_RECORDED);
     }
 
     /**

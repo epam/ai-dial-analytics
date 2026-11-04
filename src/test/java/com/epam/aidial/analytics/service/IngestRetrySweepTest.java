@@ -197,7 +197,7 @@ class IngestRetrySweepTest {
     void failedDayIsReRunAndResolved() throws Exception {
         writeBlob("a.log.gz", "p1");
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
-        failures.recordDayFailure(today, IngestPath.RECONCILE, IngestFailureReason.LISTING_FAILED, new IllegalStateException("store down"));
+        failures.recordDayFailure(today, IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.LISTING_FAILED, new IllegalStateException("store down"));
         clock.advance(Duration.ofMinutes(16));
 
         IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
@@ -248,6 +248,38 @@ class IngestRetrySweepTest {
                 assertThat(entry.failure().ledgerMode()).isEqualTo(IngestLedger.Mode.INGEST_ALL));
     }
 
+    /**
+     * A later failure of a skipping run, such as a scheduled run of the day while ClickHouse is briefly unavailable, does
+     * not lower the day's mode: neither that run nor a later skipping run resolves it, and the retry still ingests every blob.
+     */
+    @Test
+    void laterSkippingFailureKeepsTheDayIngestingEveryBlob() throws Exception {
+        BlobListing blob = writeBlob("a.log.gz", "p1");
+        ledger.record(List.of(blob));
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        failures.recordDayFailure(today, IngestPath.BACKFILL, IngestLedger.Mode.INGEST_ALL, IngestFailureReason.WRITE_FAILED,
+                new IllegalStateException("insert failed"));
+        clock.advance(Duration.ofMinutes(1));
+        failures.recordDayFailure(today, IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.WRITE_FAILED,
+                new IllegalStateException("down"));
+
+        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RECONCILE,
+                DataSyncService.IngestProgressListener.NO_OP);
+
+        assertThat(run.success()).isTrue();
+        assertThat(writer.rows).isEmpty();
+        assertThat(failures.outstanding()).singleElement().satisfies(entry ->
+                assertThat(entry.failure().ledgerMode()).isEqualTo(IngestLedger.Mode.INGEST_ALL));
+
+        clock.advance(Duration.ofHours(1));
+        IngestRetrySweep.SweepSummary summary = sweep(retry(true, 20)).runOnce();
+
+        assertThat(summary.succeeded()).isEqualTo(1);
+        assertThat(writer.rows).extracting(row -> row.get("project_id")).containsExactly("p1");
+        assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).extracting(IngestFailureEvent::type)
+                .containsExactly(IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.FAILED, IngestFailureEvent.Type.RESOLVED);
+    }
+
     @Test
     void theSweepIsBounded() throws Exception {
         BlobListing older = writeBlob("a.log.gz", "p1");
@@ -268,7 +300,7 @@ class IngestRetrySweepTest {
         BlobListing blob = writeBlob("a.log.gz", "p1");
         failures.recordBlobFailure(blob, IngestPath.POLL, new IOException("reset"));
         failureLedger.failAppends = true;
-        failures.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestFailureReason.WRITE_FAILED,
+        failures.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.WRITE_FAILED,
                 new IllegalStateException("down"));
         failureLedger.failAppends = false;
         clock.advance(Duration.ofMinutes(16));

@@ -181,9 +181,9 @@ class IngestFailureServiceTest {
     @Test
     void resolvedSubjectIsNotRequeued() {
         LocalDate day = LocalDate.parse("2026-05-26");
-        service.recordDayFailure(day, IngestPath.RECONCILE, IngestFailureReason.LISTING_FAILED, new IllegalStateException("x"));
+        service.recordDayFailure(day, IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.LISTING_FAILED, new IllegalStateException("x"));
         clock.advance(Duration.ofMinutes(1));
-        service.resolveDayIfOpen(day, IngestPath.RETRY);
+        service.resolveDayIfOpen(day, IngestPath.RETRY, IngestLedger.Mode.SKIP_RECORDED);
         service.recordBlobFailure(new BlobListing(KEY, T0), IngestPath.POLL, new ZipException("bad"));
 
         int requeued = service.requeue(new IngestFailureFilter(null, null, null, null, null, Set.of(KEY, day.toString())));
@@ -197,7 +197,8 @@ class IngestFailureServiceTest {
             service.recordBlobFailure(new BlobListing("logs/2026/05/26/" + i + ".log.gz", T0), IngestPath.POLL, new ZipException("bad"));
             clock.advance(Duration.ofMinutes(1));
         }
-        service.recordDayFailure(LocalDate.parse("2026-05-27"), IngestPath.BACKFILL, IngestFailureReason.LISTING_FAILED, new IllegalStateException("x"));
+        service.recordDayFailure(LocalDate.parse("2026-05-27"), IngestPath.BACKFILL, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.LISTING_FAILED,
+                new IllegalStateException("x"));
 
         IngestFailureService.Page all = service.list(IngestFailureFilter.ALL, 2);
         IngestFailureService.Page blobs = service.list(new IngestFailureFilter(IngestFailureKind.BLOB, null,
@@ -233,7 +234,8 @@ class IngestFailureServiceTest {
     @Test
     void dayFailureThatCannotBeWrittenIsHeldWithItsOriginalTime() {
         failureLedger.failAppends = true;
-        service.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestFailureReason.WRITE_FAILED, new IllegalStateException("down"));
+        service.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.WRITE_FAILED,
+                new IllegalStateException("down"));
         assertThat(service.drainUnwritten()).isZero();
         assertThat(registry.get("sync.failures.unwritten").gauge().value()).isEqualTo(1);
 
@@ -249,7 +251,7 @@ class IngestFailureServiceTest {
     void theHeldQueueIsBounded() {
         failureLedger.failAppends = true;
         for (int i = 0; i <= IngestFailureService.MAX_UNWRITTEN; i++) {
-            service.recordDayFailure(LocalDate.parse("2020-01-01").plusDays(i), IngestPath.RECONCILE, IngestFailureReason.WRITE_FAILED,
+            service.recordDayFailure(LocalDate.parse("2020-01-01").plusDays(i), IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.WRITE_FAILED,
                     new IllegalStateException("down"));
         }
 
@@ -260,7 +262,8 @@ class IngestFailureServiceTest {
     void gaugesCountOutstandingByKindAndState() {
         service.recordBlobFailure(new BlobListing("logs/a.log.gz", T0), IngestPath.POLL, new ZipException("bad"));
         service.recordBlobFailure(new BlobListing("logs/b.log.gz", T0), IngestPath.POLL, new ZipException("bad"));
-        service.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestFailureReason.LISTING_FAILED, new IllegalStateException("x"));
+        service.recordDayFailure(LocalDate.parse("2026-05-26"), IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.LISTING_FAILED,
+                new IllegalStateException("x"));
 
         service.refreshGauges();
 

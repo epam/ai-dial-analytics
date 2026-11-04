@@ -20,7 +20,8 @@ import java.time.LocalDate;
  * @param reason           the reason code of the latest failure
  * @param message          the message of the latest failure
  * @param path             the path of the latest failure
- * @param mode             the ledger mode of the latest failure: for a day, how its retry runs; empty otherwise
+ * @param mode             for a day, how its retry runs: {@code ingest_all} when any failure since the day was last
+ *                         resolved recorded it, otherwise the mode of its latest failure; empty otherwise
  */
 public record OpenIngestFailure(
         IngestFailureKind kind,

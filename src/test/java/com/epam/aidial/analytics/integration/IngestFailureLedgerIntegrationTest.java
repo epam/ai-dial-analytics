@@ -132,6 +132,34 @@ class IngestFailureLedgerIntegrationTest extends AbstractClickHouseIntegrationTe
                 .contains(new IngestFailureLedger.Latest(IngestFailureEvent.Type.REQUEUED, "ingest_all"));
     }
 
+    /**
+     * A later failure of a skipping run does not hide an earlier {@code ingest_all} one; a resolution ends it, so a failure
+     * after it takes its own mode again.
+     */
+    @Test
+    void ingestAllModeHoldsUntilTheDayIsResolved() {
+        LocalDate day = LocalDate.parse("2026-05-26");
+        failureLedger.append(List.of(
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "backfill",
+                        IngestFailureReason.WRITE_FAILED, "down", T0, IngestLedger.Mode.INGEST_ALL.wire()),
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "reconcile",
+                        IngestFailureReason.WRITE_FAILED, "down", T0.plusSeconds(60), IngestLedger.Mode.SKIP_RECORDED.wire())));
+
+        assertThat(failureLedger.open()).singleElement()
+                .satisfies(open -> assertThat(open.ledgerMode()).isEqualTo(IngestLedger.Mode.INGEST_ALL));
+        assertThat(failureLedger.latestOf(IngestFailureKind.DAY, day.toString()))
+                .contains(new IngestFailureLedger.Latest(IngestFailureEvent.Type.FAILED, "ingest_all"));
+
+        failureLedger.append(List.of(
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.RESOLVED, "retry",
+                        null, "", T0.plusSeconds(120)),
+                new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, IngestFailureEvent.Type.FAILED, "reconcile",
+                        IngestFailureReason.WRITE_FAILED, "down", T0.plusSeconds(180), IngestLedger.Mode.SKIP_RECORDED.wire())));
+
+        assertThat(failureLedger.open()).singleElement()
+                .satisfies(open -> assertThat(open.ledgerMode()).isEqualTo(IngestLedger.Mode.SKIP_RECORDED));
+    }
+
     @Test
     void theIngestLedgerKeyedReadResolvesFailedBlobs() {
         ingestLedger.record(List.of(new BlobListing("logs/c.log.gz", T0), new BlobListing("logs/d.log.gz", T0)));

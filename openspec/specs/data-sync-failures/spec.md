@@ -293,12 +293,16 @@ any other blob-level failure, so the blob backs off and eventually parks rather 
 of the other due subjects. A `records` attempt that fails to read or write its blob is recorded the same way, on
 its `records` subject.
 
-A day attempt SHALL re-run the day in the ingest-ledger mode its latest failure recorded. A day that failed in a
-reconciliation run or a default backfill is re-run as a reconciliation run does, skipping the blobs the ingest
+A day attempt SHALL re-run the day ingesting every blob again when any of its failures since it was last resolved
+recorded `ingest_all`, and otherwise in the mode its latest failure recorded. A day that failed only in
+reconciliation runs or default backfills is re-run as a reconciliation run does, skipping the blobs the ingest
 ledger records. A day that failed in a backfill that included already-ingested blobs is re-run ingesting every
 blob again. Skipping would be wrong there: the blobs after the fault are recorded from their earlier ingest, so a
-skipping retry would leave their earlier rows in place and still mark the day resolved. A blob that fails within
-that day SHALL record its own failure, as on every path.
+skipping retry would leave their earlier rows in place and still mark the day resolved. A later failure of a
+skipping run, such as the scheduled run of the day while ClickHouse is briefly unavailable, SHALL NOT lower the
+mode: the mode is read across the failures since the last resolution rather than from the latest one, so recording
+a failure still never reads the ledger first. A blob that fails within that day SHALL record its own failure, as on
+every path.
 
 For the same reason, a run of a day that skips recorded blobs, such as the scheduled reconciliation run, SHALL NOT
 resolve a day failure recorded by a run that ingested every blob. The failure stays open until a run in that mode
@@ -318,6 +322,13 @@ Parked subjects SHALL NOT be attempted until an operator requeues them.
   the fault are recorded in the ingest ledger from their earlier ingest
 - **THEN** the scheduled reconciliation run of that day does not resolve its failure, and the retry sweep re-runs the
   day ingesting every blob again, so those blobs are rewritten under the new mapping before the day is resolved
+
+#### Scenario: A later skipping failure does not lower the day's mode
+
+- **WHEN** a backfill with `includeIngested` fails a day, and a scheduled reconciliation run of that day then fails as
+  well, recording `skip_recorded`
+- **THEN** the day still reads as `ingest_all`: a later skipping run of it does not resolve it, and the retry sweep
+  re-runs it ingesting every blob again
 
 #### Scenario: A transient blob failure is recovered after the overlap window
 

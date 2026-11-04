@@ -39,7 +39,7 @@ public interface IngestFailureLedger {
     }
 
     /**
-     * The latest event of one subject, with the ledger mode of its latest failure.
+     * The latest event of one subject, with the ledger mode its retry takes.
      *
      * @param kind    blob, day or records
      * @param subject the blob key or ISO date
@@ -51,11 +51,12 @@ public interface IngestFailureLedger {
      * A subject's latest event.
      *
      * @param type       the latest event's type
-     * @param failedMode the ledger mode its latest failure recorded; empty when none
+     * @param failedMode {@code ingest_all} when any failure since the subject was last resolved recorded it, otherwise the
+     *                   mode of its latest failure; empty when none
      */
     record Latest(IngestFailureEvent.Type type, String failedMode) {
 
-        /** The ledger mode of the latest failure. */
+        /** The ledger mode the subject's retry takes. */
         public IngestLedger.Mode failedLedgerMode() {
             return IngestLedger.Mode.fromWire(failedMode);
         }

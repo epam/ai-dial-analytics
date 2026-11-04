@@ -49,6 +49,14 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
     private static final String FAILED = "event = 'failed'";
     private static final String NOT_FAILED = "event != 'failed'";
 
+    /**
+     * The ledger mode a subject's retry takes: {@code ingest_all} when any failure since its latest {@code resolved} event
+     * recorded it, otherwise the mode of its latest failure. So a later failure of a skipping run never hides an earlier
+     * {@code ingest_all} one, and the day is still retried ingesting every blob.
+     */
+    private static final String RETRY_MODE = "if(arrayExists(f -> f.1 > maxIf(event_at, event = 'resolved') AND f.2 = 'ingest_all',"
+            + " groupArrayIf((event_at, mode), " + FAILED + ")), 'ingest_all', argMaxIf(mode, event_at, " + FAILED + "))";
+
     private static final String OPEN_SQL = "SELECT kind, subject,"
             + " toString(argMaxIf(day, event_at, " + FAILED + ")) AS failed_day,"
             + " toUnixTimestamp64Milli(argMaxIf(blob_last_modified, event_at, " + FAILED + ")) AS blob_last_modified_ms,"
@@ -60,12 +68,12 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             + " argMaxIf(reason, event_at, " + FAILED + ") AS latest_reason,"
             + " argMaxIf(message, event_at, " + FAILED + ") AS latest_message,"
             + " argMaxIf(path, event_at, " + FAILED + ") AS latest_path,"
-            + " argMaxIf(mode, event_at, " + FAILED + ") AS latest_mode"
+            + " " + RETRY_MODE + " AS latest_mode"
             + " FROM " + TABLE
             + " GROUP BY kind, subject"
             + " HAVING argMax(event, event_at) != 'resolved' AND countIf(" + FAILED + ") > 0";
 
-    private static final String LATEST_SQL = "SELECT argMax(event, event_at) AS latest, argMaxIf(mode, event_at, " + FAILED + ") AS failed_mode,"
+    private static final String LATEST_SQL = "SELECT argMax(event, event_at) AS latest, " + RETRY_MODE + " AS failed_mode,"
             + " count() AS events FROM " + TABLE
             + " WHERE kind = {kind:String} AND subject = {subject:String}";
 

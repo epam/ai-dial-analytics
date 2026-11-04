@@ -67,21 +67,29 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
             open.add(new OpenIngestFailure(latest.kind(), latest.subject(), latest.day(), latest.blobLastModified(), resetAt,
                     (int) failed.stream().filter(event -> event.eventAt().isAfter(resetAt)).count(),
                     failed.getFirst().eventAt(), latest.eventAt(), latest.reason().failureClass(), latest.reason().wire(),
-                    latest.message(), latest.path(), latest.mode()));
+                    latest.message(), latest.path(), retryMode(sorted)));
         }
         return open;
     }
 
     @Override
     public Optional<Latest> latestOf(IngestFailureKind kind, String subject) {
-        String failedMode = events.stream()
-                .filter(event -> event.kind() == kind && event.subject().equals(subject) && event.type() == IngestFailureEvent.Type.FAILED)
-                .max(Comparator.comparing(IngestFailureEvent::eventAt))
-                .map(IngestFailureEvent::mode).orElse("");
-        return events.stream()
+        List<IngestFailureEvent> sorted = events.stream()
                 .filter(event -> event.kind() == kind && event.subject().equals(subject))
-                .max(Comparator.comparing(IngestFailureEvent::eventAt))
-                .map(event -> new Latest(event.type(), failedMode));
+                .sorted(Comparator.comparing(IngestFailureEvent::eventAt)).toList();
+        return sorted.isEmpty() ? Optional.empty() : Optional.of(new Latest(sorted.getLast().type(), retryMode(sorted)));
+    }
+
+    /** {@code ingest_all} when a failure since the latest {@code resolved} recorded it, else the latest failure's mode. */
+    private static String retryMode(List<IngestFailureEvent> sorted) {
+        Instant resolvedAt = sorted.stream().filter(event -> event.type() == IngestFailureEvent.Type.RESOLVED)
+                .map(IngestFailureEvent::eventAt).max(Comparator.naturalOrder()).orElse(Instant.EPOCH);
+        List<IngestFailureEvent> failed = sorted.stream().filter(event -> event.type() == IngestFailureEvent.Type.FAILED).toList();
+        String ingestAll = IngestLedger.Mode.INGEST_ALL.wire();
+        if (failed.stream().anyMatch(event -> event.eventAt().isAfter(resolvedAt) && ingestAll.equals(event.mode()))) {
+            return ingestAll;
+        }
+        return failed.isEmpty() ? "" : failed.getLast().mode();
     }
 
     /** The events of one subject, in writing order. */
