@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Orchestrates the operator-triggered, asynchronous backfill of a bounded UTC date range. A trigger
  * validates the range, registers a {@link BackfillRun}, and submits a worker that ingests each day in
- * the range via {@link DataSyncService#runForDate(LocalDate, IngestLedger.Mode, IngestPath, DataSyncService.IngestProgressListener)}
+ * the range via {@link DataSyncService#runForDate(LocalDate, IngestLedger.Mode, IngestSource, DataSyncService.IngestProgressListener)}
  * — the same parse → map → batch-insert pipeline used by the scheduled path. By default it skips the blobs
  * the {@link IngestLedger} records, so a backfill over ingested days, or a re-trigger of a range a stopped run
  * left part-done, writes only what is missing; {@code includeIngested} re-ingests the whole range, the
@@ -168,7 +168,7 @@ public class DataBackfillService {
             for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
                 dayInProgress = date;
                 run.startDay(date);
-                DataSyncService.RunSummary summary = dataSyncService.runForDate(date, mode, IngestPath.BACKFILL, progressOf(run));
+                DataSyncService.RunSummary summary = dataSyncService.runForDate(date, mode, IngestSource.backfill(run.runId()), progressOf(run));
                 // A day with a failed blob is incomplete, so it is named as failed; its blobs are in the failure ledger.
                 run.completeDay(date, summary, summary.complete());
                 dayInProgress = null;

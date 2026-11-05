@@ -41,6 +41,7 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             Map.entry("event", "LowCardinality(String)"),
             Map.entry("path", "LowCardinality(String)"),
             Map.entry("mode", "LowCardinality(String)"),
+            Map.entry("backfill_run_id", "String"),
             Map.entry("failure_class", "LowCardinality(String)"),
             Map.entry("reason", "LowCardinality(String)"),
             Map.entry("message", "String"),
@@ -57,6 +58,13 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
     private static final String RETRY_MODE = "if(arrayExists(f -> f.1 > maxIf(event_at, event = 'resolved') AND f.2 = 'ingest_all',"
             + " groupArrayIf((event_at, mode), " + FAILED + ")), 'ingest_all', argMaxIf(mode, event_at, " + FAILED + "))";
 
+    /**
+     * The backfill runs whose failures of a subject came after its latest {@code resolved} event, sorted. A run whose
+     * failure of it was since resolved no longer has a failure of it outstanding.
+     */
+    private static final String BACKFILL_RUNS = "arraySort(arrayDistinct(arrayMap(f -> f.2, arrayFilter(f -> f.1 > maxIf(event_at, event = 'resolved')"
+            + " AND f.2 != '', groupArrayIf((event_at, backfill_run_id), " + FAILED + ")))))";
+
     private static final String OPEN_SQL = "SELECT kind, subject,"
             + " toString(argMaxIf(day, event_at, " + FAILED + ")) AS failed_day,"
             + " toUnixTimestamp64Milli(argMaxIf(blob_last_modified, event_at, " + FAILED + ")) AS blob_last_modified_ms,"
@@ -68,7 +76,8 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             + " argMaxIf(reason, event_at, " + FAILED + ") AS latest_reason,"
             + " argMaxIf(message, event_at, " + FAILED + ") AS latest_message,"
             + " argMaxIf(path, event_at, " + FAILED + ") AS latest_path,"
-            + " " + RETRY_MODE + " AS latest_mode"
+            + " " + RETRY_MODE + " AS latest_mode,"
+            + " " + BACKFILL_RUNS + " AS backfill_runs"
             + " FROM " + TABLE
             + " GROUP BY kind, subject"
             + " HAVING argMax(event, event_at) != 'resolved' AND countIf(" + FAILED + ") > 0";
@@ -97,6 +106,7 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             row.put("event", event.type().wire());
             row.put("path", event.path());
             row.put("mode", event.mode());
+            row.put("backfill_run_id", event.backfillRunId());
             row.put("failure_class", event.reason() == null ? "" : event.reason().failureClass());
             row.put("reason", event.reason() == null ? "" : event.reason().wire());
             row.put("message", event.message());
@@ -127,7 +137,8 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
                     row.getString("latest_reason"),
                     row.getString("latest_message"),
                     row.getString("latest_path"),
-                    row.getString("latest_mode")));
+                    row.getString("latest_mode"),
+                    row.getList("backfill_runs")));
         }
         return open;
     }

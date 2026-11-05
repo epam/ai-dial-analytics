@@ -239,7 +239,7 @@ class IngestRetrySweepTest {
         failures.recordDayFailure(today, IngestPath.BACKFILL, IngestLedger.Mode.INGEST_ALL, IngestFailureReason.WRITE_FAILED,
                 new IllegalStateException("insert failed"));
 
-        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RECONCILE,
+        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestSource.of(IngestPath.RECONCILE),
                 DataSyncService.IngestProgressListener.NO_OP);
 
         assertThat(run.success()).isTrue();
@@ -263,7 +263,7 @@ class IngestRetrySweepTest {
         failures.recordDayFailure(today, IngestPath.RECONCILE, IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.WRITE_FAILED,
                 new IllegalStateException("down"));
 
-        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.RECONCILE,
+        DataSyncService.RunSummary run = dataSyncService.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestSource.of(IngestPath.RECONCILE),
                 DataSyncService.IngestProgressListener.NO_OP);
 
         assertThat(run.success()).isTrue();
@@ -374,7 +374,7 @@ class IngestRetrySweepTest {
     @Test
     void requeuedRefusedBlobIsIngestedOnceTheCauseIsGone() throws Exception {
         BlobListing blob = writeBlob("a.log.gz", "p1");
-        failures.recordBlobFailures(List.of(failures.refusedBlobFailure(blob, IngestPath.POLL,
+        failures.recordBlobFailures(List.of(failures.refusedBlobFailure(blob, IngestSource.of(IngestPath.POLL),
                 new RefusedBlob(blob, "dial_usage_log", 53, "TYPE_MISMATCH"))));
         assertThat(failures.outstanding()).singleElement().extracting(IngestFailureEntry::state).isEqualTo(IngestFailureState.PARKED);
         failures.requeue(IngestFailureFilter.ALL);

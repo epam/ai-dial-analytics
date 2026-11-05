@@ -21,6 +21,7 @@ import java.util.Locale;
  * @param reason           why the attempt failed; {@code null} unless {@code type} is {@link Type#FAILED}
  * @param message          a short description of the failure, never record content; empty when none
  * @param eventAt          when it happened
+ * @param backfillRunId    for a failure a backfill run hit, that run's id; empty for every other event
  */
 public record IngestFailureEvent(
         IngestFailureKind kind,
@@ -32,7 +33,8 @@ public record IngestFailureEvent(
         IngestFailureReason reason,
         String message,
         Instant eventAt,
-        String mode) {
+        String mode,
+        String backfillRunId) {
 
     /** The longest message stored. */
     public static final int MAX_MESSAGE_LENGTH = 512;
@@ -43,6 +45,13 @@ public record IngestFailureEvent(
     public IngestFailureEvent {
         message = message == null ? "" : message.length() > MAX_MESSAGE_LENGTH ? message.substring(0, MAX_MESSAGE_LENGTH) : message;
         mode = mode == null ? "" : mode;
+        backfillRunId = backfillRunId == null ? "" : backfillRunId;
+    }
+
+    /** An event attributed to no backfill run. */
+    public IngestFailureEvent(IngestFailureKind kind, String subject, LocalDate day, Instant blobLastModified, Type type, String path,
+            IngestFailureReason reason, String message, Instant eventAt, String mode) {
+        this(kind, subject, day, blobLastModified, type, path, reason, message, eventAt, mode, "");
     }
 
     /** An event that records no ledger mode: every event but a failed day. */
@@ -52,26 +61,27 @@ public record IngestFailureEvent(
     }
 
     /** A failed attempt on a blob. */
-    static IngestFailureEvent blobFailed(String key, Instant lastModified, IngestPath path, IngestFailureReason reason, String message, Instant at) {
-        return failed(IngestFailureKind.BLOB, key, lastModified, path, reason, message, at);
+    static IngestFailureEvent blobFailed(String key, Instant lastModified, IngestSource source, IngestFailureReason reason, String message, Instant at) {
+        return failed(IngestFailureKind.BLOB, key, lastModified, source, reason, message, at);
     }
 
     /** A failed attempt on a blob-keyed subject: a {@code blob}, or the {@code records} of a blob. */
-    static IngestFailureEvent failed(IngestFailureKind kind, String key, Instant lastModified, IngestPath path, IngestFailureReason reason,
+    static IngestFailureEvent failed(IngestFailureKind kind, String key, Instant lastModified, IngestSource source, IngestFailureReason reason,
             String message, Instant at) {
-        return new IngestFailureEvent(kind, key, blobDay(lastModified, at), lastModified, Type.FAILED, path.wire(), reason, message, at);
+        return new IngestFailureEvent(kind, key, blobDay(lastModified, at), lastModified, Type.FAILED, source.path().wire(), reason, message, at, "",
+                source.backfillRunId());
     }
 
     /** The skipped records of a blob that was otherwise ingested: always {@link IngestFailureReason#SKIPPED_RECORDS}. */
-    static IngestFailureEvent recordsFailed(String key, Instant lastModified, IngestPath path, String message, Instant at) {
-        return failed(IngestFailureKind.RECORDS, key, lastModified, path, IngestFailureReason.SKIPPED_RECORDS, message, at);
+    static IngestFailureEvent recordsFailed(String key, Instant lastModified, IngestSource source, String message, Instant at) {
+        return failed(IngestFailureKind.RECORDS, key, lastModified, source, IngestFailureReason.SKIPPED_RECORDS, message, at);
     }
 
     /** A failed run of a day, which took {@code mode}. */
-    static IngestFailureEvent dayFailed(LocalDate day, IngestPath path, IngestLedger.Mode mode, IngestFailureReason reason, String message,
+    static IngestFailureEvent dayFailed(LocalDate day, IngestSource source, IngestLedger.Mode mode, IngestFailureReason reason, String message,
             Instant at) {
-        return new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, Type.FAILED, path.wire(), reason, message, at,
-                mode.wire());
+        return new IngestFailureEvent(IngestFailureKind.DAY, day.toString(), day, Instant.EPOCH, Type.FAILED, source.path().wire(), reason, message, at,
+                mode.wire(), source.backfillRunId());
     }
 
     /** The subject no longer needs recovery. */

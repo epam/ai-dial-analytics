@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service;
 
 import com.epam.aidial.analytics.blob.BlobListing;
+import com.epam.aidial.analytics.configuration.SyncRetryProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -270,6 +271,102 @@ class IngestFailureServiceTest {
         assertThat(registry.get("sync.failures.outstanding").tag("kind", "blob").tag("state", "parked").gauge().value()).isEqualTo(2);
         assertThat(registry.get("sync.failures.outstanding").tag("kind", "day").tag("state", "pending").gauge().value()).isEqualTo(1);
         assertThat(registry.get("sync.failures.outstanding").tag("kind", "blob").tag("state", "pending").gauge().value()).isZero();
+    }
+
+    @Test
+    void listCountsEveryMatchAndBothStatesBeyondTheLimit() {
+        for (int i = 0; i < 3; i++) {
+            service.recordBlobFailure(new BlobListing("logs/p" + i + ".log.gz", T0), IngestPath.POLL, new IOException("reset"));
+            clock.advance(Duration.ofSeconds(1));
+        }
+        service.recordBlobFailure(new BlobListing("logs/k.log.gz", T0), IngestPath.POLL, new ZipException("Not in GZIP format"));
+
+        IngestFailureService.Page parked = service.list(IngestFailureFilter.ALL.withState(IngestFailureState.PARKED), 100);
+        assertThat(parked.entries()).hasSize(1);
+        assertThat(parked.total()).isEqualTo(1);
+        // The per-state counts disregard the state filter, so one read fills both tabs.
+        assertThat(parked.byState()).containsEntry(IngestFailureState.PENDING, 3).containsEntry(IngestFailureState.PARKED, 1);
+
+        IngestFailureService.Page limited = service.list(IngestFailureFilter.ALL, 2);
+        assertThat(limited.entries()).hasSize(2);
+        assertThat(limited.truncated()).isTrue();
+        assertThat(limited.total()).isEqualTo(4);
+    }
+
+    @Test
+    void listTotalEqualsWhatRequeueWithSameFilterRequeues() {
+        for (int i = 0; i < 3; i++) {
+            service.recordBlobFailure(new BlobListing("logs/m" + i + ".log.gz", T0), IngestPath.POLL, new ZipException("Not in GZIP format"));
+        }
+        service.recordBlobFailure(new BlobListing("logs/t.log.gz", T0), IngestPath.POLL, new IOException("reset"));
+        IngestFailureFilter parked = IngestFailureFilter.ALL.withState(IngestFailureState.PARKED);
+
+        int total = service.list(parked, 1).total();
+
+        assertThat(total).isEqualTo(3);
+        assertThat(service.requeue(parked)).isEqualTo(total);
+    }
+
+    @Test
+    void targetSelectsOneKindOfSharedKey() {
+        BlobListing blob = new BlobListing(KEY, T0);
+        service.recordBlobFailure(blob, IngestPath.POLL, new ZipException("Not in GZIP format"));
+        service.record(IngestFailureKind.RECORDS, blob, IngestPath.POLL, IngestFailureReason.SKIPPED_RECORDS, "malformed_line 1");
+        IngestFailureFilter recordsOnly = new IngestFailureFilter(null, null, null, null, null, null, null,
+                Set.of(new IngestFailureFilter.Target(IngestFailureKind.RECORDS, KEY)));
+
+        assertThat(service.requeue(recordsOnly)).isEqualTo(1);
+        assertThat(failureLedger.of(IngestFailureKind.RECORDS, KEY).getLast().type()).isEqualTo(IngestFailureEvent.Type.REQUEUED);
+        assertThat(failureLedger.of(IngestFailureKind.BLOB, KEY).getLast().type()).isEqualTo(IngestFailureEvent.Type.FAILED);
+    }
+
+    @Test
+    void failureIsAttributedToItsBackfillRunUntilResolved() {
+        LocalDate day = LocalDate.parse("2026-05-20");
+        BlobListing blob = new BlobListing(KEY, T0);
+        service.recordDayFailure(day, IngestSource.backfill("run-a"), IngestLedger.Mode.SKIP_RECORDED, IngestFailureReason.LISTING_FAILED,
+                new IllegalStateException("store down"));
+        service.recordBlobFailures(List.of(service.blobFailure(blob, IngestSource.backfill("run-b"), new ZipException("bad"))));
+        service.recordBlobFailure(new BlobListing("logs/other.log.gz", T0), IngestPath.POLL, new ZipException("bad"));
+
+        IngestFailureFilter runA = new IngestFailureFilter(null, null, null, null, null, null, "run-a", null);
+        assertThat(service.list(runA, 100).entries()).singleElement().satisfies(entry -> {
+            assertThat(entry.failure().subject()).isEqualTo(day.toString());
+            assertThat(entry.failure().backfillRunIds()).containsExactly("run-a");
+        });
+
+        // Once resolved, a later failure by another path is no longer the run's.
+        clock.advance(Duration.ofMinutes(1));
+        service.resolveBlobs(List.of(blob), IngestPath.RETRY);
+        clock.advance(Duration.ofMinutes(1));
+        service.recordBlobFailure(blob, IngestPath.POLL, new ZipException("bad"));
+        IngestFailureFilter runB = new IngestFailureFilter(null, null, null, null, null, null, "run-b", null);
+        assertThat(service.list(runB, 100).entries()).isEmpty();
+    }
+
+    @Test
+    void retrySweepStatusReportsTheNextRun() {
+        IngestFailureService.RetrySweepStatus status = service.retrySweepStatus();
+        assertThat(status.maxPerSweep()).isEqualTo(InMemoryIngestFailureLedger.RETRY.maxPerSweep());
+
+        SyncRetryProperties everyQuarterHour = new SyncRetryProperties(true, "0 */15 * * * *", Duration.ofMinutes(15), Duration.ofHours(24), 10, 20);
+        IngestFailureService.RetrySweepStatus scheduled =
+                new IngestFailureService(failureLedger, ingestLedger, everyQuarterHour, new SimpleMeterRegistry(), clock).retrySweepStatus();
+        assertThat(scheduled.enabled()).isTrue();
+        assertThat(scheduled.nextSweepAt()).isAfter(T0).isBeforeOrEqualTo(T0.plus(Duration.ofMinutes(15)));
+
+        SyncRetryProperties off = new SyncRetryProperties(false, "0 */15 * * * *", Duration.ofMinutes(15), Duration.ofHours(24), 10, 20);
+        IngestFailureService.RetrySweepStatus disabled =
+                new IngestFailureService(failureLedger, ingestLedger, off, new SimpleMeterRegistry(), clock).retrySweepStatus();
+        assertThat(disabled.enabled()).isFalse();
+        assertThat(disabled.nextSweepAt()).isNull();
+    }
+
+    @Test
+    void unscheduledSweepIsReportedDisabled() {
+        // The test settings schedule no sweep ("-"), so although retries are on nothing will attempt them.
+        assertThat(service.retrySweepStatus().enabled()).isFalse();
+        assertThat(service.retrySweepStatus().nextSweepAt()).isNull();
     }
 
     private IngestFailureEntry single() {

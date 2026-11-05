@@ -6,11 +6,15 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -99,7 +103,8 @@ public class IngestFailureService {
      * @throws RuntimeException if the event cannot be written
      */
     public void record(IngestFailureKind kind, BlobListing listing, IngestPath path, IngestFailureReason reason, String message) {
-        recordBlobFailures(List.of(IngestFailureEvent.failed(kind, listing.name(), listing.lastModified(), path, reason, message, clock.instant())));
+        recordBlobFailures(List.of(IngestFailureEvent.failed(kind, listing.name(), listing.lastModified(), IngestSource.of(path), reason, message,
+                clock.instant())));
     }
 
     /**
@@ -117,8 +122,13 @@ public class IngestFailureService {
      * many blobs fail.
      */
     public IngestFailureEvent blobFailure(BlobListing listing, IngestPath path, Throwable error) {
+        return blobFailure(listing, IngestSource.of(path), error);
+    }
+
+    /** As {@link #blobFailure(BlobListing, IngestPath, Throwable)}, attributed to {@code source}'s backfill run when it has one. */
+    public IngestFailureEvent blobFailure(BlobListing listing, IngestSource source, Throwable error) {
         IngestFailureReason reason = IngestFailureClassifier.classifyBlob(error);
-        return IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), path, reason, IngestFailureClassifier.describe(error), clock.instant());
+        return IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), source, reason, IngestFailureClassifier.describe(error), clock.instant());
     }
 
     /**
@@ -126,15 +136,15 @@ public class IngestFailureService {
      *
      * @param skipped what the blob's ingest skipped; must not be empty
      */
-    public IngestFailureEvent recordsFailure(BlobListing listing, IngestPath path, SkippedRecords skipped) {
-        return IngestFailureEvent.recordsFailed(listing.name(), listing.lastModified(), path, skipped.describe(), clock.instant());
+    public IngestFailureEvent recordsFailure(BlobListing listing, IngestSource source, SkippedRecords skipped) {
+        return IngestFailureEvent.recordsFailed(listing.name(), listing.lastModified(), source, skipped.describe(), clock.instant());
     }
 
     /**
      * The failure event for a blob whose rows ClickHouse refused with a data-class error, stamped now.
      */
-    public IngestFailureEvent refusedBlobFailure(BlobListing listing, IngestPath path, RefusedBlob refused) {
-        return IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), path, IngestFailureReason.REJECTED_BY_SERVER,
+    public IngestFailureEvent refusedBlobFailure(BlobListing listing, IngestSource source, RefusedBlob refused) {
+        return IngestFailureEvent.blobFailed(listing.name(), listing.lastModified(), source, IngestFailureReason.REJECTED_BY_SERVER,
                 refused.describe(), clock.instant());
     }
 
@@ -143,11 +153,11 @@ public class IngestFailureService {
      * something, and a {@code rejected_by_server} failure for each refused blob. The caller writes them with
      * {@link #recordBlobFailures} before recording the written blobs in the ingest ledger.
      */
-    List<IngestFailureEvent> handOverFailures(RunSink.HandOver handOver, IngestPath path) {
+    List<IngestFailureEvent> handOverFailures(RunSink.HandOver handOver, IngestSource source) {
         List<IngestFailureEvent> events = new ArrayList<>(handOver.skipped().size() + handOver.refused().size());
-        handOver.skipped().forEach((listing, skips) -> events.add(recordsFailure(listing, path, skips)));
+        handOver.skipped().forEach((listing, skips) -> events.add(recordsFailure(listing, source, skips)));
         for (RefusedBlob refused : handOver.refused()) {
-            events.add(refusedBlobFailure(refused.listing(), path, refused));
+            events.add(refusedBlobFailure(refused.listing(), source, refused));
         }
         return events;
     }
@@ -160,7 +170,12 @@ public class IngestFailureService {
      * @throws RuntimeException if either write fails; the sink turns it into a fault of the run
      */
     void recordHandOver(RunSink.HandOver handOver, IngestPath path) {
-        recordBlobFailures(handOverFailures(handOver, path));
+        recordHandOver(handOver, IngestSource.of(path));
+    }
+
+    /** As {@link #recordHandOver(RunSink.HandOver, IngestPath)}, attributed to {@code source}'s backfill run when it has one. */
+    void recordHandOver(RunSink.HandOver handOver, IngestSource source) {
+        recordBlobFailures(handOverFailures(handOver, source));
         if (!handOver.written().isEmpty()) {
             ingestLedger.record(handOver.written());
         }
@@ -190,11 +205,18 @@ public class IngestFailureService {
      * original time.
      */
     public void recordDayFailure(LocalDate day, IngestPath path, IngestLedger.Mode mode, IngestFailureReason reason, Throwable error) {
-        IngestFailureEvent event = IngestFailureEvent.dayFailed(day, path, mode, reason, IngestFailureClassifier.describe(error), clock.instant());
-        counted(IngestFailureKind.DAY, path.wire(), reason);
+        recordDayFailure(day, IngestSource.of(path), mode, reason, error);
+    }
+
+    /** As {@link #recordDayFailure(LocalDate, IngestPath, IngestLedger.Mode, IngestFailureReason, Throwable)}, attributed to {@code source}'s
+     * backfill run when it has one. */
+    public void recordDayFailure(LocalDate day, IngestSource source, IngestLedger.Mode mode, IngestFailureReason reason, Throwable error) {
+        String path = source.path().wire();
+        IngestFailureEvent event = IngestFailureEvent.dayFailed(day, source, mode, reason, IngestFailureClassifier.describe(error), clock.instant());
+        counted(IngestFailureKind.DAY, path, reason);
         try {
             failures.append(List.of(event));
-            log.warn("Recorded {} failure of day {} on the {} path", reason.wire(), day, path.wire());
+            log.warn("Recorded {} failure of day {} on the {} path", reason.wire(), day, path);
         } catch (RuntimeException ex) {
             hold(event, ex);
         }
@@ -347,13 +369,45 @@ public class IngestFailureService {
     }
 
     /**
-     * The outstanding subjects {@code filter} selects, newest latest failure first, at most {@code limit} of them.
+     * The outstanding subjects {@code filter} selects, newest latest failure first, at most {@code limit} of them, with
+     * how many matched in all and per state. The per-state counts disregard {@code filter}'s state, so one read
+     * answers both how many wait for an operator and how many are retried automatically.
      *
-     * @return the page and whether more matched
+     * @return the page, whether more matched, and the totals
      */
     public Page list(IngestFailureFilter filter, int limit) {
-        List<IngestFailureEntry> matched = outstanding().stream().filter(filter::matches).toList();
-        return new Page(matched.size() > limit ? matched.subList(0, limit) : matched, matched.size() > limit);
+        List<IngestFailureEntry> outstanding = outstanding();
+        IngestFailureFilter anyState = filter.withState(null);
+        Map<IngestFailureState, Integer> byState = new EnumMap<>(IngestFailureState.class);
+        for (IngestFailureState state : IngestFailureState.values()) {
+            byState.put(state, 0);
+        }
+        List<IngestFailureEntry> matched = new ArrayList<>();
+        for (IngestFailureEntry entry : outstanding) {
+            if (anyState.matches(entry)) {
+                byState.merge(entry.state(), 1, Integer::sum);
+            }
+            if (filter.matches(entry)) {
+                matched.add(entry);
+            }
+        }
+        return new Page(matched.size() > limit ? List.copyOf(matched.subList(0, limit)) : List.copyOf(matched), matched.size() > limit,
+                matched.size(), Map.copyOf(byState));
+    }
+
+    /**
+     * Whether the retry sweep attempts due subjects, and when its next run starts. A requeue is honoured either way,
+     * but with the sweep off a requeued subject stays pending until it is turned on.
+     */
+    public RetrySweepStatus retrySweepStatus() {
+        boolean scheduled = !Scheduled.CRON_DISABLED.equals(properties.cron());
+        Instant next = null;
+        if (properties.enabled() && scheduled) {
+            // @Scheduled evaluates a cron in the server's default time zone, so the next run is computed the same way.
+            ZonedDateTime fire = CronExpression.parse(properties.cron()).next(clock.instant().atZone(ZoneId.systemDefault()));
+            next = fire == null ? null : fire.toInstant();
+        }
+        return new RetrySweepStatus(properties.enabled() && next != null, next, properties.maxPerSweep());
     }
 
     /**
@@ -475,7 +529,28 @@ public class IngestFailureService {
      *
      * @param entries   the subjects returned
      * @param truncated whether more matched than were returned
+     * @param total     how many matched
+     * @param byState   how many matched every filter member but the state, per state
      */
-    public record Page(List<IngestFailureEntry> entries, boolean truncated) {
+    public record Page(List<IngestFailureEntry> entries, boolean truncated, int total, Map<IngestFailureState, Integer> byState) {
+
+        /** A page whose totals are those of {@code entries} alone, not truncated. */
+        public static Page of(List<IngestFailureEntry> entries) {
+            Map<IngestFailureState, Integer> byState = new EnumMap<>(IngestFailureState.class);
+            for (IngestFailureState state : IngestFailureState.values()) {
+                byState.put(state, (int) entries.stream().filter(entry -> entry.state() == state).count());
+            }
+            return new Page(List.copyOf(entries), false, entries.size(), Map.copyOf(byState));
+        }
+    }
+
+    /**
+     * Whether the retry sweep attempts due subjects.
+     *
+     * @param enabled     whether {@code sync.retry.enabled} is on and the sweep is scheduled
+     * @param nextSweepAt when the next sweep starts; {@code null} when not enabled
+     * @param maxPerSweep the most subjects one sweep attempts
+     */
+    public record RetrySweepStatus(boolean enabled, Instant nextSweepAt, int maxPerSweep) {
     }
 }

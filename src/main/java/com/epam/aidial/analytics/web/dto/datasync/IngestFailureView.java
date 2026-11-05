@@ -8,6 +8,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.time.Instant;
+import java.util.List;
 
 /** One outstanding failure-ledger subject. */
 @Schema(description = "An outstanding failed blob or day.")
@@ -28,7 +29,9 @@ public record IngestFailureView(
         @JsonProperty("first_failed_at") @Schema(description = "Earliest failure (UTC, ISO-8601).") String firstFailedAt,
         @JsonProperty("last_failed_at") @Schema(description = "Latest failure (UTC, ISO-8601).") String lastFailedAt,
         @JsonProperty("next_attempt_at") @Schema(description = "When the retry sweep is due to attempt it; pending subjects only.")
-        String nextAttemptAt) {
+        String nextAttemptAt,
+        @JsonProperty("backfill_run_ids") @Schema(description = "Backfill runs that failed the subject since it was last resolved; absent when none.")
+        List<String> backfillRunIds) {
 
     public static IngestFailureView of(IngestFailureEntry entry) {
         OpenIngestFailure failure = entry.failure();
@@ -46,6 +49,7 @@ public record IngestFailureView(
                 failure.attempts(),
                 failure.firstFailedAt().toString(),
                 failure.lastFailedAt().toString(),
-                entry.nextAttemptAt() == null ? null : entry.nextAttemptAt().toString());
+                entry.nextAttemptAt() == null ? null : entry.nextAttemptAt().toString(),
+                failure.backfillRunIds().isEmpty() ? null : failure.backfillRunIds());
     }
 }

@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS _dial_internal_failed_ingest
     event              LowCardinality(String),
     path               LowCardinality(String),
     mode               LowCardinality(String),
+    backfill_run_id    String,
     failure_class      LowCardinality(String),
     reason             LowCardinality(String),
     message            String,

@@ -527,7 +527,7 @@ class DataSyncServiceTest {
                 ledger, failures);
         LocalDate today = LocalDate.now(ZoneOffset.UTC);
 
-        assertThat(down.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestPath.BACKFILL, DataSyncService.IngestProgressListener.NO_OP)
+        assertThat(down.runForDate(today, IngestLedger.Mode.SKIP_RECORDED, IngestSource.of(IngestPath.BACKFILL), DataSyncService.IngestProgressListener.NO_OP)
                 .success()).isFalse();
 
         assertThat(failureLedger.of(IngestFailureKind.DAY, today.toString())).singleElement().satisfies(event -> {
