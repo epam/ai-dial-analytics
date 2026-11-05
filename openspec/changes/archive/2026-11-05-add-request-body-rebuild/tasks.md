@@ -180,7 +180,7 @@ Paths below are relative to `src/main/java/com/epam/aidial/analytics/` (producti
       data-sync spec.
 - [x] 8.3 Check every touched file against the CLAUDE.md public-repo hygiene rules (no environment names, no
       real-data figures, invented ids only) with the PCRE and multiline sweeps CLAUDE.md gives.
-- [ ] 8.4 When archiving, insert the new requirements of `structured-query`, `sql-query-translation`,
+- [x] 8.4 When archiving, insert the new requirements of `structured-query`, `sql-query-translation`,
       `query-schema-discovery`, `flight-sql-endpoint` and `query-translation-endpoint` **before** each spec's
       `## Implementation notes` header; confirm the merged `data-sync` and `table-management` requirements match the
       shipped behavior.
