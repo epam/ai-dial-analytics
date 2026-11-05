@@ -3,6 +3,8 @@ package com.epam.aidial.analytics.service.query.repository;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -21,6 +23,8 @@ import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.SelectQuery;
 import org.jooq.impl.DSL;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -31,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
@@ -49,6 +54,19 @@ import static org.mockito.Mockito.verify;
  */
 @ExtendWith(MockitoExtension.class)
 class StructuredQueryExecutorTest {
+
+    /** Pipeline statements run only inside a pipeline run; each test drives one as if inside it. */
+    private ReplicaScope.Binding pipelineRun;
+
+    @BeforeEach
+    void bindPipelineRun() {
+        pipelineRun = ReplicaRouterStubs.pipelineRun();
+    }
+
+    @AfterEach
+    void unbindPipelineRun() {
+        pipelineRun.close();
+    }
 
     /** The key {@code QuerySettings.serverSetting("final", ...)} stores under in {@code getAllSettings()}. */
     private static final String FINAL_KEY = FinalSettings.FINAL_KEY;
@@ -117,7 +135,8 @@ class StructuredQueryExecutorTest {
         // under FINAL instead of merging every part of the payload table.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal());
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
+                .execute(collapsing, rowQueryWithTotal());
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
                 .doesNotContainKey(FINAL_KEY)
@@ -131,7 +150,7 @@ class StructuredQueryExecutorTest {
         // global — slower, never wrong — on every statement of the read.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
                 .execute(collapsing(DialUsageLogTestModel.crossPartitionModel()), rowQueryWithTotal());
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
@@ -146,7 +165,8 @@ class StructuredQueryExecutorTest {
         // which only affects FINAL reads, is not attached either.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
 
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
+                .execute(collapsing, rowQueryWithTotal().withFinalRead(false));
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s)
                 .doesNotContainKey(FINAL_KEY)
@@ -160,7 +180,8 @@ class StructuredQueryExecutorTest {
         final ExprTranslator expr = new ExprTranslator(new ValueExprToObjectMapper());
         final StructuredQueryBuilder forced = new StructuredQueryBuilder(expr, new FilterTranslator(expr), true);
 
-        new StructuredQueryExecutor(forced, ctx, clickHouse, RowPolicyFilterStubs.inert()).execute(collapsing, rowQueryWithTotal().withFinalRead(false));
+        new StructuredQueryExecutor(forced, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
+                .execute(collapsing, rowQueryWithTotal().withFinalRead(false));
 
         assertThat(settingsOfEveryStatement(2)).allSatisfy(s -> assertThat(s).containsEntry(NO_MERGE_KEY, "1"));
         assertThat(sqlOfEveryStatement(2)).allSatisfy(sql -> assertThat(sql).contains("\"dial_usage_log\" FINAL"));
@@ -171,7 +192,7 @@ class StructuredQueryExecutorTest {
         // A caller adds to the deduplication rather than replacing it. A budget that silently dropped
         // final=1 would change what the preview *reports*, not just what it costs — and the numbers would
         // be wrong in the direction of showing more rows than any read of the same data returns.
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
                 .executeScan(scanStatement(), new QuerySettings().serverSetting("max_execution_time", "30"));
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
@@ -183,7 +204,7 @@ class StructuredQueryExecutorTest {
 
     @Test
     void scanWithoutCallerSettingsStillDeduplicates() {
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert()).executeScan(scanStatement());
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace()).executeScan(scanStatement());
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
         verify(clickHouse).query(anyString(), settings.capture());
@@ -196,7 +217,7 @@ class StructuredQueryExecutorTest {
      */
     @Test
     void pipelineReadCarriesItsQueryIdThroughTheSettingsCall() {
-        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert())
+        new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace())
                 .executeScan(scanStatement(), new QuerySettings().setQueryId("adas-p1-scan-1"), model);
 
         final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
@@ -207,7 +228,7 @@ class StructuredQueryExecutorTest {
 
     @Test
     void modelAwareScanFollowsTheModelsPartitionLocality() {
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace());
 
         executor.executeScan(scanStatement(), new QuerySettings(), model);
         executor.executeScan(scanStatement(), new QuerySettings(), DialUsageLogTestModel.crossPartitionModel());
@@ -222,7 +243,7 @@ class StructuredQueryExecutorTest {
         // No model, no claim: the model-less scans keep final=1 alone, and the two-argument composite — a user
         // read, whose FINAL lives in its SQL — carries nothing. A composite plan asserts partition locality
         // explicitly, having ANDed it over every entity it reads final.
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace());
 
         executor.executeScan(scanStatement());
         executor.executeScan(scanStatement(), new QuerySettings());
@@ -243,7 +264,7 @@ class StructuredQueryExecutorTest {
         // the key set from, so the page itself must carry the projection — for the DSL page and the
         // composite (execute-sql) page alike.
         given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of());
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert());
+        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(), ReplicaRouterStubs.inPlace());
         final StructuredQuery aliased = new StructuredQuery(
                 DialUsageLogTestModel.ENTITY,
                 null,
@@ -273,7 +294,7 @@ class StructuredQueryExecutorTest {
         final RowPolicyFilter confining = org.mockito.Mockito.mock(RowPolicyFilter.class);
         given(confining.apply(any(QuerySettings.class))).willAnswer(inv ->
                 ((QuerySettings) inv.getArgument(0)).serverSetting(RowPolicyFilter.SETTING, "{'default.t':'1 = 0'}"));
-        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, confining);
+        final StructuredQueryExecutor executor = new StructuredQueryExecutor(builder, ctx, clickHouse, confining, ReplicaRouterStubs.inPlace());
         final String filterKey = com.clickhouse.client.api.ClientConfigProperties.serverSetting(RowPolicyFilter.SETTING);
 
         executor.execute(collapsing, rowQueryWithTotal());
@@ -284,5 +305,14 @@ class StructuredQueryExecutorTest {
         assertThat(sent.subList(0, 3)).allSatisfy(s -> assertThat(s).containsEntry(filterKey, "{'default.t':'1 = 0'}"));
         assertThat(sent.get(3)).doesNotContainKey(filterKey);
         verify(confining, times(2)).apply(any(QuerySettings.class));
+    }
+
+    /** A pipeline scan outside a pipeline run would execute on the primary rather than the run's home. */
+    @Test
+    void pipelineScanOutsidePipelineRunIsRefused() {
+        pipelineRun.close();
+        assertThatThrownBy(() -> new StructuredQueryExecutor(builder, ctx, clickHouse, RowPolicyFilterStubs.inert(),
+                ReplicaRouterStubs.inPlace()).executeScan(scanStatement()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside a pipeline run");
     }
 }

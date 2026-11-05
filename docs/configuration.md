@@ -142,7 +142,7 @@ grants — are in [`clickhouse-server.md`](clickhouse-server.md).
 
 | Variable              | Property              | Default     | Required | Description                                                                   |
 |-----------------------|-----------------------|-------------|----------|-------------------------------------------------------------------------------|
-| `CLICKHOUSE_HOST`     | `clickhouse.host`     | `localhost` | Yes      | ClickHouse host.                                                              |
+| `CLICKHOUSE_HOST`     | `clickhouse.host`     | `localhost` | Yes      | The primary replica: ingest, API writes and DDL. Must reach only that server. |
 | `CLICKHOUSE_PORT`     | `clickhouse.port`     | `8123`      | No       | ClickHouse HTTP interface port.                                               |
 | `CLICKHOUSE_DATABASE` | `clickhouse.database` | _(empty)_   | No       | Default database for both connections. Blank means `default`.                 |
 | `CLICKHOUSE_USER`     | `clickhouse.user`     | `default`   | Yes      | Read-only user. The default is the local image's passwordless `default` user. |
@@ -170,6 +170,20 @@ the PostgreSQL catalog alone. A file placed in the wrong migration root silently
 | Variable                        | Property                        | Default | Required | Description                                                                                                                                                                    |
 |---------------------------------|---------------------------------|---------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `CLICKHOUSE_MIGRATIONS_ENABLED` | `clickhouse.migrations.enabled` | `true`  | No       | Run the ClickHouse migrations at startup; `true` also when the property is absent. Set `false` when the schema is provisioned out of band. A migration failure aborts startup. |
+
+### ClickHouse replicas and routing
+
+Replicas are discovered from the `Replicated` database, never configured; these keys only shape how
+work is routed over them. Topology, requirements and the failover runbook are in
+[`clickhouse-replication.md`](clickhouse-replication.md).
+
+| Variable                                 | Property                                 | Default    | Required | Description                                                                              |
+|------------------------------------------|------------------------------------------|------------|----------|------------------------------------------------------------------------------------------|
+| `CLICKHOUSE_ROUTING_QUERIES`             | `clickhouse.routing.queries`             | `replicas` | No       | Where user queries run: `replicas` (healthy replicas) or `primary`.                      |
+| `CLICKHOUSE_ROUTING_PIPELINES`           | `clickhouse.routing.pipelines`           | `replicas` | No       | Where pipeline runs run: `replicas` (each pipeline's home replica) or `primary`.          |
+| `CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL` | `clickhouse.replicas.discovery-interval` | `30s`      | No       | How often the replica set is re-read from `system.clusters`; at least `5s`.              |
+| `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT`       | `clickhouse.replicas.sync-timeout`       | `30s`      | No       | Bound of one replica sync before a pipeline run or an ingest cycle; positive.            |
+| `CLICKHOUSE_DDL_TASK_TIMEOUT`            | `clickhouse.ddl.task-timeout`            | `30s`      | No       | How long a DDL waits for the other replicas before returning; at least `1s`.             |
 
 ### PostgreSQL table catalog
 

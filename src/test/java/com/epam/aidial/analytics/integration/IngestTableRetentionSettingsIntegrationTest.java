@@ -142,6 +142,7 @@ class IngestTableRetentionSettingsIntegrationTest extends AbstractClickHouseInte
         // on 26.3 and parenthesised from 26.8, so the match accepts both spellings and nothing else.
         assertThat(ddl).containsPattern("ORDER BY \\(?event_id\\)?(?![\\w,])");
         // The version column every enrichment carries, stamped by ClickHouse rather than the caller.
-        assertThat(ddl).contains("ReplacingMergeTree(_updated_at)");
+        // Replicated, as every table is; SHOW CREATE spells the Keeper arguments before the version column.
+        assertThat(ddl).containsPattern("ReplicatedReplacingMergeTree\\('[^']*', '[^']*', _updated_at\\)");
     }
 }

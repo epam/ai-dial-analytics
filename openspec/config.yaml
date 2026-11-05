@@ -259,6 +259,15 @@ context: |
     `ClickHouseMigrationRunner`, writer credential). A file in the wrong folder silently never runs.
     Gated by `clickhouse.migrations.enabled`, default `true` **including when the property is
     absent**; a failure aborts startup.
+  - **ClickHouse storage is replicated on every deployment.** The session database is a `Replicated`
+    database and every table a `Replicated*MergeTree` with **no Keeper arguments** and
+    `SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0`
+    (insert deduplication off; the table setting is the only spelling honoured from 25.3 to 26.8). A
+    **new ClickHouse migration declares that form itself** and keeps its one-line header; applied
+    migrations that declare plain engines stay frozen and are pre-created replicated by the runner's
+    Flyway callback. `TableDdlRenderer` renders the same form for every catalog table. Every DDL runs on
+    the primary under `DdlSettings`; a statement no routing rule names runs on the primary
+    (`openspec/specs/clickhouse-replication/spec.md`).
   - **`security.mode` is `oidc` or `none`, default `none`.** In `none` every authorization check
     fails open — the endpoint gates, per-table grants, pipeline authorization, saved-query ownership,
     sensitive-column masking, row policies — and the Flight port is unauthenticated; only the
@@ -317,6 +326,8 @@ operations:
       - Keep a new migration's comments to a one-line header that links the owning spec. Flyway
         checksums the whole file, so a comment can never be corrected once applied; rationale goes to
         the spec or `design.md`.
+      - A new ClickHouse `CREATE TABLE` migration declares `Replicated*MergeTree` with no arguments plus
+        `replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0`.
   archive:
     guidance:
       - Confirm the merged spec matches the shipped behavior before archiving; the spec, not the

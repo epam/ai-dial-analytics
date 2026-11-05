@@ -240,7 +240,7 @@ abstract class AbstractClickHouseIntegrationTest {
                                     + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
                             .setUsername(container.getUsername())
                             .setPassword(container.getPassword())
-                            .setDefaultDatabase(container.getDatabaseName())
+                            .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
                             .build();
                     writeClient = local;
                 }

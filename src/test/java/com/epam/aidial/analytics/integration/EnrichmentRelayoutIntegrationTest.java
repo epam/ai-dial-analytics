@@ -399,7 +399,7 @@ class EnrichmentRelayoutIntegrationTest extends AbstractClickHouseIntegrationTes
         seedUci();
         final String before = rows("SELECT event_id, session, _updated_at FROM " + UCI + " ORDER BY event_id");
         states.start(UCI, RelayoutStep.STARTED, copy(UCI), null);
-        execute("CREATE TABLE " + copy(UCI) + " (junk String) ENGINE = MergeTree ORDER BY junk");
+        execute("CREATE TABLE " + copy(UCI) + " (junk String) ENGINE = ReplicatedMergeTree ORDER BY junk");
 
         relayouts.runAll();
 

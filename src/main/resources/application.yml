@@ -105,6 +105,14 @@ clickhouse:
     password: ${CLICKHOUSE_WRITER_PASSWORD:}
   migrations:
     enabled: ${CLICKHOUSE_MIGRATIONS_ENABLED:true}
+  routing:
+    queries: ${CLICKHOUSE_ROUTING_QUERIES:replicas}
+    pipelines: ${CLICKHOUSE_ROUTING_PIPELINES:replicas}
+  replicas:
+    discovery-interval: ${CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL:30s}
+    sync-timeout: ${CLICKHOUSE_REPLICAS_SYNC_TIMEOUT:30s}
+  ddl:
+    task-timeout: ${CLICKHOUSE_DDL_TASK_TIMEOUT:30s}
 
 blob:
   provider: ${BLOB_PROVIDER:azureblob}

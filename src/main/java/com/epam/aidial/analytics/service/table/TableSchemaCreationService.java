@@ -13,6 +13,7 @@ import com.epam.aidial.analytics.service.table.TableDdlRenderer.CreateSpec;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.DdlColumn;
 import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -40,6 +41,7 @@ import java.util.stream.Stream;
  * leaving an {@code ACTIVE} definition without a confirmed ClickHouse table.
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class TableSchemaCreationService {
 
@@ -90,14 +92,25 @@ public class TableSchemaCreationService {
         writer.persistSchema(name, schema);
         final TableDefinitionEntity persisted = definitions.findById(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        boolean existedBefore = true;
         try {
             // The inherited TTL is read from the source's physical table, which a validation pass (NO_OP) does not
             // need: it issues no DDL, and must not fail an import preview over a ClickHouse read. Inside the try,
             // like the CREATE: the schema is committed by now, so a failed read must record FAILED rather than
             // leave a half-defined PENDING row.
             final CreateSpec spec = createSpec(persisted, executor != DdlExecutor.NO_OP, List.of());
+            existedBefore = executor == DdlExecutor.NO_OP || inspector.exists(name);
             executor.execute(ddlRenderer.renderCreate(name, spec));
         } catch (RuntimeException ex) {
+            // A CREATE the primary executed is applied, even when the statement then failed waiting for another
+            // replica or with an error another replica reported: that replica applies it from the database log. It is
+            // never compensated, so a table the other replicas are creating is not dropped from under them.
+            if (!existedBefore && tookEffect(name)) {
+                log.warn("Table '{}' was created on the primary although the CREATE reported a failure ({}); it is "
+                        + "treated as created, and lagging replicas apply it from the database log", name, ex.getMessage());
+                writer.markStatus(name, TableStatus.ACTIVE);
+                return catalogService.get(name);
+            }
             safeDrop(name, executor);
             try {
                 writer.markStatus(name, TableStatus.FAILED);
@@ -351,6 +364,15 @@ public class TableSchemaCreationService {
                         "ttl column '" + ttl.column() + "' is not a declared column of this table"));
         return new TableDdlRenderer.TtlDdl(ttl.column(), ttl.interval(), ttl.unit(),
                 TableTtlRules.wrapsToDateTime(column.getType()));
+    }
+
+    /** Whether {@code name} exists on the primary; false when that cannot be read either. */
+    private boolean tookEffect(String name) {
+        try {
+            return inspector.exists(name);
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /** Best-effort idempotent drop used to undo an ambiguous create; swallows any failure. */

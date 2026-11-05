@@ -34,7 +34,7 @@ class ClickHouseMigrationConnectionIntegrationTest extends AbstractClickHouseInt
     @Test
     void migrationConnectionRunsWithFinalEnabled() throws Exception {
         final String url = ClickHouseMigrationRunner.jdbcUrl(clickHouse.host(), clickHouse.port(), clickHouse.database());
-        assertThat(url).endsWith("?custom_settings=" + ClickHouseMigrationRunner.MIGRATION_SETTINGS);
+        assertThat(url).contains("?custom_settings=" + ClickHouseMigrationRunner.MIGRATION_SETTINGS + ",");
 
         try (Connection connection = DriverManager.getConnection(
                         url, ClickHouseContainerSupport.CLICKHOUSE.getUsername(), ClickHouseContainerSupport.CLICKHOUSE.getPassword());
@@ -43,6 +43,24 @@ class ClickHouseMigrationConnectionIntegrationTest extends AbstractClickHouseInt
             assertThat(result.next()).isTrue();
             // `final` is a Bool setting: the server renders it "true" over the JDBC path, "1" over others.
             assertThat(result.getString("f")).isIn("1", "true");
+        }
+    }
+
+    /**
+     * Every DDL on the migration connection returns once the active replicas applied it, within the DDL bound, so a
+     * stopped replica cannot hold startup for the server's default 180 seconds.
+     */
+    @Test
+    void migrationConnectionRunsDdlOnlyActiveWithinBound() throws Exception {
+        final String url = ClickHouseMigrationRunner.jdbcUrl(clickHouse.host(), clickHouse.port(), clickHouse.database());
+        try (Connection connection = DriverManager.getConnection(
+                        url, ClickHouseContainerSupport.CLICKHOUSE.getUsername(), ClickHouseContainerSupport.CLICKHOUSE.getPassword());
+                Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("SELECT getSetting('distributed_ddl_output_mode') AS m, "
+                        + "toString(getSetting('distributed_ddl_task_timeout')) AS t")) {
+            assertThat(result.next()).isTrue();
+            assertThat(result.getString("m")).isEqualTo("null_status_on_timeout_only_active");
+            assertThat(result.getString("t")).isEqualTo("30");
         }
     }
 

@@ -200,6 +200,8 @@ public class DataSyncService {
         try {
             // Preparing the day (prefix, and the catalog read behind the sink) sits inside the try so a failure
             // there fails this day like any other, instead of escaping and breaking the never-throws contract.
+            // The ledgers first, so a new primary skips every blob already recorded; a failed sync fails the day.
+            ledger.sync();
             prefix = prefixResolver.dayPrefix(targetDate);
             log.info("Data-sync run starting: prefix={}", prefix);
             // One sink for the whole run so rows batch across blobs instead of one insert per blob.

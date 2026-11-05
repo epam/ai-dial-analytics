@@ -80,7 +80,7 @@ public class ClickHouseTableInspector {
     public List<GenericRecord> query(String sql, Map<String, Object> params) {
         return clickHouseSpans.query(null, () -> {
             try {
-                return writer.client().queryAll(sql, params);
+                return writer.primaryClient().queryAll(sql, params);
             } catch (Exception ex) {
                 if (ClickHouseFailures.isUnavailable(ex)) {
                     throw new ClickHouseUnavailableException("ClickHouse is unreachable", ex);

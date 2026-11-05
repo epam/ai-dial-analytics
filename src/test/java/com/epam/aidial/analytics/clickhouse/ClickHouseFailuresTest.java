@@ -169,4 +169,32 @@ class ClickHouseFailuresTest {
 
         assertThat(ClickHouseFailures.transportFaults()).doesNotContain(ClientFaultCause.ServerRetryable);
     }
+
+    /** Keeper and replication failures mean the cluster's coordination is impaired, not that the statement is wrong. */
+    @Test
+    void keeperAndReplicationFailuresAreUnavailable() {
+        for (final int code : new int[] {242, 225, 999, 319}) {
+            assertThat(ClickHouseFailures.isUnavailable(new RuntimeException("wrapped", serverError(code))))
+                    .as("code %d", code).isTrue();
+        }
+        assertThat(ClickHouseFailures.isUnavailable(serverError(164))).as("READONLY stays a rejection").isFalse();
+    }
+
+    @Test
+    void connectFailuresAreNarrowerThanUnavailability() {
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new java.net.ConnectException("refused"))))
+                .isTrue();
+        assertThat(ClickHouseFailures.isConnectFailure(new java.net.SocketTimeoutException("read"))).isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(serverError(242))).isFalse();
+    }
+
+    /** A replica behind on DDL reports a catalog-resolved name unknown under one of these three codes. */
+    @Test
+    void unknownNamesAreRecognisedByCode() {
+        assertThat(ClickHouseFailures.isUnknownName(new RuntimeException(serverError(60)))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(47))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(16))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(62))).isFalse();
+        assertThat(ClickHouseFailures.isTimeout(serverError(159))).isTrue();
+    }
 }

@@ -1,17 +1,19 @@
 package com.epam.aidial.analytics.clickhouse;
 
+import com.epam.aidial.analytics.configuration.ClickHouseDdlProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
-import com.epam.aidial.analytics.sync.IngestTtlReconciler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.Flyway;
-import org.springframework.boot.ApplicationArguments;
-import org.springframework.boot.ApplicationRunner;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Duration;
 
 /**
  * Provisions the ClickHouse schema (e.g. {@code dial_usage_log}) on startup by running the Flyway
@@ -24,14 +26,23 @@ import org.springframework.stereotype.Component;
  * used only for migrations and connects over the ClickHouse JDBC driver, with no {@code DataSource}
  * or {@code spring-jdbc} dragged into the app just to satisfy auto-config.
  *
- * <p>After the migrations it reconciles the usage log's and the payload table's {@code TTL} with
- * {@code sync.usage-log.ttl-days} and {@code sync.payload.ttl-days} ({@link IngestTtlReconciler}): the migrations
- * only provision the defaults, and applied migrations are frozen.
- * Done here so it shares this runner's gate and runs before every other startup step.
+ * <p><b>A step of the storage phase, not a runner of its own.</b> {@code ClickHouseStoragePhase} calls
+ * {@link #migrate()} after the table conversion and before the retention reconciliation and the table check, under
+ * the phase's advisory lock: Flyway takes no lock of its own on ClickHouse, and several instances starting at once
+ * would otherwise migrate concurrently.
+ *
+ * <p><b>Replicated tables without editing applied migrations.</b> Before {@code migrate()} the Flyway history table
+ * is created as a {@code ReplicatedMergeTree} with the plugin's own column list, so every replica sees one history;
+ * before each pending migration, {@link MigrationPreCreate} creates the migration's {@code CREATE TABLE IF NOT EXISTS}
+ * table in its replicated form, so the migration's own statement finds it and does nothing and its checksum is
+ * unchanged. See {@code openspec/specs/data-sync/spec.md}.
  *
  * <p>Connects with the <em>writer</em> credential, which must additionally hold {@code CREATE TABLE}
- * grants (DDL). Gated by {@code clickhouse.migrations.enabled} (default true); disable it when the
+ * grants (DDL). Run only when {@code clickhouse.migrations.enabled} (default true); disable it when the
  * schema is operator-provisioned. A migration failure aborts startup.
+ *
+ * <p><b>The migration connection runs every DDL under {@link DdlSettings}</b>, so a stopped replica holds a statement
+ * for at most {@code clickhouse.ddl.task-timeout} instead of failing startup.
  *
  * <p><b>The migration connection reads with {@code final=1}</b>, the same server setting every ADAS read
  * path applies ({@link FinalSettings}). Every ingest table is a
@@ -47,48 +58,80 @@ import org.springframework.stereotype.Component;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(name = "clickhouse.migrations.enabled", havingValue = "true", matchIfMissing = true)
-// Ordered ahead of SchemaValidator so the schema is provisioned before startup reconciliation runs.
-@Order(0)
-public class ClickHouseMigrationRunner implements ApplicationRunner {
+public class ClickHouseMigrationRunner {
 
-    private static final String MIGRATIONS_LOCATION = "classpath:db/migration/clickhouse";
+    private static final String MIGRATIONS_FOLDER = "db/migration/clickhouse";
+    private static final String MIGRATIONS_LOCATION = "classpath:" + MIGRATIONS_FOLDER;
+
+    /** The Flyway history table, Flyway's default name. */
+    public static final String HISTORY_TABLE = "flyway_schema_history";
 
     /**
-     * Server settings every migration statement runs under, in the driver's {@code custom_settings}
-     * spelling ({@code name=value}, comma-separated). {@code final=1} is deliberately the only one: the
-     * migration path is meant to behave like the read path, not to tune itself.
+     * The read setting every migration statement runs under, in the driver's {@code custom_settings} spelling: the
+     * migration path is meant to read like the read path. The DDL settings ({@link DdlSettings}) are appended to it in
+     * {@link #jdbcUrl(String, int, String, Duration)}.
      */
     public static final String MIGRATION_SETTINGS = "final=1";
 
+    /**
+     * The Flyway ClickHouse plugin's history-table columns, verbatim, with a replicated engine and insert deduplication
+     * off. Created before {@code migrate()}, so the plugin finds the table and never creates its plain form.
+     */
+    static final String HISTORY_DDL = "CREATE TABLE IF NOT EXISTS " + HISTORY_TABLE + " ("
+            + "installed_rank Int32, version Nullable(String), description String, type String, script String, "
+            + "checksum Nullable(Int32), installed_by String, installed_on DateTime DEFAULT now(), execution_time Int32, "
+            + "success Bool) ENGINE = ReplicatedMergeTree PRIMARY KEY (script) SETTINGS "
+            + ReplicatedDdl.NO_INSERT_DEDUPLICATION;
+
     private final ClickHouseProperties properties;
     private final ClickHouseWriterProperties writerProperties;
-    private final IngestTtlReconciler ingestTtlReconciler;
+    private final ClickHouseDdlProperties ddlProperties;
 
-    @Override
-    public void run(ApplicationArguments args) {
+    /** Pre-creates the history table, then applies every pending migration with its table pre-created replicated. */
+    public void migrate() {
         final String url = jdbcUrl();
         log.info("Running ClickHouse schema migrations against {}", url);
+        createHistoryTable(url);
         final Flyway flyway = Flyway.configure()
                 .dataSource(url, writerProperties.user(), writerProperties.password())
                 .locations(MIGRATIONS_LOCATION)
+                .table(HISTORY_TABLE)
+                .callbacks(new MigrationPreCreate(MIGRATIONS_FOLDER))
                 .load();
         final int applied = flyway.migrate().migrationsExecuted;
         log.info("ClickHouse schema migrations complete ({} applied)", applied);
-        ingestTtlReconciler.reconcile();
+    }
+
+    private void createHistoryTable(String url) {
+        try (Connection connection = DriverManager.getConnection(url, writerProperties.user(), writerProperties.password());
+                Statement statement = connection.createStatement()) {
+            statement.execute(HISTORY_DDL);
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Could not create the replicated Flyway history table", ex);
+        }
     }
 
     /**
      * The JDBC URL Flyway connects with: host, port and database from {@code clickhouse.*}, plus
-     * {@link #MIGRATION_SETTINGS}. Package-private so a test can open the very same connection and
-     * assert the setting is in effect rather than merely present in the string.
+     * {@link #MIGRATION_SETTINGS} and the DDL settings. Package-private so a test can open the very same connection
+     * and assert the settings are in effect rather than merely present in the string.
      */
     String jdbcUrl() {
-        return jdbcUrl(properties.host(), properties.port(), properties.database());
+        return jdbcUrl(properties.host(), properties.port(), properties.database(), ddlProperties.taskTimeout());
     }
 
+    /** {@link #jdbcUrl(String, int, String, Duration)} with the default DDL bound. */
     public static String jdbcUrl(String host, int port, String database) {
+        return jdbcUrl(host, port, database, ClickHouseDdlProperties.defaults().taskTimeout());
+    }
+
+    public static String jdbcUrl(String host, int port, String database, Duration ddlTaskTimeout) {
         final String schema = StringUtils.isBlank(database) ? "default" : database.trim();
-        return "jdbc:clickhouse://" + host + ":" + port + "/" + schema + "?custom_settings=" + MIGRATION_SETTINGS;
+        return "jdbc:clickhouse://" + host + ":" + port + "/" + schema + "?custom_settings=" + customSettings(ddlTaskTimeout);
+    }
+
+    /** Every setting of the migration connection, in the driver's {@code custom_settings} spelling. */
+    public static String customSettings(Duration ddlTaskTimeout) {
+        return MIGRATION_SETTINGS + "," + DdlSettings.customSettings(ddlTaskTimeout);
     }
 }

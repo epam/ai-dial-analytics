@@ -53,6 +53,16 @@ import java.net.UnknownHostException;
  * account's) keeps the 503 this class assigned, because the identical statement succeeds once that load
  * clears. Read the pair as: this class asks <em>did ClickHouse run out of something</em>; the budget asks
  * <em>was it our something</em>.
+ *
+ * <h2>Keeper and replication failures</h2>
+ *
+ * <p>On replicated storage a statement can also fail because the cluster's coordination is impaired: Keeper is
+ * unreachable or the session expired ({@code NO_ZOOKEEPER}, {@code KEEPER_EXCEPTION}), a replica lost its Keeper
+ * connection and turned read-only ({@code TABLE_IS_READ_ONLY}), or an insert's commit could not be confirmed
+ * ({@code UNKNOWN_STATUS_OF_INSERT}). They are 503 too, even the rare persistent cases (a replica whose Keeper
+ * metadata was lost stays read-only until an operator restores it): the same statement succeeds once the cluster
+ * is repaired, and a 4xx would make a first-party caller discard valid work. Classified by code alone, like the
+ * rest; see {@code openspec/specs/clickhouse-replication/spec.md}.
  */
 public final class ClickHouseFailures {
 
@@ -94,6 +104,27 @@ public final class ClickHouseFailures {
 
     /** {@code QUERY_WAS_CANCELLED} — cancelled server-side, not by the caller. */
     private static final int QUERY_WAS_CANCELLED = 394;
+
+    /** {@code NO_ZOOKEEPER} — no Keeper is configured or reachable. */
+    private static final int NO_ZOOKEEPER = 225;
+
+    /** {@code TABLE_IS_READ_ONLY} — the replica lost its Keeper session; writes and syncs fail, reads work. */
+    private static final int TABLE_IS_READ_ONLY = 242;
+
+    /** {@code UNKNOWN_STATUS_OF_INSERT} — the insert's Keeper commit could not be confirmed either way. */
+    private static final int UNKNOWN_STATUS_OF_INSERT = 319;
+
+    /** {@code KEEPER_EXCEPTION} — a Keeper operation failed, mostly a lost connection or an expired session. */
+    private static final int KEEPER_EXCEPTION = 999;
+
+    /** {@code NO_SUCH_COLUMN_IN_TABLE} — a replica behind on DDL does not know a column yet. */
+    private static final int NO_SUCH_COLUMN_IN_TABLE = 16;
+
+    /** {@code UNKNOWN_IDENTIFIER} — likewise, as the analyzer reports it. */
+    private static final int UNKNOWN_IDENTIFIER = 47;
+
+    /** {@code UNKNOWN_TABLE} — a replica behind on DDL does not know a table yet. */
+    private static final int UNKNOWN_TABLE = 60;
 
     private ClickHouseFailures() {
     }
@@ -143,7 +174,8 @@ public final class ClickHouseFailures {
                     || cause instanceof NoRouteToHostException) {
                 return true;
             }
-            if (cause instanceof ServerException server && isResourceExhaustion(server.getCode())) {
+            if (cause instanceof ServerException server
+                    && (isResourceExhaustion(server.getCode()) || isCoordinationFailure(server.getCode()))) {
                 return true;
             }
             final String type = cause.getClass().getSimpleName().toLowerCase();
@@ -152,6 +184,61 @@ public final class ClickHouseFailures {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether {@code ex}, or anything in its cause chain, means the connection to the server could not be made: the
+     * server is down or its name does not resolve, so nothing reached it. Narrower than {@link #isUnavailable}: a
+     * read that timed out may have run, a refused connection did not.
+     */
+    public static boolean isConnectFailure(Throwable ex) {
+        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ConnectException
+                    || cause instanceof UnknownHostException
+                    || cause instanceof NoRouteToHostException) {
+                return true;
+            }
+            final String type = cause.getClass().getSimpleName().toLowerCase();
+            if (type.contains("connect") && !(cause instanceof ServerException)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether {@code ex} reports a table or column unknown ({@code UNKNOWN_TABLE}, {@code UNKNOWN_IDENTIFIER},
+     * {@code NO_SUCH_COLUMN_IN_TABLE}). On a non-primary replica, for a name the catalog has already resolved, that
+     * means the replica has not applied a recent DDL yet.
+     */
+    public static boolean isUnknownName(Throwable ex) {
+        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ServerException server) {
+                return switch (server.getCode()) {
+                    case UNKNOWN_TABLE, UNKNOWN_IDENTIFIER, NO_SUCH_COLUMN_IN_TABLE -> true;
+                    default -> false;
+                };
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code ex} carries {@code TIMEOUT_EXCEEDED}, the server's own wall-clock ceiling. */
+    public static boolean isTimeout(Throwable ex) {
+        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ServerException server && server.getCode() == TIMEOUT_EXCEEDED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a ClickHouse server error code reports impaired Keeper coordination. */
+    private static boolean isCoordinationFailure(int code) {
+        return switch (code) {
+            case NO_ZOOKEEPER, TABLE_IS_READ_ONLY, UNKNOWN_STATUS_OF_INSERT, KEEPER_EXCEPTION -> true;
+            default -> false;
+        };
     }
 
     /** Whether a ClickHouse server error code reports the server running out of a resource. */

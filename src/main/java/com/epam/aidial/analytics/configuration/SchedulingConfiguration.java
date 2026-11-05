@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.configuration;
 
+import com.epam.aidial.analytics.clickhouse.replication.StorageReadyGate;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -30,6 +31,11 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  * <p>{@link Primary} states the intent rather than relying on an accident of naming: with two
  * {@code TaskScheduler} beans, a {@code @Scheduled} method that names none resolves by type, and Spring's
  * fallback to the bean literally called {@code taskScheduler} would otherwise be what saves it.
+ *
+ * <p><b>Both are gated on the storage phase.</b> Spring starts {@code @Scheduled} jobs when the context refresh
+ * completes, before the ClickHouse storage phase runs, so each scheduler is a {@link GatedTaskScheduler} that skips
+ * any run before the {@link StorageReadyGate} opens. Gating the schedulers rather than each job covers a job added
+ * later; see {@code openspec/specs/clickhouse-replication/spec.md}.
  */
 @Configuration(proxyBeanMethods = false)
 public class SchedulingConfiguration {
@@ -37,8 +43,8 @@ public class SchedulingConfiguration {
     /** The pool the blob poller and the data-sync job run on; exactly what Boot would have built. */
     @Bean
     @Primary
-    public ThreadPoolTaskScheduler taskScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return builder.build();
+    public ThreadPoolTaskScheduler taskScheduler(ThreadPoolTaskSchedulerBuilder builder, StorageReadyGate gate) {
+        return builder.configure(new GatedTaskScheduler(new StorageReadyTaskDecorator(gate)));
     }
 
     /**
@@ -50,8 +56,8 @@ public class SchedulingConfiguration {
      * splitting the pool.
      */
     @Bean
-    public ThreadPoolTaskScheduler aggregateTaskScheduler(AggregateProperties properties) {
-        final ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+    public ThreadPoolTaskScheduler aggregateTaskScheduler(AggregateProperties properties, StorageReadyGate gate) {
+        final ThreadPoolTaskScheduler scheduler = new GatedTaskScheduler(new StorageReadyTaskDecorator(gate));
         scheduler.setPoolSize(properties.schedulerPoolSize());
         scheduler.setThreadNamePrefix("aggregate-sched-");
         // A refresh in flight has already probed its window; letting it finish means the cursor advances

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!--
+  Refuses a non-replicated MergeTree table inside a Replicated database, as the operator documentation
+  recommends (docs/clickhouse-replication.md), so a code path that renders a plain engine fails the
+  suite instead of silently creating an unreplicated table. Copied into /etc/clickhouse-server/users.d/.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <database_replicated_allow_only_replicated_engine>1</database_replicated_allow_only_replicated_engine>
+        </default>
+    </profiles>
+</clickhouse>

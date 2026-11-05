@@ -3,14 +3,19 @@ package com.epam.aidial.analytics.clickhouse;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.command.CommandResponse;
 import com.clickhouse.client.api.command.CommandSettings;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaMeters;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.observability.ClientSpanTracer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -24,6 +29,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
@@ -40,6 +46,19 @@ import static org.mockito.Mockito.verify;
  */
 @ExtendWith(MockitoExtension.class)
 class ClickHouseInsertSelectExecutorTest {
+
+    /** Pipeline statements run only inside a pipeline run; each test drives one as if inside it. */
+    private ReplicaScope.Binding pipelineRun;
+
+    @BeforeEach
+    void bindPipelineRun() {
+        pipelineRun = ReplicaRouterStubs.pipelineRun();
+    }
+
+    @AfterEach
+    void unbindPipelineRun() {
+        pipelineRun.close();
+    }
 
     private static final String SQL = "INSERT INTO t (k) SELECT k FROM s";
 
@@ -59,7 +78,7 @@ class ClickHouseInsertSelectExecutorTest {
         given(writer.client()).willReturn(client);
         given(client.execute(eq(SQL), any(CommandSettings.class))).willReturn(CompletableFuture.completedFuture(response));
 
-        final long written = new ClickHouseInsertSelectExecutor(writer, TestClickHouseSpans.noop())
+        final long written = new ClickHouseInsertSelectExecutor(writer, TestClickHouseSpans.noop(), new ReplicaMeters(new SimpleMeterRegistry()))
                 .insertSelect("t", SQL, partitionLocal, BUDGET, TAG);
 
         assertThat(written).isEqualTo(3L);
@@ -125,7 +144,7 @@ class ClickHouseInsertSelectExecutorTest {
         final ClickHouseSpans traced = new ClickHouseSpans(new ClientSpanTracer(OpenTelemetrySdk.builder()
                 .setTracerProvider(SdkTracerProvider.builder().addSpanProcessor(SimpleSpanProcessor.create(spans)).build())
                 .build()), new ClickHouseProperties("localhost", 8123, null, "default", ""));
-        final ClickHouseInsertSelectExecutor executor = new ClickHouseInsertSelectExecutor(writer, traced);
+        final ClickHouseInsertSelectExecutor executor = new ClickHouseInsertSelectExecutor(writer, traced, new ReplicaMeters(new SimpleMeterRegistry()));
 
         executor.insertSelect("t", SQL, false, BUDGET, TAG);
         final String firstInContext = MDC.get(StatementTag.MDC_KEY);
@@ -140,5 +159,14 @@ class ClickHouseInsertSelectExecutorTest {
         assertThat(spans.getFinishedSpanItems())
                 .extracting(span -> span.getAttributes().get(ClickHouseSpans.DB_QUERY_ID))
                 .containsExactlyElementsOf(ids);
+    }
+
+    /** A pipeline write outside a pipeline run would execute on the primary rather than the run's home. */
+    @Test
+    void writeOutsidePipelineRunIsRefused() {
+        pipelineRun.close();
+        assertThatThrownBy(() -> new ClickHouseInsertSelectExecutor(writer, TestClickHouseSpans.noop(),
+                new ReplicaMeters(new SimpleMeterRegistry())).insertSelect("t", SQL, false, BUDGET, TAG))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside a pipeline run");
     }
 }

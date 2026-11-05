@@ -189,7 +189,7 @@ rules are pod selectors; the rest is external HTTPS.
 
 | Destination | Port | When active |
 |---|---|---|
-| ClickHouse (`dial-adas-clickhouse-headless`) | 8123 TCP | always |
+| ClickHouse primary (`CLICKHOUSE_HOST`) and every replica pod's host name | 8123 TCP | always |
 | PostgreSQL (`dial-adas-postgresql`) | 5432 TCP | always |
 | Azure Blob (`<account>.blob.core.windows.net`) | 443 TCP | when data-sync polling/backfill runs |
 | DIAL Core `/v1/user/info` | 443 TCP | `oidc` mode with API keys enabled (incl. startup probe) |
@@ -216,6 +216,13 @@ spec:
     - to: [{ namespaceSelector: {}, podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
 ```
+
+ADAS dials two kinds of ClickHouse address on the HTTP port: the primary endpoint named by
+`CLICKHOUSE_HOST`, and each replica at the pod host name it reports in `system.clusters`, for pipeline
+runs and user queries ([`clickhouse-replication.md`](clickhouse-replication.md)). The pod-selector rule
+above covers both, because both resolve to ClickHouse pods. With one replica `CLICKHOUSE_HOST` may
+still name the headless Service. Before a second replica joins, point it at an endpoint that selects
+only the primary pod: startup refuses a host that resolves to, or is answered by, several replicas.
 
 Tightening options: replace the open 443 CIDR with the storage account's service-tag ranges (or a
 Private Endpoint), and if DIAL Core runs in-cluster, move it to a pod/namespace selector rule.

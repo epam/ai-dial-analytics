@@ -1,0 +1,126 @@
+# Local three-replica ClickHouse cluster, one standalone Keeper, PostgreSQL and ADAS, for exercising
+# replication: discovery, pipeline home replicas, user-query routing and failover
+# (docs/clickhouse-replication.md).
+#
+# Run from the repo root, after `./gradlew bootJar`:
+#   docker compose -f local_env/docker-compose.replicas.yml up -d
+#   docker compose -f local_env/docker-compose.replicas.yml stop chi-2     # take a replica down
+#   docker compose -f local_env/docker-compose.replicas.yml down -v        # stop and wipe
+#
+# ADAS runs inside the compose network, because it reaches each replica at the host name the replica
+# reports in system.clusters (chi-0, chi-1, chi-2), on the same HTTP port; from the host those names
+# do not resolve. CLICKHOUSE_HOST names chi-0 alone, so chi-0 is the primary. The replicas' HTTP ports
+# are published on 8133, 8134 and 8135 for clickhouse-client and curl; ADAS's REST API is on 5000.
+#
+# Separate from docker-compose.yml (its own project name and volumes), so both can exist side by side.
+
+name: adas-replicas
+
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:26.8
+  depends_on:
+    keeper:
+      condition: service_healthy
+  ulimits:
+    nofile:
+      soft: 262144
+      hard: 262144
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 10s
+
+services:
+  keeper:
+    image: clickhouse/clickhouse-keeper:26.8
+    hostname: keeper
+    volumes:
+      - ./clickhouse/replicas/keeper.xml:/etc/clickhouse-keeper/keeper_config.d/keeper.xml:ro
+      - keeper-data:/var/lib/clickhouse-keeper
+    healthcheck:
+      # "imok" once Keeper serves requests; the servers' init scripts create the Replicated database through it.
+      test: ["CMD-SHELL", "echo ruok | nc -w1 127.0.0.1 9181 | grep -q imok && echo mntr | nc -w1 127.0.0.1 9181 | grep -q zk_server_state"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  chi-0:
+    <<: *clickhouse
+    hostname: chi-0
+    environment: { MACRO_REPLICA: chi-0 }
+    ports: ["${CHI0_HTTP_PORT:-8133}:8123"]
+    volumes:
+      - ./clickhouse/users.d/zzz-local-dev-networks.xml:/etc/clickhouse-server/users.d/zzz-local-dev-networks.xml:ro
+      - ./clickhouse/users.d/zzz-replicated-only.xml:/etc/clickhouse-server/users.d/zzz-replicated-only.xml:ro
+      - ./clickhouse/config.d/encryption.xml:/etc/clickhouse-server/config.d/encryption.xml:ro
+      - ./clickhouse/replicas/server.xml:/etc/clickhouse-server/config.d/replication.xml:ro
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+      - chi-0-data:/var/lib/clickhouse
+
+  chi-1:
+    <<: *clickhouse
+    hostname: chi-1
+    environment: { MACRO_REPLICA: chi-1 }
+    ports: ["${CHI1_HTTP_PORT:-8134}:8123"]
+    volumes:
+      - ./clickhouse/users.d/zzz-local-dev-networks.xml:/etc/clickhouse-server/users.d/zzz-local-dev-networks.xml:ro
+      - ./clickhouse/users.d/zzz-replicated-only.xml:/etc/clickhouse-server/users.d/zzz-replicated-only.xml:ro
+      - ./clickhouse/config.d/encryption.xml:/etc/clickhouse-server/config.d/encryption.xml:ro
+      - ./clickhouse/replicas/server.xml:/etc/clickhouse-server/config.d/replication.xml:ro
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+      - chi-1-data:/var/lib/clickhouse
+
+  chi-2:
+    <<: *clickhouse
+    hostname: chi-2
+    environment: { MACRO_REPLICA: chi-2 }
+    ports: ["${CHI2_HTTP_PORT:-8135}:8123"]
+    volumes:
+      - ./clickhouse/users.d/zzz-local-dev-networks.xml:/etc/clickhouse-server/users.d/zzz-local-dev-networks.xml:ro
+      - ./clickhouse/users.d/zzz-replicated-only.xml:/etc/clickhouse-server/users.d/zzz-replicated-only.xml:ro
+      - ./clickhouse/config.d/encryption.xml:/etc/clickhouse-server/config.d/encryption.xml:ro
+      - ./clickhouse/replicas/server.xml:/etc/clickhouse-server/config.d/replication.xml:ro
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+      - chi-2-data:/var/lib/clickhouse
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  adas:
+    image: eclipse-temurin:25-jre
+    depends_on:
+      chi-0: { condition: service_healthy }
+      chi-1: { condition: service_healthy }
+      chi-2: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    working_dir: /app
+    command: >-
+      sh -c 'exec java --add-opens=java.base/java.nio=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
+      --enable-native-access=ALL-UNNAMED -jar /app/ai-dial-analytics-0.0.0.jar'
+    environment:
+      CLICKHOUSE_HOST: chi-0
+      POSTGRES_HOST: postgres
+      POLL_ENABLED: "false"
+    ports: ["${ADAS_PORT:-5000}:5000"]
+    volumes:
+      - ../build/libs/ai-dial-analytics-0.0.0.jar:/app/ai-dial-analytics-0.0.0.jar:ro
+
+volumes:
+  keeper-data:
+  chi-0-data:
+  chi-1-data:
+  chi-2-data:
+  postgres-data:

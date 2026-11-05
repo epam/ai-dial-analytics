@@ -356,6 +356,9 @@ tasks.named('test') {
             .withPropertyName('openspecSpecs')
             .withPathSensitivity(PathSensitivity.RELATIVE)
             .optional()
+    // The ClickHouse server version the integration tests run against (ClickHouseContainerSupport): an input, so a
+    // run against another version is never reported UP-TO-DATE from one against the default.
+    inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
 }
 
 tasks.named('bootRun') {

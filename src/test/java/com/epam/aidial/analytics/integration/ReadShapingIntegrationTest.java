@@ -328,9 +328,9 @@ class ReadShapingIntegrationTest extends AbstractClickHouseIntegrationTest {
         // throwaway pair of tables and a hand-built model cover that type, unmatched rows included.
         execute("DROP TABLE IF EXISTS rs_src");
         execute("DROP TABLE IF EXISTS rs_enr");
-        execute("CREATE TABLE rs_src (k String, at DateTime64(3, 'UTC')) ENGINE = MergeTree ORDER BY k");
+        execute("CREATE TABLE rs_src (k String, at DateTime64(3, 'UTC')) ENGINE = ReplicatedMergeTree ORDER BY k");
         execute("CREATE TABLE rs_enr (k String, at DateTime64(3, 'UTC'), body String, _updated_at DateTime64(3))"
-                + " ENGINE = ReplacingMergeTree(_updated_at) ORDER BY k");
+                + " ENGINE = ReplicatedReplacingMergeTree(_updated_at) ORDER BY k");
         try {
             execute("INSERT INTO rs_src VALUES ('a', '2026-01-01 00:00:01'), ('b', '2026-01-01 00:00:02'),"
                     + " ('c', '2026-01-01 00:00:03'), ('d', '2026-01-01 00:00:04')");

@@ -17,9 +17,11 @@ import com.epam.aidial.analytics.service.table.relayout.RelayoutStateStore;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -68,6 +70,7 @@ import java.util.function.UnaryOperator;
  * limit of hiding — column names are not a secrecy guarantee.
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class TableSchemaService {
 
@@ -419,7 +422,19 @@ public class TableSchemaService {
             commands.add(ddlRenderer.removeTtlCommand());
         }
         if (!commands.isEmpty()) {
-            ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
+            try {
+                ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
+            } catch (RuntimeException ex) {
+                // An ALTER the primary executed is applied, even when the statement then failed waiting for another
+                // replica or with an error another replica reported: that replica applies it from the database log,
+                // so the catalog follows the primary rather than staying behind it.
+                if (!alterTookEffect(name, drops, renames.stream().map(r -> r.to()).toList(),
+                        adds.stream().map(add -> add.column().sourceName()).toList())) {
+                    throw ex;
+                }
+                log.warn("The schema change of table '{}' took effect on the primary although the ALTER reported a "
+                        + "failure ({}); it is treated as applied", name, ex.getMessage());
+            }
         }
 
         writer.applyPatch(name,
@@ -431,6 +446,24 @@ public class TableSchemaService {
                         u.tag(), u.displayName(), u.description(), u.sensitive(), u.heavy())).toList(),
                 ttlChange);
         return catalogService.get(name);
+    }
+
+    /**
+     * Whether an {@code ALTER} with column changes took effect on the primary: every added and renamed-to column is
+     * present and every dropped one is gone. False when it carries no column change, or when the columns cannot be read.
+     */
+    private boolean alterTookEffect(String table, List<String> dropped, List<String> renamedTo, List<String> added) {
+        if (dropped.isEmpty() && renamedTo.isEmpty() && added.isEmpty()) {
+            return false;
+        }
+        try {
+            final Set<String> live = new HashSet<>();
+            inspector.query("SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {table:String}",
+                    Map.of("table", table)).forEach(row -> live.add(row.getString("name")));
+            return live.containsAll(added) && live.containsAll(renamedTo) && dropped.stream().noneMatch(live::contains);
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /**

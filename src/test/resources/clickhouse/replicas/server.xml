@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!--
+  The three servers of MultiReplicaClickHouseSupport: the shared standalone Keeper, the interserver port
+  replicas fetch parts over, and this server's macros from its MACRO_REPLICA environment variable.
+  A short Keeper session timeout lets a stopped replica turn inactive within seconds.
+-->
+<clickhouse>
+    <zookeeper>
+        <node>
+            <host>keeper</host>
+            <port>9181</port>
+        </node>
+        <session_timeout_ms>5000</session_timeout_ms>
+    </zookeeper>
+    <interserver_http_port>9009</interserver_http_port>
+    <macros>
+        <shard>01</shard>
+        <replica from_env="MACRO_REPLICA"/>
+    </macros>
+</clickhouse>

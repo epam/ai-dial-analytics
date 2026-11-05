@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.enrichment;
 
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
 import com.epam.aidial.analytics.configuration.GroupFetchProperties;
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
@@ -101,7 +102,7 @@ class GroupFetchServiceTest {
                 filterTranslator, ctx, executor, new JsonMapperConfiguration().jsonMapper(),
                 new ScanProperties(Duration.ZERO, 100, 1000),
                 new GroupFetchProperties(100, 1000, DataSize.ofMegabytes(10)),
-                new PipelineBudgetProperties(Duration.ofSeconds(30), DataSize.ofGigabytes(1)));
+                new PipelineBudgetProperties(Duration.ofSeconds(30), DataSize.ofGigabytes(1)), ReplicaRouterStubs.inPlace());
 
         given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.model());
         given(scanSources.cursorColumns(SOURCE)).willReturn(new CursorColumns("_ingested_at", "event_id"));

@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.configuration;
 
+import com.epam.aidial.analytics.clickhouse.replication.StorageReadyGate;
 import com.epam.aidial.analytics.service.pipeline.AggregateScheduler;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -27,6 +28,7 @@ class SchedulingConfigurationTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(TaskSchedulingAutoConfiguration.class))
             .withUserConfiguration(SchedulingConfiguration.class)
+            .withBean(StorageReadyGate.class)
             .withBean(AggregateProperties.class, () -> new AggregateProperties(
                     true, "0 * * * * *", 2, java.time.Duration.ofSeconds(5), 100, 20,
                     new AggregateProperties.Preview(java.time.Duration.ofSeconds(30),
