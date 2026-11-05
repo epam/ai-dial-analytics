@@ -96,6 +96,11 @@ public class UsageLogWriter {
                     throw new ClickHouseStorageFullException(
                             "ClickHouse refused the insert into " + table + ": the disk is full", ex);
                 }
+                Integer dataCode = dataRejectionCode(ex);
+                if (dataCode != null) {
+                    failed(table, "data_rejected");
+                    throw new ClickHouseDataRejectedException(table, dataCode, ex);
+                }
                 failed(table, "other");
                 throw new IllegalStateException("ClickHouse insert failed", ex);
             }
@@ -117,6 +122,18 @@ public class UsageLogWriter {
     static boolean isOutOfDiskSpace(Throwable error) {
         return CauseChain.anyMatch(
                 error, cause -> cause instanceof ServerException server && server.getCode() == NOT_ENOUGH_SPACE);
+    }
+
+    /**
+     * The server error code of {@code error} when it is, or was caused by, ClickHouse refusing the inserted rows
+     * themselves ({@link ClickHouseDataRejectedException#DATA_CLASS_CODES}); {@code null} otherwise. Package-private so
+     * the classification is testable on its own, without a live server.
+     */
+    static Integer dataRejectionCode(Throwable error) {
+        return CauseChain.first(error, cause -> cause instanceof ServerException server
+                        && ClickHouseDataRejectedException.DATA_CLASS_CODES.containsKey(server.getCode()))
+                .map(cause -> ((ServerException) cause).getCode())
+                .orElse(null);
     }
 
     /**

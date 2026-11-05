@@ -51,6 +51,7 @@ class DataBackfillServiceFilesystemTest {
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
     private RecordingWriter writer;
     private final InMemoryIngestLedger ledger = new InMemoryIngestLedger();
+    private final InMemoryIngestFailureLedger failureLedger = new InMemoryIngestFailureLedger();
     private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
     private DataBackfillService backfillService;
     private LocalDate dayOne;
@@ -93,7 +94,7 @@ class DataBackfillServiceFilesystemTest {
         BlobIngestor ingestor = new BlobIngestor(blobClient, new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES),
                 List.of(new SyncTarget("dial_usage_log", mappingConfig, mappingEngine)), IngestFlushOrder.NONE);
         DataSyncService syncService = new DataSyncService(blobClient, ingestor, writer, syncProps, new BlobPrefixResolver(syncProps, new SimpleMeterRegistry()),
-                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger);
+                new SimpleMeterRegistry(), TestClientSpanTracer.noop(), ledger, failureLedger.service(ledger));
         backfillService = new DataBackfillService(syncService, new BackfillProperties(true, 366), metrics);
     }
 

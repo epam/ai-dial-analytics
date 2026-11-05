@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.blob.BlobListing;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -25,6 +26,24 @@ public interface IngestLedger {
      * @return the recorded entries whose key starts with {@code prefix}
      */
     Map<String, Instant> recorded(String prefix);
+
+    /**
+     * The recorded entries among {@code keys}: key → the newest entry's last-modified time and when it was written.
+     * Keys the ledger does not record are absent. Used to tell which failed blobs have been ingested since they failed.
+     *
+     * @param keys full blob keys; an empty map when empty
+     * @return the recorded entries whose key is among {@code keys}
+     */
+    Map<String, Recorded> recordedAmong(Collection<String> keys);
+
+    /**
+     * One recorded blob.
+     *
+     * @param lastModified the last-modified time recorded for it
+     * @param ingestedAt   when that entry was written
+     */
+    record Recorded(Instant lastModified, Instant ingestedAt) {
+    }
 
     /**
      * Records blobs whose rows have all been written. A listing without a last-modified time
@@ -56,6 +75,16 @@ public interface IngestLedger {
         /** Skip the blobs the ledger records — the scheduled run, the poller and a default backfill. */
         SKIP_RECORDED,
         /** Ingest every listed blob, recorded or not — a backfill with {@code includeIngested: true}. */
-        INGEST_ALL
+        INGEST_ALL;
+
+        /** The lower-case spelling stored in the failure ledger. */
+        public String wire() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+
+        /** The mode a stored spelling names; {@link #SKIP_RECORDED} for an empty or unknown one. */
+        public static Mode fromWire(String wire) {
+            return INGEST_ALL.wire().equals(wire) ? INGEST_ALL : SKIP_RECORDED;
+        }
     }
 }

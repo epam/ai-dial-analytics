@@ -10,6 +10,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * An {@link IngestLedger} held in memory for unit tests: the newest record per key wins, as in ClickHouse,
@@ -20,6 +21,10 @@ import java.util.Map;
 class InMemoryIngestLedger implements IngestLedger {
 
     final Map<String, Instant> entries = new LinkedHashMap<>();
+    /** When each entry was last written, as ClickHouse stamps {@code ingested_at}. */
+    final Map<String, Instant> ingestedAt = new HashMap<>();
+    /** The time {@link #record} stamps; a test pins it to its own clock. */
+    Supplier<Instant> clock = Instant::now;
     final List<List<String>> recordBatches = new ArrayList<>();
     int reads;
     boolean failReads;
@@ -41,6 +46,21 @@ class InMemoryIngestLedger implements IngestLedger {
     }
 
     @Override
+    public Map<String, Recorded> recordedAmong(Collection<String> keys) {
+        reads++;
+        if (failReads) {
+            throw new IllegalStateException("ledger read failed");
+        }
+        Map<String, Recorded> result = new HashMap<>();
+        for (String key : keys) {
+            if (entries.containsKey(key)) {
+                result.put(key, new Recorded(entries.get(key), ingestedAt.get(key)));
+            }
+        }
+        return result;
+    }
+
+    @Override
     public void record(Collection<BlobListing> written) {
         if (failWrites) {
             throw new IllegalStateException("ledger write failed");
@@ -51,6 +71,7 @@ class InMemoryIngestLedger implements IngestLedger {
                 continue;
             }
             entries.put(listing.name(), listing.lastModified().truncatedTo(ChronoUnit.MILLIS));
+            ingestedAt.put(listing.name(), clock.get());
             batch.add(listing.name());
         }
         recordBatches.add(batch);

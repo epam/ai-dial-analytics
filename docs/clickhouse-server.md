@@ -295,7 +295,7 @@ aggregate `INSERT … SELECT` statements. Which grants it needs depends on which
 
 | Surface                                                   | Statements issued                                                                                                                                                    | Grant                                                     |
 |-----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------|
-| `data-sync` ingest                                        | `INSERT INTO`, `DESCRIBE TABLE` (startup schema validation, and the payload table's request-delta columns on the first flush), `SELECT` / `INSERT INTO` on the ingest ledger `_dial_internal_ingested_blob`, and `SELECT` on `dial_usage_log_payload` (the request-delta parent lookup) | `INSERT`, `SELECT`                                        |
+| `data-sync` ingest                                        | `INSERT INTO`, `DESCRIBE TABLE` (startup schema validation, and the payload table's request-delta columns on the first flush), `SELECT` / `INSERT INTO` on the ingest ledger `_dial_internal_ingested_blob` and the failure ledger `_dial_internal_failed_ingest`, and `SELECT` on `dial_usage_log_payload` (the request-delta parent lookup) | `INSERT`, `SELECT`                                        |
 | Startup migrations (`CLICKHOUSE_MIGRATIONS_ENABLED=true`) | `CREATE TABLE`, `ALTER TABLE … ADD COLUMN` / `MODIFY COLUMN` / `MATERIALIZE COLUMN` / `ADD INDEX` / `MATERIALIZE INDEX` / `MODIFY SETTING`, usage-log and payload `MODIFY TTL` / `REMOVE TTL`, Flyway history r/w | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`               |
 | Table catalog create (`POST /v1/tables`)                  | `CREATE TABLE`, best-effort `DROP TABLE IF EXISTS` after a failed create                                                                                             | `CREATE TABLE`, `DROP TABLE`                              |
 | Table catalog schema evolution (`PATCH …/schema`)         | `ALTER TABLE … ADD/DROP/RENAME COLUMN`                                                                                                                               | `ALTER`                                                   |
@@ -323,8 +323,9 @@ PATCH/DELETE needs `SELECT, INSERT, CREATE TABLE, ALTER`. `ALTER` cannot be drop
 including the `DROP COLUMN` that V11 issues against `dial_usage_log`.
 
 A deployment that grants per table rather than on `<database>.*` adds `SELECT, INSERT` on
-`<database>._dial_internal_ingested_blob` (ClickHouse migration V13): every ingest path reads and writes
-it, and startup schema validation describes it. The `_dial_internal_` prefix is reserved for tables the
+`<database>._dial_internal_ingested_blob` (ClickHouse migration V13) and on
+`<database>._dial_internal_failed_ingest` (V17, the failure ledger of blobs and days that failed to ingest):
+every ingest path reads and writes both, and startup schema validation describes both. The `_dial_internal_` prefix is reserved for tables the
 service owns; `POST /v1/tables` refuses it.
 
 ### Narrowing `ALTER` to sub-privileges

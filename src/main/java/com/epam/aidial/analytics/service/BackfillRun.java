@@ -39,6 +39,7 @@ public class BackfillRun {
     private long rowsInserted;
     private long rowsSkipped;
     private long rowsDropped;
+    private long failedBlobs;
     private Instant finishedAt;
 
     // Cumulative counts as of the start of the day in progress, so the day's live per-blob increments
@@ -47,6 +48,7 @@ public class BackfillRun {
     private long baselineInserted;
     private long baselineSkipped;
     private long baselineDropped;
+    private long baselineFailedBlobs;
 
     BackfillRun(String runId, LocalDate from, LocalDate to, Instant startedAt) {
         this.runId = runId;
@@ -74,6 +76,7 @@ public class BackfillRun {
         this.baselineInserted = rowsInserted;
         this.baselineSkipped = rowsSkipped;
         this.baselineDropped = rowsDropped;
+        this.baselineFailedBlobs = failedBlobs;
     }
 
     /**
@@ -88,6 +91,14 @@ public class BackfillRun {
     }
 
     /**
+     * Counts one blob of the day in progress that failed to read or map, so status reflects it before the day
+     * completes. Reconciled to the day summary by {@link #completeDay}.
+     */
+    synchronized void recordBlobFailure() {
+        failedBlobs++;
+    }
+
+    /**
      * Closes out the day in progress: replaces its live per-blob counts with the authoritative day
      * summary (so totals are exact regardless of batching/flush timing) and increments the
      * completed-or-failed tally, naming {@code date} among the failed dates when the day failed. A {@code null}
@@ -99,6 +110,7 @@ public class BackfillRun {
             rowsInserted = baselineInserted + summary.rowsInserted();
             rowsSkipped = baselineSkipped + summary.rowsSkipped();
             rowsDropped = baselineDropped + summary.rowsDropped();
+            failedBlobs = baselineFailedBlobs + summary.blobsFailed();
         }
         if (daySucceeded) {
             daysCompleted++;
@@ -147,7 +159,7 @@ public class BackfillRun {
     public synchronized Snapshot snapshot() {
         return new Snapshot(
                 runId, from, to, daysTotal, state, currentDate, daysCompleted, daysFailed, List.copyOf(failedDates),
-                filesProcessed, rowsInserted, rowsSkipped, rowsDropped, startedAt, finishedAt);
+                filesProcessed, rowsInserted, rowsSkipped, rowsDropped, failedBlobs, startedAt, finishedAt);
     }
 
     /**
@@ -167,6 +179,7 @@ public class BackfillRun {
             long rowsInserted,
             long rowsSkipped,
             long rowsDropped,
+            long failedBlobs,
             Instant startedAt,
             Instant finishedAt) {
     }

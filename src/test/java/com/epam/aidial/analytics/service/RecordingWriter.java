@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service;
 
+import com.epam.aidial.analytics.clickhouse.ClickHouseDataRejectedException;
 import com.epam.aidial.analytics.clickhouse.TestClickHouseSpans;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -23,6 +24,8 @@ class RecordingWriter extends UsageLogWriter {
     int insertCalls;
     /** The 1-based insert call that fails (stands in for ClickHouse refusing a write), or 0 for none. */
     int failOnInsertCall;
+    /** Whether every insert is refused as ClickHouse refuses rows it cannot parse (a data-class error). */
+    boolean rejectRows;
 
     RecordingWriter() {
         super(null, null, null, TestClickHouseSpans.noop(), new SimpleMeterRegistry());
@@ -32,6 +35,9 @@ class RecordingWriter extends UsageLogWriter {
     public void insert(String table, List<Map<String, Object>> batch) {
         if (batch.isEmpty()) {
             return;
+        }
+        if (rejectRows) {
+            throw new ClickHouseDataRejectedException(table, 53, new IllegalStateException("type mismatch"));
         }
         if (insertCalls + 1 == failOnInsertCall) {
             throw new IllegalStateException("ClickHouse insert failed");
