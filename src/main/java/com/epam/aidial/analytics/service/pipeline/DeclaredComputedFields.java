@@ -1,6 +1,5 @@
 package com.epam.aidial.analytics.service.pipeline;
 
-import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.MemberOrder;
 import com.epam.aidial.analytics.service.enrichment.model.MemberSelect;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
@@ -70,14 +69,10 @@ final class DeclaredComputedFields {
     }
 
     private static void name(String what, String column) {
-        if (column != null && ComputedFields.isComputed(column.trim())) {
-            throw new PipelineValidationException(ComputedFields.declarationMessage(what, column.trim()));
-        }
+        ComputedFields.requireNotComputed(what, column);
     }
 
     private static void fragment(String what, String sql) {
-        for (final String referenced : QualifiedColumnTokens.referencedNames(sql)) {
-            name(what, referenced);
-        }
+        ComputedFields.requireNoneComputed(what, QualifiedColumnTokens.referencedNames(sql));
     }
 }

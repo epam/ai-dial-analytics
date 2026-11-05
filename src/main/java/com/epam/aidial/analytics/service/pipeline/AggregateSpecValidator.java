@@ -535,16 +535,6 @@ public class AggregateSpecValidator {
         spec.setGroupBy(derived);
     }
 
-    /**
-     * A computed field is completed after a read's statement runs, so no aggregate statement can group or measure it
-     * (see {@code openspec/specs/aggregate-pipeline/spec.md}).
-     */
-    private static void requireNotComputed(String what, String column, EntityFields input) {
-        if (column != null && input.isComputed(column)) {
-            throw new PipelineValidationException(ComputedFields.declarationMessage(what, column));
-        }
-    }
-
     private void validateGroupKeys(AggregateSpec spec, String inputTable, EntityFields input, String filterSql) {
         final List<GroupKey> keys = spec.getGroupBy();
         if (keys == null || keys.isEmpty()) {
@@ -558,7 +548,8 @@ public class AggregateSpecValidator {
                 throw new PipelineValidationException(
                         "each group_by entry must declare exactly one of 'column' or 'trunc'");
             }
-            requireNotComputed("group_by", key.inputColumn(), input);
+            // A computed field is completed after a read's statement runs, so no aggregate statement can group it.
+            ComputedFields.requireNotComputed("group_by", key.inputColumn());
             if (key.isBucket()) {
                 buckets++;
                 validateBucket(key, inputTable, input);
@@ -760,7 +751,7 @@ public class AggregateSpecValidator {
                     throw new PipelineValidationException(
                             unknownField("measure column", measure.getColumn(), inputTable, input));
                 }
-                requireNotComputed("measure '" + measure.getName() + "'", measure.getColumn(), input);
+                ComputedFields.requireNotComputed("measure '" + measure.getName() + "'", measure.getColumn());
                 requireEnrichmentAbsenceIsRepresentable("measure column", measure.getColumn(), input);
             }
         }

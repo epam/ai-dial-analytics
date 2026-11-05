@@ -221,8 +221,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   `whole-with-path` it returns the stored body marked `stored`, so re-pointing first is safe. ADAS does not rewrite
   pipelines. To roll back to a build without the field, re-point such pipelines back to `request_body` and switch
   ingest to `whole-with-path` first: an older build refuses a pipeline bound to `request_body_full`.
-- `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` (default `8`) and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` (default `20000`)
-  — the work one read may spend rebuilding `request_body_full`; past either bound the affected rows read `partial`. See
+- `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.

@@ -160,7 +160,10 @@ reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, afte
 as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
 `dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
 byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
-request). Both are `NULL` when the event has no payload row or no stored request body.
+request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two
+always agree. `request_body_rebuild` selected alone reads no body: its `rebuilt` means the row's chain was found, and a
+body that turns out not to rebuild (its `partial` reason `invalid`) is detected only when `request_body_full` is read
+too. Select both when the status must describe the body you get.
 
 ```sql
 -- one hop, read back whole

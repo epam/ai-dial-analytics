@@ -9,6 +9,7 @@ import org.jooq.impl.QOM;
 import org.jooq.impl.SQLDataType;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * One service-defined <b>computed field</b> of an enrichment: a field the query model exposes and discovery lists, but
@@ -51,6 +52,9 @@ public record ComputedField(String name, Kind kind, QueryFieldType type, List<St
             "event_id", "request_body.null", "request_parent_hash", "request_ancestor_hashes", "request_cache_control.null",
             "request_time");
 
+    /** The stand-in renders counted by the innermost {@link #render} on this thread; {@code null} outside one. */
+    private static final ThreadLocal<int[]> RENDERED = new ThreadLocal<>();
+
     /** The stand-in for this field over {@code table}'s columns. */
     public Field<Object> standIn(String table) {
         return new StandIn(this, table);
@@ -68,6 +72,38 @@ public record ComputedField(String name, Kind kind, QueryFieldType type, List<St
     public static StandIn standInOf(Field<?> projected) {
         final Field<?> field = projected instanceof QOM.FieldAlias<?> alias ? alias.$field() : projected;
         return field instanceof StandIn standIn ? standIn : null;
+    }
+
+    /**
+     * The SQL {@code render} produces, guaranteed to render a stand-in exactly {@code projected} times: once per
+     * top-level select entry the completer will replace, and nowhere else.
+     *
+     * <p>The backstop under every validation that refuses a computed field outside a plain projection. Those give the
+     * caller its message; this keeps a clause that forgot its own check — a group key, a ranking, a filter, a window,
+     * a join condition, a derived table — from silently computing over the tuple a stand-in renders in the field's
+     * place. Each stand-in counts itself as it renders, so the check holds however the statement was assembled.
+     *
+     * @param render    renders the statement on the calling thread, as {@code getSQL} does
+     * @param projected how many stand-ins the statement's own select list projects; {@code 0} for a statement whose
+     *     result no completer reads (a count, an {@code INSERT ... SELECT})
+     * @throws IllegalStateException when a stand-in renders anywhere else
+     */
+    public static String render(Supplier<String> render, int projected) {
+        final int[] outer = RENDERED.get();
+        final int[] count = new int[1];
+        RENDERED.set(count);
+        final String sql;
+        try {
+            sql = render.get();
+        } finally {
+            RENDERED.set(outer);
+        }
+        if (count[0] != projected) {
+            throw new IllegalStateException("a computed field's stand-in renders " + count[0] + " time(s) in a statement"
+                    + " whose select list projects " + projected + ": a computed field is only completed as a plain"
+                    + " projection, and the statement would compute over its stand-in instead");
+        }
+        return sql;
     }
 
     /**
@@ -99,6 +135,10 @@ public record ComputedField(String name, Kind kind, QueryFieldType type, List<St
 
         @Override
         public void accept(Context<?> ctx) {
+            final int[] rendered = RENDERED.get();
+            if (rendered != null) {
+                rendered[0]++;
+            }
             final boolean status = computed.kind() == Kind.STATUS;
             final Field<?> body = status
                     ? DSL.field("toUInt8(({0} = toUUID('00000000-0000-0000-0000-000000000000')) OR ({1} = 1))", Integer.class,

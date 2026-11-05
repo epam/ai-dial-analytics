@@ -28,6 +28,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineReadBudget;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
@@ -342,9 +343,7 @@ public class ScanService {
         sensitiveGuard.enforceEntity(source, guarded, "scan");
         // A declaration stored before every write refused a computed group key would be grouped by the stand-in this
         // page renders in its place; the fragments are refused by name already, in their parse above.
-        if (groupKeyField != null) {
-            GroupFetchService.requireNotComputed("trigger.group_by", groupKeyField);
-        }
+        ComputedFields.requireNotComputed("trigger.group_by", groupKeyField);
 
         // The clamp is taken over the wider set — the statement's own names PLUS a group pipeline's bound
         // columns, which this page does not project but the assembly reads for the very rows this page

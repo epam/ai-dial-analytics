@@ -263,11 +263,7 @@ public final class AggregateSqlValidator {
         // the shape of the expression it sits in.
         governance.enforceSensitive(inputTable, input, referenced, operation);
         // A computed field is completed after a read's statement runs, so no aggregate statement can compute over one.
-        for (final String column : referenced) {
-            if (input.isComputed(column)) {
-                throw new PipelineValidationException(ComputedFields.declarationMessage("the SQL declaration", column));
-            }
-        }
+        ComputedFields.requireNoneComputed("the SQL declaration", referenced);
 
         final List<RelationColumn> columns = relationColumns(plan, input);
         final List<Integer> keys = keyPositions(query, plan.translation().columns(), plan.columns(),

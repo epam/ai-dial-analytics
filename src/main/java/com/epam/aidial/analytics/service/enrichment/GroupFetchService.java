@@ -301,9 +301,9 @@ public class GroupFetchService {
         // renders in the field's place. Every declaration write refuses one here, but a declaration stored before that
         // refusal existed is read as it is stored. The fragments are refused by name already, in their parse above.
         for (MemberOrder order : orderBy) {
-            requireNotComputed("member_select.order_by", order.getColumn());
+            ComputedFields.requireNotComputed("member_select.order_by", order.getColumn());
         }
-        requireNotComputed("trigger.group_by", groupKeyField);
+        ComputedFields.requireNotComputed("trigger.group_by", groupKeyField);
 
         // What the selection phase names beyond its projection: the preference, the ordering, and the group
         // key. Kept apart from `declared` — which also carries the bound columns, so it is the right set to
@@ -321,13 +321,6 @@ public class GroupFetchService {
 
         return new Assembly(pipelineName, source, cursorColumns, model, select, orderBy, filter, prefer, bound,
                 response, policy, groupKeyField, groupKeyAlias, scanSources.orderingKey(source));
-    }
-
-    /** 422 for a computed field named where a statement would compute over it (see {@link ComputedFields}). */
-    static void requireNotComputed(String what, String column) {
-        if (ComputedFields.isComputed(column)) {
-            throw new PipelineValidationException(ComputedFields.declarationMessage(what, column));
-        }
     }
 
     /**

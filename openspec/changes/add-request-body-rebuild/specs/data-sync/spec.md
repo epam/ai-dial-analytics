@@ -207,8 +207,14 @@ plane), and every `partial` value additionally on `query.request.rebuild.partial
 `limit`, `failed` or `invalid`. A read that returns any `partial` value SHALL log one WARN line naming the counts per
 reason and the number of rounds, and never a body or a hash. A read whose rows are all `stored` SHALL issue no
 rebuild statement. A read projecting `request_body_rebuild` without `request_body_full` SHALL run the first phase
-only and read no body, reporting `rebuilt` for every chain that phase completes; projected together, the two fields
-SHALL always agree.
+only and read no body, reporting `rebuilt` for every chain that phase completes, a root carrying cache markers
+included; projected together, the two fields SHALL always agree. Read alone, `rebuilt` therefore states that the
+chain was found, not that its bodies rebuild: a body or marker of the wrong shape (reason `invalid`) is detected only
+by a read that also projects `request_body_full`, which may return `partial` for a row the status-only read reported
+`rebuilt`. Every rebuild statement SHALL carry a query id of its own, never the triggering statement's: on the
+query surfaces `adas-query-rebuild-{uuid}`, on a pipeline read the id the enrichment-runtime capability prescribes, and
+on an untagged pipeline read `adas-pipeline-rebuild-{uuid}`; each SHALL be logged on the statement logger like the
+service's other statements, its bound paths and event ids counted rather than printed.
 
 #### Scenario: A follow-up turn reads back whole
 

@@ -1,9 +1,11 @@
 package com.epam.aidial.analytics.service.query;
 
+import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -41,7 +43,8 @@ public final class ComputedFields {
     public static final ComputedField REQUEST_BODY_REBUILD = new ComputedField("request_body_rebuild", ComputedField.Kind.STATUS,
             QueryFieldType.ENUM, List.of("stored", "rebuilt", "partial"), "Request body rebuild status",
             "What request_body_full holds: stored (the body was stored whole), rebuilt, or partial (the stored delta,"
-                    + " because the chain could not be completed); projection-only.");
+                    + " because the chain could not be completed); selected without request_body_full, rebuilt means the"
+                    + " chain was found; projection-only.");
 
     private static final Map<String, List<ComputedField>> BY_TABLE = Map.of(TABLE, List.of(REQUEST_BODY_FULL, REQUEST_BODY_REBUILD));
 
@@ -121,6 +124,28 @@ public final class ComputedFields {
     public static String declarationMessage(String what, String flatName) {
         return what + " references '" + flatName + "', which is computed after a read's statement runs: it can only be"
                 + " selected by a query or bound as a transform input";
+    }
+
+    /**
+     * The one pipeline-side refusal of a computed field named where a statement would compute over it (see
+     * {@code openspec/specs/enrichment-registry/spec.md}): by name alone, so it needs no entitlement and no catalog row.
+     *
+     * @param what     the declaration part naming it, for the message
+     * @param flatName the name the declaration gives, surrounding whitespace ignored; {@code null} names nothing
+     * @throws PipelineValidationException 422 {@code pipeline_validation_failed} when {@code flatName} is computed
+     */
+    public static void requireNotComputed(String what, String flatName) {
+        final String name = flatName == null ? null : flatName.trim();
+        if (isComputed(name)) {
+            throw new PipelineValidationException(declarationMessage(what, name));
+        }
+    }
+
+    /** {@link #requireNotComputed} over every name in {@code flatNames}, in their order. */
+    public static void requireNoneComputed(String what, Collection<String> flatNames) {
+        for (final String name : flatNames) {
+            requireNotComputed(what, name);
+        }
     }
 
     /**

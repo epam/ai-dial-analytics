@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -135,17 +136,22 @@ public class ComputedFieldCompleter {
 
     private void record(Read read, Surface surface) {
         final String surfaceTag = surface.name().toLowerCase(Locale.ROOT);
+        // Counted first and recorded once per outcome and reason, so a large page costs a handful of meter lookups
+        // rather than one per row.
+        final Map<Outcome, Integer> outcomes = new EnumMap<>(Outcome.class);
         final Map<Reason, Integer> partial = new TreeMap<>();
         for (final Target target : read.targets) {
             if (target.outcome == null) {
                 continue;
             }
-            counter(ROWS_METER, "outcome", target.outcome.name().toLowerCase(Locale.ROOT), "surface", surfaceTag).increment();
+            outcomes.merge(target.outcome, 1, Integer::sum);
             if (target.outcome == Outcome.PARTIAL) {
-                counter(PARTIAL_METER, "reason", target.reason.name().toLowerCase(Locale.ROOT)).increment();
                 partial.merge(target.reason, 1, Integer::sum);
             }
         }
+        outcomes.forEach((outcome, count) ->
+                counter(ROWS_METER, "outcome", outcome.name().toLowerCase(Locale.ROOT), "surface", surfaceTag).increment(count));
+        partial.forEach((reason, count) -> counter(PARTIAL_METER, "reason", reason.name().toLowerCase(Locale.ROOT)).increment(count));
         if (!partial.isEmpty()) {
             final Map<String, Integer> byReason = new LinkedHashMap<>();
             partial.forEach((reason, count) -> byReason.put(reason.name().toLowerCase(Locale.ROOT), count));

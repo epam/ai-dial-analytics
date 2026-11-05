@@ -127,7 +127,10 @@ The settings never carry the triggering statement's query id (`remainingTime` dr
 `StatementTag` to `executeScan`, and each rebuild statement then carries a fresh id minted under the stage
 `<stage>-rebuild` (`adas-p1-group-project-rebuild-<uuid>`), so the statements a computed field costs can be attributed
 to the pipeline in `system.query_log`. The id is set on the statement's settings only, not published to the MDC: the
-call's outcome line keeps describing the triggering read. User reads stay untagged, as their own statements are.
+call's outcome line keeps describing the triggering read. A rebuild for a user read, whose own statement carries no
+ADAS id, gets `adas-query-rebuild-<uuid>`, and one for an untagged pipeline read `adas-pipeline-rebuild-<uuid>`, so
+every rebuild statement can be found in `system.query_log`; each is also logged on `SqlLog` with its bound values
+counted, not printed.
 
 ### D4. Two-phase, partition-local chain read
 
@@ -175,7 +178,11 @@ primary key.
 **Status only.** A projection of `request_body_rebuild` without `request_body_full` runs phase 1 only. When both are
 projected they are completed together and always agree. The group projection, which otherwise reads each heavy column
 in a statement of its own, therefore reads the computed fields of one enrichment in one statement: read apart, the
-status read would walk phase 1 only and could say `rebuilt` beside a body the other read returned `partial`.
+status read would walk phase 1 only and could say `rebuilt` beside a body the other read returned `partial`. The same
+holds for a status read on its own: its `rebuilt` means the chain was found, and a body or marker that does not
+rebuild (`invalid`) shows only when the body is read too. Ingest never writes such a row, so the maintainers keep the
+status-only read body-free rather than pay a phase-2 read to rule it out; the spec says so, and discovery's field
+description tells callers to select both when the status must describe the body.
 
 ### D5. The rebuild moves into production code
 

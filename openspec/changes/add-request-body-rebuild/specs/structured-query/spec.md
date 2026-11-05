@@ -14,6 +14,11 @@ naming the field and stating that it is projection-only and can only be selected
 branch, lambda, window or `array_join`; any use in an `aggregate`-mode query; a `distinct` query; and a reference
 from a scalar subquery or `in` subquery. A rejected query SHALL be rejected whatever else it projects.
 
+Beneath these refusals, every statement the service runs SHALL render a computed field's statement-side stand-in
+only as a top-level `select` entry the completion replaces, and nowhere in an `INSERT ... SELECT`; a statement in which
+it renders anywhere else — a filter, sort, group key, window, join condition, derived table or subquery — SHALL fail
+as an internal error before it is sent, rather than compute over the stand-in.
+
 A projected computed field SHALL appear in the response under its output name, in its `select` position, with the
 type discovery reports for it (`string` for `request_body_full`, `enum` serialized as its string value for
 `request_body_rebuild`), and the response SHALL carry no other column on its account. An output name beginning with

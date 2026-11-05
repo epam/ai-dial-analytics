@@ -189,3 +189,20 @@ Paths below are relative to `src/main/java/com/epam/aidial/analytics/` (producti
 ## 9. Verification
 
 - [ ] 9.1 Run `./gradlew clean build` and make it pass.
+
+## 10. Review follow-ups
+
+- [x] 10.1 One render-time backstop for the projection-only rule: `ComputedField.render` counts stand-in renders and
+      refuses a statement where one renders anywhere but a top-level select entry; the executor renders every
+      statement through it and the three `INSERT ... SELECT` compilers expect none. Tested in
+      `ComputedFieldRenderGuardTest` and `StructuredQueryExecutorTest`.
+- [x] 10.2 One pipeline-side refusal, `ComputedFields.requireNotComputed`, by name, replacing the per-validator copies
+      and the entity-aware `EntityFields.isComputed`.
+- [x] 10.3 `requirePlainProjection` once per public `StructuredQueryBuilder` entry point, not per render.
+- [x] 10.4 Rebuild meters counted per outcome and reason, then incremented once each.
+- [x] 10.5 `QueryParameterChunks` shared by `RequestChainReader` and `ClickHouseParentLookup`.
+- [x] 10.6 Every rebuild statement carries a query id (`adas-query-rebuild-`, `adas-pipeline-rebuild-` when untagged)
+      and a `SqlLog` line with its bound values counted.
+- [x] 10.7 The status-only meaning of `rebuilt` (chain found; `invalid` shows only with the body) stated in the
+      data-sync spec, the design, the discovery description and `docs/heavy-columns.md`; the upgrade notes name the
+      rebuild variables and link `configuration.md` instead of describing them.

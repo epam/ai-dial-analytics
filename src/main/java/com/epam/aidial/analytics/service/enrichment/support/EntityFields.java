@@ -26,29 +26,17 @@ public record EntityFields(Map<String, Field> byName) {
     /**
      * One resolvable field, and the table it belongs to. The owning table is carried because a
      * refusal must name the enrichment a qualified column came from, and because the sensitive gate
-     * is enforced per table.
+     * is enforced per table. A computed field ({@code ComputedFields}) is an enrichment field whose
+     * {@code column} is a transient descriptor; it is refused by name wherever a declaration would compute
+     * over it.
      *
      * @param enrichment whether the field is reached through the entity's grain join rather than
      *     declared on the base table itself
-     * @param computed   whether the field is a service-defined computed field ({@code ComputedFields}), whose
-     *     {@code column} is a transient descriptor: it may be bound as a transform input and named nowhere else
      */
-    public record Field(String owner, ColumnMappingEntity column, boolean enrichment, boolean computed) {
-
-        /** A field backed by a catalog column. */
-        public Field(String owner, ColumnMappingEntity column, boolean enrichment) {
-            this(owner, column, enrichment, false);
-        }
-    }
+    public record Field(String owner, ColumnMappingEntity column, boolean enrichment) {}
 
     public boolean contains(String name) {
         return byName.containsKey(name);
-    }
-
-    /** Whether {@code name} is a computed field: completed after a read's statement runs, so no SQL can name it. */
-    public boolean isComputed(String name) {
-        final Field field = byName.get(name);
-        return field != null && field.computed();
     }
 
     /** The table {@code name} belongs to, or null when it resolves to nothing. */

@@ -70,7 +70,7 @@ public class EntityFieldResolver {
      */
     private static void addComputed(Map<String, EntityFields.Field> byName, String owner, List<ColumnMappingEntity> columns) {
         for (final ComputedFields.Descriptor computed : ComputedFields.of(owner, columns)) {
-            byName.putIfAbsent(owner + "." + computed.column().getName(), new EntityFields.Field(owner, computed.column(), true, true));
+            byName.putIfAbsent(owner + "." + computed.column().getName(), new EntityFields.Field(owner, computed.column(), true));
         }
     }
 

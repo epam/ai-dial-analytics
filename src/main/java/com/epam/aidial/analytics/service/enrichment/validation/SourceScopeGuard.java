@@ -92,9 +92,7 @@ public class SourceScopeGuard {
         for (String column : referenced) {
             // Every governed fragment passes here, so this is the one place a computed field in SQL is refused by
             // name: its value exists only after a read's statement has run, so no fragment can compute over it.
-            if (ComputedFields.isComputed(column)) {
-                throw new PipelineValidationException(ComputedFields.declarationMessage(what, column));
-            }
+            ComputedFields.requireNotComputed(what, column);
             if (!known.contains(column)) {
                 throw new PipelineValidationException(what + " references '" + column
                         + "', which is not a column of source '" + source + "'"

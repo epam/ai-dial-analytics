@@ -44,6 +44,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -375,7 +376,7 @@ class StructuredQueryExecutorTest {
     }
 
     @Test
-    void userReadRebuildStatementsCarryNoPipelineQueryId() {
+    void untaggedPipelineReadRebuildStatementsCarryTheirOwnQueryId() {
         final SelectQuery<Record> scan = scanStatement();
         scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
         final GenericRecord row = deltaRow();
@@ -385,7 +386,37 @@ class StructuredQueryExecutorTest {
 
         final ArgumentCaptor<QuerySettings> rebuild = ArgumentCaptor.forClass(QuerySettings.class);
         verify(clickHouse).query(anyString(), anyMap(), rebuild.capture());
-        assertThat(rebuild.getValue().getQueryId()).isNull();
+        assertThat(rebuild.getValue().getQueryId()).startsWith("adas-pipeline-rebuild-");
+    }
+
+    @Test
+    void userReadRebuildStatementsCarryTheirOwnQueryId() {
+        // A user read's own statement carries no ADAS id, but the rebuild statements it costs run after it and are
+        // found in system.query_log by theirs.
+        final GenericRecord row = deltaRow();
+        given(clickHouse.query(anyString(), any(QuerySettings.class))).willReturn(List.of(row));
+
+        rebuildingExecutor().execute(modelWithComputed(), new StructuredQuery(DialUsageLogTestModel.ENTITY, null, QueryMode.ROW,
+                false, List.of(new OutputColumn(new FieldExpr(FULL), null)), null, null, null, new OffsetPage(0L, 10, false)),
+                10, new QuerySettings().serverSetting("max_execution_time", "30"));
+
+        final ArgumentCaptor<QuerySettings> rebuild = ArgumentCaptor.forClass(QuerySettings.class);
+        verify(clickHouse).query(anyString(), anyMap(), rebuild.capture());
+        assertThat(rebuild.getValue().getQueryId()).startsWith("adas-query-rebuild-");
+    }
+
+    @Test
+    void standInRenderedOutsideTheSelectListIsNeverSent() {
+        // The backstop under every validation: a clause that slipped past them would otherwise group, filter or sort
+        // by the tuple the stand-in renders in the field's place.
+        final SelectQuery<Record> scan = scanStatement();
+        scan.addSelect(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE).as(FULL));
+        scan.addGroupBy(ComputedFields.REQUEST_BODY_FULL.standIn(ComputedFields.TABLE));
+
+        assertThatThrownBy(() -> rebuildingExecutor().executeScan(scan, new QuerySettings(), model))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("renders 2 time(s)");
+        verify(clickHouse, never()).query(anyString(), any(QuerySettings.class));
     }
 
     /** The rows a read completed, counted under {@code surface}. */

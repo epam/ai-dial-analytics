@@ -256,17 +256,18 @@ public class StructuredQueryBuilder {
      */
     public SelectQuery<Record> build(
             DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
-        // Ahead of the shaping, which plans over the query's clauses before the statement is rendered.
+        // Ahead of the shaping, which plans over the query's clauses before the statement is rendered. Once per public
+        // entry point: the renders below, the page block's included, take the query as checked.
         ComputedFieldUse.requirePlainProjection(model, query);
         if (!readShaping) {
-            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED);
+            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, List.of());
         }
         try {
             return shaped(dsl, model, query, maxLimit);
         } catch (QueryValidationException ex) {
             // Shaping translates parts of the query ahead of the statement; whatever it trips over, the unshaped
             // build trips over too, and reporting that build's refusal keeps every message what it always was.
-            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED);
+            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, List.of());
         }
     }
 
@@ -277,6 +278,7 @@ public class StructuredQueryBuilder {
      */
     public SelectQuery<Record> build(
             DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit, LimitPolicy policy) {
+        ComputedFieldUse.requirePlainProjection(model, query);
         return build(dsl, model, query, maxLimit, policy, List.of());
     }
 
@@ -302,6 +304,7 @@ public class StructuredQueryBuilder {
      */
     public SelectQuery<Record> build(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra) {
+        ComputedFieldUse.requirePlainProjection(model, query);
         final StructuredQueryBuilder renderer = windowTransfer ? withoutWindowTransfer() : this;
         return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of());
     }
@@ -469,7 +472,6 @@ public class StructuredQueryBuilder {
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock,
             boolean declarePaths, List<Condition> keyConjuncts) {
-        ComputedFieldUse.requirePlainProjection(model, query);
         final boolean finalRead = readsFinal(model, query);
         final SelectQuery<Record> select = dsl.selectQuery();
         // The source takes FINAL only when its own engine collapses; ClickHouse refuses it on a plain MergeTree,

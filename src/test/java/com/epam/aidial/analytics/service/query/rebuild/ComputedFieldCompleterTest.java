@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.query.rebuild;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
+import com.epam.aidial.analytics.clickhouse.QueryParameterChunks;
 import com.epam.aidial.analytics.configuration.RequestBodyRebuildProperties;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import com.epam.aidial.analytics.observability.LogCapture;
@@ -426,7 +427,7 @@ class ComputedFieldCompleterTest {
         complete(completer(8, 20000), STATUS_ONLY, rows);
 
         assertThat(linkCalls).hasSize(2);
-        assertThat(linkCalls.get(0).split(",")).hasSize(RequestChainReader.CHUNK);
+        assertThat(linkCalls.get(0).split(",")).hasSize(QueryParameterChunks.SIZE);
         assertThat(rows).allSatisfy(row -> assertThat(row.get(STATUS)).isEqualTo("rebuilt"));
     }
 
