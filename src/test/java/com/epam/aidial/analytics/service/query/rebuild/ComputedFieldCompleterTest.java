@@ -399,9 +399,22 @@ class ComputedFieldCompleterTest {
 
         complete(completer(8, 100), STATUS_ONLY, List.of(row));
 
-        assertThat(row.get(STATUS)).isEqualTo("rebuilt");
+        assertThat(row.get(STATUS)).isEqualTo("resolvable");
         assertThat(linkCalls).hasSize(1);
         assertThat(bodyCalls).isEmpty();
+        assertThat(meters.get(ComputedFieldCompleter.ROWS_METER).tags("outcome", "resolvable", "surface", "query").counter().count()).isEqualTo(1);
+    }
+
+    /** A root carrying markers read for its status alone is not parsed, so it is resolvable, not rebuilt. */
+    @Test
+    void statusOnlyRootWithMarkersIsResolvable() {
+        final Map<String, Object> row = row(turn(1), RequestBodyRebuild.NO_PARENT, List.of(), "[{\"at\":\"\",\"i\":0,\"v\":{\"type\":\"ephemeral\"}}]",
+                STATUS_ONLY);
+
+        complete(completer(8, 100), STATUS_ONLY, List.of(row));
+
+        verifyNoInteractions(client);
+        assertThat(row.get(STATUS)).isEqualTo("resolvable");
     }
 
     @Test
@@ -428,7 +441,7 @@ class ComputedFieldCompleterTest {
 
         assertThat(linkCalls).hasSize(2);
         assertThat(linkCalls.get(0).split(",")).hasSize(QueryParameterChunks.SIZE);
-        assertThat(rows).allSatisfy(row -> assertThat(row.get(STATUS)).isEqualTo("rebuilt"));
+        assertThat(rows).allSatisfy(row -> assertThat(row.get(STATUS)).isEqualTo("resolvable"));
     }
 
     @Test

@@ -188,7 +188,7 @@ Paths below are relative to `src/main/java/com/epam/aidial/analytics/` (producti
 
 ## 9. Verification
 
-- [ ] 9.1 Run `./gradlew clean build` and make it pass.
+- [x] 9.1 Run `./gradlew clean build` and make it pass.
 
 ## 10. Review follow-ups
 
@@ -206,3 +206,11 @@ Paths below are relative to `src/main/java/com/epam/aidial/analytics/` (producti
 - [x] 10.7 The status-only meaning of `rebuilt` (chain found; `invalid` shows only with the body) stated in the
       data-sync spec, the design, the discovery description and `docs/heavy-columns.md`; the upgrade notes name the
       rebuild variables and link `configuration.md` instead of describing them.
+- [x] 10.8 A status-only read reports `resolvable`, not `rebuilt`, so `rebuilt` always means the body was rebuilt;
+      the enum, discovery description, data-sync and table-management specs, design and `docs/heavy-columns.md`
+      follow.
+- [x] 10.9 The by-name computed-field refusal precedes the entitlement gate on the reads of a stored declaration too
+      (scan, group assembly, an SQL aggregate's plan and analysis), as the enrichment-registry spec states; pinned for
+      a caller the gate would refuse in `ScanServiceTest`, `GroupFetchServiceTest` and `AggregateSqlValidatorTest`.
+- [x] 10.10 Chain hints held packed (`PackedPaths`, 16 bytes a path); `docs/heavy-columns.md` and the CSV export spec
+      state that a large read past the per-read bounds degrades to `partial`.

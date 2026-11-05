@@ -296,14 +296,15 @@ public class GroupFetchService {
         for (MemberOrder order : orderBy) {
             declared.add(order.getColumn());
         }
-        sensitiveGuard.enforceEntity(source, declared, "group assembly");
         // A computed field is completed after a statement runs, so this phase would rank or group by the stand-in it
         // renders in the field's place. Every declaration write refuses one here, but a declaration stored before that
         // refusal existed is read as it is stored. The fragments are refused by name already, in their parse above.
+        // By name, so before the entitlement gate: the refusal is the same whoever reads the declaration.
         for (MemberOrder order : orderBy) {
             ComputedFields.requireNotComputed("member_select.order_by", order.getColumn());
         }
         ComputedFields.requireNotComputed("trigger.group_by", groupKeyField);
+        sensitiveGuard.enforceEntity(source, declared, "group assembly");
 
         // What the selection phase names beyond its projection: the preference, the ordering, and the group
         // key. Kept apart from `declared` — which also carries the bound columns, so it is the right set to

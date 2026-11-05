@@ -122,7 +122,7 @@ public class RequestChainReader {
                     }
                 }
                 found.add(new Link(UUID.fromString(row.getString("path")), UUID.fromString(row.getString("parent")),
-                        List.copyOf(ancestors), row.getString("event_id")));
+                        PackedPaths.of(ancestors), row.getString("event_id")));
             }
         }
         return found;

@@ -41,10 +41,10 @@ public final class ComputedFields {
 
     /** What {@link #REQUEST_BODY_FULL} holds. */
     public static final ComputedField REQUEST_BODY_REBUILD = new ComputedField("request_body_rebuild", ComputedField.Kind.STATUS,
-            QueryFieldType.ENUM, List.of("stored", "rebuilt", "partial"), "Request body rebuild status",
+            QueryFieldType.ENUM, List.of("stored", "rebuilt", "resolvable", "partial"), "Request body rebuild status",
             "What request_body_full holds: stored (the body was stored whole), rebuilt, or partial (the stored delta,"
-                    + " because the chain could not be completed); selected without request_body_full, rebuilt means the"
-                    + " chain was found; projection-only.");
+                    + " because the chain could not be completed); selected without request_body_full, resolvable (the"
+                    + " chain was found, no body was read) instead of rebuilt; projection-only.");
 
     private static final Map<String, List<ComputedField>> BY_TABLE = Map.of(TABLE, List.of(REQUEST_BODY_FULL, REQUEST_BODY_REBUILD));
 

@@ -173,7 +173,7 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
 
         assertThat(row.get(STATUS)).isEqualTo("rebuilt");
         assertThat(Rebuild.canonical((String) row.get(FULL))).isEqualTo(Rebuild.canonical(body(c)));
-        assertThat(status.get(STATUS)).isEqualTo("rebuilt");
+        assertThat(status.get(STATUS)).isEqualTo("resolvable");
     }
 
     @Test

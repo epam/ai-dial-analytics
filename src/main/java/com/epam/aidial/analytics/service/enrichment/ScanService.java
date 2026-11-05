@@ -340,10 +340,11 @@ public class ScanService {
         statement.addAll(signal.columns());
         Set<String> guarded = new LinkedHashSet<>(statement);
         guarded.addAll(boundColumns);
-        sensitiveGuard.enforceEntity(source, guarded, "scan");
         // A declaration stored before every write refused a computed group key would be grouped by the stand-in this
-        // page renders in its place; the fragments are refused by name already, in their parse above.
+        // page renders in its place; the fragments are refused by name already, in their parse above. By name, so
+        // before the entitlement gate: the refusal is the same whoever reads the declaration.
         ComputedFields.requireNotComputed("trigger.group_by", groupKeyField);
+        sensitiveGuard.enforceEntity(source, guarded, "scan");
 
         // The clamp is taken over the wider set — the statement's own names PLUS a group pipeline's bound
         // columns, which this page does not project but the assembly reads for the very rows this page

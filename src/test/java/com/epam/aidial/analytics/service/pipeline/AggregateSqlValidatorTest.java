@@ -840,4 +840,25 @@ class AggregateSqlValidatorTest {
         assertRefused(HEAD + "SELECT deployment, date_trunc('day', request_time), max(length(\"" + full + "\")), sum(total_tokens)"
                 + " FROM dial_usage_log GROUP BY 1, 2", "the SQL declaration references '" + full + "'", "bound as a transform input");
     }
+
+    /**
+     * The refusal is by name, so it precedes the entitlement gate: a caller whose model hides the field, and who may
+     * not read the sensitive body it rebuilds, gets the same 422 rather than the 403 a failed plan would turn into.
+     */
+    @Test
+    void computedFieldIsRefusedByNameBeforeTheEntitlementGate() {
+        final String full = DialUsageLogTestModel.payload("request_body_full");
+        final TableDefinitionEntity payload = table(ComputedFields.TABLE, TableType.ENRICHMENT);
+        payload.setSourceTable(INPUT);
+        payload.setGrainKey("event_id");
+        given(definitions.findById(ComputedFields.TABLE)).willReturn(Optional.of(payload));
+        given(catalog.activeEnrichmentsOf(INPUT)).willReturn(List.of(table(ENRICHMENT, TableType.ENRICHMENT), payload));
+        given(columns.findByTableNameOrderByOrdinal(ComputedFields.TABLE))
+                .willReturn(List.of(sensitive(nullable(column(ComputedFields.TABLE, "request_body", QueryFieldType.STRING)))));
+        given(sensitiveAccess.mayReadSensitive(anyString())).willReturn(false);
+        given(sensitiveAccess.maySeeSensitive(anyString())).willReturn(false);
+
+        assertRefused(HEAD + "SELECT deployment, date_trunc('day', request_time), max(length(\"" + full + "\")), sum(total_tokens)"
+                + " FROM dial_usage_log GROUP BY 1, 2", "the SQL declaration references '" + full + "'", "bound as a transform input");
+    }
 }

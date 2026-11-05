@@ -2,10 +2,10 @@
 
 ### Requirement: The pipeline data plane completes a bound computed field
 
-When an ENRICH pipeline's `transform.inputs` binds a computed field — `dial_usage_log_payload.request_body_full` or
+Every pipeline read that projects an ENRICH pipeline's bound columns SHALL return a bound computed field's completed
+value under its qualified name. A computed field — `dial_usage_log_payload.request_body_full` or
 `dial_usage_log_payload.request_body_rebuild` (see the data-sync capability, "A rebuilt request body is readable
-beside the stored one") — every pipeline read that projects the bound columns SHALL return the field's completed
-value under its qualified name: the row-grain scan page (`POST /v1/pipelines/{name}/scan`), the projection phase of
+beside the stored one") — is bound when the pipeline's `transform.inputs` names it. The reads are: the row-grain scan page (`POST /v1/pipelines/{name}/scan`), the projection phase of
 group assembly (`POST /v1/pipelines/{name}/group-rows`), and the dry-run preview's row and member samples. No read
 SHALL return a stored delta in a computed field's place without marking it `partial`.
 

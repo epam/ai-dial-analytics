@@ -178,11 +178,12 @@ primary key.
 **Status only.** A projection of `request_body_rebuild` without `request_body_full` runs phase 1 only. When both are
 projected they are completed together and always agree. The group projection, which otherwise reads each heavy column
 in a statement of its own, therefore reads the computed fields of one enrichment in one statement: read apart, the
-status read would walk phase 1 only and could say `rebuilt` beside a body the other read returned `partial`. The same
-holds for a status read on its own: its `rebuilt` means the chain was found, and a body or marker that does not
-rebuild (`invalid`) shows only when the body is read too. Ingest never writes such a row, so the maintainers keep the
-status-only read body-free rather than pay a phase-2 read to rule it out; the spec says so, and discovery's field
-description tells callers to select both when the status must describe the body.
+status read would walk phase 1 only and could not say `rebuilt` beside the body the other read returned. A status read
+on its own reports `resolvable` where a body read would report `rebuilt` or `partial` (`invalid`): the chain was
+found, and a body or marker that does not rebuild shows only when the body is read too. Ingest never writes such a
+row, so the maintainers keep the status-only read body-free rather than pay a phase-2 read to rule it out. It gets a
+value of its own rather than `rebuilt` so that one value never means two things depending on what else a read
+projects; discovery's field description tells callers to select both when the status must describe the body.
 
 ### D5. The rebuild moves into production code
 
@@ -230,9 +231,10 @@ bodies are disjoint slices of it.
 
 The chain hints are not covered by that argument. Each resolved link keeps its row's `request_ancestor_hashes` (up to
 128 paths) for the life of the read, and so does each target, so the hint memory is bounded by
-`(max-ancestors + rows returned) × 128` paths: on the order of a hundred MB at the default bound and a full Flight
-page, before any body is read. It is reached only by a read whose rows mostly sit deep in long chains; the bound that
-governs it is `max-ancestors`, and lowering it trades that memory for `partial` (`limit`) rows.
+`(max-ancestors + rows returned) × 128` paths. The hints are held packed, 16 bytes a path rather than a `UUID` object
+and its reference, which puts that bound at several tens of MB at the default bound and a full Flight page, before
+any body is read. It is reached only by a read whose rows mostly sit deep in long chains; the bound that governs it is
+`max-ancestors`, and lowering it trades that memory for `partial` (`limit`) rows.
 
 Every failure is per row and ends `partial` with the stored body: `missing` (no row carries a path), `limit` (a bound
 reached), `failed` (a rebuild statement of the row's day threw or was not issued for lack of time, budget breach

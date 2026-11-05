@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.ScanProperties;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
+import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
 import com.epam.aidial.analytics.service.enrichment.model.GroupPage;
 import com.epam.aidial.analytics.service.enrichment.model.InputBinding;
@@ -55,6 +56,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -316,6 +318,24 @@ class GroupFetchServiceTest {
                 .hasMessageContaining("member_select.order_by references 'dial_usage_log_payload.request_body_full'")
                 .hasMessageContaining("bound as a transform input");
         verify(executor, never()).executeScan(any(), any(), any(), any());
+    }
+
+    /** The refusal is by name, so a caller the entitlement gate would refuse gets the same 422, not the 403. */
+    @Test
+    void storedRankingByComputedFieldIsRefusedByNameBeforeTheEntitlementGate() {
+        givenPipelineBinding(REQUEST_BODY);
+        final MemberOrder order = new MemberOrder();
+        order.setColumn(DialUsageLogTestModel.payload("request_body_full"));
+        final MemberSelect select = new MemberSelect();
+        select.setOrderBy(List.of(order));
+        resolved().pipeline().setMemberSelect(select);
+        given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.withComputedFields(DialUsageLogTestModel.model()));
+        willThrow(new SensitiveColumnNotEntitledException("not entitled")).given(sensitiveGuard).enforceEntity(any(), any(), any());
+
+        assertThatThrownBy(() -> service.fetch(NAME, GROUP_KEY, 100))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("member_select.order_by references 'dial_usage_log_payload.request_body_full'");
+        verify(sensitiveGuard, never()).enforceEntity(any(), any(), any());
     }
 
     private ResolvedEnrichPipeline resolved() {

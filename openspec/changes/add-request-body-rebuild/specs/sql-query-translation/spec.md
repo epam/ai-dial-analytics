@@ -2,10 +2,11 @@
 
 ### Requirement: Computed fields are projection-only in SQL
 
-The computed fields `"dial_usage_log_payload.request_body_full"` and `"dial_usage_log_payload.request_body_rebuild"`
-(see the structured-query capability, "Computed fields are projection-only and completed after the statement runs")
-SHALL be resolvable SQL columns of `dial_usage_log` for a caller who may see them, typed as character data, and
-SHALL be usable only as a plain select item, optionally aliased, of a **single-entity** statement. Any other use SHALL
+A computed field SHALL be usable in SQL only as a plain select item, optionally aliased, of a **single-entity**
+statement. The computed fields, `"dial_usage_log_payload.request_body_full"` and
+`"dial_usage_log_payload.request_body_rebuild"` (see the structured-query capability, "Computed fields are
+projection-only and completed after the statement runs"), SHALL be resolvable SQL columns of `dial_usage_log` for a
+caller who may see them, typed as character data. Any other use SHALL
 be rejected at translation time — before any ClickHouse contact — with HTTP 400 `bad_request` and a message naming
 the field and stating that it can only be selected; the error SHALL NOT be an "unknown column" error. Rejected uses
 SHALL include `WHERE`, `ORDER BY` (by the column, its alias or its ordinal position), `GROUP BY`, `HAVING`, `SELECT

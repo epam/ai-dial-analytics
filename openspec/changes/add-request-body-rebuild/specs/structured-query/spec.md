@@ -2,10 +2,11 @@
 
 ### Requirement: Computed fields are projection-only and completed after the statement runs
 
-A **computed field** — `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild`
-(see the data-sync capability, "A rebuilt request body is readable beside the stored one") — SHALL be usable in a
-structured query only as a **plain row-mode projection**: a `select` entry that is the bare field, with or without
-`as`. Its value SHALL be completed by ADAS after the statement has run, so the statement itself never computes it.
+A **computed field** SHALL be usable in a structured query only as a **plain row-mode projection**: a `select` entry
+that is the bare field, with or without `as`. The computed fields are `dial_usage_log_payload.request_body_full` and
+`dial_usage_log_payload.request_body_rebuild` (see the data-sync capability, "A rebuilt request body is readable beside
+the stored one"). Their value SHALL be completed by ADAS after the statement has run, so the statement itself never
+computes it.
 
 Any other use SHALL be rejected before ClickHouse is contacted, with HTTP 400, `error` `bad_request`, and a message
 naming the field and stating that it is projection-only and can only be selected. Rejected uses SHALL include: a

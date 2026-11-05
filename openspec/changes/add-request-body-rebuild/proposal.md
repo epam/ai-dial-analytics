@@ -12,7 +12,8 @@ enabling `delta` silently degrades both.
 
 - **New projection-only fields on the payload enrichment.** `dial_usage_log_payload.request_body_full` returns a
   row's request body rebuilt to the document the request carried; `dial_usage_log_payload.request_body_rebuild`
-  returns what `request_body_full` holds: `stored`, `rebuilt` or `partial` (`NULL` when the row has no stored body).
+  returns what `request_body_full` holds: `stored`, `rebuilt` or `partial` (`NULL` when the row has no stored body),
+  or `resolvable` when it is read without `request_body_full` and the row's chain was found.
   Both are sensitive and heavy like `request_body`. `request_body` itself keeps returning exactly what is stored.
 - **Rebuild on read, two-phase and partition-local.** After a read returns its rows, ADAS resolves each
   delta row's chain from the small chain columns, then reads only the ancestor bodies it needs by `event_id`, and

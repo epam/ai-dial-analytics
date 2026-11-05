@@ -8,7 +8,9 @@ their JSON counterparts accept it, and SHALL refuse every other use with the sam
 (see the structured-query capability, "Computed fields are projection-only and completed after the statement
 runs"). Each cell SHALL carry the completed value the JSON counterpart's row carries — the rebuilt body's JSON text,
 quoted per the dialect rules, and the status as its string value — never the stored body in its place and never an
-internal helper column.
+internal helper column. The rebuild SHALL run under the bounds of the data-sync capability ("A rebuilt request body is
+readable beside the stored one") for the whole export: rows whose chains exceed them SHALL be exported as their
+stored body with the status `partial`, and the export SHALL NOT fail for that reason.
 
 #### Scenario: A CSV export of rebuilt bodies
 

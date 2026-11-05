@@ -35,6 +35,11 @@ public final class RequestBodyRebuild {
         STORED,
         /** The body rebuilt from its chain. */
         REBUILT,
+        /**
+         * The row's chain was found, but no body was read: what a read of the status without the body reports where a
+         * read of the body would report {@link #REBUILT}, or {@link #PARTIAL} for a body that does not rebuild.
+         */
+        RESOLVABLE,
         /** The stored body, because the rebuild could not be completed. */
         PARTIAL
     }

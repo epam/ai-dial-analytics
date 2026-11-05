@@ -21,7 +21,7 @@ only its new history, replacing it only while it is still the seeded text.
 
 The payload enrichment's part of the entity schema SHALL also carry two **computed fields**,
 `"dial_usage_log_payload.request_body_full"` (`string`, nullable) and `"dial_usage_log_payload.request_body_rebuild"`
-(`enum` with values `stored`, `rebuilt`, `partial`, nullable), specified by the data-sync capability ("A rebuilt
+(`enum` with values `stored`, `rebuilt`, `resolvable`, `partial`, nullable), specified by the data-sync capability ("A rebuilt
 request body is readable beside the stored one"). They SHALL be defined by the service, not by catalog rows: no
 `column_mapping` row and no migration SHALL exist for them, and nothing a catalog row drives — `GET
 /v1/tables/dial_usage_log_payload`, schema `PATCH`, row writes, row policies, grants, catalog export and import,
@@ -118,7 +118,7 @@ the API could try to modify (see "Table TTL").
 - **WHEN** `GET /v1/queries/entities/schema/dial_usage_log` is called by a caller entitled to the payload table's
   sensitive columns
 - **THEN** the schema carries `"dial_usage_log_payload.request_body_full"` typed `string` and
-  `"dial_usage_log_payload.request_body_rebuild"` typed `enum` with `enum_values` `["stored", "rebuilt", "partial"]`,
+  `"dial_usage_log_payload.request_body_rebuild"` typed `enum` with `enum_values` `["stored", "rebuilt", "resolvable", "partial"]`,
   both reported `sensitive: true`, `heavy: true` and `projection_only: true`, after the payload's catalog columns
 
 #### Scenario: A caller without sensitive access does not see the rebuild fields

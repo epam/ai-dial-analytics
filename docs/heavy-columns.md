@@ -161,9 +161,9 @@ as it was sent (system prompt, tools and cache markers included; key order and w
 `dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
 byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
 request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two
-always agree. `request_body_rebuild` selected alone reads no body: its `rebuilt` means the row's chain was found, and a
-body that turns out not to rebuild (its `partial` reason `invalid`) is detected only when `request_body_full` is read
-too. Select both when the status must describe the body you get.
+always agree. `request_body_rebuild` selected alone reads no body and reports `resolvable` instead of `rebuilt`: the
+row's chain was found, but a body that turns out not to rebuild (its `partial` reason `invalid`) is detected only when
+`request_body_full` is read too. Select both when the status must describe the body you get.
 
 ```sql
 -- one hop, read back whole
@@ -181,7 +181,10 @@ a disabled draft included).
 Discovery marks them `projection_only: true`. A rebuild reads the row's chain inside its own UTC day — first the small
 chain columns, then the bodies of exactly the rows on the chain — so it costs extra statements for delta rows only,
 none for rows stored whole. It runs within what is left of the read's time budget, after the read's own statements,
-and rows it has no time left for read `partial`; the per-read bounds are in
+and rows it has no time left for read `partial`. The bounds on chain-lookup rounds and on distinct ancestors also
+apply per read, so a large read — a Flight SQL pull, a CSV export, a pipeline scan page — of rows that sit deep in
+many separate long chains degrades to `partial` (reason `limit`) past them: read fewer rows per request, or filter to
+fewer conversations, rather than raise the bounds. The bounds are in
 [configuration](configuration.md#request-body-rebuild).
 The behaviour is specified in `openspec/specs/data-sync/spec.md` ("A chat request body is stored as its new history
 and a parent link", "A rebuilt request body is readable beside the stored one").

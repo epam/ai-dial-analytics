@@ -118,7 +118,7 @@ public class ComputedFieldCompleter {
                 if (full) {
                     target.finish(RequestBodyRebuild.rebuild(target.body, target.parent, target.markers, Map.of()));
                 } else {
-                    target.finish(Outcome.REBUILT, null, null);
+                    target.finish(Outcome.RESOLVABLE, null, null);
                 }
             } else {
                 pending.add(target);
@@ -209,7 +209,7 @@ public class ComputedFieldCompleter {
                     switch (walk.state) {
                         case COMPLETE -> {
                             target.finish(full ? RequestBodyRebuild.rebuild(target.body, target.parent, target.markers, day.bodies)
-                                    : new RequestBodyRebuild.Result(Outcome.REBUILT, null, null));
+                                    : new RequestBodyRebuild.Result(Outcome.RESOLVABLE, null, null));
                             it.remove();
                         }
                         case MISSING, INVALID -> {
@@ -424,7 +424,7 @@ public class ComputedFieldCompleter {
             final String markers = full ? (String) tuple.get(3) : null;
             final boolean hasMarkers = full ? markers != null : truth(tuple.get(3));
             final int day = ((Number) tuple.get(4)).intValue();
-            return new Target(row, false, full ? (String) first : null, parent, List.copyOf(hint), markers,
+            return new Target(row, false, full ? (String) first : null, parent, PackedPaths.of(hint), markers,
                     hasMarkers, day);
         }
 

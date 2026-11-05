@@ -123,7 +123,7 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].heavy", contains(true)))
                 .andExpect(jsonPath("$.fields[?(@.name=='" + full + "')].source", contains("request_body_full")))
                 .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].type", contains("enum")))
-                .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].enum_values[*]", contains("stored", "rebuilt", "partial")))
+                .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].enum_values[*]", contains("stored", "rebuilt", "resolvable", "partial")))
                 .andExpect(jsonPath("$.fields[?(@.name=='" + status + "')].projection_only", contains(true)))
                 .andExpect(jsonPath("$.fields[?(@.name=='dial_usage_log_payload.request_body')].projection_only", contains(false)))
                 .andExpect(jsonPath("$.fields[?(@.name=='request_time')].projection_only", contains(false)))

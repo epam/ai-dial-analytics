@@ -146,14 +146,16 @@ stored: no column, ingest stage or migration is added for them, and ingest SHALL
   classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
   at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
   members and values; key order and whitespace are not preserved — written as compact JSON.
-- **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `partial`; nullable) SHALL say what `request_body_full`
-  holds:
+- **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
+  `request_body_full` holds:
   - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
   - `stored`, with `request_body_full` equal to the stored `request_body` byte for byte, for a row whose
     `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` — a body stored whole under either
     mode, a root without markers, a body that is not a chat request, a row ingested before delta storage;
   - `rebuilt`, with the rebuilt body, for a row with a parent whose chain reaches a root, or a root carrying cache
     markers;
+  - `resolvable`, only when `request_body_rebuild` is read without `request_body_full`, for a row that would otherwise
+    be checked for `rebuilt`: its chain was found, but no body was read (see below);
   - `partial`, with `request_body_full` equal to the stored `request_body` byte for byte, for a rebuild that cannot
     be completed (see below).
 
@@ -202,16 +204,16 @@ would not disclose had it been stored whole. Restricting the ancestors a rebuild
 inside a project is not part of this requirement.
 
 **Observability.** Every completed value SHALL be counted on `query.request.rebuild.rows`, tagged `outcome`
-(`stored`, `rebuilt`, `partial`) and `surface` (`query` for the query surfaces, `pipeline` for the pipeline data
+(`stored`, `rebuilt`, `resolvable`, `partial`) and `surface` (`query` for the query surfaces, `pipeline` for the pipeline data
 plane), and every `partial` value additionally on `query.request.rebuild.partial`, tagged `reason`: `missing`,
 `limit`, `failed` or `invalid`. A read that returns any `partial` value SHALL log one WARN line naming the counts per
 reason and the number of rounds, and never a body or a hash. A read whose rows are all `stored` SHALL issue no
 rebuild statement. A read projecting `request_body_rebuild` without `request_body_full` SHALL run the first phase
-only and read no body, reporting `rebuilt` for every chain that phase completes, a root carrying cache markers
-included; projected together, the two fields SHALL always agree. Read alone, `rebuilt` therefore states that the
-chain was found, not that its bodies rebuild: a body or marker of the wrong shape (reason `invalid`) is detected only
-by a read that also projects `request_body_full`, which may return `partial` for a row the status-only read reported
-`rebuilt`. Every rebuild statement SHALL carry a query id of its own, never the triggering statement's: on the
+only and read no body, reporting `resolvable` for every chain that phase completes, a root carrying cache markers
+included; projected together, the two fields SHALL always agree, and `resolvable` SHALL NOT be reported. `resolvable`
+states that the chain was found, not that its bodies rebuild: a body or marker of the wrong shape (reason `invalid`)
+is detected only by a read that also projects `request_body_full`, which may return `partial` for a row the
+status-only read reported `resolvable`. `rebuilt` SHALL mean only that the body was rebuilt. Every rebuild statement SHALL carry a query id of its own, never the triggering statement's: on the
 query surfaces `adas-query-rebuild-{uuid}`, on a pipeline read the id the enrichment-runtime capability prescribes, and
 on an untagged pipeline read `adas-pipeline-rebuild-{uuid}`; each SHALL be logged on the statement logger like the
 service's other statements, its bound paths and event ids counted rather than printed.

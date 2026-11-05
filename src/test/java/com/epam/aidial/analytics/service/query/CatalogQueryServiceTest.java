@@ -534,7 +534,7 @@ class CatalogQueryServiceTest {
                         tuple("dial_usage_log_payload.request_body", QueryFieldType.STRING, "request_body", true, false, false),
                         tuple("dial_usage_log_payload.request_body_full", QueryFieldType.STRING, "request_body_full", true, true, true),
                         tuple("dial_usage_log_payload.request_body_rebuild", QueryFieldType.ENUM, "request_body_rebuild", true, true, true));
-        assertThat(model.baseSchema().getLast().enumValues()).containsExactly("stored", "rebuilt", "partial");
+        assertThat(model.baseSchema().getLast().enumValues()).containsExactly("stored", "rebuilt", "resolvable", "partial");
     }
 
     @Test

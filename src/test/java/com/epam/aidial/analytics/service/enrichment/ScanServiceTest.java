@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.ScanProperties;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
+import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.observability.TransitionLog;
 import com.epam.aidial.analytics.service.enrichment.model.InputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
@@ -60,6 +61,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -180,6 +182,20 @@ class ScanServiceTest {
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("trigger.group_by references 'dial_usage_log_payload.request_body_full'");
         verify(executor, never()).executeScan(any(), any(), any(), any());
+    }
+
+    /** The refusal is by name, so a caller the entitlement gate would refuse gets the same 422, not the 403. */
+    @Test
+    void storedComputedGroupKeyIsRefusedByNameBeforeTheEntitlementGate() {
+        given(pipelines.resolveForScan(NAME)).willReturn(
+                resolved(DialUsageLogTestModel.payload("request_body_full"), "chat_id", "deployment"));
+        given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.withComputedFields(DialUsageLogTestModel.modelWithEnrichment()));
+        willThrow(new SensitiveColumnNotEntitledException("not entitled")).given(sensitiveGuard).enforceEntity(any(), any(), any());
+
+        assertThatThrownBy(() -> service.scan(NAME, null, 50, null, null))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("trigger.group_by references 'dial_usage_log_payload.request_body_full'");
+        verify(sensitiveGuard, never()).enforceEntity(any(), any(), any());
     }
 
     /** {@code ready_when.signal} is projected as the computed verdict, not as the columns it reads. */
