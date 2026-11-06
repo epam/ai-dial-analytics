@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.service.query.CatalogQueryService;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
+import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.SecurityMode;
@@ -80,6 +81,32 @@ class SensitiveProjectionGuardTest {
         when(evaluator.isAllowed(SOURCE, Privilege.TABLE_SENSITIVE)).thenReturn(false);
         when(evaluator.isAllowed(SOURCE, Privilege.TABLE_READ)).thenReturn(false);
         assertThatCode(() -> guard.enforce(SOURCE, List.of("event_id"), "scan")).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("a computed field is judged by the sensitive flag it carries, like the body column it rebuilds")
+    void computedFieldOfAnEnrichmentIsRefusedLikeTheBody() {
+        final String payload = "dial_usage_log_payload";
+        final ColumnMappingEntity body = new ColumnMappingEntity();
+        body.setTableName(payload);
+        body.setName("request_body");
+        body.setSourceName("request_body");
+        body.setSensitive(true);
+        when(columns.findByTableNameOrderByOrdinal(payload)).thenReturn(List.of(body));
+        final TableDefinitionEntity enrichment = new TableDefinitionEntity();
+        enrichment.setName(payload);
+        final CatalogQueryService catalog = mock(CatalogQueryService.class);
+        when(catalog.activeEnrichmentsOf(SOURCE)).thenReturn(List.of(enrichment));
+        final SensitiveProjectionGuard entityGuard = new SensitiveProjectionGuard(
+                new SensitiveColumnAccess(evaluator, new SecurityModeResolver(SecurityMode.OIDC.code())), columns, catalog);
+        when(evaluator.isAllowed(payload, Privilege.TABLE_SENSITIVE)).thenReturn(false);
+        when(evaluator.isAllowed(payload, Privilege.TABLE_READ)).thenReturn(true);
+
+        assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_full"), "scan"))
+                .isInstanceOf(SensitiveColumnNotEntitledException.class)
+                .hasMessageContaining(payload + ".request_body_full");
+        assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_rebuild"), "group-rows"))
+                .isInstanceOf(SensitiveColumnNotEntitledException.class);
     }
 
     @Test

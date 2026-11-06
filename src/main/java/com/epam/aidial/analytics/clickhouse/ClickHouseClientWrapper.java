@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -62,6 +63,14 @@ public class ClickHouseClientWrapper {
      */
     public List<GenericRecord> query(String sql, QuerySettings settings) {
         return execute(settings.getQueryId(), () -> client().queryAll(sql, settings));
+    }
+
+    /**
+     * As {@link #query(String, QuerySettings)}, binding {@code params} server-side ({@code {name:Type}} placeholders in
+     * {@code sql}). For statements ADAS writes itself whose values come from data it read, never from a caller.
+     */
+    public List<GenericRecord> query(String sql, Map<String, Object> params, QuerySettings settings) {
+        return execute(settings.getQueryId(), () -> client().queryAll(sql, params, settings));
     }
 
     private List<GenericRecord> execute(String queryId, Supplier<List<GenericRecord>> call) {

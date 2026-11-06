@@ -678,6 +678,7 @@ public class PipelineService implements PipelineTargetCascade {
         pipeline.setReadyWhen(registration.readyWhen());
         pipeline.setMemberSelect(registration.memberSelect());
         requireNoTriggerContradiction(pipeline);
+        DeclaredComputedFields.requireNone(pipeline, spec);
         requireValidCron(pipeline.getTriggerKind(), pipeline.getTriggerCron(), armed);
         return spec;
     }

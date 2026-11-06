@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.service.enrichment.support.CursorPredicates;
 import com.epam.aidial.analytics.service.pipeline.model.AggregateSpec;
 import com.epam.aidial.analytics.service.pipeline.model.GroupKey;
 import com.epam.aidial.analytics.service.pipeline.model.Measure;
+import com.epam.aidial.analytics.service.query.ComputedField;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
@@ -204,8 +205,9 @@ public class AggregateCompiler {
         final String columnList = targetColumns.stream()
                 .map(column -> renderContext.render(DSL.name(column)))
                 .collect(Collectors.joining(", "));
+        // An INSERT writes what its SELECT computes, so no computed field's stand-in may render in it.
         final String sql = "INSERT INTO " + renderContext.render(DSL.name(Identifiers.require(target)))
-                + " (" + columnList + ") " + select.getSQL(ParamType.INLINED);
+                + " (" + columnList + ") " + ComputedField.render(() -> select.getSQL(ParamType.INLINED), 0);
         return new Compiled(sql, targetColumns);
     }
 
