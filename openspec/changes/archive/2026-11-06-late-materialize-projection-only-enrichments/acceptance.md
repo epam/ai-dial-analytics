@@ -97,4 +97,5 @@ Results match on every read, up to ties on the sort key and rows ingested betwee
 
 The trace view is the one read whose peak memory more than doubles: its filter (a trace id list plus a time range)
 already keys today's identity join down to the trace's few rows, so there is no window-sized build to save, and the
-page-keyed join costs a few MiB more. Its duration is unchanged.
+page-keyed join costs a few MiB more. Its duration is unchanged. It stays far below the floor design D6 sets for a
+regression, so it is accepted as a known cost.

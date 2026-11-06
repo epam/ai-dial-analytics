@@ -40,7 +40,7 @@
   - no other spec cites the old title;
   - sweep `openspec/specs/` for any scenario whose row-mode read projects an aligned enrichment's light column only and asserts a derived table, a key set, a transferred window or a bare unrestricted join; modify each one into this change.
 - [x] 5.2 `openspec validate late-materialize-projection-only-enrichments --strict`
-- [ ] 5.3 After archive, check that the renamed requirement (moved to the end of `## Requirements` by the archive) still sits before `## Implementation notes` in `openspec/specs/structured-query/spec.md`, and that `openspec validate --specs` reports nothing new
+- [x] 5.3 After archive, check that the renamed requirement (moved to the end of `## Requirements` by the archive) still sits before `## Implementation notes` in `openspec/specs/structured-query/spec.md`, and that `openspec validate --specs` reports nothing new
 
 ## 6. Verification
 
@@ -48,7 +48,7 @@
 
 ## 7. Acceptance on a running deployment
 
-Record order-of-magnitude peak memory and duration from `system.query_log`, before and after, in `acceptance.md`. A shape regresses when, at the same window, it is refused by the budget where today's statement completes, or its peak memory or duration is more than twice today's. If any shape below regresses, add an eligibility guard to this change, with a spec condition and a design update (design D6), before archive.
+Record order-of-magnitude peak memory and duration from `system.query_log`, before and after, in `acceptance.md`. A shape regresses when, at the same window, it is refused by the budget where today's statement completes, or its peak memory or duration is more than twice today's and above the floor design D6 sets (about 100 MiB, about 1 s). If any shape below regresses, add an eligibility guard to this change, with a spec condition and a design update (design D6), before archive.
 
 - [x] 7.1 The header page from the proposal over a multi-day window
 - [x] 7.2 A wide-window light page that succeeds today, checked against the execution-time ceiling as well as memory
@@ -58,4 +58,4 @@ Record order-of-magnitude peak memory and duration from `system.query_log`, befo
 - [x] 7.6 A light page over a sparse aligned enrichment (one with rows for few source rows)
 - [x] 7.7 The guard (design D7): a session lookup projecting light payload columns, with and without an unaligned enrichment's column, renders today's SQL and costs what it costs today
 - [x] 7.8 A path-only light page over a wide window (`json_extract_string(request_tags, 'conversation_id')` and no bare document), checking duration as well as memory: today's window-bounded join over a pruned path is already cheap (`acceptance.md`), so the page block's second pass over the source window is the whole difference
-- [ ] 7.9 Replay a sample of row-mode reads that project aligned-enrichment columns, at default and explicit limits, including pages projecting identity columns on a deployment where `usage_client_identity` is aligned. Confirm identical results and no new budget refusals
+- [x] 7.9 Replay a sample of row-mode reads that project aligned-enrichment columns, at default and explicit limits, including pages projecting identity columns on a deployment where `usage_client_identity` is aligned. Confirm identical results and no new budget refusals

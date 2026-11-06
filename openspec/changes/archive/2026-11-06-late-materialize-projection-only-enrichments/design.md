@@ -93,10 +93,16 @@ or skipping enrichments below a size). A guard needs a threshold that only measu
 trade (below) is favourable in every shape anyone has reasoned through. Acceptance (tasks group 7) covers the
 shapes where it could invert. A shape **regresses** when, at the same window on the same deployment, it is refused
 by the budget where today's statement completes, or its peak memory or its duration is more than twice today's. If
-one regresses, the guard is added in this change before it is archived, and the spec gains the condition. Measured on
-a running deployment (`acceptance.md`), none regresses: short windows, path-only and scalar reads and point lookups
-cost the same as today or less, because the window-sized hash build holds one key tuple per in-window row whatever it
-projects. Narrowing the rule to whole documents was therefore rejected.
+one regresses, the guard is added in this change before it is archived, and the spec gains the condition. A rise
+counts only when the new figure matters against the query budget: above about 100 MiB of peak memory or about 1 s of
+duration. Below that, a doubling is noise next to a budget of gigabytes and tens of seconds. That floor was added
+after acceptance, which found one such case: a trace view whose filter (a few trace ids and a time range) already
+keys today's identity join to a few rows, so there is no window-sized build to save, and the page-keyed join costs a
+few MiB more at the same duration. A guard for it would have to read selectivity off the filter's shape, which the
+planner cannot judge, and would risk the large savings on similar reads. Measured on a running deployment
+(`acceptance.md`), no shape regresses under that rule: short windows, path-only and scalar reads, sparse
+enrichments and point lookups cost the same as today or less, because the window-sized hash build holds one key tuple
+per in-window row whatever it projects. Narrowing the rule to whole documents was therefore rejected.
 
 **D7. A pre-selected light-only block keeps today's statement.** Partition pre-selection restricts the page block
 only (structured-query, "A lookup on an aligned enrichment pre-selects the source's partitions"). The outer statement

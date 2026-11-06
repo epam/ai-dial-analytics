@@ -1701,9 +1701,9 @@ enrichment conjunct SHALL NOT be moved out of it, and SHALL be copied into a der
 `filter`, or whose `filter` has no source-only top-level conjunct (an enrichment-only filter, or an `or`
 mixing source and enrichment columns), SHALL join the enrichment table unkeyed, unless that requirement
 or "Scalar calls over a heavy text column are computed inside the enrichment's derived table" emits it as
-a derived table. On the single-entity read path a row-mode page whose heavy enrichment columns are
-projection-only SHALL instead join those enrichments as "Projection-only heavy enrichment columns are
-fetched for the returned page only" states. The same rule SHALL apply to
+a derived table. On the single-entity read path a late-materialized row-mode page SHALL instead join its
+late enrichments for the page's keys, as "Projection-only enrichment columns are fetched for the returned page
+only" defines them and states. The same rule SHALL apply to
 the `include_total` count statement. Keying changes which rows the join build reads, never which rows
 the statement returns, whatever shape the enrichment conjuncts take — including `IS NULL` and
 `coalesce` over an enrichment column: the key predicates are a subset of the outer `WHERE`'s
@@ -1757,7 +1757,8 @@ readings group by the same column. The offset pagination strategy SHALL be appli
 #### Scenario: A source-only filter keys the enrichment join
 
 - **WHEN** a validated query projects an enrichment column and its `filter` names source columns only
-  (for example `trace_id = 'x'`)
+  (for example `trace_id = 'x'`), and the block is not late-materialized (see "Projection-only enrichment columns
+  are fetched for the returned page only")
 - **THEN** the rendered SQL `LEFT JOIN`s a derived table over the enrichment — its grain key and the
   referenced enrichment columns, restricted to `enrichment.grain_key IN (SELECT source.grain_key FROM
   source WHERE <filter>)` — aliased to the enrichment's name and joined on the same grain-key
@@ -1785,7 +1786,7 @@ readings group by the same column. The offset pagination strategy SHALL be appli
 #### Scenario: A filter naming an enrichment column joins the enrichment unkeyed
 
 - **WHEN** a validated query's `filter` references enrichment columns only (it has no source-only
-  top-level conjunct), or the query has no `filter`
+  top-level conjunct), or the query has no `filter`, and the block is not late-materialized
 - **THEN** the rendered SQL `LEFT JOIN`s the enrichment table itself, with no key sub-query
 
 #### Scenario: A mixed or is left unkeyed
@@ -2138,7 +2139,7 @@ granularity the store enforces — SHALL be refused at startup rather than accep
 #### Scenario: An unbounded heavy-column read is refused, not dropped
 
 - **WHEN** a query reads a `heavy` column that its returned page does not bound — in its `filter`, inside an
-  aggregate, or in a block that is not eligible for late materialization (see "Projection-only heavy
+  aggregate, or in a block that is not eligible for late materialization (see "Projection-only
   enrichment columns are fetched for the returned page only") — with no predicate that prunes the source's
   partitions, so the read exceeds a ceiling
 - **THEN** the caller receives the `query_budget_exceeded` error rather than an empty or transport-level
@@ -3089,6 +3090,8 @@ lets the rule be adopted per call site rather than everywhere at once.
 The statements that declare their usage SHALL be the Class-1 materialize probe and its write, and the
 query surface: the single-entity read statement (including the page block and the outer statement of a
 late-materialized read), its `include_total` count statement, and every block of a composite SQL statement.
+A late-materialized read's page-keyed join is the enrichment table itself, so it has no derived table to prune; how
+it reads an addressed path is stated in "Projection-only enrichment columns are fetched for the returned page only".
 The enrichment scan, the group-fetch projection and the aggregate refresh and its preview SHALL declare none
 and SHALL render exactly as they did before this requirement. Naming them is what makes the previous paragraph
 falsifiable: "adopted per call site" with no list is a claim no reader can check.
@@ -3144,7 +3147,8 @@ indistinguishable from a row that legitimately has no enrichment.
 #### Scenario: An aligned enrichment is bounded by the source's partition values
 
 - **GIVEN** a source partitioned on `day` and an enrichment declaring `day` as its own partition column
-- **AND** a query filtering on a source column alone and selecting an enrichment column
+- **AND** a query filtering on a source column alone and selecting and sorting by an enrichment column, so the block
+  is not late-materialized (see "Projection-only enrichment columns are fetched for the returned page only")
 - **WHEN** the statement is rendered
 - **THEN** the derived table carries
   `enrichment.day IN (SELECT source.day FROM source WHERE <filter>)`
@@ -3211,7 +3215,8 @@ indistinguishable from a row that legitimately has no enrichment.
 #### Scenario: A query with no source predicates is joined unkeyed
 
 - **GIVEN** an aligned source and enrichment
-- **AND** a query with no filter
+- **AND** a query with no filter that selects and sorts by an enrichment column, so the block is not
+  late-materialized
 - **WHEN** the statement is rendered
 - **THEN** the enrichment is joined as a bare table with no restriction of either kind
 
@@ -3828,116 +3833,6 @@ whose result the caller consumes immediately; a moving window is exactly what ma
 - **WHEN** a caller executes a query, translates one, or saves one whose body calls `now()`
 - **THEN** the request is accepted — the property governs the derivation paths, not the query surfaces
 
-### Requirement: Projection-only heavy enrichment columns are fetched for the returned page only
-
-A block SHALL be **late-materialized** on the single-entity read path — `POST /v1/queries/execute`,
-`POST /v1/queries/execute-sql`, their CSV twins and the Flight SQL endpoint — when all of these hold: it is in row mode and not
-`distinct`; it renders a `LIMIT`; it references at least one `heavy` column of a keyable enrichment; every heavy
-column of every such enrichment is referenced only by `select` entries — not by `filter`, `sort` (directly, or
-through the name of a `select` entry that references it), `group_by` or `having`; no `select` entry contains a
-window expression or `array_join`; it calls no non-deterministic catalog function other than `now`; every such
-enrichment is joined on the same source grain key and the same aligned source partition column (or on the same
-grain key, none of them aligned); and no `select` output is named `__adas_lm_key` or `__adas_lm_part`. Any other
-block SHALL render as the "SQL translation" requirement describes. Composite SQL blocks, the translation-only
-endpoints and every pipeline statement SHALL NOT be late-materialized.
-
-A late-materialized block SHALL be rendered as one statement that evaluates its page's keys **once**:
-
-```
-SELECT <the block's projection, unchanged>
-FROM source [FINAL]
-<every other enrichment join, exactly as "SQL translation" renders it>
-LEFT JOIN heavy_enrichment [FINAL]
-  ON source.grain_key = heavy_enrichment.grain_key
- AND (heavy_enrichment.grain_key, heavy_enrichment.partition_col) IN (K)
-WHERE <the block's whole filter>
-  AND ((source.grain_key, source.partition_col) IN (K)
-       OR source.grain_key IS NULL OR source.partition_col IS NULL)
-ORDER BY <the block's sort> LIMIT <limit> OFFSET <offset>
-```
-
-where `K` is `SELECT "__adas_lm_key", "__adas_lm_part" FROM (<page block>) AS "__adas_lm"` and the **page block**
-is the same block with every `select` entry that references a heavy column removed (an entry a `sort` item names
-is kept, under its resolved output name), projecting the source grain key as `__adas_lm_key` and the source
-partition column as `__adas_lm_part`, ordered by the block's `sort`, with `LIMIT <offset + limit>` and no
-`OFFSET`. Without an aligned partition column, `K` and both `IN` tuples carry the grain key alone. The two
-references to `K` SHALL both stand in the outer statement's scope — the outer `WHERE` and the heavy join's `ON` —
-and never inside a derived table, because ClickHouse builds one set per distinct subquery within a scope and
-re-evaluates a subquery referenced from a nested scope: two evaluations of a page whose order has ties, or that
-reads rows ingested in between, can choose different rows, and a row whose page key is missing from the heavy
-join's set would read its heavy column as unmatched with no error. A materialized CTE SHALL NOT be used for this
-(ClickHouse gates it behind a setting that is off by default).
-
-The late-materialized statement SHALL return exactly the rows, column names, column order, values and
-NULL/default semantics the unshaped statement returns, up to the order of rows that tie on the sort, which neither
-statement fixes: the page block selects the top `offset + limit` rows of the same filtered relation, the outer
-`WHERE` keeps those rows (and any other row sharing one of their keys, which ranks after them), and the outer
-`ORDER BY`/`LIMIT`/`OFFSET` then cuts the same page; the heavy join's extra condition is true for every kept row,
-so its match is the grain-key match the unshaped join gives it. A row whose grain key or partition column is NULL
-is kept by the `IS NULL` arms and reads its heavy columns as unmatched, as it does unshaped. The `include_total`
-count statement SHALL NOT be late-materialized. On the single-entity read path a count that is read final SHALL
-join only the enrichments its `filter` references: read final, every grain join is 0..1, so a join the filter
-does not read cannot change the count, and joining it would build the columns the page projects — a heavy body —
-over the whole window. A count that is not read final SHALL keep every join its page has, because an unmerged
-enrichment version fans a row out in the page and must fan it out in the count too.
-
-#### Scenario: The last page of requests with their bodies reads bodies for the page only
-
-- **WHEN** a row-mode query selects `trace_id` and `dial_usage_log_payload.request_body`, filters
-  `request_time >= T`, sorts by `request_time` descending and pages `limit 10`
-- **THEN** the rendered SQL joins `dial_usage_log_payload` (under `FINAL` when read final) with
-  `("dial_usage_log_payload"."event_id", "dial_usage_log_payload"."request_time") IN (K)` in its `ON`
-- **AND** the outer `WHERE` carries the whole filter and `("dial_usage_log"."event_id", "dial_usage_log"."request_time")
-  IN (K)` with the two `IS NULL` arms, where `K` is the same subquery text
-- **AND** `K`'s page block projects no heavy column, carries the filter and the sort, and has `LIMIT 10`
-
-#### Scenario: An offset page fetches keys for the rows up to its end
-
-- **WHEN** the same query pages `limit 10, offset 20`
-- **THEN** the page block has `LIMIT 30` and no `OFFSET`, and the outer statement keeps `LIMIT 10 OFFSET 20`
-
-#### Scenario: The total of a body page does not read bodies
-
-- **WHEN** the same query, read final, also asks for `include_total`
-- **THEN** the count statement joins no payload table, and its total equals the unshaped count's
-
-#### Scenario: Late materialization returns the unshaped rows
-
-- **GIVEN** source rows with no payload row, a payload key with several unmerged versions, rows tying on the
-  sort key, and a body larger than 1 MB
-- **WHEN** a late-materialized query and the same query rendered unshaped run against ClickHouse, with and
-  without an `offset`
-- **THEN** both return identical column names, types and values, row for row
-
-#### Scenario: The page keys are evaluated once
-
-- **WHEN** the late-materialized shape runs with a page block ordered by a per-row random value
-- **THEN** every row the outer `WHERE` keeps finds its heavy row, on every run
-
-#### Scenario: A heavy column outside the projection keeps today's join
-
-- **WHEN** a row-mode query filters, sorts or groups on a heavy enrichment column, or sorts by the output name of
-  a `select` entry that reads one
-- **THEN** the block is not late-materialized
-
-#### Scenario: Shapes whose page cannot be chosen first keep today's join
-
-- **WHEN** a row-mode query that projects a heavy enrichment column is `distinct`, or projects a window
-  expression or `array_join`, or is in aggregate mode
-- **THEN** the block is not late-materialized
-
-#### Scenario: A light column of the heavy enrichment may appear anywhere
-
-- **WHEN** a row-mode query projects `dial_usage_log_payload.request_body` and filters on
-  `dial_usage_log_payload.request_tags`
-- **THEN** the block is late-materialized, the page block joins the payload for `request_tags` only, and the
-  outer statement reads both columns from the page-restricted join
-
-#### Scenario: Composite blocks keep today's join
-
-- **WHEN** a composite SQL statement's block projects a heavy enrichment column under a `LIMIT`
-- **THEN** the block renders as "SQL translation" describes, with no page-key subquery
-
 ### Requirement: Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table
 
 A top-level conjunct of the filter SHALL be **copied** into an enrichment's derived-table `WHERE` on the single-entity
@@ -4070,8 +3965,10 @@ restriction into `E`'s derived table, and into every other aligned join, through
 carries). A join of the same statement without an aligned partition pair has no such equality; it SHALL be keyed on
 `partitionExpr(source.p) IN PS` as one of its source-only key predicates, so that it reads the grain keys of the
 selected partitions rather than hashing its whole table. When the statement is late-materialized, the restriction
-SHALL appear in the page block only: the outer statement is confined to the page's keys, which ClickHouse carries into
-every aligned join as well. A count for `include_total` SHALL take the same restriction as the page.
+SHALL appear in the page block only, and the outer statement is confined to the page's keys instead. Only a block with
+a heavy late enrichment is late-materialized beside a pre-selection (see "Projection-only enrichment columns are
+fetched for the returned page only"). A count for
+`include_total` SHALL take the same restriction as the page.
 
 On the read path a top-level `AND` conjunct SHALL qualify only when all of these hold: it references one
 column of one aligned enrichment alone; that column is not heavy; it has the form `col = <literal>` or
@@ -4097,7 +3994,7 @@ conjunct SHALL be unchanged.
 #### Scenario: A session lookup prunes both tables to the session's days
 
 - **GIVEN** an aligned `usage_client_identity` of `dial_usage_log`
-- **WHEN** a query filters `"usage_client_identity.client_session_id" = 's1'`
+- **WHEN** a query filters `"usage_client_identity.client_session_id" = 's1'`, and the block is not late-materialized
 - **THEN** the statement restricts `dial_usage_log` to the partitions holding an enrichment row of `s1`, its plan
   reads the enrichment's derived table in those partitions only, `PS` occurs once per scope that needs it, and the
   statement returns the same rows as without the restriction
@@ -4308,7 +4205,8 @@ covers:
 - a key conjunct a composite join's reduction hands to the block.
 
 A point lookup such as `trace_id = X` therefore keeps the grain-key set that confines its read to one granule. A
-join with no aligned pair, an unkeyed join and a late-materialized join SHALL render exactly as before.
+join with no aligned pair and an unkeyed join SHALL render exactly as before, and a late-materialized join SHALL render
+as "Projection-only enrichment columns are fetched for the returned page only" states.
 
 The transfer is sound for the same reason the partition restriction is: the alignment invariant gives each
 admitted source row an enrichment row with the same partition value, so the bound holds for that enrichment row
@@ -4329,11 +4227,20 @@ exceeded. Full-window aggregates run several times faster, with peak memory unch
 #### Scenario: A window-only read transfers its window onto the aligned enrichment
 
 - **GIVEN** a source partitioned on `day` and an enrichment aligned with it on `day`
-- **AND** a query whose filter is `day >= T` and which selects an enrichment column
+- **AND** a query whose filter is `day >= T` and which selects and sorts by an enrichment column, so the block is
+  not late-materialized (see "Projection-only enrichment columns are fetched for the returned page only")
 - **WHEN** the statement is rendered
 - **THEN** the enrichment's derived table carries `enrichment.day >= T`
 - **AND** it carries neither `enrichment.grain_key IN (SELECT …)` nor `enrichment.day IN (SELECT …)`
 - **AND** the join condition still compares the grain key and `day`
+
+#### Scenario: A window-only page projecting the aligned enrichment only is page-keyed instead
+
+- **GIVEN** the same aligned pair and a row-mode query whose filter is `day >= T`, which selects an enrichment column
+  and neither filters nor sorts on one
+- **WHEN** the statement is rendered
+- **THEN** the block is late-materialized: the enrichment is joined as its own table for the page's keys, with
+  neither a transferred window nor a key set, and the page block does not join it
 
 #### Scenario: A pushed enrichment conjunct stays beside the transferred window
 
@@ -4344,7 +4251,8 @@ exceeded. Full-window aggregates run several times faster, with peak memory unch
 
 #### Scenario: Any other source predicate keeps both key sets
 
-- **GIVEN** the same aligned pair and a filter `day >= T AND deployment = 'd'`
+- **GIVEN** the same aligned pair, a filter `day >= T AND deployment = 'd'`, and a query that selects and sorts by an
+  enrichment column
 - **WHEN** the statement is rendered
 - **THEN** the derived table carries both key sets over both conjuncts, exactly as before
 
@@ -4377,8 +4285,248 @@ exceeded. Full-window aggregates run several times faster, with peak memory unch
 #### Scenario: The transferred read returns the keyed read's rows
 
 - **GIVEN** an aligned source and enrichment holding rows inside and outside a window
-- **WHEN** the same window-only query runs rendered with the transfer and with both key sets
+- **WHEN** the same window-only query, sorted on the enrichment column so it is not late-materialized, runs rendered
+  with the transfer and with both key sets
 - **THEN** both return identical rows
+
+### Requirement: Projection-only enrichment columns are fetched for the returned page only
+
+A block's **late enrichments**, which it SHALL join for its page's keys rather than for its window, are of two
+kinds:
+
+- a **heavy late enrichment** is an enrichment the block references at least one `heavy` column of;
+- a **light candidate** is a partition-aligned enrichment the block references no `heavy` column of and whose every
+  referenced column is referenced only by `select` entries — not by `filter`, `sort` (directly, or through the name
+  of a `select` entry that references it), `group_by` or `having`. A light candidate is a **light late
+  enrichment** when its source grain key and aligned source partition column are those of the block's key join.
+
+The block's **key join** is its first heavy late enrichment in the entity's enrichment order when it has one (every
+heavy late enrichment is on its keys, so which one does not change the statement). Otherwise it is the light
+candidate whose source keys defer the most: the most referenced `object` columns across the light candidates on those
+keys, then the most referenced columns, ties broken by the source grain key's name and then the enrichment table's.
+The entity's enrichment order SHALL NOT decide it, because the catalog does not fix that order. A **deferred column** is a heavy column of a heavy late
+enrichment or any column of a light late enrichment.
+
+A block SHALL be **late-materialized** on the single-entity read path — `POST /v1/queries/execute`,
+`POST /v1/queries/execute-sql`, their CSV twins and the Flight SQL endpoint — when all of these hold: it is in row
+mode and not `distinct`; it renders a `LIMIT`; it has at least one late enrichment; every heavy column of every
+heavy late enrichment is referenced only by `select` entries — not by `filter`, `sort` (directly, or through the
+name of a `select` entry that references it), `group_by` or `having`; no `select` entry contains a window
+expression or `array_join`; it calls no non-deterministic catalog function other than `now`; every heavy late
+enrichment is keyable and all of them are joined on the same source grain key and the same aligned source partition
+column (or on the same grain key, none of them aligned); and no `select` output is named `__adas_lm_key` or
+`__adas_lm_part`. A referenced enrichment that is neither a heavy late enrichment nor a light late enrichment — an
+unaligned enrichment read only through light columns, an aligned one read outside the projection, or a light
+candidate on other keys than the key join — SHALL NOT disqualify the block, except as the next paragraph states: it
+is joined as "SQL translation" describes, in the page block where the page block references it and in the outer
+statement.
+
+A block with no heavy late enrichment SHALL NOT be late-materialized when its filter qualifies for a partition
+pre-selection (see "A lookup on an aligned enrichment pre-selects the source's partitions"), whatever else it joins.
+The pre-selection restricts the page block only. In the outer statement the page's keys bound the late joins, through
+the `IN (K)` in their `ON`, but every other join — the lookup's own enrichment among them, which its filter reads, so
+it is never late — would keep only what ClickHouse carries into it from the outer `WHERE`, and that it carries the
+page-key tuple through a join equality is not established. Such a join could lose the bound the pre-selection gives it
+today — a key predicate for an unaligned join, the carried partition restriction for an aligned one — and read its
+whole table. The block keeps today's statement instead, in which the pre-selection already bounds its aligned joins to
+the lookup's partitions. A block with a heavy late enrichment is late-materialized as before.
+
+Any other block SHALL render as the "SQL translation" requirement describes. Composite SQL blocks, the translation-only endpoints and every pipeline
+statement SHALL NOT be late-materialized.
+
+A late-materialized block SHALL be rendered as one statement that evaluates its page's keys **once**:
+
+```
+SELECT <the block's projection, unchanged>
+FROM source [FINAL]
+<every other enrichment join, exactly as "SQL translation" renders it>
+LEFT JOIN late_enrichment [FINAL]
+  ON source.grain_key = late_enrichment.grain_key
+ AND (late_enrichment.grain_key, late_enrichment.partition_col) IN (K)
+WHERE <the block's whole filter>
+  AND ((source.grain_key, source.partition_col) IN (K)
+       OR source.grain_key IS NULL OR source.partition_col IS NULL)
+ORDER BY <the block's sort> LIMIT <limit> OFFSET <offset>
+```
+
+with one such `LEFT JOIN` per late enrichment, where `K` is
+`SELECT "__adas_lm_key", "__adas_lm_part" FROM (<page block>) AS "__adas_lm"` and the **page block** is the same
+block projecting, of its `select` entries, only those a `sort` item names (under their resolved output names, none
+of which reads a deferred column), projecting the source grain key as `__adas_lm_key` and the source partition
+column as `__adas_lm_part`, ordered by the block's `sort`, with `LIMIT <offset + limit>` and no `OFFSET`. The page
+block joins only the enrichments its filter and sort read, so it joins no light late enrichment. Without an
+aligned partition column, `K` and both `IN` tuples carry the grain key alone. The two references to `K` SHALL both
+stand in the outer statement's scope — the outer `WHERE` and each late join's `ON` — and never inside a derived
+table, because ClickHouse builds one set per distinct subquery within a scope and re-evaluates a subquery
+referenced from a nested scope: two evaluations of a page whose order has ties, or that reads rows ingested in
+between, can choose different rows, and a row whose page key is missing from a late join's set would read its
+late columns as unmatched with no error. A late join SHALL therefore join the enrichment table itself, never a
+derived table over it. A compile-time literal path that one of the scalar extractors or `json_extract_array`
+addresses on a late enrichment's `object` column SHALL be read as that path's subcolumn of the joined table. A
+reference that reads the whole document — `json_extract_string_ci`, a bare projection, a comparison, or an argument
+to a function taking the whole document — reads the whole column, as it does unshaped, but for the page's rows
+only. A materialized CTE
+SHALL NOT be used for this (ClickHouse gates it behind a setting that is off by default).
+
+The late-materialized statement SHALL return exactly the rows, column names, column order, values and
+NULL/default semantics the unshaped statement returns, up to the order of rows that tie on the sort, which neither
+statement fixes: the page block selects the top `offset + limit` rows of the same filtered relation, the outer
+`WHERE` keeps those rows (and any other row sharing one of their keys, which ranks after them), and the outer
+`ORDER BY`/`LIMIT`/`OFFSET` then cuts the same page; a late join's extra condition is true for every kept row,
+so its match is the grain-key match the unshaped join gives it. A row whose grain key or partition column is NULL
+is kept by the `IS NULL` arms and reads its late columns as unmatched, as it does unshaped. The `include_total`
+count statement SHALL NOT be late-materialized. On the single-entity read path a count that is read final SHALL
+join only the enrichments its `filter` references: read final, every grain join is 0..1, so a join the filter
+does not read cannot change the count, and joining it would build the columns the page projects — a heavy body —
+over the whole window. A count that is not read final SHALL keep every join its page has, because an unmerged
+enrichment version fans a row out in the page and must fan it out in the count too.
+
+#### Scenario: The last page of requests with their bodies reads bodies for the page only
+
+- **WHEN** a row-mode query selects `trace_id` and `dial_usage_log_payload.request_body`, filters
+  `request_time >= T`, sorts by `request_time` descending and pages `limit 10`
+- **THEN** the rendered SQL joins `dial_usage_log_payload` (under `FINAL` when read final) with
+  `("dial_usage_log_payload"."event_id", "dial_usage_log_payload"."request_time") IN (K)` in its `ON`
+- **AND** the outer `WHERE` carries the whole filter and `("dial_usage_log"."event_id", "dial_usage_log"."request_time")
+  IN (K)` with the two `IS NULL` arms, where `K` is the same subquery text
+- **AND** `K`'s page block projects no heavy column, carries the filter and the sort, and has `LIMIT 10`
+
+#### Scenario: The last page of requests with their headers reads headers for the page only
+
+- **WHEN** a row-mode query selects `request_time`, `dial_usage_log_payload.request_tags` and `trace_id`, none of
+  them heavy, filters `request_time >= T`, sorts by `request_time` descending and pages `limit 25`
+- **THEN** the block is late-materialized: the rendered SQL joins `dial_usage_log_payload` with
+  `("dial_usage_log_payload"."event_id", "dial_usage_log_payload"."request_time") IN (K)` in its `ON`, and the
+  outer `WHERE` carries the filter and the same `IN (K)` with the two `IS NULL` arms
+- **AND** `K`'s page block joins no payload table, carries the filter and the sort, and has `LIMIT 25`
+
+#### Scenario: A header path on a page-keyed join reads the path's subcolumn
+
+- **WHEN** a late-materialized block whose late enrichments are light projects a literal path of
+  `dial_usage_log_payload.request_tags`
+- **THEN** the payload join is the payload table itself, not a derived table, with `IN (K)` in its `ON`
+- **AND** the outer projection reads that path as a subcolumn of the joined table, not the whole `request_tags`
+  column
+- **AND WHEN** the block reads `request_tags` through `json_extract_string_ci` instead
+- **THEN** the payload join is still the payload table itself with `IN (K)` in its `ON`, and the whole column is read
+  for the page's rows
+
+#### Scenario: An offset page fetches keys for the rows up to its end
+
+- **WHEN** the same query pages `limit 10, offset 20`
+- **THEN** the page block has `LIMIT 30` and no `OFFSET`, and the outer statement keeps `LIMIT 10 OFFSET 20`
+
+#### Scenario: The total of a body page does not read bodies
+
+- **WHEN** the same query, read final, also asks for `include_total`
+- **THEN** the count statement joins no payload table, and its total equals the unshaped count's
+
+#### Scenario: Late materialization returns the unshaped rows
+
+- **GIVEN** source rows with no payload row, a payload key with several unmerged versions, rows tying on the
+  sort key, and a body larger than 1 MB
+- **WHEN** a late-materialized query and the same query rendered unshaped run against ClickHouse, with and
+  without an `offset`, once projecting a heavy payload column and once projecting only light payload columns
+- **THEN** both return identical column names, types and values, row for row
+
+#### Scenario: The page keys are evaluated once
+
+- **WHEN** the late-materialized shape runs with a page block ordered by a per-row random value
+- **THEN** every row the outer `WHERE` keeps finds its late row, on every run
+
+#### Scenario: A heavy column outside the projection keeps today's join
+
+- **WHEN** a row-mode query filters, sorts or groups on a heavy enrichment column, or sorts by the output name of
+  a `select` entry that reads one
+- **THEN** the block is not late-materialized
+
+#### Scenario: Shapes whose page cannot be chosen first keep today's join
+
+- **WHEN** a row-mode query that projects a heavy enrichment column, or only light columns of an aligned
+  enrichment, is `distinct`, or projects a window expression or `array_join`, or is in aggregate mode
+- **THEN** the block is not late-materialized
+
+#### Scenario: A light column of the heavy enrichment may appear anywhere
+
+- **WHEN** a row-mode query projects `dial_usage_log_payload.request_body` and filters on
+  `dial_usage_log_payload.request_tags`
+- **THEN** the block is late-materialized, the page block joins the payload for `request_tags` only, and the
+  outer statement reads both columns from the page-restricted join
+
+#### Scenario: A filtered light column keeps today's join
+
+- **WHEN** a row-mode query projects `dial_usage_log_payload.request_tags`, references no heavy column, and
+  filters on a path of `dial_usage_log_payload.request_tags`
+- **THEN** the block is not late-materialized and renders as "SQL translation" describes, including any partition
+  pre-selection its filter qualifies for
+
+#### Scenario: A sorted light column keeps today's join
+
+- **WHEN** a row-mode query references no heavy column and sorts by a light column of an aligned enrichment,
+  directly or through the output name of a `select` entry that reads one
+- **THEN** the block is not late-materialized
+- **AND WHEN** the same sort appears beside a projection-only heavy column of a second enrichment on the same keys
+- **THEN** the block is late-materialized with only the heavy enrichment joined for the page's keys, and the sorted
+  enrichment is joined as "SQL translation" describes
+
+#### Scenario: A light column of an unaligned enrichment keeps today's join
+
+- **WHEN** a row-mode query under a `LIMIT` projects only non-heavy columns of a keyable enrichment that declares no
+  aligned partition column
+- **THEN** the block is not late-materialized
+
+#### Scenario: A light enrichment on another grain key does not disqualify the page
+
+- **WHEN** a row-mode query projects a heavy column of one aligned enrichment and a non-heavy column of a second
+  aligned enrichment joined on a different source grain key, both only in its `select`
+- **THEN** the block is late-materialized, the first enrichment is joined for the page's keys, and the second is
+  joined as "SQL translation" describes
+
+#### Scenario: Heavy and light enrichments on the same keys share one page
+
+- **WHEN** a row-mode query projects a heavy column of one aligned enrichment and a non-heavy column of a second
+  aligned enrichment joined on the same source grain key and partition column, both only in its `select`
+- **THEN** both enrichments are joined with the same `IN (K)` in their `ON`, `K` is one subquery text, and the
+  page block joins neither
+
+#### Scenario: A pre-selected light-only page keeps today's statement
+
+- **GIVEN** an aligned `usage_client_identity` of `dial_usage_log` and an enrichment keyed on `chat_id` with no
+  aligned partition pair
+- **WHEN** a row-mode query filters `"usage_client_identity.client_session_id" = 's1'` and projects
+  `dial_usage_log_payload.request_tags` and a column of the `chat_id` enrichment, references no heavy column, and
+  pages `limit 25`
+- **THEN** the block is not late-materialized: it renders as "SQL translation" describes, with the partition
+  pre-selection in its `WHERE` and keying the `chat_id` enrichment's join
+- **AND WHEN** it projects, instead of the `chat_id` enrichment's column, a column of an aligned enrichment joined on
+  another grain key than the payload, or only `request_tags` beside source columns
+- **THEN** the block is not late-materialized either
+- **AND WHEN** it also projects a heavy payload column, beside the `chat_id` enrichment's column
+- **THEN** the block is late-materialized as a heavy page is, and only its page block carries the pre-selection
+
+#### Scenario: A light-only page takes its keys from what it defers
+
+- **GIVEN** an aligned enrichment `trace_summary` of `dial_usage_log` joined on `trace_id`, listed before the payload in
+  the entity's enrichment order
+- **WHEN** a row-mode query references no heavy column and projects `trace_summary.title` and
+  `dial_usage_log_payload.request_tags`, both only in its `select`
+- **THEN** the page's keys are `event_id` and `request_time`, the payload is joined for them, and `trace_summary` is
+  joined as "SQL translation" describes
+- **AND WHEN** the query projects `trace_summary.title` and one non-`object` payload column instead
+- **THEN** the payload is still joined for the page's keys, because `event_id` sorts before `trace_id`
+- **AND** each statement is the same whatever order the catalog lists the enrichments in, up to the order of its joins
+
+#### Scenario: A heavy column of an enrichment that cannot be keyed disqualifies the block
+
+- **WHEN** a row-mode query projects a heavy column of an enrichment whose grain-key fields the model does not know,
+  beside a light column of an aligned enrichment
+- **THEN** the block is not late-materialized
+
+#### Scenario: Composite blocks keep today's join
+
+- **WHEN** a composite SQL statement's block projects a heavy enrichment column, or a non-heavy column of an
+  aligned enrichment, under a `LIMIT`
+- **THEN** the block renders as "SQL translation" describes, with no page-key subquery
 
 ## Implementation notes
 
