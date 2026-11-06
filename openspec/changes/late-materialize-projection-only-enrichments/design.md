@@ -59,11 +59,16 @@ statement; it never applies to a block with a heavy late enrichment.
 
 **D3. The key join.** With heavy late enrichments present, the key join is the first of them, as today. A light
 candidate joins `tables` only when `sameSourceKeys(keyJoin, candidate)` holds. With none present, the key join is
-the first light candidate in `model.enrichments()` order, and the other light candidates are compared against it.
-Alignment only says that the enrichment's partition column is named like the source's
-(`CatalogQueryService`), so every aligned join of one source shares the source's partition column, but its grain
-key is per enrichment. Two aligned enrichments can therefore differ by grain key, never by partition column. The
-order is fixed, so the rendered SQL is deterministic whichever enrichments a catalog declares.
+the light candidate whose source keys defer the most: the most referenced `object` columns across the candidates on
+those keys, then the most referenced columns, ties broken by the source grain key's name and then the table's. The
+other light candidates are compared against it. Alignment only says that the enrichment's partition column is named
+like the source's (`CatalogQueryService`), so every aligned join of one source shares the source's partition column,
+but its grain key is per enrichment. Two aligned enrichments can therefore differ by grain key, never by partition
+column. Rejected: the first light candidate in `model.enrichments()` order. That order comes from
+`TableDefinitionRepository.findBySourceTable`, which has no `ORDER BY`, so it can change after an unrelated catalog
+update, and it lets a cheap enrichment on a non-unique key take the page keys from the payload document this change
+exists to defer. Ranking by `object` columns first targets that document; the name ties make the SQL deterministic
+whichever order the catalog returns.
 
 **D4. The page block is described as the code builds it.** The current spec says the page block is the block with
 its heavy `select` entries removed. The code keeps only the sort-named entries (`ReadShaping.latePlan`). Both give
@@ -90,25 +95,23 @@ shapes where it could invert. A shape **regresses** when, at the same window on 
 by the budget where today's statement completes, or its peak memory or its duration is more than twice today's. If
 one regresses, the guard is added in this change before it is archived, and the spec gains the condition.
 
-**D7. A pre-selected light block beside a join the page keys cannot reach keeps today's statement.** Partition
-pre-selection restricts the page block only (structured-query, "A lookup on an aligned enrichment pre-selects the
-source's partitions"). The outer statement is bounded by the page keys `(grain_key, partition_col) IN (K)`, and those
-reach only the joins on the key join's two columns. Today the pre-selection bounds the other joins too: a join with no
-aligned partition pair is keyed on it, so it reads the grain keys of the lookup's partitions; an aligned join on
-another grain key gets the partition restriction carried through its `source.p = e.p` equality. In the outer
-statement of a late-materialized block neither holds. Such a join is keyed only by the filter's source-only conjuncts
-(or bounded by the transferred window), and with none it hashes its whole table. So a block whose only late
-enrichments are light is not late-materialized when its filter qualifies for a pre-selection and it joins an
-enrichment not on the key join's grain key and partition column. Little is lost: in exactly those blocks, the
-pre-selection already bounds the light enrichment's join to the lookup's partitions, which for a session or
-conversation lookup is a few days. A block with a heavy late enrichment is unchanged: its outer statement already
-lacks the pre-selection today.
+**D7. A pre-selected light-only block keeps today's statement.** Partition pre-selection restricts the page block
+only (structured-query, "A lookup on an aligned enrichment pre-selects the source's partitions"). The outer statement
+is bounded by the page keys `(grain_key, partition_col) IN (K) OR … IS NULL`. Those bound its late joins, through the
+`IN (K)` in each late join's `ON`. Its other joins keep only what ClickHouse carries into them from the outer `WHERE`.
+Today the pre-selection bounds them all: a join with no aligned partition pair is keyed on it, and an aligned join gets
+the source's partition restriction carried through its `source.p = e.p` equality (measured in
+`PartitionPreselectionIntegrationTest`). That includes the lookup's own enrichment, which is filtered, so it is never
+a late join; in the outer statement it is a derived table carrying only the pushed lookup conjunct. Nothing measures
+whether ClickHouse carries the tuple `IN (K)`, with its `IS NULL` arms, through a join equality the same way. Without
+it, the lookup's enrichment is read across every partition once more, and an unaligned join hashes its whole table.
+So a block whose only late enrichments are light is not late-materialized when its filter qualifies for a
+pre-selection, whatever else it joins. Little is lost: the pre-selection already bounds the light enrichment's join to
+the lookup's partitions, which for a session or conversation lookup is a few days. A block with a heavy late
+enrichment is unchanged: its outer statement already lacks the pre-selection today.
 
-The guard leaves one cost open: a light-only lookup block with every join reachable is late-materialized, and its
-outer statement's source scan has no pre-selection either. Whether ClickHouse prunes that scan's partitions from
-`IN (K)` decides whether a lookup with no time bound costs more than today. Heavy lookup pages already run this
-shape. Acceptance 7.7 measures it on a lookup with no `request_time` bound, and a regression there adds the time-bound
-condition to the guard under D6. Rejected: giving the outer statement the
+Rejected: exempting a light-only lookup block whose every other join is aligned on the key join's keys. That rests on
+the unmeasured carry-through above. Also rejected: giving the outer statement the
 pre-selection too. That would fix heavy pages as well, but each pre-selection would be evaluated a second time (its
 own scope), and the SQL of every heavy page with a lookup would change. That is a separate cost trade, to be
 measured on its own. Also rejected: keying an unaligned join on the page keys through the source
@@ -123,8 +126,8 @@ measured on its own. Also rejected: keying an unaligned join on the page keys th
   build of the deferred enrichment's columns. The trade inverts when the deferred join is cheap and the filter is
   expensive. Acceptance runs exactly those shapes (7.2–7.5) before merge.
 - [An outer statement loses keying that the page block has] → The page block carries the pre-selections; the outer
-  statement does not. D7 keeps light-only blocks out of the shapes where that un-keys a join, and leaves the outer
-  source scan of a lookup with no time bound to acceptance 7.7.
+  statement does not. D7 keeps every light-only block with a pre-selection in today's statement. Heavy lookup pages
+  keep the shape they run today.
 - [Row pages that project light columns of aligned enrichments change SQL shape] → Results are unchanged by the
   equivalence requirement. The render tests add a third, aligned enrichment to the test model to cover the mixed
   heavy + light case. The existing models declare `usage_client_identity` unaligned, and flipping it would break

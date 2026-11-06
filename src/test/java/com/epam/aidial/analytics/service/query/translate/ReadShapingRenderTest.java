@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -77,6 +78,11 @@ class ReadShapingRenderTest {
     }
 
     private static QueryEntityModel model() {
+        return model(false);
+    }
+
+    /** The test model, its enrichments in reverse order when {@code reversed}: the catalog does not fix that order. */
+    private static QueryEntityModel model(boolean reversed) {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         bind(bindings, "event_id", "dial_usage_log", "event_id", QueryFieldType.UUID, false);
         bind(bindings, "request_time", "dial_usage_log", "request_time", QueryFieldType.TIMESTAMP, false);
@@ -115,8 +121,12 @@ class ReadShapingRenderTest {
         final EnrichmentJoin dump = new EnrichmentJoin(DSL.table(DSL.name("raw_dump")),
                 DSL.field(DSL.name("dial_usage_log", "trace_id")).eq(DSL.field(DSL.name("raw_dump", "trace_id"))),
                 null, null, null, null, Set.of(DUMP), null);
+        final List<EnrichmentJoin> joins = new ArrayList<>(List.of(payload, identity, session, summary, dump));
+        if (reversed) {
+            Collections.reverse(joins);
+        }
         return new QueryEntityModel("dial_usage_log", DSL.table(DSL.name("dial_usage_log")), bindings,
-                List.of(payload, identity, session, summary, dump), List.of(), null, true, true);
+                List.copyOf(joins), List.of(), null, true, true);
     }
 
     private static void bind(Map<String, QueryFieldBinding> bindings, String flatName, String table, String col,
@@ -126,7 +136,11 @@ class ReadShapingRenderTest {
     }
 
     private String render(StructuredQuery query) {
-        return builder.build(ctx, model(), query, StructuredQueryBuilder.MAX_LIMIT).getSQL(ParamType.INLINED);
+        return renderOn(model(), query);
+    }
+
+    private String renderOn(QueryEntityModel model, StructuredQuery query) {
+        return builder.build(ctx, model, query, StructuredQueryBuilder.MAX_LIMIT).getSQL(ParamType.INLINED);
     }
 
     private String unshaped(StructuredQuery query) {
@@ -487,7 +501,27 @@ class ReadShapingRenderTest {
     }
 
     @Test
-    void lightOnlyPageTakesItsKeysFromTheFirstLightCandidate() {
+    void lightOnlyPageKeysOnWhatItDefersWhateverTheEnrichmentOrder() {
+        for (final boolean reversed : new boolean[] {false, true}) {
+            // A whole document outranks a scalar: the payload's keys, whichever enrichment comes first.
+            final StructuredQuery document = newestPage(List.of(col(field("event_id")), col(field(TITLE)), col(field(TAGS))));
+            final String sql = renderOn(model(reversed), document);
+            assertThat(sql).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD))
+                    .doesNotContainIgnoringCase("(\"trace_summary\".\"trace_id\", \"trace_summary\".\"request_time\") in (select \"__adas_lm");
+            assertThat(pageKeySubqueries(sql).getFirst()).containsIgnoringCase("\"dial_usage_log\".\"event_id\" \"__adas_lm_key\"");
+
+            // More deferred columns outrank fewer: note and status_code of the payload over one trace_summary title.
+            final StructuredQuery scalars = newestPage(List.of(col(field(TITLE)), col(field(NOTE)), col(field(STATUS))));
+            assertThat(renderOn(model(reversed), scalars)).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD));
+
+            // A tie goes to the grain key's name: event_id before trace_id.
+            final StructuredQuery tie = newestPage(List.of(col(field(TITLE)), col(field(NOTE))));
+            assertThat(renderOn(model(reversed), tie)).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD));
+        }
+    }
+
+    @Test
+    void lightOnlyPageTakesItsKeysFromItsOnlyLightCandidate() {
         // trace_summary is the only late enrichment, so its own grain key (trace_id, not unique) keys the page.
         final String sql = render(newestPage(List.of(col(field("event_id")), col(field(TITLE)))));
 

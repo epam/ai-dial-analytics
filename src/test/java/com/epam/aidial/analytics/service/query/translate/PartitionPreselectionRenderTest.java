@@ -172,25 +172,22 @@ class PartitionPreselectionRenderTest {
     }
 
     @Test
-    void preselectedLightPageIsLateMaterializedOnlyWhenThePageKeysReachEveryJoin() {
+    void preselectedLightPageKeepsTodaysStatement() {
         final FilterNode lookup = cmp(ComparisonOp.EQ, SESSION, str("s1"));
 
         // Beside the unaligned users join, which the pre-selection keys, the light labels column keeps today's statement
-        // (the case preselectionKeysOnlyTheJoinsWithoutAnAlignedPair renders).
+        // (the case preselectionKeysOnlyTheJoinsWithoutAnAlignedPair renders). So does a page beside an aligned join on
+        // another grain key, and so does one whose every join is on the page's keys: in the outer statement the lookup's
+        // own ident join would keep only what ClickHouse carries into it from IN (K), while today the pre-selection's
+        // restriction is carried into it through day = day.
         assertThat(render(query(lookup, SESSION, TAG, REGION))).doesNotContain("__adas_lm");
-        // So does an aligned join on another grain key: the page's (event_id, day) keys cannot reach it, while today the
-        // pre-selection's restriction is carried into it through day = day.
         assertThat(render(query(lookup, SESSION, TAG, TOPIC))).doesNotContain("__adas_lm");
+        final String sql = render(query(lookup, SESSION, TAG));
+        assertThat(sql).doesNotContain("__adas_lm").contains("left outer join \"labels\" FINAL on");
+        assertThat(occurrences(sql, PRESELECTION)).isEqualTo(1);
+
         // A heavy late enrichment makes it a heavy page, late-materialized as before whatever else it joins.
         assertThat(render(query(lookup, BODY, TAG, REGION))).contains("__adas_lm_key");
-
-        // Without either, the block is late-materialized and only the page block carries the pre-selection: one per copy
-        // of the page-key subquery, none in the outer statement.
-        final String sql = render(query(lookup, SESSION, TAG));
-        assertThat(sql).contains("(\"labels\".\"event_id\", \"labels\".\"day\") IN (select \"__adas_lm_key\"");
-        final String pageBlockEnd = "\"__adas_lm\")";
-        assertThat(occurrences(sql, PRESELECTION)).isEqualTo(occurrences(sql, pageBlockEnd)).isEqualTo(2);
-        assertThat(sql.substring(sql.lastIndexOf(pageBlockEnd))).doesNotContain(PRESELECTION);
     }
 
     @Test

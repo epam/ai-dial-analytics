@@ -360,9 +360,9 @@ public class StructuredQueryBuilder {
                         .or(keyJoin.sourceKey().isNull()).or(keyJoin.sourcePartition().isNull())
                 : DSL.condition("{0} IN ({1})", keyJoin.sourceKey(), pageKeys).or(keyJoin.sourceKey().isNull());
         // The partition pre-selections restrict the page block only: a copy here would evaluate each one a second time,
-        // in its own scope. The outer statement is confined to the page's keys, which reach the joins on the key join's
-        // grain key and partition column; ReadShaping.latePlan keeps a light-only block that also joins on other columns
-        // out of this shape when it has a pre-selection.
+        // in its own scope. The outer statement is confined to the page's keys instead, which bound its late joins.
+        // Only a block with a heavy late enrichment reaches this shape with a pre-selection: ReadShaping.latePlan keeps a
+        // light-only one in today's statement.
         return statement.render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED,
                 new LeafRestriction(List.of(onPage), Map.of()), outer, false);
     }

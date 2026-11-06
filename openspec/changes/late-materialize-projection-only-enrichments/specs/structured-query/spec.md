@@ -678,9 +678,9 @@ restriction into `E`'s derived table, and into every other aligned join, through
 carries). A join of the same statement without an aligned partition pair has no such equality; it SHALL be keyed on
 `partitionExpr(source.p) IN PS` as one of its source-only key predicates, so that it reads the grain keys of the
 selected partitions rather than hashing its whole table. When the statement is late-materialized, the restriction
-SHALL appear in the page block only: the outer statement is confined to the page's keys, which reach its joins on the
-key join's grain key and partition column. A light-only page whose other joins those keys cannot reach is not
-late-materialized (see "Projection-only enrichment columns are fetched for the returned page only"). A count for
+SHALL appear in the page block only, and the outer statement is confined to the page's keys instead. Only a block with
+a heavy late enrichment is late-materialized beside a pre-selection (see "Projection-only enrichment columns are
+fetched for the returned page only"). A count for
 `include_total` SHALL take the same restriction as the page.
 
 On the read path a top-level `AND` conjunct SHALL qualify only when all of these hold: it references one
@@ -759,8 +759,8 @@ conjunct SHALL be unchanged.
 
 ### Requirement: Projection-only enrichment columns are fetched for the returned page only
 
-A block's **late enrichments** are the enrichments it joins for its page's keys rather than for its window. They
-are of two kinds:
+A block's **late enrichments**, which it SHALL join for its page's keys rather than for its window, are of two
+kinds:
 
 - a **heavy late enrichment** is an enrichment the block references at least one `heavy` column of;
 - a **light candidate** is a partition-aligned enrichment the block references no `heavy` column of and whose every
@@ -768,8 +768,11 @@ are of two kinds:
   of a `select` entry that references it), `group_by` or `having`. A light candidate is a **light late
   enrichment** when its source grain key and aligned source partition column are those of the block's key join.
 
-The block's **key join** is its first heavy late enrichment in the entity's enrichment order when it has one, and
-otherwise its first light candidate in that order. A **deferred column** is a heavy column of a heavy late
+The block's **key join** is its first heavy late enrichment in the entity's enrichment order when it has one (every
+heavy late enrichment is on its keys, so which one does not change the statement). Otherwise it is the light
+candidate whose source keys defer the most: the most referenced `object` columns across the light candidates on those
+keys, then the most referenced columns, ties broken by the source grain key's name and then the enrichment table's.
+The entity's enrichment order SHALL NOT decide it, because the catalog does not fix that order. A **deferred column** is a heavy column of a heavy late
 enrichment or any column of a light late enrichment.
 
 A block SHALL be **late-materialized** on the single-entity read path — `POST /v1/queries/execute`,
@@ -787,14 +790,14 @@ is joined as "SQL translation" describes, in the page block where the page block
 statement.
 
 A block with no heavy late enrichment SHALL NOT be late-materialized when its filter qualifies for a partition
-pre-selection (see "A lookup on an aligned enrichment pre-selects the source's partitions") and it joins an
-enrichment that is not joined on the key join's source grain key and aligned source partition column: one with no
-aligned partition pair, or an aligned one on another grain key. The pre-selection restricts the page block only, and
-the page's keys bound only the outer statement's joins on those two columns. Such a join would lose the bound the
-pre-selection gives it today — a key predicate for an unaligned join, the carried partition restriction for an
-aligned one — and, with no source-only conjunct to key it, hash its whole table. The block keeps today's statement
-instead, in which the pre-selection already bounds its aligned joins to the lookup's partitions. A block with a heavy
-late enrichment is late-materialized as before.
+pre-selection (see "A lookup on an aligned enrichment pre-selects the source's partitions"), whatever else it joins.
+The pre-selection restricts the page block only. In the outer statement the page's keys bound the late joins, through
+the `IN (K)` in their `ON`, but every other join — the lookup's own enrichment among them, which its filter reads, so
+it is never late — would keep only what ClickHouse carries into it from the outer `WHERE`, and that it carries the
+page-key tuple through a join equality is not established. Such a join could lose the bound the pre-selection gives it
+today — a key predicate for an unaligned join, the carried partition restriction for an aligned one — and read its
+whole table. The block keeps today's statement instead, in which the pre-selection already bounds its aligned joins to
+the lookup's partitions. A block with a heavy late enrichment is late-materialized as before.
 
 Any other block SHALL render as the "SQL translation" requirement describes. Composite SQL blocks, the translation-only endpoints and every pipeline
 statement SHALL NOT be late-materialized.
@@ -954,7 +957,7 @@ enrichment version fans a row out in the page and must fan it out in the count t
 - **THEN** both enrichments are joined with the same `IN (K)` in their `ON`, `K` is one subquery text, and the
   page block joins neither
 
-#### Scenario: A pre-selected light page beside a join the page keys cannot reach keeps today's statement
+#### Scenario: A pre-selected light-only page keeps today's statement
 
 - **GIVEN** an aligned `usage_client_identity` of `dial_usage_log` and an enrichment keyed on `chat_id` with no
   aligned partition pair
@@ -964,12 +967,22 @@ enrichment version fans a row out in the page and must fan it out in the count t
 - **THEN** the block is not late-materialized: it renders as "SQL translation" describes, with the partition
   pre-selection in its `WHERE` and keying the `chat_id` enrichment's join
 - **AND WHEN** it projects, instead of the `chat_id` enrichment's column, a column of an aligned enrichment joined on
-  another grain key than the payload
+  another grain key than the payload, or only `request_tags` beside source columns
 - **THEN** the block is not late-materialized either
-- **AND WHEN** the same query projects only `request_tags` beside source columns
-- **THEN** the block is late-materialized, and only its page block carries the pre-selection
 - **AND WHEN** it also projects a heavy payload column, beside the `chat_id` enrichment's column
-- **THEN** the block is late-materialized as a heavy page is
+- **THEN** the block is late-materialized as a heavy page is, and only its page block carries the pre-selection
+
+#### Scenario: A light-only page takes its keys from what it defers
+
+- **GIVEN** an aligned enrichment `trace_summary` of `dial_usage_log` joined on `trace_id`, listed before the payload in
+  the entity's enrichment order
+- **WHEN** a row-mode query references no heavy column and projects `trace_summary.title` and
+  `dial_usage_log_payload.request_tags`, both only in its `select`
+- **THEN** the page's keys are `event_id` and `request_time`, the payload is joined for them, and `trace_summary` is
+  joined as "SQL translation" describes
+- **AND WHEN** the query projects `trace_summary.title` and one non-`object` payload column instead
+- **THEN** the payload is still joined for the page's keys, because `event_id` sorts before `trace_id`
+- **AND** each statement is the same whatever order the catalog lists the enrichments in, up to the order of its joins
 
 #### Scenario: A heavy column of an enrichment that cannot be keyed disqualifies the block
 

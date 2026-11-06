@@ -28,10 +28,12 @@ removed comes from the join's position (projection-only on an aligned enrichment
   referenced outside the projection, or is keyed on a different source grain key than the block's key join simply
   keeps the join it has today.
 - One guard: a block with only light late enrichments is not late-materialized when its filter qualifies for a
-  partition pre-selection and it also joins an enrichment not on the key join's grain key and partition column
-  (an unaligned one, or an aligned one on another grain key). The outer statement carries no pre-selection and the
-  page keys cannot reach that join, so it would lose the bound it has today. The pre-selection already bounds such a
-  block's light join to the lookup's partitions.
+  partition pre-selection. The outer statement carries no pre-selection, so its other joins (the lookup's own
+  enrichment among them) would keep only what ClickHouse carries into them from the page keys, which is not
+  established, and could lose the bound they have today. The pre-selection already bounds such a block's light join
+  to the lookup's partitions, so little is lost.
+- With no heavy late enrichment, the key join is chosen by what it defers (the most `object` columns, then the most
+  columns, ties by grain-key name), not by the entity's enrichment order, which the catalog does not fix.
 - A page-keyed join stays the bare enrichment table, and an `object` path it is read through is a subcolumn of
   that table. This is now stated normatively, because wrapping the join in a derived table would re-evaluate the
   page keys.
@@ -64,8 +66,8 @@ _None._
     which the widened rule now late-materializes. Those scenarios now sort on the column, so they keep describing a
     derived table. The transfer requirement gains the page-keyed case, and the keyed-join requirement says that a
     page-keyed join has no derived table to prune.
-  - "A lookup on an aligned enrichment pre-selects the source's partitions" says the page's keys reach only the joins
-    on the key join's grain key and partition column, and its session-lookup scenario names a block that is not
+  - "A lookup on an aligned enrichment pre-selects the source's partitions" says only a block with a heavy late
+    enrichment is late-materialized beside a pre-selection, and its session-lookup scenario names a block that is not
     late-materialized.
 - `rest-sql-endpoint`: the "SQL execution inherits the query budget" requirement describes the read shaping it
   inherits as late materialization of projection-only enrichment columns (no longer heavy columns alone), with a
