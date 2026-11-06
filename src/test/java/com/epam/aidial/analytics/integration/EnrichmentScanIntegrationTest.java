@@ -112,6 +112,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
             assertThat(log.messagesAt(Level.INFO)).filteredOn(line -> line.startsWith("scan pipeline=")).satisfiesExactly(
                     line -> assertThat(line).contains("pipeline=" + id + " gen=1 rows=1 has_more=false")
                             .contains("query_id=adas-" + id + "-scan-")
+                            .containsPattern("replica=[^-\\s]\\S*$")
                             .doesNotContain("11111111-1111-1111-1111-111111111111")
                             .doesNotContain(cursor),
                     line -> assertThat(line).contains("rows=0").contains("lag_s=-"));
@@ -242,7 +243,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
         // and its event_id is a table-side DEFAULT the ingest path never writes — so these rows omit it,
         // exactly as ingest does. Keying an enrichment on it also exercises the catalog resolution of the
         // grain key's type, which only works because event_id is a registered column of the source.
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics (request_time, _ingested_at, project_id, trace_id, "
                 + "core_span_id, deployment, user_hash, chat_id, response_id, rate, comment) VALUES "
                 + "('2026-01-01 00:00:00.000','2020-01-01 00:00:01.000','p','t1','s1','d','u','c','resp_1',1,NULL),"
@@ -283,7 +284,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
             assertThat(firstId).isNotBlank().isNotEqualTo(secondId);
         } finally {
             mockMvc.perform(delete("/v1/tables/rate_sent"));
-            execute("TRUNCATE TABLE rate_analytics");
+            clear("rate_analytics");
         }
     }
 
@@ -296,7 +297,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
      */
     @Test
     void pipelineScansTheSourceItDeclaresAndRepointingItInvalidatesTheCursor() throws Exception {
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics (request_time, _ingested_at, project_id, trace_id, "
                 + "core_span_id, deployment, user_hash, chat_id, response_id, rate, comment) VALUES "
                 + "('2026-01-01 00:00:00.000','2020-01-01 00:00:01.000','p','t1','s1','d','u','chat-a','r1',1,NULL),"
@@ -348,7 +349,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
                     .andExpect(jsonPath("$.error").value("invalid_cursor"));
         } finally {
             mockMvc.perform(delete("/v1/tables/scan_conv"));
-            execute("TRUNCATE TABLE rate_analytics");
+            clear("rate_analytics");
         }
     }
 

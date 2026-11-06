@@ -99,6 +99,9 @@ public class IngestRetrySweep {
         SweepSummary summary = new SweepSummary(written, 0, 0, 0);
         IngestFailureService.Snapshot snapshot;
         try {
+            // The ledgers first, as every ingest cycle does: a new primary must see every blob already recorded before
+            // it decides what is still outstanding, or it re-ingests a blob another primary already wrote.
+            ledger.sync();
             snapshot = failures.snapshot();
         } catch (RuntimeException ex) {
             log.error("Retry sweep could not read the failure ledger: {}", ex.getMessage(), ex);

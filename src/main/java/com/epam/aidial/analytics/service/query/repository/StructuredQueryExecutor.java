@@ -6,6 +6,8 @@ import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseBudget;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.observability.SqlLog;
 import com.epam.aidial.analytics.observability.trace.LogExecution;
@@ -60,6 +62,12 @@ import java.util.Map;
  * cannot be replaced by anything merged before it, and the {@code count(*)} total — run under a copy of the
  * same settings — is filtered exactly as its page is. The pipeline overloads never carry it: they read under
  * pipeline settings, and the paths that reach them refuse a row-confined caller instead.
+ *
+ * <p><b>Which replica.</b> A user query ({@link #execute}, {@link #executeComposite}) executes on one replica the
+ * {@link ReplicaRouter} chooses per request, its count statement included, and is re-run once on the primary when
+ * that replica cannot be reached or has not applied a recent DDL yet. The settings are identical on every replica,
+ * row-policy filters included. The scan overloads are pipeline reads: they execute on the replica their pipeline run
+ * bound. See {@code openspec/specs/clickhouse-replication/spec.md}.
  */
 @Slf4j
 @Component
@@ -71,6 +79,7 @@ public class StructuredQueryExecutor {
     private final DSLContext renderContext;
     private final ClickHouseClientWrapper clickHouse;
     private final RowPolicyFilter rowPolicies;
+    private final ReplicaRouter replicas;
 
     /**
      * Translates and runs {@code query} against the resolved {@code model}.
@@ -114,11 +123,15 @@ public class StructuredQueryExecutor {
         final SelectQuery<Record> select = queryBuilder.build(renderContext, model, query, maxLimit);
         final String sql = select.getSQL(ParamType.INLINED);
         SqlLog.LOG.debug("Executing structured {} query: {}", model.entity(), sql);
-        final long startedAt = System.nanoTime();
-        final List<Map<String, Object>> rows = materialize(sql, select, settings);
-        final Long totalCount = totalCount(model, query, settings, startedAt);
-        log.debug("Structured {} query returned {} row(s), totalCount={}", model.entity(), rows.size(), totalCount);
-        return new QueryResultPage(outputColumns(select), rows, totalCount);
+        // One replica for the row and the count statement; both are read to the end before anything is returned,
+        // so a re-run on the primary never follows a row already handed to the caller.
+        return replicas.query(() -> {
+            final long startedAt = System.nanoTime();
+            final List<Map<String, Object>> rows = materialize(sql, select, settings);
+            final Long totalCount = totalCount(model, query, settings, startedAt);
+            log.debug("Structured {} query returned {} row(s), totalCount={}", model.entity(), rows.size(), totalCount);
+            return new QueryResultPage(outputColumns(select), rows, totalCount);
+        });
     }
 
     /**
@@ -229,7 +242,7 @@ public class StructuredQueryExecutor {
      */
     public QueryResultPage executeComposite(SelectQuery<Record> select, QuerySettings extra, boolean partitionLocal) {
         final QuerySettings settings = rowPolicies.apply(FinalSettings.mergedOver(FinalSettings.userRead(partitionLocal), extra));
-        return new QueryResultPage(outputColumns(select), run(select, settings, "composite"), null);
+        return replicas.query(() -> new QueryResultPage(outputColumns(select), run(select, settings, "composite"), null));
     }
 
     /**
@@ -272,6 +285,7 @@ public class StructuredQueryExecutor {
     }
 
     private List<Map<String, Object>> scan(SelectQuery<Record> select, QuerySettings extra, boolean partitionLocal) {
+        ReplicaScope.requirePipelineRun("pipeline scan");
         return run(select, FinalSettings.pipelineRead(extra, partitionLocal), "scan");
     }
 

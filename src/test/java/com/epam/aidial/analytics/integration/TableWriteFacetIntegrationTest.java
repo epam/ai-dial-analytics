@@ -64,7 +64,7 @@ class TableWriteFacetIntegrationTest extends AbstractClickHouseIntegrationTest {
         createRollup();
 
         assertThatShowCreate()
-                .contains("ReplacingMergeTree(_updated_at)")
+                .containsPattern("ReplicatedReplacingMergeTree\\('[^']*', '[^']*', _updated_at\\)")
                 .contains("ORDER BY (deployment, day)");
     }
 

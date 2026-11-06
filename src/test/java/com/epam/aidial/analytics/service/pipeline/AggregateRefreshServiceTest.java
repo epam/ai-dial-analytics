@@ -4,6 +4,7 @@ import com.clickhouse.client.api.ServerException;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseInsertSelectExecutor;
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
 import com.epam.aidial.analytics.configuration.AggregateProperties;
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
@@ -151,7 +152,7 @@ class AggregateRefreshServiceTest {
                 READ_BUDGET,
                 new ClientSpanTracer(sdk), new TransitionLog(),
                 new PreviewValueCapper(new JsonMapperConfiguration().jsonMapper()),
-                PortableRenderers.over(DialUsageLogTestModel.model()));
+                PortableRenderers.over(DialUsageLogTestModel.model()), ReplicaRouterStubs.inPlace());
 
         given(pipelines.findById(NAME)).willReturn(Optional.of(pipeline()));
         given(scanSources.entityModel(INPUT)).willReturn(DialUsageLogTestModel.model());

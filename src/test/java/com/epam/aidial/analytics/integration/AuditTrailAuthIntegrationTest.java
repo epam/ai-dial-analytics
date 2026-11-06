@@ -55,6 +55,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach and the service starts unverified.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",

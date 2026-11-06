@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.table.relayout;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.pipeline.LookupIndexService;
@@ -148,6 +149,7 @@ public class EnrichmentRelayoutService {
     private final DataSource dataSource;
     private final TransactionTemplate transactions;
     private final PipelineBudgetProperties budget;
+    private final ReplicaRouter replicas;
 
     /** How long the hold waits before its final copy: {@code pipeline.budget.timeout} plus {@link #SETTLE_MARGIN}. */
     private Duration settle;
@@ -525,6 +527,9 @@ public class EnrichmentRelayoutService {
      * information instead of rewriting its data, so expiry then drops whole parts as it would on a table created so.
      * The modification waits for that mutation ({@code mutations_sync}), so the setting can be reset after it: it is
      * read when the mutation runs, and left in place it would turn every later TTL change into a recalculation only.
+     * It waits for every active replica ({@code mutations_sync = 2}), not only the primary: a replica that ran the
+     * mutation after the reset reached it would rewrite the whole table. A replica down at that moment applies the
+     * mutation on recovery, which costs work and loses nothing.
      */
     private void applyTtl(Plan plan) {
         if (plan.ttl() == null) {
@@ -533,7 +538,7 @@ public class EnrichmentRelayoutService {
         ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of("MODIFY SETTING materialize_ttl_recalculate_only = 1"
                 + (plan.ttlOnlyDropParts() ? ", ttl_only_drop_parts = 1" : ""))));
         ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of(ddlRenderer.modifyTtlCommand(plan.ttl())))
-                + " SETTINGS mutations_sync = 1");
+                + " SETTINGS mutations_sync = 2");
         ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of("RESET SETTING materialize_ttl_recalculate_only")));
     }
 
@@ -755,6 +760,7 @@ public class EnrichmentRelayoutService {
      * @return the number of slices run
      */
     private int forEachSlice(Plan plan, String table, String where, String after, Consumer<Slice> body) {
+        synced(table);
         final long rows = rowsPerSlice(table);
         final String key = quote(plan.grainKey());
         String lower = after;
@@ -839,23 +845,36 @@ public class EnrichmentRelayoutService {
     }
 
     private boolean hasPartition(String table, String partitionId) {
+        synced(table);
         return !inspector.query("SELECT 1 FROM system.parts WHERE active AND database = currentDatabase() "
                 + "AND table = {table:String} AND partition_id = {id:String} LIMIT 1",
                 Map.of("table", table, "id", partitionId)).isEmpty();
     }
 
     private long maxUpdatedAt(String table) {
+        synced(table);
         final List<GenericRecord> rows = inspector.query("SELECT toInt64(toUnixTimestamp64Milli(max(" + quote(UPDATED_AT)
                 + "))) AS m FROM " + quote(table), Map.of());
         return rows.isEmpty() ? 0 : rows.getFirst().getLong("m");
     }
 
     private long count(String table, boolean collapsed) {
+        synced(table);
         return single("SELECT toInt64(count()) AS c FROM " + quote(table) + (collapsed ? " FINAL" : ""));
     }
 
     private long countWhere(String table, String where) {
+        synced(table);
         return single("SELECT toInt64(count()) AS c FROM " + quote(table) + " WHERE " + where);
+    }
+
+    /**
+     * Brings the primary up to date on {@code table} before a read that decides what to copy, keep or drop: an
+     * enrichment is written by its pipeline from that pipeline's home replica, so the primary may not have fetched its
+     * newest rows yet. A sync that fails or exceeds {@code clickhouse.replicas.sync-timeout} fails the step.
+     */
+    private void synced(String table) {
+        replicas.syncOnPrimary(List.of(table));
     }
 
     /** The one {@code c} value {@code sql} selects. */

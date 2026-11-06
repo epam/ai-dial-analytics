@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.blob.BlobListing;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -63,6 +64,12 @@ public class ClickHouseIngestLedger implements IngestLedger {
     private static final DateTimeFormatter STORAGE = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
 
     private final UsageLogWriter writer;
+    private final ReplicaRouter replicas;
+
+    @Override
+    public void sync() {
+        replicas.syncOnPrimary(List.of(TABLE, ClickHouseIngestFailureLedger.TABLE));
+    }
 
     @Override
     public Map<String, Instant> recorded(String prefix) {

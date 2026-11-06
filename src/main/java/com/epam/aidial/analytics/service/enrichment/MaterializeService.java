@@ -3,6 +3,8 @@ package com.epam.aidial.analytics.service.enrichment;
 import com.epam.aidial.analytics.clickhouse.ClickHouseBudget;
 import com.epam.aidial.analytics.clickhouse.ClickHouseInsertSelectExecutor;
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
+import com.epam.aidial.analytics.clickhouse.replication.SyncPlan;
 import com.epam.aidial.analytics.configuration.MaterializeProperties;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.ResourceBudget;
@@ -144,6 +146,7 @@ public class MaterializeService {
     private final EnrichmentFreshness freshness;
     private final EnrichSpecValidator validator;
     private final MaterializeOutcomeLog outcomes;
+    private final ReplicaRouter replicas;
 
     /**
      * The probed window's end tuple, how many source rows it covers, and whether the probe filled its limit.
@@ -283,80 +286,85 @@ public class MaterializeService {
 
         WindowSpec spec = new WindowSpec(model, filter.filter(), cursorColumns, cursorValues, from, to,
                 referenced, filter.columns(), enrichmentBound.orElse(null));
-        // Stamped BEFORE the probe, not after. The drained horizon means "nothing matching below this
-        // instant minus the safety lag", and the instant it is really making that claim about is the one
-        // the probe evaluated `now64(3)` at. Reading the clock afterwards would move the horizon forward by
-        // however long the probe took, releasing a sliver of rows the probe never looked inside — rows that
-        // sat in the still-mutating window at probe time and may yet be enriched. On a slow probe over a
-        // large source that sliver is seconds wide, and a rollup reading past it aggregates an absent value.
-        Instant probedAt = Instant.now();
-        // The call's one clock starts here, before the first statement: the probe's time counts against the
-        // same pipeline.budget.timeout the clamp re-probe, the narrowing re-probes and the writes then run
-        // on, so the call as a whole — not each statement — is what the runner's read timeout has to cover.
-        MaterializeCall call = MaterializeCall.start();
-        boolean completed = false;
-        try {
-            // The first statement runs on the whole budget: nothing has been spent yet.
-            Window window = call.time(MaterializeCall.Stage.PROBE, () -> probeWindow(
-                    spec, effectiveLimit, readBudget, new StatementTag(pipelineName, "probe")));
-            if (window == null) {
-                // Nothing to do: write nothing, echo the caller's cursor so it never skips a window.
-                //
-                // Record that the pipeline is DRAINED as of now, and deliberately not a position. The cursor echoed
-                // above is the *caller's*, so persisting it would store what the runner asserted rather than
-                // what ADAS observed. The drained instant is a different fact and the one consumers need: the
-                // probe applies the pipeline's filter, so a filtered pipeline's position stops at its last matching row
-                // while non-matching rows sit above it forever — without this, every rollup reading such an
-                // enrichment would wait for rows nothing is ever going to enrich. A windowed call records
-                // nothing here: "nothing left in this backfill window" says nothing about the pipeline's tail.
-                boolean clampedEmpty = !rederivingHistory && clampHeldRowsBack(spec, pipelineName, call);
-                if (!rederivingHistory && !clampedEmpty) {
-                    recording(pipelineName, "drained horizon",
-                            () -> positions.recordDrained(pipelineName, generation, probedAt));
+        // On the pipeline's home replica from here on, brought up to date first: the syncs follow every catalog
+        // read above (the freshness clamp names positions committed before them), and sit outside the statement
+        // budget the call's clock starts below. A sync that cannot complete refuses the call (503) before any read.
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(pipelineName, SyncPlan.of(List.of(source), joined, null))) {
+            // Stamped BEFORE the probe, not after. The drained horizon means "nothing matching below this
+            // instant minus the safety lag", and the instant it is really making that claim about is the one
+            // the probe evaluated `now64(3)` at. Reading the clock afterwards would move the horizon forward by
+            // however long the probe took, releasing a sliver of rows the probe never looked inside — rows that
+            // sat in the still-mutating window at probe time and may yet be enriched. On a slow probe over a
+            // large source that sliver is seconds wide, and a rollup reading past it aggregates an absent value.
+            Instant probedAt = Instant.now();
+            // The call's one clock starts here, before the first statement: the probe's time counts against the
+            // same pipeline.budget.timeout the clamp re-probe, the narrowing re-probes and the writes then run
+            // on, so the call as a whole — not each statement — is what the runner's read timeout has to cover.
+            MaterializeCall call = MaterializeCall.start();
+            boolean completed = false;
+            try {
+                // The first statement runs on the whole budget: nothing has been spent yet.
+                Window window = call.time(MaterializeCall.Stage.PROBE, () -> probeWindow(
+                        spec, effectiveLimit, readBudget, new StatementTag(pipelineName, "probe")));
+                if (window == null) {
+                    // Nothing to do: write nothing, echo the caller's cursor so it never skips a window.
+                    //
+                    // Record that the pipeline is DRAINED as of now, and deliberately not a position. The cursor echoed
+                    // above is the *caller's*, so persisting it would store what the runner asserted rather than
+                    // what ADAS observed. The drained instant is a different fact and the one consumers need: the
+                    // probe applies the pipeline's filter, so a filtered pipeline's position stops at its last matching row
+                    // while non-matching rows sit above it forever — without this, every rollup reading such an
+                    // enrichment would wait for rows nothing is ever going to enrich. A windowed call records
+                    // nothing here: "nothing left in this backfill window" says nothing about the pipeline's tail.
+                    boolean clampedEmpty = !rederivingHistory && clampHeldRowsBack(spec, pipelineName, call);
+                    if (!rederivingHistory && !clampedEmpty) {
+                        recording(pipelineName, "drained horizon",
+                                () -> positions.recordDrained(pipelineName, generation, probedAt));
+                    }
+                    outcomes.outcome(MaterializeOutcomeLog.Report.empty(pipelineName, generation,
+                            clampedEmpty ? MaterializeOutcomeLog.Outcome.CLAMPED_EMPTY : MaterializeOutcomeLog.Outcome.DRAINED,
+                            call, spec.enrichmentBound()));
+                    completed = true;
+                    return new MaterializePage(0L, cursor, false, null);
                 }
-                outcomes.outcome(MaterializeOutcomeLog.Report.empty(pipelineName, generation,
-                        clampedEmpty ? MaterializeOutcomeLog.Outcome.CLAMPED_EMPTY : MaterializeOutcomeLog.Outcome.DRAINED,
+                // The write carries the same ceiling as every read, and a refusal narrows rather than fails: halve
+                // the window and re-probe for the new end tuple, down to a floor of one source row. A legitimately
+                // large window genuinely can exceed any ceiling, and the caller cannot narrow it — ADAS picks the
+                // window — so without this, bounding the write would turn a large backfill into a dead end. The
+                // narrowed window is a PREFIX of the probed one, so the identical-window retry guarantee and the
+                // cursor ordering both survive; `hasMore` is what tells the caller to come back for the rest.
+                Narrowed written = writeNarrowing(
+                        spec, window, effectiveLimit, source, target, grainKey, declaration, expressions, call);
+                long rowsWritten = written.rows();
+                // The window actually written, which is the probed one unless the budget forced a narrower prefix.
+                // Everything downstream — the recorded position, the returned cursor, the lag — describes what was
+                // written, never what was probed, or a narrowed call would hand the caller a cursor past rows it
+                // never wrote.
+                Window covered = written.window();
+                boolean hasMore = covered.hasMore() || written.narrowed();
+                // Only now, and only on this branch: the INSERT … SELECT has returned, so every row of the probed
+                // window is in ClickHouse and this tuple is the position the enrichment is complete through. A
+                // windowed call still records nothing — its position is inside history, not at the pipeline's tail.
+                if (!rederivingHistory) {
+                    // Decided from the pipeline as it was read at the start of this call — before its own record is
+                    // applied — which is what makes "did this window carry the pipeline forward?" answerable at all. It
+                    // is also why the question is asked here rather than inside the writer: loading a PipelineEntity
+                    // inside that transaction would flush a full-row UPDATE over the columns it is setting.
+                    boolean reDerived = freshness.reDerivesHistory(resolved.pipeline(), covered.version(), covered.identity());
+                    recording(pipelineName, "materialized position", () -> positions.recordMaterialized(
+                            pipelineName, generation, covered.version(), covered.identity(), reDerived));
+                }
+                String nextCursor = codec.encode(
+                        source, List.of(Long.toString(covered.version()), covered.identity()));
+                long lagSeconds = Math.max(0L, (System.currentTimeMillis() - covered.version()) / 1000L);
+                outcomes.outcome(new MaterializeOutcomeLog.Report(pipelineName, generation,
+                        MaterializeOutcomeLog.Outcome.WRITTEN, rowsWritten, written.narrowed(), hasMore, lagSeconds,
                         call, spec.enrichmentBound()));
                 completed = true;
-                return new MaterializePage(0L, cursor, false, null);
+                return new MaterializePage(rowsWritten, nextCursor, hasMore, lagSeconds);
+            } finally {
+                outcomes.softDeadline(pipelineName, call, readBudget.timeout(), !completed);
             }
-            // The write carries the same ceiling as every read, and a refusal narrows rather than fails: halve
-            // the window and re-probe for the new end tuple, down to a floor of one source row. A legitimately
-            // large window genuinely can exceed any ceiling, and the caller cannot narrow it — ADAS picks the
-            // window — so without this, bounding the write would turn a large backfill into a dead end. The
-            // narrowed window is a PREFIX of the probed one, so the identical-window retry guarantee and the
-            // cursor ordering both survive; `hasMore` is what tells the caller to come back for the rest.
-            Narrowed written = writeNarrowing(
-                    spec, window, effectiveLimit, source, target, grainKey, declaration, expressions, call);
-            long rowsWritten = written.rows();
-            // The window actually written, which is the probed one unless the budget forced a narrower prefix.
-            // Everything downstream — the recorded position, the returned cursor, the lag — describes what was
-            // written, never what was probed, or a narrowed call would hand the caller a cursor past rows it
-            // never wrote.
-            Window covered = written.window();
-            boolean hasMore = covered.hasMore() || written.narrowed();
-            // Only now, and only on this branch: the INSERT … SELECT has returned, so every row of the probed
-            // window is in ClickHouse and this tuple is the position the enrichment is complete through. A
-            // windowed call still records nothing — its position is inside history, not at the pipeline's tail.
-            if (!rederivingHistory) {
-                // Decided from the pipeline as it was read at the start of this call — before its own record is
-                // applied — which is what makes "did this window carry the pipeline forward?" answerable at all. It
-                // is also why the question is asked here rather than inside the writer: loading a PipelineEntity
-                // inside that transaction would flush a full-row UPDATE over the columns it is setting.
-                boolean reDerived = freshness.reDerivesHistory(resolved.pipeline(), covered.version(), covered.identity());
-                recording(pipelineName, "materialized position", () -> positions.recordMaterialized(
-                        pipelineName, generation, covered.version(), covered.identity(), reDerived));
-            }
-            String nextCursor = codec.encode(
-                    source, List.of(Long.toString(covered.version()), covered.identity()));
-            long lagSeconds = Math.max(0L, (System.currentTimeMillis() - covered.version()) / 1000L);
-            outcomes.outcome(new MaterializeOutcomeLog.Report(pipelineName, generation,
-                    MaterializeOutcomeLog.Outcome.WRITTEN, rowsWritten, written.narrowed(), hasMore, lagSeconds,
-                    call, spec.enrichmentBound()));
-            completed = true;
-            return new MaterializePage(rowsWritten, nextCursor, hasMore, lagSeconds);
-        } finally {
-            outcomes.softDeadline(pipelineName, call, readBudget.timeout(), !completed);
         }
     }
 
@@ -579,8 +587,12 @@ public class MaterializeService {
         if (SqlLog.LOG.isDebugEnabled()) {
             SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", pipelineName, PipelineReadBudget.render(sample, model, readBudget));
         }
-        List<Map<String, Object>> sampled = PipelineReadBudget.run(executor, sample, model,
-                "Class-1 preview sample", readBudget, new StatementTag(pipelineName, "preview"));
+        List<Map<String, Object>> sampled;
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(pipelineName, SyncPlan.of(List.of(source),
+                EnrichmentJoins.referencedEnrichments(model, referenced), null))) {
+            sampled = PipelineReadBudget.run(executor, sample, model,
+                    "Class-1 preview sample", readBudget, new StatementTag(pipelineName, "preview"));
+        }
         SampledPosition newest = SampledPosition.newest(sampled, PREVIEW_VERSION, PREVIEW_IDENTITY);
         List<Map<String, Object>> rows = new ArrayList<>(sampled.size());
         for (Map<String, Object> row : sampled) {

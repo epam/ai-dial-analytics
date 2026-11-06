@@ -36,6 +36,7 @@ twin; capability `catalog-export-import`) promote user tables and pipelines (nev
 ./gradlew bootRun                           # run locally on http://localhost:5000
 ./gradlew checkstyleMain checkstyleTest     # code style (Google Java Style, 180-char lines)
 ./gradlew test                              # run the test suite
+./gradlew multiReplicaTest                  # opt-in: replication tests on a three-replica cluster
 ```
 
 Smoke test a running instance:
@@ -81,7 +82,7 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   description, a `Required` column that is `Yes`/`No` or a short condition. Behaviour, rationale and
   cost go to `openspec/specs/<capability>/spec.md`; a change adding no property adds nothing to
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
-  (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
+  (`clickhouse-server.md`, `clickhouse-replication.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
 
 ## Public-repo hygiene

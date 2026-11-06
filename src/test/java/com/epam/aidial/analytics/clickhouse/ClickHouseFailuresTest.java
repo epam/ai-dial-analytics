@@ -2,6 +2,9 @@ package com.epam.aidial.analytics.clickhouse;
 
 import com.clickhouse.client.api.ClientFaultCause;
 import com.clickhouse.client.api.ServerException;
+import org.apache.hc.client5.http.ConnectTimeoutException;
+import org.apache.hc.core5.http.ConnectionClosedException;
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.net.ConnectException;
@@ -168,5 +171,39 @@ class ClickHouseFailuresTest {
         first[0] = ClientFaultCause.ServerRetryable;
 
         assertThat(ClickHouseFailures.transportFaults()).doesNotContain(ClientFaultCause.ServerRetryable);
+    }
+
+    /** Keeper and replication failures mean the cluster's coordination is impaired, not that the statement is wrong. */
+    @Test
+    void keeperAndReplicationFailuresAreUnavailable() {
+        for (final int code : new int[] {242, 225, 999, 319}) {
+            assertThat(ClickHouseFailures.isUnavailable(new RuntimeException("wrapped", serverError(code))))
+                    .as("code %d", code).isTrue();
+        }
+        assertThat(ClickHouseFailures.isUnavailable(serverError(164))).as("READONLY stays a rejection").isFalse();
+    }
+
+    @Test
+    void connectFailuresAreNarrowerThanUnavailability() {
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new java.net.ConnectException("refused"))))
+                .isTrue();
+        assertThat(ClickHouseFailures.isConnectFailure(new java.net.SocketTimeoutException("read"))).isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectionRequestTimeoutException("lease"))))
+                .as("a pool lease timeout says nothing about the replica").isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectionClosedException("closed"))))
+                .as("a connection dropped mid-response may have run the statement").isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectTimeoutException("connect"))))
+                .isTrue();
+        assertThat(ClickHouseFailures.isConnectFailure(serverError(242))).isFalse();
+    }
+
+    /** A replica behind on DDL reports a catalog-resolved name unknown under one of these three codes. */
+    @Test
+    void unknownNamesAreRecognisedByCode() {
+        assertThat(ClickHouseFailures.isUnknownName(new RuntimeException(serverError(60)))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(47))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(16))).isTrue();
+        assertThat(ClickHouseFailures.isUnknownName(serverError(62))).isFalse();
+        assertThat(ClickHouseFailures.isTimeout(serverError(159))).isTrue();
     }
 }

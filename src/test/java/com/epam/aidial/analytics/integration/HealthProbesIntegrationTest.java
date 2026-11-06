@@ -29,6 +29,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach and the service starts unverified.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",

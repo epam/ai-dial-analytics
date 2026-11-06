@@ -2,6 +2,9 @@ package com.epam.aidial.analytics.clickhouse;
 
 import com.clickhouse.client.api.command.CommandResponse;
 import com.clickhouse.client.api.command.CommandSettings;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaMeters;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaTarget;
 import com.epam.aidial.analytics.configuration.ResourceBudget;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
@@ -12,6 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Runs a server-side {@code INSERT … SELECT} against ClickHouse on the dedicated <em>writer</em>
@@ -29,6 +33,8 @@ import java.util.Objects;
  * target untouched for that window and the caller's cursor unmoved, and an identical retry is safe.
  * Connectivity failures surface as {@link ClickHouseUnavailableException} (503); a rejected statement
  * surfaces as {@link ClickHouseQueryException} (400). Raw ClickHouse messages are never propagated.
+ *
+ * <p>It runs only inside a pipeline run, on the run's home replica ({@link ReplicaScope#requirePipelineRun}).
  */
 @Component
 @Slf4j
@@ -47,6 +53,7 @@ public class ClickHouseInsertSelectExecutor {
 
     private final ClickHouseWriterClient writer;
     private final ClickHouseSpans clickHouseSpans;
+    private final ReplicaMeters replicaMeters;
 
     /**
      * Executes one complete {@code INSERT … SELECT} statement (identifiers quoted, parameters inlined)
@@ -77,12 +84,17 @@ public class ClickHouseInsertSelectExecutor {
         settings.serverSetting(MAX_PARTITIONS_PER_INSERT_BLOCK, "0");
         ClickHouseBudget.apply(settings, Objects.requireNonNull(budget, "budget"));
         final String queryId = tag.applyTo(settings);
+        final Optional<ReplicaTarget> bound = Optional.of(ReplicaScope.requirePipelineRun("INSERT … SELECT into " + target));
         return clickHouseSpans.insertSelect(target, queryId, () -> {
+            replicaMeters.statement(bound.get().route(), bound.get().name());
             try (CommandResponse response = writer.client().execute(sql, settings).get()) {
                 return response.getWrittenRows();
             } catch (InterruptedException ex) {
                 throw ClickHouseWriterClient.interrupted("Interrupted while writing to ClickHouse", ex);
             } catch (Exception ex) {
+                if (bound.isPresent() && !bound.get().primary() && ClickHouseFailures.isConnectFailure(ex)) {
+                    bound.get().unreachable();
+                }
                 if (ClickHouseFailures.isUnavailable(ex)) {
                     throw new ClickHouseUnavailableException("ClickHouse is unreachable", ex);
                 }

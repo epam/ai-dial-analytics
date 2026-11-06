@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!--
+  Refuses a non-replicated MergeTree inside a Replicated database, where it would keep a separate copy
+  on each replica (docs/clickhouse-replication.md).
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <database_replicated_allow_only_replicated_engine>1</database_replicated_allow_only_replicated_engine>
+        </default>
+    </profiles>
+</clickhouse>
