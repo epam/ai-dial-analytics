@@ -2,7 +2,7 @@
 
 - [x] 1.1 Give the Testcontainers ClickHouse (`ClickHouseContainerSupport`) an embedded Keeper, `macros` and a `Replicated` session database, so the whole suite runs on replicated storage
 - [x] 1.2 Add a multi-replica test support class with three ClickHouse containers and one Keeper. It must be able to stop and start a replica, stop a replica's fetches, and route ADAS's primary at a chosen replica
-- [x] 1.3 Change `local_env/docker-compose.yml` to a single replica with embedded Keeper and an init script that creates the `Replicated` database. Add a three-replica profile (`local_env/docker-compose.replicas.yml`)
+- [x] 1.3 Change `local_env/docker-compose.yml` to a single replica with embedded Keeper and an init script that creates the `Replicated` database. `local_env` stays a single server; the multi-replica setup lives in the tests only
 
 ## 2. Replicated engines and insert deduplication
 

@@ -36,6 +36,7 @@ twin; capability `catalog-export-import`) promote user tables and pipelines (nev
 ./gradlew bootRun                           # run locally on http://localhost:5000
 ./gradlew checkstyleMain checkstyleTest     # code style (Google Java Style, 180-char lines)
 ./gradlew test                              # run the test suite
+./gradlew multiReplicaTest                  # opt-in: replication tests on a three-replica cluster
 ```
 
 Smoke test a running instance:

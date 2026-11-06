@@ -24,7 +24,6 @@
 # init script creates it only on an empty volume. A volume created before this layout holds an
 # Atomic `default` database, which ADAS refuses at startup; wipe it with `down -v`, or follow the
 # manual engine-change procedure in docs/clickhouse-replication.md to keep its data.
-# A three-replica profile, with ADAS running beside it, is in docker-compose.replicas.yml.
 #
 # Images are pinned to match the versions the integration tests run (ClickHouse 26.8, PostgreSQL 16;
 # see ClickHouseContainerSupport / PostgresContainerSupport). ClickHouse 26.8 is the newest verified

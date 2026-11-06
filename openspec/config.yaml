@@ -41,7 +41,7 @@ context: |
   startup). `./gradlew clean build` — compile + checkstyle + tests — is the completion gate.
 
   Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED --sun-misc-unsafe-memory-access=allow
-  --enable-native-access=ALL-UNNAMED`. `build.gradle` sets these on `test` and `bootRun` only; IDE
+  --enable-native-access=ALL-UNNAMED`. `build.gradle` sets these on `test`, `multiReplicaTest` and `bootRun` only; IDE
   run configurations and `java -jar` must set them too, or Arrow allocation fails at runtime as a
   bare "internal error".
 
@@ -328,6 +328,9 @@ operations:
         the spec or `design.md`.
       - A new ClickHouse `CREATE TABLE` migration declares `Replicated*MergeTree` with no arguments plus
         `replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0`.
+      - The default suite runs on one ClickHouse server (embedded Keeper, `Replicated` database). A change to
+        replication, routing, the storage phase or the ClickHouse migrations also runs `./gradlew multiReplicaTest`
+        (three replicas; `CLICKHOUSE_TEST_VERSION` selects the server version), which `clean build` does not.
   archive:
     guidance:
       - Confirm the merged spec matches the shipped behavior before archiving; the spec, not the
