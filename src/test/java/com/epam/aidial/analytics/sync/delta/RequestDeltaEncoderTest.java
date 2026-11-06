@@ -9,11 +9,14 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -44,6 +47,74 @@ class RequestDeltaEncoderTest {
         assertThat(b.get("request_body")).isEqualTo("{\"messages\":[" + canonicalMsg("assistant", "a1") + "," + canonicalMsg("user", "u2") + "],\"model\":\"m\"}");
         assertThat(b.get("request_ancestor_hashes")).isEqualTo(List.of(a.get("request_hash")));
         assertRebuilds(b);
+    }
+
+    /**
+     * A row its flush did not store, because ClickHouse refused its blob's rows, teaches the cache nothing: a later request
+     * must not take a path that is in no table as its parent.
+     */
+    @Test
+    void rowNotStoredIsNotOfferedAsParent() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        RequestDeltaEncoder.Encoding encoding = encoder.encode(new ArrayList<>(List.of(a)));
+        Set<Map<String, Object>> notStored = Collections.newSetFromMap(new IdentityHashMap<>());
+        notStored.add(a);
+        encoding.written(notStored);
+        flush(b);
+
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(outcomes()).doesNotContainKey("cache");
+    }
+
+    /**
+     * A batch split by blob no longer lands together: a request linked to a row of another blob is re-rooted before the
+     * split, so it rebuilds on its own when that blob is refused; a request linked within its own blob keeps the link.
+     */
+    @Test
+    void isolatingReRootsOnlyTheRequestsLinkedAcrossParts() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("system", "s") + "," + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000",
+                chat("[" + msg("system", "s") + "," + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        Map<String, Object> c = row("e3", "10:02:00.000", chat("[" + msg("system", "s") + "," + msg("user", "u1") + ","
+                + msg("assistant", "a1") + "," + msg("user", "u2") + "," + msg("assistant", "a2") + "," + msg("user", "u3") + "]"));
+        Map<Map<String, Object>, String> partOf = new IdentityHashMap<>();
+        partOf.put(a, "blob-1");
+        partOf.put(b, "blob-2");
+        partOf.put(c, "blob-2");
+
+        RequestDeltaEncoder.Encoding encoding = encoder.encode(new ArrayList<>(List.of(a, b, c)));
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        int rerooted = encoding.isolate(partOf::get);
+        // Blob 1 is refused; only blob 2's rows reach the table.
+        table.insert(List.of(b, c));
+        Set<Map<String, Object>> notStored = Collections.newSetFromMap(new IdentityHashMap<>());
+        notStored.add(a);
+        encoding.written(notStored);
+
+        assertThat(rerooted).isEqualTo(1);
+        assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(b.get("request_ancestor_hashes")).isEqualTo(List.of());
+        assertThat(messages(b)).hasSize(4);
+        assertThat(c.get("request_parent_hash")).isEqualTo(b.get("request_hash"));
+        assertThat(c.get("request_ancestor_hashes")).isEqualTo(List.of(b.get("request_hash")));
+        assertRebuilds(b);
+        assertRebuilds(c);
+        assertThat(outcomes()).containsEntry("rerooted", 1.0);
+    }
+
+    @Test
+    void isolatingWithinOnePartChangesNothing() {
+        Map<String, Object> a = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> b = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        RequestDeltaEncoder.Encoding encoding = encoder.encode(new ArrayList<>(List.of(a, b)));
+        Object body = b.get("request_body");
+
+        assertThat(encoding.isolate(row -> "blob-1")).isZero();
+        assertThat(b.get("request_parent_hash")).isEqualTo(a.get("request_hash"));
+        assertThat(b.get("request_body")).isSameAs(body);
     }
 
     @Test

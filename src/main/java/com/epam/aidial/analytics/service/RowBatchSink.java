@@ -1,10 +1,16 @@
 package com.epam.aidial.analytics.service;
 
+import com.epam.aidial.analytics.blob.BlobListing;
+import com.epam.aidial.analytics.clickhouse.ClickHouseDataRejectedException;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A run-scoped row buffer that batches inserts <em>across</em> the blobs of a single ingestion run
@@ -34,6 +40,18 @@ import java.util.Map;
  * <p>A sink may carry a {@link FlushStage}, which rewrites each batch right before the insert and learns once it
  * succeeded. A failure in the stage fails the flush exactly as a failed insert does.
  *
+ * <p><b>A batch refused for its data is split by blob.</b> Each buffered row remembers the blob it came from. When
+ * ClickHouse refuses the batch with a data-class error ({@link ClickHouseDataRejectedException}), the flush halves the
+ * set of blobs and inserts each half, recursively: a half that is accepted is stored, and a single blob whose rows are
+ * still refused is <em>refused</em> — its rows are not stored, and {@link #flush()} returns it so the caller can keep it
+ * out of the ingest ledger and record it in the failure ledger. The sub-inserts send the rows as the stage rewrote them,
+ * never preparing them again. Before the first of them the stage is told how the rows are grouped by blob
+ * ({@link FlushStage.Written#isolate}), so it can undo any rewrite that tied a row to another blob's row, and it learns
+ * which rows were not stored. A sub-insert failing for any other
+ * reason fails the flush as a whole. Isolating {@code k} refused blobs among {@code b} costs at most about
+ * {@code 2k·log2(b)} sub-inserts; refused ones create no parts. See {@code openspec/specs/data-sync/spec.md}, "A batch
+ * ClickHouse refuses for its data is split by blob".
+ *
  * <p>Not thread-safe: a sink belongs to one run, driven by the single-threaded scheduler.
  */
 class RowBatchSink {
@@ -44,6 +62,8 @@ class RowBatchSink {
     private final long maxBatchBytes;
     private final FlushStage stage;
     private final List<Map<String, Object>> buffer = new ArrayList<>();
+    /** The blob each buffered row came from, by index; {@code null} for a row added outside a blob's read. */
+    private final List<BlobListing> origins = new ArrayList<>();
     private long bufferedBytes;
     private long totalInserted;
     private boolean failed;
@@ -73,33 +93,128 @@ class RowBatchSink {
      * and on {@code true} decides which sinks to flush and in what sequence.
      */
     boolean offer(Map<String, Object> row) {
+        return offer(row, null);
+    }
+
+    /** As {@link #offer(Map)}, remembering the blob the row came from, so a refused batch can be split by blob. */
+    boolean offer(Map<String, Object> row, BlobListing origin) {
         ensureUsable();
         buffer.add(row);
+        origins.add(origin);
         bufferedBytes += estimateBytes(row);
         return buffer.size() >= batchSize || bufferedBytes >= maxBatchBytes;
     }
 
-    /** Writes any buffered rows. Safe to call when empty. Throws {@link FlushException} on write error. */
-    void flush() {
+    /**
+     * Writes any buffered rows. Safe to call when empty. Throws {@link FlushException} on write error, except for a
+     * data-class refusal, which is split by blob (see the class note).
+     *
+     * @return the blobs whose rows ClickHouse still refused on their own, in buffer order; empty when all were stored
+     */
+    List<RefusedBlob> flush() {
         ensureUsable();
         if (buffer.isEmpty()) {
-            return;
+            return List.of();
         }
-        Runnable written;
+        FlushStage.Written written;
+        List<RefusedBlob> refused = List.of();
+        Set<Map<String, Object>> notStored = Collections.newSetFromMap(new IdentityHashMap<>());
         try {
             written = stage.prepare(buffer);
-            writer.insert(table, buffer);
-            totalInserted += buffer.size();
+            try {
+                writer.insert(table, buffer);
+            } catch (ClickHouseDataRejectedException rejected) {
+                refused = split(rejected, written, notStored);
+            }
+            totalInserted += buffer.size() - notStored.size();
         } catch (Exception ex) {
             // A flush failure is terminal for this single-use sink: mark it unusable and drop the failed
             // batch (in finally) so a caller that catches FlushException cannot retry or double-count it.
             failed = true;
-            throw new FlushException(ex);
+            throw ex instanceof FlushException flush ? flush : new FlushException(ex);
         } finally {
             buffer.clear();
+            origins.clear();
             bufferedBytes = 0;
         }
-        written.run();
+        written.written(notStored);
+        return refused;
+    }
+
+    /**
+     * Drops the buffered rows of {@code blobs}, unwritten: the rows of a blob refused by another table's flush, which
+     * must not be written in this run either.
+     */
+    void discard(Set<BlobListing> blobs) {
+        ensureUsable();
+        if (blobs.isEmpty()) {
+            return;
+        }
+        for (int i = buffer.size() - 1; i >= 0; i--) {
+            if (origins.get(i) != null && blobs.contains(origins.get(i))) {
+                bufferedBytes -= estimateBytes(buffer.get(i));
+                buffer.remove(i);
+                origins.remove(i);
+            }
+        }
+    }
+
+    /**
+     * Splits the refused buffer by blob, halving recursively (see the class note).
+     *
+     * @param notStored receives the rows not stored
+     * @return the blobs refused on their own
+     */
+    private List<RefusedBlob> split(ClickHouseDataRejectedException rejected, FlushStage.Written written,
+            Set<Map<String, Object>> notStored) {
+        Map<BlobListing, List<Map<String, Object>>> byBlob = new LinkedHashMap<>();
+        Map<Map<String, Object>, BlobListing> originOf = new IdentityHashMap<>();
+        for (int i = 0; i < buffer.size(); i++) {
+            BlobListing origin = origins.get(i);
+            if (origin == null) {
+                // A row no blob owns cannot be refused as a blob, so the batch cannot be split.
+                throw new FlushException("ClickHouse refused a batch whose rows do not all name their blob", rejected);
+            }
+            byBlob.computeIfAbsent(origin, ignored -> new ArrayList<>()).add(buffer.get(i));
+            originOf.put(buffer.get(i), origin);
+        }
+        List<BlobListing> blobs = new ArrayList<>(byBlob.keySet());
+        // Each blob's rows may be inserted apart from the others' from here on, so none may depend on another blob's.
+        written.isolate(originOf::get);
+        if (blobs.size() == 1) {
+            // A batch of one blob is already split as far as it goes.
+            notStored.addAll(byBlob.get(blobs.getFirst()));
+            return List.of(refused(blobs.getFirst(), rejected));
+        }
+        List<RefusedBlob> refused = new ArrayList<>();
+        int half = blobs.size() / 2;
+        split(blobs.subList(0, half), byBlob, refused, notStored);
+        split(blobs.subList(half, blobs.size()), byBlob, refused, notStored);
+        return refused;
+    }
+
+    private void split(List<BlobListing> blobs, Map<BlobListing, List<Map<String, Object>>> byBlob, List<RefusedBlob> refused,
+            Set<Map<String, Object>> notStored) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (BlobListing blob : blobs) {
+            rows.addAll(byBlob.get(blob));
+        }
+        try {
+            writer.insert(table, rows);
+        } catch (ClickHouseDataRejectedException rejected) {
+            if (blobs.size() == 1) {
+                notStored.addAll(rows);
+                refused.add(refused(blobs.getFirst(), rejected));
+                return;
+            }
+            int half = blobs.size() / 2;
+            split(blobs.subList(0, half), byBlob, refused, notStored);
+            split(blobs.subList(half, blobs.size()), byBlob, refused, notStored);
+        }
+    }
+
+    private RefusedBlob refused(BlobListing blob, ClickHouseDataRejectedException rejected) {
+        return new RefusedBlob(blob, table, rejected.code(), rejected.codeName());
     }
 
     /**

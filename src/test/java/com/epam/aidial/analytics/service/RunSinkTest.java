@@ -250,7 +250,30 @@ class RunSinkTest {
         sink.flush();
 
         assertThat(names(reported)).containsExactly("good");
-        assertThat(writer.rowsFor(SOURCE)).hasSize(2);
+        // The abandoned blob's buffered row is discarded, not written with the next batch.
+        assertThat(writer.rowsFor(SOURCE)).containsExactly(row(2));
+    }
+
+    @Test
+    void abandonedBlobLosesItsBufferedRowsInEveryTable() {
+        final List<List<BlobListing>> reported = new ArrayList<>();
+        final RecordingWriter writer = new OrderRecordingWriter();
+        final RunSink sink = new RunSink(writer, List.of(SOURCE, ENRICHMENT), Map.of(ENRICHMENT, SOURCE), 100, Long.MAX_VALUE,
+                reported::add);
+        sink.startBlob(blob("good"));
+        sink.add(SOURCE, row(1));
+        sink.add(ENRICHMENT, row(1));
+        sink.finishBlob();
+        sink.startBlob(blob("broken"));
+        sink.add(SOURCE, row(2));
+        sink.add(ENRICHMENT, row(2));
+
+        sink.abandonBlob();
+        sink.flush();
+
+        assertThat(names(reported)).containsExactly("good");
+        assertThat(writer.rowsFor(SOURCE)).containsExactly(row(1));
+        assertThat(writer.rowsFor(ENRICHMENT)).containsExactly(row(1));
     }
 
     /** The callback's failure is a run-level fault, never one of the blob being read when it happened. */

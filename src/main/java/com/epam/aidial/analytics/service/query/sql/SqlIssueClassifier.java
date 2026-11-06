@@ -68,12 +68,8 @@ final class SqlIssueClassifier {
                     "list the queryable entities with GET /v1/queries/entities"),
             new Rule("unknown_column", Pattern.compile("Column '([^']+)' not found in "),
                     "list the entity's fields with GET /v1/queries/entities/schema/{entity}"),
-            // A column the SELECT list names and nothing resolves reads as a self-reference, because the
-            // unnamed-item alias injector has already given the item that same name. The message is
-            // Calcite's and describes the injected alias, not the caller's mistake — so it is classified
-            // as what it actually is.
-            new Rule("unknown_column", Pattern.compile("The definition of column '([^']+)' depends on itself"),
-                    "list the entity's fields with GET /v1/queries/entities/schema/{entity}"),
+            // A bare select item nothing resolves arrives already reworded into the rule above: SqlQueryFrontEnd
+            // reports Calcite's self-reference against the item's own derived alias as the unknown column it is.
             new Rule("ambiguous_column", Pattern.compile("Column '([^']+)' is ambiguous"),
                     "qualify the column with its table alias"),
             new Rule("unknown_field", Pattern.compile("^unknown field '([^']+)'"),

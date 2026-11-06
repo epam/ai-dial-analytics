@@ -125,8 +125,8 @@ and renders the widget.
 
 ### Requirement: Settings
 
-A dashboard and each of its widgets MAY carry `settings`: any JSON object the client keeps with it, such as
-display preferences. The system SHALL store a `settings` object as sent and return it unchanged on every
+The system SHALL accept `settings` on a dashboard and on each of its widgets: any JSON object the client keeps
+with it, such as display preferences. It SHALL store a `settings` object as sent and return it unchanged on every
 full read, nested objects, arrays and `null` members within it included, and SHALL NOT interpret it,
 validate its members, or derive any behaviour from it. A `settings` that is absent or `null` SHALL be stored
 as absent and omitted from responses; an empty object SHALL be stored and returned as `{}`.
@@ -590,8 +590,8 @@ subject to the reader's own table grants, sensitive-column clearance and row pol
 
 ### Requirement: Per-caller permissions
 
-Every dashboard the service returns — the full read, the create and replace responses, and each list item —
-SHALL carry `permissions: { write, publish }`, computed for the calling caller from the same rule that
+Every dashboard the service returns SHALL carry `permissions: { write, publish }`: the full read, the create and
+replace responses, and each list item. The flags are computed for the calling caller from the same rule that
 enforcement applies, so a client never has to know which privilege a visibility maps to:
 
 - `write` — whether the caller may replace and delete this dashboard at its current visibility;

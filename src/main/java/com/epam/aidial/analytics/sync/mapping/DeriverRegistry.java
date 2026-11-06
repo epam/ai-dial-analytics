@@ -26,11 +26,14 @@ import java.util.UUID;
  *   <li>{@code classify-event-kind} — regex-classify a request URI into {@code llm_call}/{@code embedding}/{@code mcp}/{@code route}.</li>
  *   <li>{@code json-extract-string} / {@code json-extract-uint} — re-parse a source value that is itself a JSON
  *       string (or read it directly when already structured) and read {@code args.path} as the scalar's verbatim
- *       text (a boolean reads as {@code true}/{@code false}) / as an unsigned int.</li>
- *   <li>{@code json-extract-rate} — read {@code args.path} as a normalized signed rating (number as-is, {@code true}→1, {@code false}→0, else null).</li>
+ *       text (a boolean reads as {@code true}/{@code false}) / as a non-negative integer, where a present value that is
+ *       not one is a counted {@link Coercion#FAILED}.</li>
+ *   <li>{@code json-extract-rate} — read {@code args.path} as a normalized signed rating (integer as-is, {@code true}→1, {@code false}→0,
+ *       absent or blank null, anything else a counted {@link Coercion#FAILED}).</li>
  *   <li>{@code json-array-length} — length of the array at {@code args.path} within a (possibly string-encoded) JSON source.</li>
  *   <li>{@code byte-length} — UTF-8 byte length of a source string.</li>
- *   <li>{@code success-from-status} — whether an HTTP status is in {@code 200..299}.</li>
+ *   <li>{@code success-from-status} — whether an HTTP status is in {@code 200..299}; {@code false} when absent, a counted
+ *       {@link Coercion#FAILED} when present but not an integer.</li>
  * </ul>
  */
 @Component
@@ -147,17 +150,26 @@ public class DeriverRegistry {
         return node == null ? null : node.asString("");
     }
 
-    /** Reads {@code args.path} as an unsigned integer (as a long); null when absent (falls back to 0). */
+    /**
+     * Reads {@code args.path} as a non-negative integer (as a long); null when absent, so the column's fallback applies.
+     * A present value that is not one — a negative number included, which an unsigned column cannot hold — is
+     * {@link Coercion#FAILED}, counted against the column, rather than an invented or wrapped value.
+     */
     private Object jsonExtractUint(List<JsonNode> sources, Map<String, Object> args) {
         JsonNode node = extract(sources, path(args));
-        return node == null ? null : node.asLong(0);
+        if (node == null) {
+            return null;
+        }
+        Object value = Coercion.toLong(node);
+        return value instanceof Long number && number < 0 ? Coercion.FAILED : value;
     }
 
     /**
-     * Reads {@code args.path} as a normalized signed rating: a numeric value is returned as its integer
-     * value; boolean {@code true} maps to 1 and {@code false} to 0; an absent, blank, or non-numeric
-     * value yields null (so the column's nullability fallback applies). Used for {@code rate_analytics.rate},
-     * whose source `rate` field is polymorphic across boolean and integer forms in real DIAL logs.
+     * Reads {@code args.path} as a normalized signed rating: an integral value is returned as its integer
+     * value; boolean {@code true} maps to 1 and {@code false} to 0; an absent or blank value yields null (so the
+     * column's nullability fallback applies); any other value — a fractional number, unparseable text, a container —
+     * is {@link Coercion#FAILED}, which takes the same fallback and is counted. Used for {@code rate_analytics.rate},
+     * whose source `rate` field is polymorphic across boolean and integer forms in what producers send.
      */
     private Object jsonExtractRate(List<JsonNode> sources, Map<String, Object> args) {
         JsonNode node = extract(sources, path(args));
@@ -165,20 +177,9 @@ public class DeriverRegistry {
             return null;
         }
         if (node.isBoolean()) {
-            return node.asBoolean(false) ? 1L : 0L;
+            return node.booleanValue() ? 1L : 0L;
         }
-        if (node.isNumber()) {
-            return node.asLong(0);
-        }
-        String text = node.asString("").trim();
-        if (text.isEmpty()) {
-            return null;
-        }
-        try {
-            return Long.valueOf(text);
-        } catch (NumberFormatException ex) {
-            return null;
-        }
+        return Coercion.toLong(node);
     }
 
     /** Length of the array at {@code args.path} within the first parseable source; 0 otherwise. */
@@ -199,8 +200,11 @@ public class DeriverRegistry {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return false;
         }
-        long status = node.asLong(0);
-        return status >= 200 && status <= 299;
+        Object status = Coercion.toLong(node);
+        if (status instanceof Long code) {
+            return code >= 200 && code <= 299;
+        }
+        return status == null ? Boolean.FALSE : status;
     }
 
     // --- helpers --------------------------------------------------------------------------------

@@ -1,0 +1,64 @@
+package com.epam.aidial.analytics.service;
+
+import com.clickhouse.client.api.ServerException;
+import com.epam.aidial.analytics.exception.CauseChain;
+
+import java.io.EOFException;
+import java.util.zip.ZipException;
+
+/**
+ * Classifies a blob-level ingest failure into a {@link IngestFailureReason}. Deterministic only where repeating the
+ * attempt cannot succeed: an invalid gzip stream ({@link ZipException}: a bad header, CRC or deflate block) and a
+ * mapping fault ({@link RecordMappingException}). An early end of the gzip stream ({@link EOFException}) is not a
+ * {@code ZipException} and stays transient, because a read cut short looks the same as a truncated blob.
+ */
+final class IngestFailureClassifier {
+
+    private IngestFailureClassifier() {
+    }
+
+    /** The reason a blob-level failure is recorded under. */
+    static IngestFailureReason classifyBlob(Throwable error) {
+        if (CauseChain.anyMatch(error, cause -> cause instanceof RecordMappingException)) {
+            return IngestFailureReason.MAPPING_ERROR;
+        }
+        if (CauseChain.anyMatch(error, cause -> cause instanceof ZipException)) {
+            return IngestFailureReason.CORRUPT_GZIP;
+        }
+        return IngestFailureReason.READ_ERROR;
+    }
+
+    /** The package of the ClickHouse client, whose exceptions carry the server's message. */
+    private static final String CLICKHOUSE_CLIENT_PACKAGE = "com.clickhouse.";
+
+    /**
+     * A short description of the failure for the ledger: each exception in the chain by type, with its message up to the
+     * first exception whose message may quote record content — a mapping fault, whose causes may quote the record being
+     * mapped, and an exception of the ClickHouse client, which carries the server's message, and an insert error's
+     * server message often quotes the offending input. From there on only the types are kept, with the server error
+     * code of a {@link ServerException}.
+     */
+    static String describe(Throwable error) {
+        StringBuilder text = new StringBuilder();
+        boolean quoteMessages = true;
+        int depth = 0;
+        for (Throwable cause = error; cause != null && depth < 8; cause = cause.getCause(), depth++) {
+            if (!text.isEmpty()) {
+                text.append(" <- ");
+            }
+            text.append(cause.getClass().getSimpleName());
+            if (cause.getClass().getName().startsWith(CLICKHOUSE_CLIENT_PACKAGE)) {
+                quoteMessages = false;
+            }
+            if (cause instanceof ServerException server) {
+                text.append(": code ").append(server.getCode());
+            } else if (quoteMessages && cause.getMessage() != null) {
+                text.append(": ").append(cause.getMessage());
+            }
+            if (cause instanceof RecordMappingException) {
+                quoteMessages = false;
+            }
+        }
+        return text.toString();
+    }
+}

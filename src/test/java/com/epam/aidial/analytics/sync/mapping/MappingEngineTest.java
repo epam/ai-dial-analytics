@@ -770,7 +770,7 @@ class MappingEngineTest {
             assertThat(row.get("request_body")).isEqualTo(REQUEST_BODY);
             assertThat(row.get("response_body")).isEqualTo(RESPONSE_BODY);
             assertThat(row.get("assembled_response")).isEqualTo(RESPONSE_BODY);
-            assertThat(registry.getMeters()).isEmpty();
+            assertThat(registry.getMeters()).noneMatch(meter -> meter.getId().getName().startsWith("ingest.inline."));
         }
 
         @Test

@@ -78,14 +78,20 @@ but "not reported" and "reported as 0" become indistinguishable.
 The authoritative column type is the table DDL; `kind` only selects how the source value is read.
 From `ColumnKind.java` — six tokens, and an unrecognised one is a fatal config error:
 
-| Kind            | Reads                                                                                                       |
-|-----------------|-------------------------------------------------------------------------------------------------------------|
-| `string`        | Scalar text.                                                                                                |
-| `long`          | Integer.                                                                                                    |
-| `double`        | Decimal, with precision preserved exactly — no binary float round-trip, so it suits `Decimal` cost columns. |
-| `bool`          | Boolean.                                                                                                    |
-| `array<string>` | JSON array coerced to a list of strings.                                                                    |
-| `object`        | A JSON object carried verbatim into a ClickHouse `JSON` column (the payload table's two documents).         |
+| Kind            | Reads                                                                                                                  |
+|-----------------|------------------------------------------------------------------------------------------------------------------------|
+| `string`        | Scalar text; an object or array as its JSON text.                                                                      |
+| `long`          | An integral number within the 64-bit range, or text that parses as one (`"42"`, `"1e3"`). `12.7` is refused, not truncated. |
+| `double`        | A number or decimal text, with precision preserved exactly — no binary float round-trip, so it suits `Decimal` cost columns. |
+| `bool`          | `true`/`false`, `0`/`1`, or that text in any case.                                                                     |
+| `array<string>` | A JSON array as a list of strings; an object or array element as its JSON text.                                        |
+| `object`        | A JSON object carried verbatim into a ClickHouse `JSON` column (the payload table's two documents).                    |
+
+Blank text is absent for every kind but `string` and `object`. A value a kind cannot read — `"abc"` or `12.7` for
+`long`, `"yes"` for `bool`, a scalar for `array<string>` — takes the column's fallback like an absent one and is
+counted on `sync.values.coercion.failures{table,column,kind}`, with at most one WARN per column per minute. A
+nullable column therefore stores `NULL`, never an invented `0` or `false`. The same holds for the numeric derivers
+(`json-extract-uint`, `json-extract-rate`, the status read of `success-from-status`).
 
 ## Transform registry
 
@@ -111,8 +117,8 @@ unknown deriver name is a fatal config error at load. From `DeriverRegistry.java
 | `hash-uuid`           | all `sources`, concatenated  | Deterministic UUIDv5, stable across re-ingests and never null (e.g. `event_id`).                                                                                 |
 | `classify-event-kind` | first source (a request URI) | `llm_call` / `embedding` / `mcp` / `route`, or `""` when none match.                                                                                             |
 | `json-extract-string` | `sources` + `args.path`      | The member's verbatim scalar text. Reads **any** scalar, so a boolean yields `true`/`false` and a number its literal digits; an object or array yields no value. |
-| `json-extract-uint`   | `sources` + `args.path`      | The member as an unsigned integer.                                                                                                                               |
-| `json-extract-rate`   | `sources` + `args.path`      | Normalized signed rating: number as-is, `true`→1, `false`→0, else null.                                                                                          |
+| `json-extract-uint`   | `sources` + `args.path`      | The member as a non-negative integer, read like the `long` kind: absent is null, a negative or unreadable value is a counted coercion failure.                  |
+| `json-extract-rate`   | `sources` + `args.path`      | Normalized signed rating: integer as-is, `true`→1, `false`→0, absent or blank null, anything else a counted coercion failure.                                    |
 | `json-array-length`   | `sources` + `args.path`      | Length of the array at that path.                                                                                                                                |
 | `byte-length`         | first source                 | UTF-8 byte length of the string.                                                                                                                                 |
 | `success-from-status` | first source                 | Whether an HTTP status is in `200..299`.                                                                                                                         |

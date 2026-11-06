@@ -61,13 +61,21 @@ class DeriverRegistryTest {
                 .isEqualTo(1L);
         assertThat(derive("json-extract-rate", List.of(str("{\"rate\":false}")), Map.of("path", "rate")))
                 .isEqualTo(0L);
-        // Absent, blank, or non-numeric -> null (so the column's nullability fallback applies).
+        // Absent or blank -> null (so the column's nullability fallback applies).
         assertThat(derive("json-extract-rate", List.of(str("{\"other\":1}")), Map.of("path", "rate")))
                 .isNull();
         assertThat(derive("json-extract-rate", List.of(missing()), Map.of("path", "rate")))
                 .isNull();
-        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":\"nope\"}")), Map.of("path", "rate")))
+        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":\" \"}")), Map.of("path", "rate")))
                 .isNull();
+        // Present but unreadable -> a coercion failure, which takes the same fallback and is counted.
+        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":\"nope\"}")), Map.of("path", "rate")))
+                .isSameAs(Coercion.FAILED);
+        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":0.5}")), Map.of("path", "rate")))
+                .isSameAs(Coercion.FAILED);
+        // Numeric text is read as the number.
+        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":\"-1\"}")), Map.of("path", "rate")))
+                .isEqualTo(-1L);
     }
 
     @Test
@@ -179,6 +187,21 @@ class DeriverRegistryTest {
                 Map.of("path", "usage.cache_creation_input_tokens"))).isEqualTo(7L);
         assertThat(derive("json-extract-uint", List.of(str("{\"usage\":{}}")), Map.of("path", "usage.x")))
                 .isNull();
+    }
+
+    /** It fills unsigned columns, so a negative number is refused rather than wrapped by the column type. */
+    @Test
+    void jsonExtractUintRefusesNegativeAndUnreadableValues() {
+        assertThat(derive("json-extract-uint", List.of(str("{\"n\":-1}")), Map.of("path", "n"))).isSameAs(Coercion.FAILED);
+        assertThat(derive("json-extract-uint", List.of(str("{\"n\":\"n/a\"}")), Map.of("path", "n"))).isSameAs(Coercion.FAILED);
+        assertThat(derive("json-extract-uint", List.of(str("{\"n\":1e400}")), Map.of("path", "n"))).isSameAs(Coercion.FAILED);
+        assertThat(derive("json-extract-uint", List.of(str("{\"n\":\"12\"}")), Map.of("path", "n"))).isEqualTo(12L);
+    }
+
+    /** A caller-controlled rate that no number fits fails the field instead of throwing out of the record. */
+    @Test
+    void jsonExtractRateRefusesNonFiniteRatesWithoutThrowing() {
+        assertThat(derive("json-extract-rate", List.of(str("{\"rate\":1e400}")), Map.of("path", "rate"))).isSameAs(Coercion.FAILED);
     }
 
     @Test

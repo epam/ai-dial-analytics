@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Orchestrates the operator-triggered, asynchronous backfill of a bounded UTC date range. A trigger
  * validates the range, registers a {@link BackfillRun}, and submits a worker that ingests each day in
- * the range via {@link DataSyncService#runForDate(LocalDate, IngestLedger.Mode, DataSyncService.IngestProgressListener)}
+ * the range via {@link DataSyncService#runForDate(LocalDate, IngestLedger.Mode, IngestSource, DataSyncService.IngestProgressListener)}
  * — the same parse → map → batch-insert pipeline used by the scheduled path. By default it skips the blobs
  * the {@link IngestLedger} records, so a backfill over ingested days, or a re-trigger of a range a stopped run
  * left part-done, writes only what is missing; {@code includeIngested} re-ingests the whole range, the
@@ -168,10 +168,11 @@ public class DataBackfillService {
             for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) {
                 dayInProgress = date;
                 run.startDay(date);
-                DataSyncService.RunSummary summary = dataSyncService.runForDate(date, mode, run::recordBlobProgress);
-                run.completeDay(date, summary, summary.success());
+                DataSyncService.RunSummary summary = dataSyncService.runForDate(date, mode, IngestSource.backfill(run.runId()), progressOf(run));
+                // A day with a failed blob is incomplete, so it is named as failed; its blobs are in the failure ledger.
+                run.completeDay(date, summary, summary.complete());
                 dayInProgress = null;
-                if (summary.success()) {
+                if (summary.complete()) {
                     meterRegistry.counter("backfill.days", "outcome", "success").increment();
                     log.info("Backfill run {} ingested {}: {}", run.runId(), date, summary);
                 } else {
@@ -185,6 +186,7 @@ public class DataBackfillService {
                 meterRegistry.counter("backfill.rows.skipped").increment(summary.rowsSkipped());
                 meterRegistry.counter("backfill.rows.dropped").increment(summary.rowsDropped());
                 meterRegistry.counter("backfill.blobs.skipped", "reason", "ledger").increment(summary.blobsSkipped());
+                meterRegistry.counter("backfill.blobs.failed").increment(summary.blobsFailed());
                 if (summary.storageFull()) {
                     // Per-day isolation stops here, deliberately: ClickHouse is out of disk, so every remaining
                     // day would fail the same way while adding load and partial parts to a store that cannot
@@ -235,6 +237,21 @@ public class DataBackfillService {
         } finally {
             running.set(false);
         }
+    }
+
+    /** Feeds a day's per-blob progress, and its failed blobs, into the run's live status. */
+    private static DataSyncService.IngestProgressListener progressOf(BackfillRun run) {
+        return new DataSyncService.IngestProgressListener() {
+            @Override
+            public void onBlobIngested(long rowsInserted, long rowsSkipped, long rowsDropped) {
+                run.recordBlobProgress(rowsInserted, rowsSkipped, rowsDropped);
+            }
+
+            @Override
+            public void onBlobFailed() {
+                run.recordBlobFailure();
+            }
+        };
     }
 
     /** Drops the oldest runs beyond {@link #MAX_RETAINED_RUNS}; the newest (the active run) is never among them. */

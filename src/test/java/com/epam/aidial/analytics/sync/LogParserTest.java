@@ -50,6 +50,32 @@ class LogParserTest {
     }
 
     @Test
+    void reportsLineNumbersCountingBlankLinesAndCrlf() throws Exception {
+        LogParser capped = new LogParser(JsonMapper.builder().build(), 1024);
+        String oversized = "{\"apiType\":\"" + "a".repeat(5_000) + "\"}";
+        byte[] gzip = gzip("{\"n\":1}\r\n\r\nnot json\r\n" + oversized + "\n{\"n\":5}\n");
+
+        List<Long> recordLines = new ArrayList<>();
+        List<String> skips = new ArrayList<>();
+        long skipped = capped.parse(new ByteArrayInputStream(gzip), "test.log.gz", (line, node) -> recordLines.add(line),
+                new LogParser.SkipListener() {
+                    @Override
+                    public void malformed(long line) {
+                        skips.add("malformed@" + line);
+                    }
+
+                    @Override
+                    public void oversized(long line) {
+                        skips.add("oversized@" + line);
+                    }
+                });
+
+        assertThat(skipped).isEqualTo(2);
+        assertThat(recordLines).containsExactly(1L, 5L);
+        assertThat(skips).containsExactly("malformed@3", "oversized@4");
+    }
+
+    @Test
     void ignoresBlankLines() throws Exception {
         byte[] gzip = gzip("{\"apiType\":\"DialOpenAI\"}\n\n\n");
 
