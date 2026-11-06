@@ -63,3 +63,38 @@ Findings:
   neither statement orders. A page whose window ends at the present also differs by the rows ingested between the
   two runs.
 - 7.7: the session lookup renders byte-identical SQL before and after, so it costs what it costs today.
+
+### Sparse aligned enrichment (7.6)
+
+`usage_request_baggage` holds a row for a few percent of source events. A 25-row page projecting its `baggage`
+column, sorted by `request_time` descending:
+
+| Window | Before: peak memory, duration | After: peak memory, duration |
+| --- | --- | --- |
+| a week | ~10 MiB, tens of ms | under 1 MiB, tens of ms |
+| a month | ~100 MiB, ~0.1 s | under 1 MiB, tens of ms |
+| full history | ~100 MiB, a few hundred ms | under 1 MiB, under 0.1 s |
+
+A sparse enrichment's window join is already small, so there is less to save, but nothing regresses: the page block
+reads only source columns, and most page keys find no row in the late join. Results match on every window.
+
+### Replayed reads (7.9)
+
+Row-mode reads issued against the deployment over a month, rebuilt as `execute-sql` statements and rendered by the code
+before and after this change, then run as above. Of a few dozen distinct read shapes that join an aligned enrichment,
+these project an aligned enrichment's columns only in their `select`:
+
+| Read | Before: peak memory, duration | After: peak memory, duration |
+| --- | --- | --- |
+| Trace view: a few traces over a few days, one identity column, `LIMIT 600` | a few MiB, tens of ms | ~10 MiB, tens of ms |
+| Event detail: one trace, every identity, payload document, baggage and second-enrichment column, `LIMIT 300` | ~200 MiB, ~0.2 s | ~170 MiB, ~0.2 s |
+| Identity and payload documents over a month, `LIMIT 100`, unsorted | refused: memory budget | ~200 MiB, a few hundred ms |
+| Header page: `request_tags` and source columns over a few days, `LIMIT 25` | ~1 GiB, ~1 s | tens of MiB, tens of ms |
+| Client-identity columns over three hours, sorted by `_ingested_at`, `LIMIT 25` | ~10 MiB, tens of ms | a few MiB, tens of ms |
+| Identity lookup (`client_type = 'dialcli'`) over two days, `LIMIT 25` | tens of MiB, tens of ms | the same: not late-materialized |
+
+Results match on every read, up to ties on the sort key and rows ingested between the two runs.
+
+The trace view is the one read whose peak memory more than doubles: its filter (a trace id list plus a time range)
+already keys today's identity join down to the trace's few rows, so there is no window-sized build to save, and the
+page-keyed join costs a few MiB more. Its duration is unchanged.
