@@ -294,8 +294,9 @@ resource budget"), and SHALL report a refusal with the same status and `error` c
 translates SQL into the structured query and runs it through the same governed pipeline, so a ceiling
 that bound only the DSL surface would leave the identical statement unbounded when written as SQL. The
 same pipeline also applies the structured query's read shaping (late materialization of projection-only
-heavy enrichment columns, and the enrichment-conjunct and scalar-call pushdowns), so a SQL statement and
-its DSL equivalent cost the same.
+enrichment columns, as structured-query's "Projection-only enrichment columns are fetched for the returned
+page only" defines it, and the enrichment-conjunct and scalar-call pushdowns), so a SQL statement and its DSL
+equivalent cost the same.
 
 #### Scenario: A SQL query exceeding a ceiling is refused
 
@@ -321,6 +322,14 @@ its DSL equivalent cost the same.
 - **THEN** the body is read for the returned page's rows only, so the heavy column's cost does not grow with
   the unpruned scan; the scan of `dial_usage_log` that chooses the page still runs under the budget and is
   refused with `query_budget_exceeded` if it exceeds a ceiling
+
+#### Scenario: A projection-only header column is fetched for the page
+
+- **WHEN** a caller entitled to the column posts
+  `{ "sql": "SELECT request_time, \"dial_usage_log_payload.request_tags\", trace_id FROM dial_usage_log WHERE request_time >= TIMESTAMP '2026-01-01 00:00:00' ORDER BY request_time DESC LIMIT 25" }`,
+  which names a non-heavy column of the partition-aligned payload enrichment only in its projection
+- **THEN** `request_tags` is read for the 25 returned rows only, so the payload join's cost does not grow with
+  the window; the scan of `dial_usage_log` that chooses the page still runs under the budget
 
 #### Scenario: The same query inside a bound succeeds
 

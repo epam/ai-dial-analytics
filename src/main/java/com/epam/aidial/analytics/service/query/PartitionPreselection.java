@@ -54,6 +54,11 @@ public final class PartitionPreselection {
     private PartitionPreselection() {
     }
 
+    /** Whether a lookup on {@code join} yields a pre-selection: the join is partition-aligned at a known granularity. */
+    public static boolean applies(EnrichmentJoin join) {
+        return join != null && join.partitionAligned() && join.partitionGranularity() != null;
+    }
+
     /**
      * The restriction a lookup adds to the statement's {@code WHERE} — {@code partitionExpr(source.p) IN PS} — or empty
      * when {@code join} is not partition-aligned or its granularity is unknown.
@@ -64,7 +69,7 @@ public final class PartitionPreselection {
      *     conjunct of the statement on the source's partition column; empty for none
      */
     public static Optional<Condition> of(EnrichmentJoin join, Condition lookup, List<Condition> bounds) {
-        if (!join.partitionAligned() || join.partitionGranularity() == null || lookup == null) {
+        if (!applies(join) || lookup == null) {
             return Optional.empty();
         }
         final Field<Object> enrichmentPartition = partitionExpr(join.enrichmentPartition(), join.partitionGranularity());

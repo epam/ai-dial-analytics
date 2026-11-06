@@ -89,9 +89,9 @@ import java.util.Set;
  * through the {@code final = 1} setting instead.
  *
  * <p>On the single-entity read path ({@link #build(DSLContext, QueryEntityModel, StructuredQuery, int)} and
- * {@link #buildCount}) the statement is additionally <em>shaped</em> so a heavy enrichment column costs what the
- * statement returns or keeps rather than what its window holds — late materialization of projection-only heavy
- * columns, and pushdown of allow-listed enrichment conjuncts and heavy-column calls into the derived tables. The
+ * {@link #buildCount}) the statement is additionally <em>shaped</em> so an enrichment column costs what the
+ * statement returns or keeps rather than what its window holds — late materialization of projection-only enrichment
+ * columns (heavy ones, and those of a partition-aligned enrichment), and pushdown of allow-listed enrichment conjuncts and heavy-column calls into the derived tables. The
  * rules are {@link ReadShaping}'s; every one of them returns exactly the unshaped statement's result, which
  * {@link #withoutReadShaping()} renders for comparison.
  */
@@ -249,8 +249,9 @@ public class StructuredQueryBuilder {
      * therefore unaffected.
      *
      * <p>This overload (and the three-argument form that delegates to it) is the single-entity read path, so it is
-     * where the statement is <em>shaped</em> (see {@link ReadShaping}): a projection-only heavy enrichment column
-     * is fetched for the returned page only, an allow-listed enrichment-only conjunct also narrows its
+     * where the statement is <em>shaped</em> (see {@link ReadShaping}): projection-only heavy enrichment columns, and
+     * projection-only columns of a partition-aligned enrichment, are fetched for the returned page only, an
+     * allow-listed enrichment-only conjunct also narrows its
      * enrichment's derived table, and an allow-listed call over a heavy text column is computed inside it. The
      * other overloads serve composite blocks and the pipeline compiler and render unshaped.
      */
@@ -331,8 +332,9 @@ public class StructuredQueryBuilder {
                     pushdown.shaping(), false);
         }
 
-        // The page block: the same block without its heavy entries, cut at offset + limit rows, projecting the
-        // page's keys. Its light joins are shaped as the outer statement's are; the late ones are joined as today.
+        // The page block: the same block keeping only its sort-named entries, cut at offset + limit rows, projecting
+        // the page's keys. It joins only what its filter and sort read (a heavy late enrichment only for a light column
+        // they read, a light late enrichment never); those joins are shaped as the outer statement's are.
         final StructuredQuery pageQuery = new StructuredQuery(query.entity(), query.filter(), QueryMode.ROW, false,
                 late.pageEntries(), null, null, query.sort(), new OffsetPage(0, late.pageRows(), false), query.finalRead());
         final SelectQuery<Record> pageBlock = statement.render(dsl, model, pageQuery, late.pageRows(), LimitPolicy.NESTED,
@@ -347,7 +349,7 @@ public class StructuredQueryBuilder {
         }
         final Select<?> pageKeys = DSL.select(keyColumns).from(pageBlock.asTable(ReadShaping.PAGE_ALIAS));
 
-        // The outer statement: the block as written, kept to the page's rows, its heavy enrichments joined for the
+        // The outer statement: the block as written, kept to the page's rows, its late enrichments joined for the
         // page's keys. Both references to pageKeys stand in this one scope, so ClickHouse evaluates it once.
         final Map<String, EnrichmentJoins.Shaping> outer = new HashMap<>(pushdown.shaping());
         for (final String table : lateTables) {
@@ -357,9 +359,10 @@ public class StructuredQueryBuilder {
                 ? DSL.condition("({0}, {1}) IN ({2})", keyJoin.sourceKey(), keyJoin.sourcePartition(), pageKeys)
                         .or(keyJoin.sourceKey().isNull()).or(keyJoin.sourcePartition().isNull())
                 : DSL.condition("{0} IN ({1})", keyJoin.sourceKey(), pageKeys).or(keyJoin.sourceKey().isNull());
-        // The partition pre-selections restrict the page block only. The outer statement is already confined to the
-        // page's keys, which ClickHouse carries into every aligned join as well, so a copy here would only evaluate
-        // each pre-selection a second time — its own scope — and prune nothing more.
+        // The partition pre-selections restrict the page block only: a copy here would evaluate each one a second time,
+        // in its own scope. The outer statement is confined to the page's keys instead, which bound its late joins.
+        // Only a block with a heavy late enrichment reaches this shape with a pre-selection: ReadShaping.latePlan keeps a
+        // light-only one in today's statement.
         return statement.render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED,
                 new LeafRestriction(List.of(onPage), Map.of()), outer, false);
     }
@@ -428,7 +431,7 @@ public class StructuredQueryBuilder {
             where.computeIfAbsent(conjunct.table(), ignored -> new ArrayList<>()).add(condition);
             // A lookup on an aligned enrichment also names the partitions its rows live in (PartitionPreselection),
             // bounded by whatever the filter already bounds the source's partition column to.
-            if (ReadShaping.lookup(model, conjunct.node())) {
+            if (ReadShaping.preselectionLookup(model, conjunct.node())) {
                 final EnrichmentJoin owner = model.ownerOf(conjunct.field());
                 PartitionPreselection.of(owner, condition, ReadShaping.partitionBounds(filterTranslator, model, owner, filter))
                         .ifPresent(preselected::add);
