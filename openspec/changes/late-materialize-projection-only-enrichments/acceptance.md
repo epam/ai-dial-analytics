@@ -21,9 +21,45 @@ Findings:
   fallback task 1.4 describes (revisiting design D5) is not needed.
 - `IN (K)` in the page-keyed join's `ON` prunes the payload scan to the page's granules (payload rows read: a few
   granules, not the window), so even a whole-column read costs the page.
-- A window-bounded join over a pruned path is already cheap. The case this change exists for is the whole column
-  (a bare projection of `request_tags`, `json_extract_string_ci`), which today hashes every in-window document.
+- At this fixture's scale a window-bounded join over a pruned path is cheap, and the whole column (a bare projection
+  of `request_tags`, `json_extract_string_ci`) is what costs. At a running deployment's scale both cost the window
+  (see below): the hash build holds one key tuple per in-window row whatever it projects.
 
 ## Running deployment (tasks group 7)
 
-Not yet run.
+Measured on a running deployment holding millions of rows in `dial_usage_log`, its payload and `usage_client_identity`
+(all day-partitioned on `request_time`, a few months of history, still ingesting). Each shape is a 25-row page sorted
+by `request_time` descending, rendered twice from the same structured query: by the code before this change
+("before", today's statement) and by this change ("after"). Both ran read-only under the read path's own settings
+(`FINAL` on the payload, `do_not_merge_across_partitions_select_final = 1`) and its default budget (2 GB memory, 20 s),
+twice each with the order alternated. Figures are orders of magnitude from `system.query_log`.
+
+| Shape (task) | Window | Before: peak memory, duration | After: peak memory, duration |
+| --- | --- | --- | --- |
+| Whole `request_tags` (7.1, 7.3) | hours | ~100 MiB, ~0.2 s | under 1 MiB, ~10 ms |
+| Whole `request_tags` (7.1) | a week | ~1 GiB, seconds | under 1 MiB, tens of ms |
+| Whole `request_tags` (7.2) | a month | ~1 GiB, seconds | under 1 MiB, tens of ms |
+| Whole `request_tags` (7.2) | full history | refused: memory budget | ~10 MiB at most, under 0.1 s |
+| One `request_tags` path (7.8, 7.3) | hours | ~10 MiB, tens of ms | under 1 MiB, ~10 ms |
+| One `request_tags` path (7.8) | a week | ~100 MiB, ~0.1 s | under 1 MiB, tens of ms |
+| One `request_tags` path (7.8) | a month | hundreds of MiB, ~0.5 s | under 1 MiB, tens of ms |
+| One `request_tags` path (7.8) | full history | ~1 GiB, ~1 s | under 1 MiB, tens of ms |
+| Identity scalar `user_email` (7.3) | hours to a week | ~10–100 MiB, tens to ~100 ms | under 1 MiB, tens of ms |
+| Identity scalar `user_email` | a month to full history | hundreds of MiB to ~1 GiB, ~1 s | under 1 MiB, tens of ms |
+| Whole `request_tags`, filter a substring of an identity column (7.4) | a week | ~1 GiB, seconds | ~100 MiB, a few hundred ms |
+| Whole `request_tags` or one path, `trace_id = X`, no time bound (7.5) | all | tens of MiB, tens of ms | the same |
+
+Findings:
+
+- No shape regresses under design D6. The shapes where the trade could invert — a short window (7.3), a path-only
+  read (7.8), a point lookup (7.5), a filter that the page block and the outer statement both join (7.4) — cost the
+  same as today or less.
+- The page block's second pass over the source window is cheap: it reads the key and sort columns only, on the
+  order of tens of MiB for a month. What goes away is the window-sized hash build, which is large even for a single
+  path or a scalar column over a wide window, because it holds one key tuple per in-window row.
+- The whole-document page over the full history, which today's statement cannot complete within the memory budget,
+  completes in well under a second.
+- Results match: the same rows on every shape, in the same order except among rows tying on `request_time`, which
+  neither statement orders. A page whose window ends at the present also differs by the rows ingested between the
+  two runs.
+- 7.7: the session lookup renders byte-identical SQL before and after, so it costs what it costs today.

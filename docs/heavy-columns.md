@@ -250,7 +250,7 @@ ClickHouse builds into the join. None changes a result; the
 | statement shape | what is read into the join |
 |---|---|
 | bodies only in the `SELECT`, under a `LIMIT` (`SELECT trace_id, "…request_body" … ORDER BY request_time DESC LIMIT 10`) | the bodies of the returned page only, whatever the window: the page's keys are chosen first, then its bodies fetched |
-| payload documents only in the `SELECT`, no body anywhere (`SELECT request_time, "…request_tags" … LIMIT 25`) | the same: `request_tags` and `jwt_claims` of the returned page only (the payload is partition-aligned with its source); a literal path is read as its subcolumn, which matters most for a whole document, since a window-bounded join over a single path is already cheap. A lookup page whose filter qualifies for a partition pre-selection keeps today's join, which the pre-selection bounds |
+| payload documents only in the `SELECT`, no body anywhere (`SELECT request_time, "…request_tags" … LIMIT 25`) | the same: `request_tags` and `jwt_claims` of the returned page only (the payload is partition-aligned with its source); a literal path is read as its subcolumn. A lookup page whose filter qualifies for a partition pre-selection keeps today's join, which the pre-selection bounds |
 | a body search in the `WHERE` (`"…request_body" ILIKE '%error%'`, `= 'x'`, `IN (…)`, `starts_with(…)`) | only the payload rows that match; every body in the window is still *scanned* to decide that |
 | a body used only through `length`, `json_extract_*`, `starts_with` or `contains` (`avg(length("…request_body"))`) | the number, string or flag the call returns, not the body |
 

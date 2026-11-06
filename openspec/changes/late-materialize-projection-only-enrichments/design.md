@@ -93,7 +93,10 @@ or skipping enrichments below a size). A guard needs a threshold that only measu
 trade (below) is favourable in every shape anyone has reasoned through. Acceptance (tasks group 7) covers the
 shapes where it could invert. A shape **regresses** when, at the same window on the same deployment, it is refused
 by the budget where today's statement completes, or its peak memory or its duration is more than twice today's. If
-one regresses, the guard is added in this change before it is archived, and the spec gains the condition.
+one regresses, the guard is added in this change before it is archived, and the spec gains the condition. Measured on
+a running deployment (`acceptance.md`), none regresses: short windows, path-only and scalar reads and point lookups
+cost the same as today or less, because the window-sized hash build holds one key tuple per in-window row whatever it
+projects. Narrowing the rule to whole documents was therefore rejected.
 
 **D7. A pre-selected light-only block keeps today's statement.** Partition pre-selection restricts the page block
 only (structured-query, "A lookup on an aligned enrichment pre-selects the source's partitions"). The outer statement

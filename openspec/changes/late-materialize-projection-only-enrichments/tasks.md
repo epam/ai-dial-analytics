@@ -50,12 +50,12 @@
 
 Record order-of-magnitude peak memory and duration from `system.query_log`, before and after, in `acceptance.md`. A shape regresses when, at the same window, it is refused by the budget where today's statement completes, or its peak memory or duration is more than twice today's. If any shape below regresses, add an eligibility guard to this change, with a spec condition and a design update (design D6), before archive.
 
-- [ ] 7.1 The header page from the proposal over a multi-day window
-- [ ] 7.2 A wide-window light page that succeeds today, checked against the execution-time ceiling as well as memory
-- [ ] 7.3 A light page over a short window (hours), where the page block's extra pass is proportionally largest
-- [ ] 7.4 A light page whose filter reads another enrichment without qualifying for a pre-selection (a range or substring match), which the page block and the outer statement both join
-- [ ] 7.5 Point lookups projecting light payload columns: by `trace_id = X`, and by a conversation-id header path
+- [x] 7.1 The header page from the proposal over a multi-day window
+- [x] 7.2 A wide-window light page that succeeds today, checked against the execution-time ceiling as well as memory
+- [x] 7.3 A light page over a short window (hours), where the page block's extra pass is proportionally largest
+- [x] 7.4 A light page whose filter reads another enrichment without qualifying for a pre-selection (a range or substring match), which the page block and the outer statement both join
+- [x] 7.5 Point lookups projecting light payload columns: by `trace_id = X`, and by a conversation-id header path
 - [ ] 7.6 A light page over a sparse aligned enrichment (one with rows for few source rows)
-- [ ] 7.7 The guard (design D7): a session lookup projecting light payload columns, with and without an unaligned enrichment's column, renders today's SQL and costs what it costs today
-- [ ] 7.8 A path-only light page over a wide window (`json_extract_string(request_tags, 'conversation_id')` and no bare document), checking duration as well as memory: today's window-bounded join over a pruned path is already cheap (`acceptance.md`), so the page block's second pass over the source window is the whole difference
+- [x] 7.7 The guard (design D7): a session lookup projecting light payload columns, with and without an unaligned enrichment's column, renders today's SQL and costs what it costs today
+- [x] 7.8 A path-only light page over a wide window (`json_extract_string(request_tags, 'conversation_id')` and no bare document), checking duration as well as memory: today's window-bounded join over a pruned path is already cheap (`acceptance.md`), so the page block's second pass over the source window is the whole difference
 - [ ] 7.9 Replay a sample of row-mode reads that project aligned-enrichment columns, at default and explicit limits, including pages projecting identity columns on a deployment where `usage_client_identity` is aligned. Confirm identical results and no new budget refusals
