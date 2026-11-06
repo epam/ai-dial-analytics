@@ -4,6 +4,8 @@ import com.epam.aidial.analytics.blob.BlobListing;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -51,9 +53,17 @@ import java.util.function.Consumer;
  * callback (the ingest ledger) once none does — right after the flush that writes its last buffered row, or
  * at once when it finished with nothing buffered (a blob that produced no rows included). Blobs written by
  * the same flush are handed over as one batch, and {@link #flush()} always hands over, so a trailing blob is
- * never left behind. A blob whose read never finished (its ingest threw) is never handed over, and neither is
- * any blob after a failed flush. Tracking only decides when to call back; it never forces a flush, so batching
+ * never left behind. A blob whose read never finished (its ingest threw) is never handed over, and its rows
+ * still buffered are discarded ({@link #abandonBlob()}); neither is any blob after a failed flush. Tracking only decides when to call back; it never forces a flush, so batching
  * is unchanged.
+ *
+ * <p><b>Refused blobs and skipped records.</b> A per-table flush that ClickHouse refuses for its data splits by blob
+ * ({@link RowBatchSink}) and names the blobs it still refused. Such a blob leaves the run: its rows still buffered in
+ * every other table are discarded, so a usage-log row is not written for a blob whose payload rows were refused; any
+ * further row read from it is dropped; and it is never handed over as written. Each hand-over carries, beside the
+ * written blobs, the blobs refused since the last one and what each written blob's read skipped
+ * ({@link SkippedRecords}), so the callback records both in the failure ledger before it records the written blobs in
+ * the ingest ledger — and a blob recorded as ingested always has its lost records on record.
  *
  * <p>Not thread-safe: a run sink belongs to one run, driven by the single-threaded scheduler. A
  * {@link RowBatchSink.FlushException} from any per-table sink, or from the callback (wrapped as one so no
@@ -67,7 +77,7 @@ class RunSink {
     /** Target table → the run's target tables that are enrichments of it, in declaration order. */
     private final Map<String, List<String>> enrichmentsOf = new LinkedHashMap<>();
 
-    private final Consumer<List<BlobListing>> onBlobsWritten;
+    private final HandOverListener onHandOver;
 
     /** The blob being read, between {@link #startBlob} and {@link #finishBlob}; {@code null} otherwise. */
     private BlobListing reading;
@@ -77,6 +87,12 @@ class RunSink {
     private final Map<BlobListing, Set<String>> pending = new LinkedHashMap<>();
     /** Finished blobs whose rows are all written, awaiting the next hand-over. */
     private final List<BlobListing> written = new ArrayList<>();
+    /** What the reads of finished, not yet handed-over blobs skipped, for those that skipped anything. */
+    private final Map<BlobListing, SkippedRecords> skipped = new HashMap<>();
+    /** Every blob refused this run: none of its rows is written from then on. */
+    private final Set<BlobListing> refused = new HashSet<>();
+    /** Blobs refused since the last hand-over. */
+    private final List<RefusedBlob> refusedSinceHandOver = new ArrayList<>();
     private boolean failed;
 
     RunSink(UsageLogWriter writer, Iterable<String> tables, int batchSize, long maxBatchBytes) {
@@ -94,17 +110,18 @@ class RunSink {
      */
     RunSink(UsageLogWriter writer, Iterable<String> tables, Map<String, String> sourceOf, int batchSize, long maxBatchBytes,
             Consumer<List<BlobListing>> onBlobsWritten) {
-        this(writer, tables, sourceOf, Map.of(), batchSize, maxBatchBytes, onBlobsWritten);
+        this(writer, tables, sourceOf, Map.of(), batchSize, maxBatchBytes, (HandOverListener) handOver -> onBlobsWritten.accept(handOver.written()));
     }
 
     /**
-     * @param sourceOf       enrichment target table → the source target table it enriches, for the pairs where
-     *     both are among {@code tables}; every other table is independent
-     * @param stages         target table → the {@link FlushStage} its sink runs on each batch; absent means none
-     * @param onBlobsWritten receives, in one batch per hand-over, the finished blobs whose rows are all written
+     * @param sourceOf   enrichment target table → the source target table it enriches, for the pairs where both are among
+     *     {@code tables}; every other table is independent
+     * @param stages     target table → the {@link FlushStage} its sink runs on each batch; absent means none
+     * @param onHandOver receives, once per hand-over, the finished blobs whose rows are all written, what their reads
+     *     skipped, and the blobs refused since the last hand-over
      */
     RunSink(UsageLogWriter writer, Iterable<String> tables, Map<String, String> sourceOf, Map<String, FlushStage> stages,
-            int batchSize, long maxBatchBytes, Consumer<List<BlobListing>> onBlobsWritten) {
+            int batchSize, long maxBatchBytes, HandOverListener onHandOver) {
         for (String table : tables) {
             sinks.putIfAbsent(table, new RowBatchSink(writer, table, batchSize, maxBatchBytes, stages.getOrDefault(table, FlushStage.NONE)));
         }
@@ -114,16 +131,34 @@ class RunSink {
                 enrichmentsOf.computeIfAbsent(source, ignored -> new ArrayList<>()).add(table);
             }
         }
-        this.onBlobsWritten = onBlobsWritten;
+        this.onHandOver = onHandOver;
     }
 
     /**
      * Starts reading {@code listing}: rows added until {@link #finishBlob()} belong to it. A blob started while
-     * another's read never finished (its ingest threw) abandons the earlier one, which is never handed over.
+     * another's read never finished (its ingest threw) {@linkplain #abandonBlob() abandons} the earlier one.
      */
     void startBlob(BlobListing listing) {
         ensureUsable();
+        abandonBlob();
         reading = listing;
+        readingTables = new HashSet<>();
+    }
+
+    /**
+     * Abandons the blob being read, whose read failed: its rows still buffered in any table are discarded, and it is
+     * never handed over. Rows of it that an earlier batch already wrote stay written. Does nothing when no read is open,
+     * or once the sink is unusable, so a caller can call it on any failure without masking the original one.
+     */
+    void abandonBlob() {
+        if (failed || reading == null) {
+            return;
+        }
+        Set<BlobListing> abandoned = Set.of(reading);
+        for (RowBatchSink sink : sinks.values()) {
+            sink.discard(abandoned);
+        }
+        reading = null;
         readingTables = new HashSet<>();
     }
 
@@ -132,9 +167,28 @@ class RunSink {
      * and handed over at once; otherwise it is handed over after the flush that writes its last row.
      */
     void finishBlob() {
+        finishBlob(null);
+    }
+
+    /**
+     * As {@link #finishBlob()}, remembering what the blob's read skipped so the hand-over that writes it carries it. A blob
+     * refused while it was read is dropped here, never handed over.
+     *
+     * @param skips what the read skipped; {@code null} or empty when nothing was
+     */
+    void finishBlob(SkippedRecords skips) {
         ensureUsable();
         if (reading == null) {
             return;
+        }
+        if (refused.contains(reading)) {
+            reading = null;
+            readingTables = new HashSet<>();
+            handOver();
+            return;
+        }
+        if (skips != null && !skips.isEmpty()) {
+            skipped.put(reading, skips);
         }
         if (readingTables.isEmpty()) {
             written.add(reading);
@@ -157,9 +211,12 @@ class RunSink {
             throw new IllegalStateException("No run sink configured for target table '" + table + "'");
         }
         if (reading != null) {
+            if (refused.contains(reading)) {
+                return; // the blob was refused while it was read: nothing more of it is written this run
+            }
             readingTables.add(table);
         }
-        if (sink.offer(row)) {
+        if (sink.offer(row, reading)) {
             flushInOrder(table, new LinkedHashSet<>());
             handOver();
         }
@@ -191,13 +248,38 @@ class RunSink {
         for (String enrichment : enrichmentsOf.getOrDefault(table, List.of())) {
             flushInOrder(enrichment, flushed);
         }
+        List<RefusedBlob> refusedHere;
         try {
-            sinks.get(table).flush();
+            refusedHere = sinks.get(table).flush();
         } catch (RowBatchSink.FlushException ex) {
             failed = true;
             throw ex;
         }
+        refuse(refusedHere);
         tableWritten(table);
+    }
+
+    /**
+     * Takes refused blobs out of the run: their rows still buffered in any table are discarded — the source table's
+     * included, which flushes after its enrichments — and they will never be handed over as written.
+     */
+    private void refuse(List<RefusedBlob> blobs) {
+        if (blobs.isEmpty()) {
+            return;
+        }
+        Set<BlobListing> listings = new HashSet<>();
+        for (RefusedBlob blob : blobs) {
+            if (refused.add(blob.listing())) {
+                listings.add(blob.listing());
+                refusedSinceHandOver.add(blob);
+            }
+        }
+        for (RowBatchSink sink : sinks.values()) {
+            sink.discard(listings);
+        }
+        listings.forEach(pending::remove);
+        listings.forEach(skipped::remove);
+        written.removeIf(listings::contains);
     }
 
     /** Every row buffered for {@code table} is now written: no blob waits on it any more. */
@@ -214,16 +296,26 @@ class RunSink {
     }
 
     private void handOver() {
-        if (written.isEmpty()) {
+        if (written.isEmpty() && refusedSinceHandOver.isEmpty()) {
             return;
         }
         List<BlobListing> batch = List.copyOf(written);
+        Map<BlobListing, SkippedRecords> batchSkips = new LinkedHashMap<>();
+        for (BlobListing listing : batch) {
+            SkippedRecords skips = skipped.remove(listing);
+            if (skips != null) {
+                batchSkips.put(listing, skips);
+            }
+        }
+        List<RefusedBlob> batchRefused = List.copyOf(refusedSinceHandOver);
         written.clear();
+        refusedSinceHandOver.clear();
         try {
-            onBlobsWritten.accept(batch);
+            onHandOver.accept(new HandOver(batch, batchSkips, batchRefused));
         } catch (RuntimeException ex) {
             failed = true;
-            throw new RowBatchSink.FlushException("Failed to record " + batch.size() + " written blob(s) in the ingest ledger", ex);
+            throw new RowBatchSink.FlushException("Failed to record " + batch.size() + " written and " + batchRefused.size()
+                    + " refused blob(s)", ex);
         }
     }
 
@@ -240,6 +332,28 @@ class RunSink {
             total += sink.totalInserted();
         }
         return total;
+    }
+
+    /**
+     * One hand-over: what the ingest path records, failure ledger first, then the ingest ledger.
+     *
+     * @param written the finished blobs whose rows are all written, in the order they became so
+     * @param skipped what the reads of {@code written} blobs skipped, for those that skipped anything
+     * @param refused the blobs refused since the last hand-over; none of them is in {@code written}
+     */
+    record HandOver(List<BlobListing> written, Map<BlobListing, SkippedRecords> skipped, List<RefusedBlob> refused) {
+
+        HandOver {
+            written = List.copyOf(written);
+            skipped = Collections.unmodifiableMap(new LinkedHashMap<>(skipped));
+            refused = List.copyOf(refused);
+        }
+    }
+
+    /** Receives each {@link HandOver}. A failure fails the run: the sink wraps it as a flush failure. */
+    @FunctionalInterface
+    interface HandOverListener {
+        void accept(HandOver handOver);
     }
 
     /**

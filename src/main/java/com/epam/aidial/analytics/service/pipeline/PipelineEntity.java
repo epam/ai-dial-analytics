@@ -13,6 +13,7 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.DynamicUpdate;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.envers.Audited;
 import org.hibernate.envers.NotAudited;
@@ -61,9 +62,15 @@ import java.time.Instant;
  * <p>{@link #generation} is the declaration's revision and the Enrichment Runner's <b>only</b> token for
  * detecting a declaration change. A patch that only changes {@code enabled} does not bump it: that flag is
  * the run control, not part of the declaration, and the runner reads it directly.
+ *
+ * <p>{@link DynamicUpdate}: an entity save writes only the columns it changed. A full-row {@code UPDATE}
+ * would write back the materialized-position columns as the entity loaded them, over a position a
+ * materialize recorded meanwhile through the targeted {@code @Modifying} writes of
+ * {@link PipelineRepository}; with {@code generation} unchanged, the stale position would read as valid.
  */
 @Entity
 @Audited
+@DynamicUpdate
 @Table(name = "pipeline")
 @Getter
 @Setter

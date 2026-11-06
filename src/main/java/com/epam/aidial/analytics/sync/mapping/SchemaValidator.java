@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.sync.mapping;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 import com.epam.aidial.analytics.configuration.SyncProperties;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
+import com.epam.aidial.analytics.service.ClickHouseIngestFailureLedger;
 import com.epam.aidial.analytics.service.ClickHouseIngestLedger;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -63,6 +64,8 @@ public class SchemaValidator implements ApplicationRunner {
         }
         validateLedger(describeTable(ClickHouseIngestLedger.TABLE));
         log.info("Data-sync ingest ledger '{}' validated", ClickHouseIngestLedger.TABLE);
+        validateFailureLedger(describeTable(ClickHouseIngestFailureLedger.TABLE));
+        log.info("Data-sync failure ledger '{}' validated", ClickHouseIngestFailureLedger.TABLE);
     }
 
     /**
@@ -73,8 +76,23 @@ public class SchemaValidator implements ApplicationRunner {
      * @throws IllegalStateException naming each missing or mistyped column
      */
     void validateLedger(Map<String, String> tableColumns) {
+        validateInternalTable("Ingest ledger", ClickHouseIngestLedger.TABLE, ClickHouseIngestLedger.COLUMNS, "V13", tableColumns);
+    }
+
+    /**
+     * Checks the failure ledger, which every ingest path writes when a blob or day fails, the same way.
+     *
+     * @param tableColumns the failure ledger's {@code DESCRIBE TABLE}; empty when the table does not exist
+     * @throws IllegalStateException naming each missing or mistyped column
+     */
+    void validateFailureLedger(Map<String, String> tableColumns) {
+        validateInternalTable("Failure ledger", ClickHouseIngestFailureLedger.TABLE, ClickHouseIngestFailureLedger.COLUMNS, "V17", tableColumns);
+    }
+
+    private static void validateInternalTable(String what, String table, Map<String, String> columns, String migration,
+            Map<String, String> tableColumns) {
         List<String> problems = new ArrayList<>();
-        ClickHouseIngestLedger.COLUMNS.forEach((column, expected) -> {
+        columns.forEach((column, expected) -> {
             String type = tableColumns.get(column);
             if (type == null) {
                 problems.add("'" + column + "' is missing");
@@ -83,8 +101,8 @@ public class SchemaValidator implements ApplicationRunner {
             }
         });
         if (!problems.isEmpty()) {
-            throw new IllegalStateException("Ingest ledger table '" + ClickHouseIngestLedger.TABLE + "' does not match "
-                    + "ClickHouse migration V13: " + String.join("; ", problems));
+            throw new IllegalStateException(what + " table '" + table + "' does not match "
+                    + "ClickHouse migration " + migration + ": " + String.join("; ", problems));
         }
     }
 

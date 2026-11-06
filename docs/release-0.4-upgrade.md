@@ -3,11 +3,15 @@
 What an environment has to do to move from **release-0.3** to **release-0.4**. An environment still on an
 earlier build first follows [`release-0.3-upgrade.md`](release-0.3-upgrade.md).
 
-Two things make this release more than a redeploy:
+Three things make this release more than a redeploy:
 
 - a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `3` to `4`;
 - an **automatic relayout** of existing row-grain enrichments, which holds their writers for two to three
-  minutes each, ten minutes after the deploy.
+  minutes each, ten minutes after the deploy;
+- **new writer grants**: `SELECT` on `system.parts` and `system.data_skipping_indices`, which
+  `<database>.*` does not cover, and access to the new failure-ledger table `_dial_internal_failed_ingest`,
+  which every ingest path writes. Without the system-table grants the relayout fails; without the ledger
+  grant a writer narrowed per table either fails startup or stops ingesting at the first failed blob (§1).
 
 There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build writes aligned tables with no
 `request_time`, so its rows land in the 1970 partition, which the inherited TTL drops at the next merge.
@@ -38,6 +42,29 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   writer narrowed per table needs `SELECT` on `dial_usage_log_payload`, and `ALTER` on it for the ClickHouse `V16`
   migration. Without `SELECT` every lookup fails with a WARN and `ingest.request.delta.lookup.failures`, and requests
   are stored as chain roots: ingest goes on, the saving is smaller.
+- **Grants for the new failure ledger.** ClickHouse `V17` creates `_dial_internal_failed_ingest` in the ingest
+  database (§3b), and every ingest path reads and writes it. A writer granted on `<database>.*` already covers it.
+  A writer narrowed per table needs `SELECT` and `INSERT` on it, and `CREATE TABLE` unless that is granted on the
+  database:
+
+  ```sql
+  GRANT CREATE TABLE ON <database>._dial_internal_failed_ingest TO <writer>;
+  GRANT SELECT, INSERT ON <database>._dial_internal_failed_ingest TO <writer>;
+  ```
+
+  - Without `CREATE TABLE`, startup fails at `V17`.
+  - Without `INSERT`, the first blob that fails to ingest also fails to be recorded, which fails the poll cycle:
+    the poller's watermark holds and **near-real-time ingest stops** until the grant is added. A reconciliation or
+    backfill day with a failed blob fails as a whole.
+  - Without `SELECT`, every retry sweep logs an ERROR and retries nothing, and `GET /v1/data-sync/failures`
+    answers `503 clickhouse_unavailable`.
+
+  See [`clickhouse-server.md`](clickhouse-server.md#writer-credential).
+- **No new `ALTER` grant for the route columns.** `V15` adds them to `dial_usage_log` (§4) with `ALTER ADD COLUMN`,
+  which the documented sub-privilege set already holds on the ingest tables
+  ([`clickhouse-server.md`](clickhouse-server.md#narrowing-alter-to-sub-privileges)).
+- If `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply ClickHouse `V15`, `V16` and `V17` by hand, in that order, **before**
+  starting the new build. The new build assumes all three are applied.
 - **Writer hold.** `PIPELINE_BUDGET_TIMEOUT` sets the hold: it waits this plus 15 s. Raising it lengthens the
   window of `503`s (§3).
 - **API description needs a credential in `oidc` mode.** `/v3/api-docs`, `/swagger-ui.html` and `/swagger-ui/**`
@@ -65,7 +92,8 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
   pipeline's materialized position valid. The Enrichment Runner build that follows this rule reads the unfiltered
   feed and drops its own operator pause. Before deploying that runner, list `GET /v1/pipelines/paused` on the
   runner and set `enabled: false` here for each entry whose `origin` is `operator`, so a pipeline stopped on purpose
-  stays stopped. See [pipeline-registry](../openspec/specs/pipeline-registry/spec.md), "A pipeline has exactly one
+  stays stopped. Do it immediately before that deploy: the runner still deployed drops a disabled pipeline from its
+  cache, and the pipeline's dead-letter items lose their stored labels while it stays disabled. See [pipeline-registry](../openspec/specs/pipeline-registry/spec.md), "A pipeline has exactly one
   run control".
 - **Evaluator archive (optional).** 0.4 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
@@ -141,13 +169,72 @@ then read only the days the value occurs on instead of all of history.
 - A source with `granularity: year` could not be created (ADAS rendered `toYYYY`, which ClickHouse does not have);
   it now renders `toYear`.
 
+## 3b. Ingest failures are recorded and retried
+
+Before 0.4 a blob that failed to ingest could go missing from analytics, and only a log line and an aggregate counter
+showed it. On the daily reconciliation run and on a backfill, one unreadable or unmappable blob stopped the rest of its
+day, and a deterministic failure stopped every re-run at the same blob. On the poller, a failed blob was retried only
+while it stayed inside the overlap window.
+
+- **A failed blob no longer stops its day.** Its failure is recorded and the day goes on with the next blob, on every
+  path. Only day-level faults still fail a day: the listing or preparing the day fails, a batch or ledger write fails,
+  or ClickHouse is out of disk.
+- **Failures are recorded in `_dial_internal_failed_ingest`**, an append-only log of failed blobs and days kept for 13
+  months. A failure is `deterministic` (a corrupt gzip, a mapping or deriver fault, a blob that no longer exists) and
+  **parked** at once, or `transient` (any other, an `EOF` on read included) and retried with exponential backoff until
+  `SYNC_RETRY_MAX_ATTEMPTS`, then parked. A blob is `resolved` once the ingest ledger records it; a day, once a run of
+  it succeeds.
+- **A retry sweep** (`SYNC_RETRY_CRON`, every 15 minutes by default) re-ingests due blobs one by one and re-runs due
+  days in the default skip-ingested mode. A failed reconciliation day is now retried by itself; before, only an
+  operator backfill recovered it.
+- **Operator surface:**
+  - `GET /v1/data-sync/failures` (`REGISTRY_READ`) lists `pending` and `parked` entries, newest first, filtered by
+    `state`, `kind`, `reason`, `from`/`to`, `backfill_run_id` and `limit`. It reports the `total` matched (with the
+    filters of a retry, the count that retry would requeue), the `by_state` counts, and `retry_sweep`: whether the
+    sweep runs and when it next starts.
+  - `POST /v1/data-sync/failures/retry` (`DATA_SYNC_OPERATE`) requeues the matching outstanding entries with their
+    attempts reset, for example `{"state": "parked", "reason": "mapping_error"}` after a mapping fix, or the failures
+    of one backfill run with `{"backfill_run_id": "<runId>"}`. `targets` names exact `{kind, subject}` pairs, since a
+    blob's `blob` and `records` entries share its key. An empty body is `400`, so nothing is requeued by accident.
+- **Backfill status** adds `failedBlobs`. A day with a failed blob is still named in `failedDates`, but its other
+  blobs are now ingested.
+- **Metrics:** gauge `sync.failures.outstanding{kind,state}`, counters `sync.failures.recorded{kind,path,reason}` and
+  `sync.retry.attempts{kind,outcome}`, and gauge `sync.failures.unwritten`: day failures that could not be
+  written during a ClickHouse outage and are held in memory until the next sweep (lost on a restart). Alert on
+  `sync.failures.outstanding{state="parked"}` above zero: a parked entry stays missing until an operator acts.
+
+Behaviour: [`data-sync-failures`](../openspec/specs/data-sync-failures/spec.md).
+
+## 3c. Values ingest cannot read are counted, and stored as absent instead of `0`
+
+Ingest used to read a `long`, `double` or `bool` value it could not parse as `0` or `false`, silently. It now reads
+each kind strictly ([`column-mapping.md`](column-mapping.md#extraction-kinds)):
+
+- A value that fails to read — `"abc"` or `12.7` for `long`, `"yes"` for `bool`, a non-finite or out-of-range number —
+  takes the column's fallback as an absent value does: the `default`, else `NULL` on a nullable column, else the kind's
+  zero. **A nullable column (the token counts, `rate`, the cost columns) now stores `NULL` where earlier rows stored
+  `0`** for the same producer value.
+- A fractional value is refused for a `long` column, not truncated. Blank text is absent for every kind but `string`
+  and `object`.
+- `json-extract-uint` refuses a negative value, and `success-from-status` stores `false` for an unreadable status.
+- An `array<string>` element that is an object or array is stored as its JSON text instead of `""`.
+- Every failure counts on `sync.values.coercion.failures{table,column,kind}`, with at most one WARN per column per
+  minute naming the table, column, kind, JSON type and blob, never the value.
+
+Rows already stored are unchanged. A backfill with `"includeIngested": true` applies the new reading to history, and
+re-fires the row-grain enrichments over the re-ingested rows. A counter that keeps rising points at a producer field or
+a mapping `kind` that does not match. The DIAL Core fields the shipped mappings read are expected to stay at zero.
+
 ## 4. Migrations (automatic on startup)
 
 | Migration | Effect |
 |---|---|
-| Postgres `V47` | Adds `enrichment_relayout`: the progress and writer hold of the automatic relayout (§3). |
+| ClickHouse `V15` | Adds the nullable `route_name` and `route_type` columns to `dial_usage_log`: the route that served the request. Rows ingested earlier read `NULL` until re-ingested. |
 | ClickHouse `V16` | Adds the request-delta columns, `project_id` and `user_hash`, and the `idx_request_hash` skip index to `dial_usage_log_payload`. Metadata-only; existing rows read the defaults. |
+| ClickHouse `V17` | Creates the failure ledger `_dial_internal_failed_ingest`: one row per failure, retry or resolution event, 13-month TTL (§3b). |
+| Postgres `V47` | Adds `enrichment_relayout`: the progress and writer hold of the automatic relayout (§3). |
 | Postgres `V48` | Drops the evaluator archive (`evaluator`, `evaluator_version`), `pipeline.evaluator_name` / `evaluator_version` and their `pipeline_aud` mirrors, and `rule_legacy` / `rule_legacy_aud`. Keeps `pipeline.legacy_rule_id`, which 0.3 still maps; the next release drops it. |
+| Postgres `V49` | Adds the catalog rows of the two route columns (`V15`), so they are queryable. |
 | Postgres `V50` | Registers `request_cache_control` on `dial_usage_log_payload`, sensitive and heavy, and extends the seeded `request_body` description. |
 | Postgres `V51` | Adds `dashboard` and its audit mirror `dashboard_aud`, for the new `/v1/dashboards` API. Both start empty. |
 | Postgres `V52` | Adds the nullable `settings` column to `dashboard` and `dashboard_aud`. |
@@ -168,12 +255,30 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   dropped automatically: compare it with the aligned table by grain key, rewrite any row you need (or let its
   pipeline write it again), then `DROP TABLE` it.
 
+**Ingest failures** (any time after the deploy):
+
+- **ClickHouse:** `SELECT count() FROM _dial_internal_failed_ingest;` succeeds as the writer. An `ACCESS_DENIED`
+  means a grant from §1 is missing.
+- **API:** `GET /v1/data-sync/failures` answers `200`. Look at any `parked` entry: its `reason` and `message` say why
+  it failed, and after a fix `POST /v1/data-sync/failures/retry` requeues it.
+- **Logs:** no `Retry sweep could not read the failure ledger` ERROR from `IngestRetrySweep`.
+
+**Recover blobs an earlier failure left behind (recommended, once).** Before 0.4, a blob that failed on the
+reconciliation run stopped the rest of its day, so the blobs after it may never have been ingested. Run one default
+backfill (no `includeIngested`) over the weeks since the 0.3 deploy: it skips every blob the ingest ledger already
+records, so it ingests only what is missing, and records any blob that still fails in the failure ledger. Do not reach
+back past the 0.3 deploy. Days before it are not in the ingest ledger, so they are re-ingested in full, and that
+re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipeline.
+
 ## 6. Breaking changes at a glance
 
 | Change | Symptom | Action |
 |---|---|---|
 | Runner data-plane needs `Adas-Contract-Version: 4` | `409` | Redeploy the runner in the same window (§2) |
 | Writer reads `system.parts` / `system.data_skipping_indices` | Relayout ERROR `ACCESS_DENIED`; schema `PATCH` dropping a column fails | Grant both (§1), restart |
+| Writer writes the failure ledger `_dial_internal_failed_ingest` (per-table grants only) | Startup fails at `V17`; or the poller stops at the first failed blob; or the retry sweep logs ERROR and `GET /v1/data-sync/failures` is `503` | Grant `SELECT`, `INSERT` (and `CREATE TABLE` unless database-wide) on it (§1) |
+| A blob that fails to ingest no longer stops its day | The day's other blobs are ingested; the day is still in `failedDates`, and `failedBlobs` counts the blob | Watch `GET /v1/data-sync/failures` and requeue after a fix (§3b) |
+| An unreadable `long` / `double` / `bool` producer value is no longer read as `0` / `false` | `NULL` in a nullable column where earlier rows had `0`; `12.7` in a `long` column is refused, not truncated; `sync.values.coercion.failures` rises | None for the shipped mappings; fix the producer or the mapping `kind` if the counter rises (§3c) |
 | Row write to an aligned enrichment without `request_time` (`POST /v1/tables/{name}/rows`) — a new table, or an existing one once the relayout aligned it | `422 validation_error` | Send the source row's `request_time` (§3) |
 | Per-row LLM write-back to an aligned enrichment without `__partition_v` | `422 validation_error` | Runner 0.4 echoes it (§2) |
 | Registering a pipeline onto an aligned enrichment that reads a table other than the enrichment's source, or has a group trigger | `422 pipeline_validation_failed` | Read the enrichment's own source with a row trigger |
@@ -232,4 +337,8 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   [`clickhouse-server.md`](clickhouse-server.md#narrowing-alter-to-sub-privileges)).
 - `SYNC_USAGE_LOG_TTL_DAYS` (default unset) — `dial_usage_log`'s retention in days, `-1` for none, applied the same
   way. No day count equals the provisioned `INTERVAL 1 YEAR`; `365` is the nearest. See
+  [`configuration.md`](configuration.md).
+- `SYNC_RETRY_ENABLED` (default `true`), `SYNC_RETRY_CRON` (`0 */15 * * * *`), `SYNC_RETRY_INITIAL_BACKOFF` (`15m`),
+  `SYNC_RETRY_MAX_BACKOFF` (`24h`), `SYNC_RETRY_MAX_ATTEMPTS` (`10`), `SYNC_RETRY_MAX_PER_SWEEP` (`20`) — the retry
+  sweep over the failure ledger (§3b); failures are recorded and listed even with retries disabled. See
   [`configuration.md`](configuration.md).

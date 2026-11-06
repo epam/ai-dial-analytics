@@ -193,6 +193,19 @@ class UsageLogWriterTest {
     }
 
     @Test
+    void recognizesDataClassCodesAnywhereInTheChain() {
+        assertThat(UsageLogWriter.dataRejectionCode(serverError(41))).isEqualTo(41);
+        assertThat(UsageLogWriter.dataRejectionCode(
+                new IllegalStateException("ClickHouse insert failed", new RuntimeException("wrapped", serverError(53))))).isEqualTo(53);
+        // Disk exhaustion, a memory limit and too many parts are the server's state, not the rows': never split for.
+        assertThat(UsageLogWriter.dataRejectionCode(serverError(243))).isNull();
+        assertThat(UsageLogWriter.dataRejectionCode(serverError(241))).isNull();
+        assertThat(UsageLogWriter.dataRejectionCode(serverError(252))).isNull();
+        assertThat(UsageLogWriter.dataRejectionCode(new IllegalStateException("no server exception here"))).isNull();
+        assertThat(UsageLogWriter.dataRejectionCode(new SelfCausing("loops forever"))).isNull();
+    }
+
+    @Test
     void terminatesOnSelfReferentialCauseChain() {
         assertThat(UsageLogWriter.isOutOfDiskSpace(new SelfCausing("loops forever"))).isFalse();
         assertThat(UsageLogWriter.isOutOfDiskSpace(

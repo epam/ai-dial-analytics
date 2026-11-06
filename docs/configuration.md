@@ -510,6 +510,20 @@ scheduled jobs.
 | `BACKFILL_ENABLED`  | `backfill.enabled`  | `true`  | No       | Master switch for the backfill endpoints. When `false` a trigger is rejected with `503 backfill_disabled`. |
 | `BACKFILL_MAX_DAYS` | `backfill.max-days` | `366`   | No       | Maximum inclusive span in days one request may cover; a longer range is rejected with 400.                 |
 
+### Data-sync failure retry
+
+The retry sweep of the failure ledger, which records every blob and day that failed to ingest
+(`GET /v1/data-sync/failures`). Behaviour is specified in `openspec/specs/data-sync-failures/spec.md`.
+
+| Variable                     | Property                     | Default          | Required | Description                                                                                  |
+|------------------------------|------------------------------|------------------|----------|----------------------------------------------------------------------------------------------|
+| `SYNC_RETRY_ENABLED`         | `sync.retry.enabled`         | `true`           | No       | Whether the sweep attempts due failures; failures are recorded and listed either way.        |
+| `SYNC_RETRY_CRON`            | `sync.retry.cron`            | `0 */15 * * * *` | No       | Spring cron controlling how often a sweep runs.                                              |
+| `SYNC_RETRY_INITIAL_BACKOFF` | `sync.retry.initial-backoff` | `15m`            | No       | Wait after a subject's first transient failure, doubled after each further one; positive.    |
+| `SYNC_RETRY_MAX_BACKOFF`     | `sync.retry.max-backoff`     | `24h`            | No       | Cap on that wait; not below `initial-backoff`, or startup fails.                             |
+| `SYNC_RETRY_MAX_ATTEMPTS`    | `sync.retry.max-attempts`    | `10`             | No       | Transient failures after which a subject is parked until an operator requeues it; at least 1. |
+| `SYNC_RETRY_MAX_PER_SWEEP`   | `sync.retry.max-per-sweep`   | `20`             | No       | Most blobs and days one sweep attempts; at least 1.                                          |
+
 ## Security
 
 ### Authentication
