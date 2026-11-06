@@ -69,12 +69,19 @@ public class BlobPollingService {
     private final MeterRegistry meterRegistry;
     private final ClientSpanTracer clientSpanTracer;
     private final IngestLedger ledger;
+    private final IngestFailureService failures;
 
     private final Timer durationTimer;
     /** Greatest last-modified time ingested so far; blobs at/after this (less overlap) are candidates. */
     private volatile Instant watermark;
     /** Names already ingested within the current overlap window, to avoid redundant re-reads. */
     private final Map<String, Instant> recentlyIngested = new HashMap<>();
+    /**
+     * Blobs whose failure this poller recorded within the overlap window → the failed version's last-modified time. A
+     * blob is retried every cycle while it stays in the window, but its failure is recorded once per version, so the
+     * poller's own retries do not use up {@code sync.retry.max-attempts} before the retry sweep's backoff begins.
+     */
+    private final Map<String, Instant> failureRecorded = new HashMap<>();
 
     public BlobPollingService(
             BlobClient blobClient,
@@ -85,7 +92,8 @@ public class BlobPollingService {
             BlobPrefixResolver prefixResolver,
             MeterRegistry meterRegistry,
             ClientSpanTracer clientSpanTracer,
-            IngestLedger ledger) {
+            IngestLedger ledger,
+            IngestFailureService failures) {
         this.blobClient = blobClient;
         this.blobIngestor = blobIngestor;
         this.usageLogWriter = usageLogWriter;
@@ -95,6 +103,7 @@ public class BlobPollingService {
         this.meterRegistry = meterRegistry;
         this.clientSpanTracer = clientSpanTracer;
         this.ledger = ledger;
+        this.failures = failures;
         this.watermark = Instant.now().minus(pollProperties.restartLookback());
         this.durationTimer = Timer.builder("poll.duration").register(meterRegistry);
         Gauge.builder("poll.watermark.lag.seconds", this, BlobPollingService::watermarkLagSeconds)
@@ -115,8 +124,8 @@ public class BlobPollingService {
      * is left unchanged so the next cycle re-covers the whole window. A failure to ingest a single blob
      * (e.g. a corrupt gzip) is <em>not</em> fatal: it is counted and skipped, the cycle continues with
      * the remaining blobs, and the watermark still advances — so one bad blob cannot wedge the poller.
-     * The skipped blob stays eligible for retry within the overlap window and is otherwise recovered by
-     * the daily reconciliation sweep.
+     * The skipped blob is recorded in the failure ledger, stays eligible for retry within the overlap window,
+     * and is otherwise recovered by the daily reconciliation run or the retry sweep.
      *
      * @return a summary of the cycle
      */
@@ -142,11 +151,19 @@ public class BlobPollingService {
         // Blobs ingested this cycle are committed to the seen-set only after a successful final flush,
         // so a flush failure (writer down) holds the watermark AND leaves them re-ingestable next cycle.
         List<BlobListing> ingestedThisCycle = new ArrayList<>();
+        // The cycle's new blob failures, written in one append before the final flush.
+        List<IngestFailureEvent> blobFailures = new ArrayList<>();
+        // Blobs ClickHouse refused once their batch was split by blob, recorded in the failure ledger by the hand-over.
+        // They stay in the seen-set like any blob read this cycle, so the overlap window does not refuse them again.
+        List<RefusedBlob> refused = new ArrayList<>();
         try {
             // One sink per cycle so rows batch across blobs (a cycle of many tiny blobs → a few inserts). Built
             // inside the try so a failed catalog read behind it is a failed cycle, with its metrics recorded.
             // Each blob is recorded in the ledger as soon as its rows are all written (usually at the final flush).
-            sink = blobIngestor.newRunSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), ledger::record);
+            sink = blobIngestor.newHandOverSink(usageLogWriter, syncProperties.batchSize(), syncProperties.maxBatchBytes(), handOver -> {
+                failures.recordHandOver(handOver, IngestPath.POLL);
+                refused.addAll(handOver.refused());
+            });
             List<String> prefixes = activePrefixes(now, cutoff);
             log.info("Poll cycle starting: mode={}, watermark={}, prefixes={}",
                     pollProperties.listingMode(), watermark, prefixes);
@@ -187,15 +204,21 @@ public class BlobPollingService {
                         // propagate so the watermark holds.
                         throw fe;
                     } catch (Exception ex) {
-                        // A single bad blob must not abort the cycle or hold back the watermark. Count
-                        // it and move on, leaving it out of the seen-set so it is retried while it stays
-                        // within the overlap window; the daily sweep is the longer-term backstop.
+                        // A single bad blob must not abort the cycle or hold back the watermark. Record and count
+                        // it and move on, leaving it out of the seen-set so it is retried while it stays within the
+                        // overlap window; past that the reconciliation run and the retry sweep take it over. The failure
+                        // is recorded once per blob version; a failure to record it fails the cycle so the watermark holds.
                         failed++;
                         log.warn("Failed to ingest blob {}; skipping it this cycle: {}",
                                 listing.name(), ex.getMessage(), ex);
+                        if (!lastModified.equals(failureRecorded.get(listing.name()))) {
+                            blobFailures.add(failures.blobFailure(listing, IngestPath.POLL, ex));
+                        }
                     }
                 }
             }
+            failures.recordBlobFailures(blobFailures);
+            blobFailures.forEach(event -> failureRecorded.put(event.subject(), event.blobLastModified()));
             // Final flush before advancing: if it throws, the watermark and seen-set stay put.
             sink.flush();
             ingestedThisCycle.forEach(listing -> recentlyIngested.put(listing.name(), listing.lastModified()));
@@ -213,6 +236,9 @@ public class BlobPollingService {
                 log.error("Poll cycle failed; watermark held at {}: {}", watermark, ex.getMessage(), ex);
             }
         } finally {
+            // A refused blob was read in full, so it was counted as ingested; it is a failed one.
+            ingested -= refused.size();
+            failed += refused.size();
             durationTimer.record(Duration.ofNanos(System.nanoTime() - startNanos));
             meterRegistry.counter("poll.cycles", "outcome", success ? "success" : "failure").increment();
             meterRegistry.counter("poll.blobs.discovered").increment(discovered);
@@ -238,6 +264,7 @@ public class BlobPollingService {
     private void pruneSeen() {
         Instant keepFrom = watermark.minus(pollProperties.overlap());
         recentlyIngested.values().removeIf(lastModified -> lastModified.isBefore(keepFrom));
+        failureRecorded.values().removeIf(lastModified -> lastModified.isBefore(keepFrom));
     }
 
     /**

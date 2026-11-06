@@ -105,8 +105,11 @@ expose `GET /v1/data-sync/backfill/{runId}` returning the run's current status, 
 (at least `RUNNING`, `COMPLETED`, and `FAILED`, serialized in lowercase as `running`, `completed` and
 `failed`), the total number of days in the range, the number of days completed, the date currently
 being processed (while running), cumulative counts of files processed and rows inserted / skipped /
-dropped, the count of days that failed, the dates of the days that failed, and the start and (when
-finished) completion timestamps. A `GET` for a `runId` the service does not know SHALL return a
+dropped, the count of days that failed, the dates of the days that failed, the count of blobs that
+failed to ingest (`failedBlobs`, always present and zero for a run in which no blob failed), and the
+start and (when finished) completion timestamps. Like the run's other counts, `failedBlobs` SHALL
+advance as each failing blob is met within a day. It does not say which blobs failed: they are named in the
+failure ledger (see `data-sync-failures`), which outlives the run. A `GET` for a `runId` the service does not know SHALL return a
 `404`-class error using the `ErrorView` contract.
 
 The failed days SHALL be reported as ISO `yyyy-MM-dd` dates in ascending order — the order in which
@@ -154,7 +157,13 @@ restart SHALL NOT resume automatically, and its `runId` MAY become unknown after
 #### Scenario: A clean run carries no failed-date field
 
 - **WHEN** the caller reads the status of a run in which no day failed
-- **THEN** the response carries no failed-dates member at all, rather than an empty list or a null
+- **THEN** the response carries no failed-dates member at all, rather than an empty list or a null, and
+  `failedBlobs` is `0`
+
+#### Scenario: Failed blobs are counted while the run is in progress
+
+- **WHEN** the day being processed has met two blobs that failed to ingest and the run is still `RUNNING`
+- **THEN** the status reports `failedBlobs` as `2`
 
 #### Scenario: Unknown run id
 
@@ -250,6 +259,17 @@ count observable so the operator can re-run the affected range. A failure while 
 ingestion — resolving its prefix or reading the catalog to set up its write path — SHALL count as that
 day's failure like any other, not abort the run.
 
+Failures SHALL also be isolated per blob within a day. A blob that cannot be opened or read, whose gzip stream
+is invalid, or one of whose records fails to map SHALL NOT stop its day. The service SHALL record the blob's
+failure in the failure ledger (see `data-sync-failures`), count it in the run's `failedBlobs`, and ingest the
+day's remaining blobs. A day in which any blob failed SHALL still count as failed and be named among the
+failed dates, because it is incomplete. Only a failure of the day as a whole SHALL also be recorded as a day
+failure in the failure ledger: a listing failure, a preparation failure, a failed batch insert or ledger write,
+or disk exhaustion. A day failure is retried by the retry sweep. A blob failure is retried, or parked for an
+operator, on its own failure entry. Neither needs the run's in-memory status, so what a run left missing stays
+known after a restart. A day the run never attempted, the remainder after an early stop, is not a failure and
+SHALL NOT be recorded.
+
 The status SHALL further identify **which** days failed, so the operator re-runs those days rather
 than the whole range. The identity of a failed day exists only inside the run and cannot be derived
 from the counts, and a re-run of a whole range to recover a handful of days is redundant listing of days
@@ -288,6 +308,31 @@ rather than working through the range.
 - **WHEN** listing or ingesting one day in the range fails while other days succeed
 - **THEN** the service counts that day as failed, ingests the remaining days, and reaches a terminal
   state reporting the failed-day count
+
+#### Scenario: A bad blob does not stop its day
+
+- **WHEN** one blob of a backfill day cannot be mapped and the day holds other blobs
+- **THEN** the other blobs of that day are ingested, the day is counted and named as failed, `failedBlobs`
+  is incremented, the blob's failure is recorded as parked with the reason `mapping_error`, and no day
+  failure is recorded
+
+#### Scenario: A deterministic bad blob no longer blocks the blobs after it
+
+- **WHEN** a day's blob has a corrupt gzip stream and the operator re-triggers the day's range
+- **THEN** each run ingests every other blob of the day, so no blob listed after the corrupt one is left
+  unattempted
+
+#### Scenario: A failed day is recorded for retry
+
+- **WHEN** a backfill day fails because listing its prefix fails
+- **THEN** the day is named among the failed dates and recorded in the failure ledger as a day failure, which
+  the retry sweep attempts once its backoff has elapsed
+
+#### Scenario: Days left unattempted by an early stop are not recorded
+
+- **WHEN** a run stops on disk exhaustion with days of its range unattempted
+- **THEN** the day refused for lack of space is recorded as a day failure with the reason `storage_full`,
+  and none of the unattempted days are recorded
 
 #### Scenario: A catalog read failure fails the day, not the run
 

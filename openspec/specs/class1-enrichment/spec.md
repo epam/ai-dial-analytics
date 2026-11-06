@@ -853,7 +853,9 @@ as an `object`-typed result does.
 
 A materialize that writes a window SHALL record, against the pipeline it ran for, the position it wrote
 through — the same `(version, identity)` tuple it returns as the caller's next cursor. The record SHALL be
-monotonic: a call SHALL NOT lower it.
+monotonic: a call SHALL NOT lower it. Nor SHALL any other write to the pipeline: a registry change that
+commits while a materialize records its position, such as a `PATCH` of `enabled` alone, SHALL leave the
+recorded position, drained horizon and re-derivation as the materialize wrote them.
 
 ADAS is the writer on this path and the write is synchronous, so this is a fact ADAS observes rather than
 one it is told. When the `INSERT … SELECT` returns, the derived rows are in ClickHouse and the probed

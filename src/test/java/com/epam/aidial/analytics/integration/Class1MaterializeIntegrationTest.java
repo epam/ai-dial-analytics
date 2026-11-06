@@ -13,6 +13,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 
@@ -58,6 +60,9 @@ class Class1MaterializeIntegrationTest extends AbstractClickHouseIntegrationTest
 
     @Autowired
     private PipelineRepository pipelineRepository;
+
+    @Autowired
+    private TransactionTemplate transactions;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -652,6 +657,33 @@ class Class1MaterializeIntegrationTest extends AbstractClickHouseIntegrationTest
         materialize(id, "{\"limit\":10}");
 
         assertThat(pipeline(id).getHistoryRederivedAt()).isNotNull();
+    }
+
+    /**
+     * A save of the entity writes only the columns it changed: a position a materialize records while a flag-only
+     * patch holds the row survives the patch's commit, rather than being overwritten by the position the patch
+     * loaded. The flag does not move {@code generation}, so a position written back stale would read as valid.
+     */
+    @Test
+    void flagOnlySaveKeepsPositionRecordedMeanwhile() throws Exception {
+        seedRow("11111111-1111-1111-1111-111111111111", "2020-01-01 00:00:01.000", "{\"model\":\"gpt-4o\"}");
+        final String id = createSqlPipeline();
+        materialize(id, "{\"limit\":10}");
+        final long loaded = positionOf(id);
+        TransactionTemplate concurrent = new TransactionTemplate(transactions.getTransactionManager());
+        concurrent.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        transactions.executeWithoutResult(status -> {
+            PipelineEntity held = pipelineRepository.findById(id).orElseThrow();
+            concurrent.executeWithoutResult(inner -> pipelineRepository.advanceMaterializedThrough(id, loaded + 1, "z"));
+            held.setEnabled(false);
+            pipelineRepository.saveAndFlush(held);
+        });
+
+        final PipelineEntity saved = pipeline(id);
+        assertThat(saved.isEnabled()).isFalse();
+        assertThat(saved.getMaterializedThroughVersion()).isEqualTo(loaded + 1);
+        assertThat(saved.getMaterializedThroughIdentity()).isEqualTo("z");
     }
 
     @Test

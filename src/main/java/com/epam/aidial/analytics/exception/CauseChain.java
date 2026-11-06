@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.exception;
 
+import java.util.Optional;
 import java.util.function.Predicate;
 
 /**
@@ -29,14 +30,26 @@ public final class CauseChain {
      * @return true if any exception in the chain satisfies {@code match}
      */
     public static boolean anyMatch(Throwable error, Predicate<Throwable> match) {
+        return first(error, match).isPresent();
+    }
+
+    /**
+     * The first exception in {@code error}'s chain, itself included, that satisfies {@code match}, walked as
+     * {@link #anyMatch} walks it.
+     *
+     * @param error the exception to inspect; {@code null} matches nothing
+     * @param match the test applied to each exception in the chain
+     * @return the first match, or empty
+     */
+    public static Optional<Throwable> first(Throwable error, Predicate<Throwable> match) {
         Throwable cause = error;
         for (int depth = 0; cause != null && depth < MAX_DEPTH; depth++) {
             if (match.test(cause)) {
-                return true;
+                return Optional.of(cause);
             }
             Throwable next = cause.getCause();
             cause = next == cause ? null : next;
         }
-        return false;
+        return Optional.empty();
     }
 }

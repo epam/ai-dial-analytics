@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -84,7 +85,7 @@ class RequestDeltaStagesTest {
         row.put("project_id", "p");
         row.put("user_hash", "u");
         row.put("request_body", "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
-        stages.byTable().get("dial_usage_log_payload").prepare(new ArrayList<>(List.of(row))).run();
+        stages.byTable().get("dial_usage_log_payload").prepare(new ArrayList<>(List.of(row))).written(Set.of());
         return row;
     }
 

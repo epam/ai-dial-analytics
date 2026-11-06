@@ -52,7 +52,7 @@ class DataSyncBackfillControllerTest {
         return new BackfillRun.Snapshot(
                 runId, LocalDate.parse("2026-06-01"), LocalDate.parse("2026-06-03"), 3,
                 state, state == BackfillRun.State.RUNNING ? LocalDate.parse("2026-06-02") : null,
-                2, failedDates.size(), failedDates, 4, 20, 1, 0,
+                2, failedDates.size(), failedDates, 4, 20, 1, 0, 0,
                 Instant.parse("2026-06-25T10:00:00Z"),
                 state == BackfillRun.State.RUNNING ? null : Instant.parse("2026-06-25T10:05:00Z"));
     }

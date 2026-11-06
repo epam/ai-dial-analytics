@@ -45,6 +45,20 @@ public class ClickHouseIngestLedger implements IngestLedger {
             + " WHERE startsWith(blob_key, {prefix:String})"
             + " GROUP BY blob_key";
 
+    /** The most keys one keyed read binds. */
+    static final int MAX_KEYS_PER_READ = 1000;
+    /**
+     * The most characters one keyed read's array parameter may hold. The HTTP interface refuses a form field longer than
+     * {@code http_max_field_value_size} (128 KiB by default), so a read of long keys is split well below that.
+     */
+    static final int MAX_PARAMETER_CHARS = 64 * 1024;
+
+    private static final String RECORDED_AMONG_SQL = "SELECT blob_key, toUnixTimestamp64Milli(argMax(blob_last_modified, ingested_at)) AS last_modified_ms,"
+            + " toUnixTimestamp64Milli(max(ingested_at)) AS ingested_at_ms"
+            + " FROM " + TABLE
+            + " WHERE blob_key IN {keys:Array(String)}"
+            + " GROUP BY blob_key";
+
     /** The {@code DateTime64(3)} spelling the row-write path also hands ClickHouse ({@code WriteTimestampNormalizer}). */
     private static final DateTimeFormatter STORAGE = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
 
@@ -57,6 +71,56 @@ public class ClickHouseIngestLedger implements IngestLedger {
             recorded.put(row.getString("blob_key"), Instant.ofEpochMilli(row.getLong("last_modified_ms")));
         }
         return recorded;
+    }
+
+    @Override
+    public Map<String, Recorded> recordedAmong(Collection<String> keys) {
+        Map<String, Recorded> recorded = new HashMap<>();
+        for (List<String> chunk : chunks(keys)) {
+            for (GenericRecord row : writer.query(RECORDED_AMONG_SQL, Map.of("keys", arrayLiteral(chunk)))) {
+                recorded.put(row.getString("blob_key"), new Recorded(
+                        Instant.ofEpochMilli(row.getLong("last_modified_ms")), Instant.ofEpochMilli(row.getLong("ingested_at_ms"))));
+            }
+        }
+        return recorded;
+    }
+
+    /** Splits {@code keys} into reads of at most {@link #MAX_KEYS_PER_READ} keys and about {@link #MAX_PARAMETER_CHARS} characters. */
+    static List<List<String>> chunks(Collection<String> keys) {
+        List<List<String>> chunks = new ArrayList<>();
+        List<String> chunk = new ArrayList<>();
+        long chars = 0;
+        for (String key : keys) {
+            // Quotes, comma and a margin for escapes.
+            long size = key.length() + 8L;
+            if (!chunk.isEmpty() && (chunk.size() >= MAX_KEYS_PER_READ || chars + size > MAX_PARAMETER_CHARS)) {
+                chunks.add(chunk);
+                chunk = new ArrayList<>();
+                chars = 0;
+            }
+            chunk.add(key);
+            chars += size;
+        }
+        if (!chunk.isEmpty()) {
+            chunks.add(chunk);
+        }
+        return chunks;
+    }
+
+    /**
+     * The text form of an {@code Array(String)} query parameter. The client hands a parameter to the server as text, and
+     * a {@link java.util.List}'s own {@code toString} is not ClickHouse's array syntax; each element is quoted with its
+     * backslashes and quotes escaped, so a key is never read as syntax.
+     */
+    static String arrayLiteral(Collection<String> values) {
+        StringBuilder text = new StringBuilder("[");
+        for (String value : values) {
+            if (text.length() > 1) {
+                text.append(',');
+            }
+            text.append('\'').append(value.replace("\\", "\\\\").replace("'", "\\'")).append('\'');
+        }
+        return text.append(']').toString();
     }
 
     @Override

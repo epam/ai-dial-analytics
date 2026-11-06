@@ -21,9 +21,29 @@ does not record — those the poller missed (e.g. during downtime longer than th
 window, or finalization beyond the poller's band) — and skips, and counts, the blobs it does record. It
 records each blob it ingests as soon as that blob's rows are written. The job MUST run in-process and MUST
 NOT be triggerable via an HTTP endpoint in this phase. The scheduler MUST be configured such that a new run
-cannot start while a previous run is still in progress. A run that fails is not retried by a later scheduled
-run, which targets its own day; a failed day is recovered by an operator backfill, which ingests only the
-blobs the failed run did not finish.
+cannot start while a previous run is still in progress.
+
+A failure to ingest a single blob SHALL NOT abort the run. Such failures include:
+- the blob cannot be opened or read;
+- its gzip stream is invalid;
+- mapping one of its records raises an error.
+
+The run SHALL record the blob's failure in the failure ledger (see `data-sync-failures`), count it, and continue
+with the day's remaining blobs. Rows that the failing blob still had buffered SHALL be discarded, unwritten.
+Rows of it that an earlier batch already wrote, because a batch filled while the blob was read, stay written: the
+blob is not recorded in the ingest ledger, and they are collapsed only if the blob is ingested again. A blob whose
+failure is deterministic is parked rather than retried, so until an operator requeues it those rows stay as written.
+
+The run SHALL fail its day only on a day-level fault:
+- listing the prefix fails;
+- preparing the day fails;
+- a batch insert or ingest-ledger write fails;
+- writing a blob's failure event fails.
+
+The run's outcome SHALL be reported as a failure when the day failed or when any of its blobs failed. A day
+that failed SHALL be recorded in the failure ledger. A later scheduled run does not retry it, since that run
+targets its own day. Instead the retry sweep retries the failed day, and an operator backfill can also recover
+it; either way only the blobs the failed run did not finish are ingested.
 
 #### Scenario: Job runs on schedule
 
@@ -51,6 +71,18 @@ blobs the failed run did not finish.
 
 - **WHEN** a reconciliation run fails after some of its writes succeeded
 - **THEN** the blobs whose rows were all written are recorded and the rest are not
+
+#### Scenario: A bad blob does not stop the day
+
+- **WHEN** the third of five blobs under the day's prefix has a corrupt gzip stream
+- **THEN** the run records that blob's failure, ingests and records the other four blobs, reports its outcome
+  as a failure, and does not record a day failure
+
+#### Scenario: A failed day is recorded for retry
+
+- **WHEN** the run cannot list the day's prefix because the store is unreachable
+- **THEN** the day fails and is recorded in the failure ledger as a pending day failure, which the retry sweep
+  attempts once its backoff has elapsed
 
 ### Requirement: Near-real-time polling ingestion
 
@@ -90,9 +122,12 @@ window, and where the ledger has no entry for a blob, correctness under overlap,
 skew, and restarts SHALL still rest on the target table's primary-key deduplication. A failure to ingest a
 single blob (e.g. a corrupt
 file) MUST NOT abort the poll cycle or hold back the watermark: the service SHALL count and skip that
-blob, continue ingesting the remaining blobs, and still advance the watermark, so that one bad blob
-cannot wedge the poller — the skipped blob is not recorded, remains eligible for retry within the overlap
-window and is otherwise recovered by the reconciliation path. A failure to list blobs (e.g. the store is
+blob, record its failure in the failure ledger (see `data-sync-failures`), continue ingesting the remaining
+blobs, and still advance the watermark, so that one bad blob cannot wedge the poller. The skipped blob is not
+recorded in the ingest ledger. It stays eligible for retry within the overlap window, and is otherwise
+recovered by the reconciliation path or by the retry sweep, which keeps retrying it after both of those. A
+failure to write the blob's failure event SHALL fail the cycle like a failed ingest-ledger write, so the
+watermark holds. A failure to list blobs (e.g. the store is
 unreachable) SHALL instead leave the watermark unchanged so the next cycle re-covers the window. The
 poller MUST be controlled by an enable flag, MUST run in-process with no HTTP trigger, and MUST NOT
 allow a new poll cycle to start while a previous one is still in progress.
@@ -128,8 +163,16 @@ allow a new poll cycle to start while a previous one is still in progress.
 
 - **WHEN** one blob in the active prefix fails to ingest (e.g. it is corrupt) while other newer blobs
   are present
-- **THEN** the service counts and skips the failing blob without recording it, ingests the other blobs,
-  and advances the watermark, so the failing blob does not block subsequent ingestion
+- **THEN** the service counts and skips the failing blob without recording it in the ingest ledger, records
+  its failure in the failure ledger, ingests the other blobs, and advances the watermark, so the failing blob
+  does not block subsequent ingestion
+
+#### Scenario: A blob that keeps failing outlives the overlap window
+
+- **WHEN** a blob fails on the poller with a transient error on every cycle until it leaves the overlap
+  window
+- **THEN** the failure ledger holds it as pending, and the retry sweep keeps attempting it with backoff
+  after the poller has stopped considering it
 
 #### Scenario: A listing failure holds the watermark
 
@@ -902,6 +945,12 @@ ingest time would describe a different interval.
 A reported duration of `0` SHALL be stored as `0`, because the producer clamps the measurement at zero and
 an operation rejected before any upstream work legitimately completes inside a millisecond.
 
+The producer reports whole milliseconds. A reported value that is not a whole number of milliseconds, or is not
+a number at all, is a coercion failure rather than a reported duration (see "A value that fails to coerce to its
+column's kind is counted and falls back like an absent one"). It is stored as `0`, like a duration that was not
+reported, and it is counted, so a producer that changed its unit or format shows on the coercion-failure counter
+instead of being silently truncated.
+
 The column is not nullable. When a record carries no duration — which for this field means it was produced
 by a DIAL Core older than the release that introduced it, since the producer emits it unconditionally
 otherwise — the column SHALL take the non-nullable absent/blank fallback and store `0`. "Not reported" is
@@ -920,6 +969,12 @@ implementation detail of the (overridable) default column mapping and is not pin
 
 - **WHEN** a record reports an operation duration of `0`
 - **THEN** the ingested row's `operation_duration_ms` is `0`, not treated as an absent value
+
+#### Scenario: A fractional duration is a counted failure
+
+- **WHEN** a record reports an operation duration of `12.7`
+- **THEN** the ingested row's `operation_duration_ms` is `0`, and the coercion failure is counted for that
+  column
 
 #### Scenario: A record from a producer that does not report the duration
 
@@ -1130,6 +1185,10 @@ same blob. The warning SHALL state the line's length and the configured cap. Eac
 increment the `sync.lines.oversized` counter (scheduled sync and backfill alike), so oversized skips
 can be told apart from malformed ones; both remain part of the skipped-rows count.
 
+A blob with any skipped line SHALL also be recorded in the failure ledger as a `records` subject with the reason
+`skipped_records`, naming the count and the first line numbers of each cause (`data-sync-failures`). Line numbers
+count every line of the decompressed stream from 1, blank lines included.
+
 The cap bounds the raw line buffer, not the memory a line costs. A line just under the cap is held at
 once as its bytes, its decoded string (up to twice the byte count for non-Latin-1 text), its JSON tree,
 its mapped row and its share of the open batch, so one parsing thread needs a small multiple of the
@@ -1145,6 +1204,13 @@ a lone CR does not end a line and stays part of it.
 - **WHEN** a blob contains a line that cannot be parsed as a valid record
 - **THEN** the service logs a warning, increments the skipped-rows count, and continues processing
   the remaining lines and files
+
+#### Scenario: A blob with a bad line is recorded in the failure ledger
+
+- **WHEN** the third line of a blob, after a blank second line, cannot be parsed, and the blob's other records are
+  written
+- **THEN** the blob is recorded in the ingest ledger, and the failure ledger holds a `records` failure for it with
+  the reason `skipped_records` and a message naming one `malformed_line` at line 3
 
 #### Scenario: An oversized line is skipped without being buffered
 
@@ -1239,10 +1305,11 @@ it as such in logs and metrics, naming the target table. Recognition SHALL be by
 error code rather than by matching message text.
 
 A failed batch insert is a **run-level** fault, not the blob-scoped failure the poller isolates (a
-corrupt blob is counted, skipped, and does not hold the watermark): whatever the reason, the run stops
-writing, and a poll cycle leaves its watermark unchanged and records in the ingest ledger only the blobs
-whose rows were all written before the failure, so every other blob it read stays eligible for re-ingest and
-the next cycle retries. Daily ingest therefore resumes on
+corrupt blob is counted, skipped, and does not hold the watermark). The one exception is a data-class refusal, which
+is split by blob ("A batch ClickHouse refuses for its data is split by blob"). For any other failure, disk exhaustion
+included, the run stops writing. A poll cycle then leaves its watermark unchanged and records in the ingest ledger
+only the blobs whose rows were all written before the failure. Every other blob it read stays eligible for
+re-ingest, and the next cycle retries. Daily ingest therefore resumes on
 its own once space is available, with no operator action and no rows lost. Rows an earlier attempt
 already flushed and a retry writes again SHALL collapse on the table's deduplication key rather than
 double-count, exactly as any other re-ingest does.
@@ -1259,8 +1326,8 @@ more.
 
 #### Scenario: The poller holds its watermark and recovers unattended
 
-- **WHEN** a poll cycle's batch insert fails — whether refused for lack of disk space or for any other
-  reason — after one or more blobs have contributed rows
+- **WHEN** a poll cycle's batch insert fails after one or more blobs have contributed rows, whether ClickHouse
+  refused it for lack of disk space or for any other reason that is not a data-class refusal
 - **THEN** the cycle fails without advancing the watermark, the blobs whose rows the failed insert carried
   are not recorded in the ledger, and a later cycle re-ingests them successfully once the write path is
   healthy again
@@ -1268,7 +1335,111 @@ more.
 #### Scenario: Another insert failure keeps its generic treatment
 
 - **WHEN** a batch insert fails for a reason other than error code 243
-- **THEN** the failure is surfaced as an ordinary run-level insert failure, not as disk exhaustion
+- **THEN** the failure is surfaced as an ordinary run-level insert failure, not as disk exhaustion, unless it is a
+  data-class refusal, which is split by blob
+
+### Requirement: A batch ClickHouse refuses for its data is split by blob
+
+When ClickHouse refuses a batch insert with a **data-class** error, the service SHALL split the batch by blob rather
+than fail the flush. A data-class error is one whose numeric server error code is in this closed set:
+
+| Code | Name |
+|------|------|
+| 6    | `CANNOT_PARSE_TEXT` |
+| 25   | `CANNOT_PARSE_ESCAPE_SEQUENCE` |
+| 26   | `CANNOT_PARSE_QUOTED_STRING` |
+| 27   | `CANNOT_PARSE_INPUT_ASSERTION_FAILED` |
+| 38   | `CANNOT_PARSE_DATE` |
+| 41   | `CANNOT_PARSE_DATETIME` |
+| 53   | `TYPE_MISMATCH` |
+| 69   | `ARGUMENT_OUT_OF_BOUND` |
+| 70   | `CANNOT_CONVERT_TYPE` |
+| 72   | `CANNOT_PARSE_NUMBER` |
+| 117  | `INCORRECT_DATA` |
+| 128  | `TOO_LARGE_ARRAY_SIZE` |
+| 130  | `CANNOT_READ_ARRAY_FROM_TEXT` |
+| 131  | `TOO_LARGE_STRING_SIZE` |
+| 321  | `VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE` |
+| 349  | `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` |
+| 376  | `CANNOT_PARSE_UUID` |
+| 407  | `DECIMAL_OVERFLOW` |
+| 441  | `CANNOT_PARSE_DOMAIN_VALUE_FROM_STRING` |
+| 467  | `CANNOT_PARSE_BOOL` |
+| 469  | `VIOLATED_CONSTRAINT` |
+| 563  | `CANNOT_READ_MAP_FROM_TEXT` |
+| 675  | `CANNOT_PARSE_IPV4` |
+| 676  | `CANNOT_PARSE_IPV6` |
+| 691  | `UNKNOWN_ELEMENT_OF_ENUM` |
+
+Recognition SHALL be by the code, never by message text. Every other failure SHALL fail the flush as before,
+including:
+- a transport fault or an unavailable server;
+- a memory limit;
+- too many parts;
+- disk exhaustion.
+
+The split works as follows:
+- The service groups the refused batch's rows by the blob they came from, and splits the set of blobs in halves.
+- It inserts the rows of each half. A half that is accepted is written. A half refused with a data-class error is
+  split again.
+- A single blob whose rows are still refused with a data-class error is **refused**:
+  - its rows are not written;
+  - it is not recorded in the ingest ledger;
+  - its failure is recorded in the failure ledger with the reason `rejected_by_server` (`data-sync-failures`). The
+    message names the target table and the error code and name, and holds no row content.
+- A sub-insert that fails with any error outside the set fails the flush.
+
+A refused blob's rows that the run still holds unwritten, in this table or any other, SHALL be dropped and not
+written. Any further rows read from it SHALL be dropped too. A source row, such as a usage-log row, is therefore
+not written in this run for a blob whose enrichment rows, such as its payload rows, were refused. Rows of the blob
+that earlier batches already wrote stay written, as for any blob that fails part-way. They collapse on the
+deduplication key only if the blob is ingested again; a refused blob is parked, so until an operator requeues it
+those rows stay as written.
+
+The rows a flush stage rewrote, such as a request-delta rewrite, SHALL be split and inserted as rewritten. They
+SHALL NOT be prepared a second time. Before the first sub-insert, though, the stage SHALL be told which blob each row
+belongs to, and every request-delta row whose parent is the row of another blob of the same batch SHALL be re-rooted:
+stored as a chain root, its whole request in canonical form with an all-zero parent and no ancestors. A row linked
+to a row of its own blob keeps that link, since the two are stored or refused together, and its ancestors hint
+follows any re-rooting above it. A row linked to a parent that an earlier flush, the path cache or the payload table
+supplied keeps that link, since its parent is already stored. So no stored row ever names a refused row as its
+parent, whether or not the refused blob is ever ingested again. Re-rooting costs space only, and only on a batch
+ClickHouse refused. The flush stage SHALL also learn which rows were not stored, so the request path of a refused row
+never becomes a parent candidate for later flushes.
+
+Rows that a refused insert partly committed, and that a later sub-insert or retry writes again, collapse on the
+table's deduplication key like any other re-ingest.
+
+#### Scenario: A refused row does not take its batch with it
+
+- **WHEN** a poll cycle flushes a batch holding the rows of 40 blobs, and ClickHouse refuses it with
+  `CANNOT_PARSE_DATETIME` because of one row of one blob
+- **THEN** the rows of the other 39 blobs are written and those blobs are recorded in the ingest ledger, the one
+  blob is parked with the reason `rejected_by_server`, the cycle succeeds, and the watermark advances
+
+#### Scenario: A child is never stored linked to a refused blob's row
+
+- **WHEN** under `sync.request-body-mode=delta` one payload batch holds request A from blob 1 and its follow-up B from
+  blob 2, B is linked to A within the flush, and ClickHouse refuses the batch because of a row of blob 1
+- **THEN** blob 1 is refused, B is stored as a chain root carrying its whole request in canonical form, and no stored
+  row names A's path as its parent
+
+#### Scenario: A refused payload row withholds its blob's usage-log rows
+
+- **WHEN** the payload batch is refused because of one blob's payload row, and that blob's usage-log rows are still
+  buffered
+- **THEN** none of that blob's buffered rows is written in either table, and the blob is parked with the reason
+  `rejected_by_server`
+
+#### Scenario: A non-data failure is not split
+
+- **WHEN** a batch insert fails because the connection to ClickHouse is refused
+- **THEN** the batch is not split, and the flush fails as a run-level fault
+
+#### Scenario: A refused row's request path is not cached
+
+- **WHEN** `sync.request-body-mode` is `delta` and a blob's payload rows are refused
+- **THEN** the request paths of those rows are not offered as parents to the requests of later flushes
 
 ### Requirement: Ingest observability
 
@@ -2001,13 +2172,22 @@ documentation SHALL state that reads requiring exact, duplicate-free results use
 The service SHALL exclude from ingestion any record whose `trace_id` or `core_span_id` is absent or
 blank, because such records would otherwise collapse together under the deduplication key and lose
 data. Each excluded record SHALL be logged and counted in a dropped-rows metric, and its exclusion
-MUST NOT abort ingestion of the remaining records or files.
+MUST NOT abort ingestion of the remaining records or files. A blob with any excluded record SHALL also be recorded
+in the failure ledger as a `records` subject with the reason `skipped_records`. Its message counts such records under
+`missing_dedup_key`, once per record and not once per target, and names their first line numbers
+(`data-sync-failures`).
 
 #### Scenario: Record missing the dedup key is dropped
 
 - **WHEN** a record has an absent or blank `trace_id` or `core_span_id`
 - **THEN** the service does not insert that record, logs it, increments the dropped-rows metric, and
   continues processing the remaining records and files
+
+#### Scenario: A blob with a dropped record is recorded in the failure ledger
+
+- **WHEN** the record on line 12 of a blob has a blank `core_span_id` and two targets match it
+- **THEN** the failure ledger holds a `records` failure for the blob whose message names one `missing_dedup_key` at
+  line 12
 
 ### Requirement: Body columns are captured only by the payload table's mapping
 
@@ -2635,8 +2815,10 @@ surface.
 
 - **WHEN** reading or parsing a blob fails, or a write of rows from the same cycle or day fails before the
   blob's rows are all written
-- **THEN** the ledger holds no entry for that blob; the poller retries it while it stays within its overlap
-  window, a reconciliation run that lists it ingests it, and otherwise an operator backfill recovers it
+- **THEN** the ledger holds no entry for that blob. The poller retries it while it stays within its overlap
+  window, and a reconciliation run that lists it ingests it. If reading or parsing failed, the failure ledger
+  holds the blob's failure, and the retry sweep retries it or parks it for an operator (see
+  `data-sync-failures`). An operator backfill can also recover it
 
 #### Scenario: An empty blob is recorded
 
@@ -2995,6 +3177,22 @@ different settings replaces the stored row with their result.
 - **WHEN** the same record is ingested twice with `sync.inline-files-max-size=0`
 - **THEN** both writes carry identical body values
 
+### Requirement: A record is written for all of its targets or for none
+
+Each parsed record SHALL be mapped by every target before any of its rows is handed to the write path. When the
+match predicate, a transform or a deriver of any target raises an error, no row of that record SHALL be
+written, and the blob fails with a mapping fault.
+
+Writing the rows of the targets mapped before the fault would write a source row without the enrichment row its
+target maps after it. Every reader of the grain join treats the missing row as final. Records of the same blob
+that were mapped before the failing one are complete, and are written as usual.
+
+#### Scenario: A payload mapping fault writes no usage-log row for the record
+
+- **WHEN** the usage-log target maps a record and the payload target's transform then raises an error on it
+- **THEN** neither the usage-log row nor the payload row of that record is written, and the blob's failure is
+  recorded with the reason `mapping_error`
+
 ### Requirement: The request body storage mode is configurable
 
 The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUEST_BODY_MODE`), set to
@@ -3347,8 +3545,8 @@ names its path as parent (see "Rebuild equivalence").
 
 ### Requirement: Cache markers are kept per event
 
-Under `sync.request-body-mode=delta`, every `cache_control` member removed from a chat request's history
-SHALL be recorded in that row's `request_cache_control` as a JSON array of entries, each giving the index
+The service SHALL record, under `sync.request-body-mode=delta`, every `cache_control` member removed from a
+chat request's history in that row's `request_cache_control`, as a JSON array of entries, each giving the index
 of the history element, the location of the member inside that element, and its value verbatim.
 `request_cache_control` SHALL be `NULL` for a request that carried none. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
@@ -3377,12 +3575,12 @@ newest message on each turn, so the same earlier message would otherwise hash di
 
 ### Requirement: A request body that is not a chat request is stored whole
 
-Under either mode, a request body that is not a chat request — an MCP JSON-RPC body, an embeddings request
-(an `input` of strings or token arrays included), a value that does not parse as JSON (including a body
-truncated at 4 MiB), a JSON object naming one member twice, a request whose `request_time` carries a UTC
-offset other than zero (its text day need not be its partition day), or a JSON value of any other shape — SHALL be stored in `request_body` exactly as it is
-stored today, with every request-delta column other than the identity columns at its default. Such a request SHALL
-never be a parent. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
+The service SHALL store a request body that is not a chat request in `request_body` exactly as it is stored
+today, under either mode, with every request-delta column other than the identity columns at its default. Such a
+body is an MCP JSON-RPC body, an embeddings request (an `input` of strings or token arrays included), a value
+that does not parse as JSON (including a body truncated at 4 MiB), a JSON object naming one member twice, a
+request whose `request_time` carries a UTC offset other than zero (its text day need not be its partition day),
+or a JSON value of any other shape. Such a request SHALL never be a parent. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
 content column.
 
 #### Scenario: An MCP body is stored whole
@@ -3400,3 +3598,136 @@ content column.
 - **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`
 - **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, and it is not
   linked to any parent
+
+### Requirement: A value that fails to coerce to its column's kind is counted and falls back like an absent one
+
+The service SHALL read a present source value as its column's extraction kind strictly. A value the kind cannot
+represent SHALL NOT be replaced by an invented value. A present value means one that is neither missing nor
+JSON `null`.
+
+| Kind            | Accepts                                                                                                                         |
+|-----------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `long`          | An integral number that fits a signed 64-bit integer, or text whose trimmed form parses as one.                                 |
+| `double`        | A number, or text whose trimmed form parses as a decimal; the producer's decimal value is preserved exactly.                    |
+| `bool`          | `true` or `false`; the number `0` or `1`; the text `true`, `false`, `0` or `1` in any case, trimmed.                             |
+| `array<string>` | An array. A scalar element is read as its text; an object or array element is read as its JSON text, as the `string` kind does. |
+| `string`        | Any value. A scalar is read as its text; an object or array is read as its JSON text.                                           |
+| `object`        | Any value, carried as it is.                                                                                                    |
+
+Blank text, meaning text that is empty after trimming, SHALL be **absent** for every kind other than `string`
+and `object`. It takes the column's absent/blank fallback and is not a coercion failure.
+
+Reading a number SHALL fail rather than spend unbounded work, or yield a value the column cannot store:
+- text longer than 100 characters, after trimming, SHALL NOT be parsed as a number;
+- a decimal whose exponent is wider than 76 digits either way SHALL NOT be read, because that is beyond the
+  widest ClickHouse `Decimal`;
+- a number that is not finite, such as `1e400`, SHALL NOT be read either.
+
+Each of these is a coercion failure of that field alone. It SHALL NOT fail the record or the blob.
+
+Any other present value is a **coercion failure**. Examples:
+- a fractional number, a boolean, an object or an out-of-range number for `long`;
+- unparseable text for `long` or `double`;
+- any other number or text for `bool`;
+- a scalar or an object for `array<string>`.
+
+A coercion failure SHALL take the column's absent/blank fallback: the configured default; otherwise `null` if
+the column is nullable; otherwise the kind's zero value. A nullable column therefore records the value as
+missing rather than as a false zero. A non-nullable column still inserts safely.
+
+The kind decides what is read, not the column's storage type. A `long` value within the signed 64-bit range is
+read even when the target column is narrower, for example `UInt16`. Out-of-range values are left to the table's
+own type.
+
+The derivers that read a number or a boolean from a present value SHALL apply the same rule and SHALL report a
+failure to the mapping rather than their own fallback:
+- `json-extract-uint`, which also refuses a negative number, since it fills unsigned columns;
+- the HTTP-success predicate, for its `response.status` read;
+- the rate normalizer, for a value that is neither a boolean, an integer, text that parses as one, nor blank
+  text.
+
+A deriver reading several sources takes the first source in which the value is present. When that value is
+unreadable, it is a failure, and later sources SHALL NOT be tried, just as a readable value in an earlier source
+wins over a later one.
+
+A failure SHALL then be counted and fall back against the derived column, as for a mapped column. A deriver's
+documented result for an **absent** value is unchanged. A failure is only a present value that cannot be read.
+For example, the HTTP-success predicate still yields `false` for an absent status, and the length and
+byte-count derivers still yield `0`.
+
+Every coercion failure SHALL increment the counter `sync.values.coercion.failures`, tagged by `table`,
+`column` and `kind`. It is attributed to the target table and column rather than to the ingest path, like the
+inline-file counters, because every path writes through the same mapping.
+
+The service SHALL also log a coercion failure at WARN, naming the table, the column, the kind, the JSON type of
+the producer value and the blob. For a failure a deriver reported, it names `DERIVED` instead of the JSON type,
+since the deriver read the value inside its sources. It SHALL write at most one such line per table and column per minute. The
+first line after a quiet period SHALL carry the number of failures not logged since the previous line. The log
+SHALL NOT include the value itself, since a field mapped as a number can carry arbitrary producer text.
+
+Values are read this way for rows ingested from when the service runs it. Rows already stored keep the values
+the earlier lenient reading gave them, and an operator backfill that includes already-ingested blobs applies
+the strict reading to a range.
+
+#### Scenario: Unreadable text in a nullable long column is stored as null
+
+- **WHEN** a record's `token_usage.prompt_tokens` is the text `"abc"` and `prompt_tokens` is a nullable `long`
+  column with no default
+- **THEN** the row stores `null` for `prompt_tokens`, and `sync.values.coercion.failures{table=dial_usage_log,
+  column=prompt_tokens, kind=long}` is incremented by one
+
+#### Scenario: A fractional number is not truncated into a long column
+
+- **WHEN** a record's `operation_duration_ms` is `12.7` and the column is a non-nullable `long` with no
+  default
+- **THEN** the row stores `0`, the kind's zero, rather than `12`, and the coercion failure is counted
+
+#### Scenario: Numeric text is read as a number
+
+- **WHEN** a record's `token_usage.total_tokens` is the text `" 42 "`
+- **THEN** the row stores `42` and nothing is counted
+
+#### Scenario: Blank text is absent, not a failure
+
+- **WHEN** a record's `token_usage.total_tokens` is the text `""` and the column is nullable
+- **THEN** the row stores `null` and the coercion-failure counter is not incremented
+
+#### Scenario: A decimal price given as text keeps its precision
+
+- **WHEN** a record's `token_usage.price` is the text `"0.000123"`
+- **THEN** the row stores exactly `0.000123`, and nothing is counted
+
+#### Scenario: An unreadable boolean is counted
+
+- **WHEN** a `bool` column's source value is the text `"yes"`
+- **THEN** the column takes its fallback and the coercion failure is counted, rather than the value being
+  stored as `false` silently
+
+#### Scenario: Structured array elements keep their content
+
+- **WHEN** an `array<string>` column's source is `["a", {"k": 1}]`
+- **THEN** the row stores the list `a`, `{"k":1}`, rather than `a` and an empty string
+
+#### Scenario: A scalar for an array column is counted
+
+- **WHEN** an `array<string>` column's source value is the text `"a"`
+- **THEN** the column takes its fallback and the coercion failure is counted
+
+#### Scenario: An unreadable number in a deriver is counted against the derived column
+
+- **WHEN** the value at `usage.completion_tokens_details.reasoning_tokens` that `json-extract-uint` reads for
+  `reasoning_tokens` is the text `"n/a"`
+- **THEN** `reasoning_tokens` takes its fallback rather than `0` from the deriver, and
+  `sync.values.coercion.failures{column=reasoning_tokens, kind=long}` is incremented
+
+#### Scenario: An absent deriver input is not a failure
+
+- **WHEN** a record has no `response.status`
+- **THEN** `success` is `false` as before, and nothing is counted
+
+#### Scenario: Repeated failures are logged once per minute per column
+
+- **WHEN** one thousand records in a minute carry unreadable text in `prompt_tokens`
+- **THEN** one WARN line names the table, column, kind, JSON type and blob without the value, the counter
+  increases by one thousand, and the next line for that column after the minute reports how many were not
+  logged
