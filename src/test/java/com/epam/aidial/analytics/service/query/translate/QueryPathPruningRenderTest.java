@@ -243,6 +243,36 @@ class QueryPathPruningRenderTest {
     }
 
     @Test
+    void lightLatePageReadsLiteralPathsAsSubcolumnsOfTheBareJoin() {
+        // Only light payload paths, all projection-only: the payload is joined for the page's keys as the table itself.
+        final Expr roles = fn("json_extract_array", field(CLAIMS), str("roles"));
+        final String sql = render(rows(WINDOW, List.of(col(field("trace_id"), null), col(EMAIL_PATH, "e"), col(roles, "r")),
+                new OffsetPage(0, 25, false)));
+
+        assertThat(sql).contains("__adas_lm")
+                .containsIgnoringCase("left outer join \"dial_usage_log_payload\" final on")
+                .doesNotContainIgnoringCase("left outer join (select")
+                .contains(SUBCOLUMN)
+                .contains("\"dial_usage_log_payload\".\"jwt_claims\".\"roles\"")
+                .doesNotContain(ALIAS)
+                .doesNotContain("\"dial_usage_log_payload\".\"jwt_claims.roles\"")
+                // Never the whole column: every reference to it is followed by a path segment.
+                .doesNotContainPattern("\"dial_usage_log_payload\"\\.\"jwt_claims\"(?!\\.)");
+    }
+
+    @Test
+    void caseInsensitivePathOnLightLatePageReadsTheWholeColumnOfTheBareJoin() {
+        final String sql = render(rows(WINDOW, List.of(col(field("trace_id"), null),
+                col(fn("json_extract_string_ci", field(CLAIMS), str("Email")), "e")), new OffsetPage(0, 25, false)));
+
+        assertThat(sql).contains("__adas_lm")
+                .containsIgnoringCase("left outer join \"dial_usage_log_payload\" final on")
+                .doesNotContainIgnoringCase("left outer join (select")
+                .contains("toJSONString(\"dial_usage_log_payload\".\"jwt_claims\")")
+                .doesNotContain(ALIAS);
+    }
+
+    @Test
     void countPrunesAsItsFilterReads() {
         final String sql = count(rows(and(WINDOW, cmp(ComparisonOp.EQ, EMAIL_PATH, str("a@b.c"))),
                 List.of(col(field("trace_id"), null)), new OffsetPage(0, 10, true)));

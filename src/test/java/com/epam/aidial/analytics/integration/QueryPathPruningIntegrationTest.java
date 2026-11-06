@@ -182,7 +182,9 @@ class QueryPathPruningIntegrationTest extends AbstractClickHouseIntegrationTest 
                         col(path("json_extract_long", "n"), "n"), col(path("json_extract_double", "r"), "r"),
                         col(path("json_extract_bool", "ok"), "ok"), col(path("json_extract_array", "roles"), "roles"),
                         col(fn("json_extract_string", field(CLAIMS), str("nested"), str("k")), "nk")),
-                null, null, List.of(new SortItem("trace_id", SortDir.ASC, null)), null));
+                // Also sorted on an extractor output, so the payload is read outside the projection and keeps its
+                // derived table: projected alone, the aligned payload would be joined for the page's keys instead.
+                null, null, List.of(new SortItem("trace_id", SortDir.ASC, null), new SortItem("e", SortDir.ASC, null)), null));
     }
 
     @Test

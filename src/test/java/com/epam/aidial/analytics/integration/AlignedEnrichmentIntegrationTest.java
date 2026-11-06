@@ -343,6 +343,18 @@ class AlignedEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest
                 null, null, List.of(new SortItem("trace_id", SortDir.ASC, null)), new OffsetPage(0, 100, false));
     }
 
+    /**
+     * {@link #lookup} also sorted on the session, so the block is not late-materialized and the enrichment keeps its
+     * derived table (a projection-only aligned column is joined for the page's keys instead; see the structured-query
+     * spec's "Projection-only enrichment columns are fetched for the returned page only").
+     */
+    private static StructuredQuery lookupSortedOnSession(FilterNode filter) {
+        final StructuredQuery query = lookup(filter);
+        return new StructuredQuery(SOURCE, filter, QueryMode.ROW, false, query.select(), null, null,
+                List.of(new SortItem("trace_id", SortDir.ASC, null), new SortItem(IDENT + ".session", SortDir.ASC, null)),
+                query.page());
+    }
+
     private static FilterNode eq(String field, String value) {
         return new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr(field), new ValueExpr(ValueType.STRING, value)));
     }
@@ -438,7 +450,7 @@ class AlignedEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest
         seedSessions();
         final QueryEntityModel model = catalog.findModel(SOURCE, Privilege.TABLE_READ).orElseThrow();
         for (final FilterNode filter : List.of(since(YESTERDAY), and(since(YESTERDAY), eq(IDENT + ".session", "s1")))) {
-            final StructuredQuery query = lookup(filter);
+            final StructuredQuery query = lookupSortedOnSession(filter);
             final SelectQuery<Record> transferred = builder.build(renderContext, model, query, StructuredQueryBuilder.MAX_LIMIT);
             final SelectQuery<Record> keyed =
                     builder.withoutWindowTransfer().build(renderContext, model, query, StructuredQueryBuilder.MAX_LIMIT);
@@ -461,7 +473,7 @@ class AlignedEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest
     void windowBesideAnotherSourceConjunctKeepsBothKeySets() throws Exception {
         seedSessions();
         final QueryEntityModel model = catalog.findModel(SOURCE, Privilege.TABLE_READ).orElseThrow();
-        final StructuredQuery query = lookup(and(since(YESTERDAY), eq("trace_id", "t-" + TODAY + "-0")));
+        final StructuredQuery query = lookupSortedOnSession(and(since(YESTERDAY), eq("trace_id", "t-" + TODAY + "-0")));
 
         final SelectQuery<Record> select = builder.build(renderContext, model, query, StructuredQueryBuilder.MAX_LIMIT);
 
