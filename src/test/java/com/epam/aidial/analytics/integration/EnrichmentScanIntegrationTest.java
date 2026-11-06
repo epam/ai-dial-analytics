@@ -112,6 +112,7 @@ class EnrichmentScanIntegrationTest extends AbstractClickHouseIntegrationTest {
             assertThat(log.messagesAt(Level.INFO)).filteredOn(line -> line.startsWith("scan pipeline=")).satisfiesExactly(
                     line -> assertThat(line).contains("pipeline=" + id + " gen=1 rows=1 has_more=false")
                             .contains("query_id=adas-" + id + "-scan-")
+                            .containsPattern("replica=[^-\\s]\\S*$")
                             .doesNotContain("11111111-1111-1111-1111-111111111111")
                             .doesNotContain(cursor),
                     line -> assertThat(line).contains("rows=0").contains("lag_s=-"));

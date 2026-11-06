@@ -9,7 +9,7 @@ import java.time.Duration;
  * {@code openspec/specs/clickhouse-replication/spec.md}.
  *
  * @param discoveryInterval how often the replica set is re-read from {@code system.clusters}; at least 5 seconds
- * @param syncTimeout       the server-side bound of one {@code SYSTEM SYNC … REPLICA}
+ * @param syncTimeout       the server-side bound of one {@code SYSTEM SYNC … REPLICA}; at least 1 second
  */
 @ConfigurationProperties(prefix = "clickhouse.replicas")
 public record ClickHouseReplicasProperties(Duration discoveryInterval, Duration syncTimeout) {
@@ -18,13 +18,11 @@ public record ClickHouseReplicasProperties(Duration discoveryInterval, Duration 
     public static final Duration MIN_DISCOVERY_INTERVAL = Duration.ofSeconds(5);
 
     public ClickHouseReplicasProperties {
-        discoveryInterval = DurationRules.positive("clickhouse.replicas.discovery-interval", discoveryInterval,
-                Duration.ofSeconds(30));
-        if (discoveryInterval.compareTo(MIN_DISCOVERY_INTERVAL) < 0) {
-            throw new IllegalArgumentException("clickhouse.replicas.discovery-interval must be at least "
-                    + MIN_DISCOVERY_INTERVAL.toSeconds() + "s, but was " + discoveryInterval);
-        }
-        syncTimeout = DurationRules.positive("clickhouse.replicas.sync-timeout", syncTimeout, Duration.ofSeconds(30));
+        discoveryInterval = DurationRules.atLeast("clickhouse.replicas.discovery-interval", discoveryInterval,
+                Duration.ofSeconds(30), MIN_DISCOVERY_INTERVAL);
+        // Applied as receive_timeout in whole seconds, so a sub-second bound is refused rather than rounded up.
+        syncTimeout = DurationRules.atLeast("clickhouse.replicas.sync-timeout", syncTimeout, Duration.ofSeconds(30),
+                Duration.ofSeconds(1));
     }
 
     /** The shipped defaults. */

@@ -185,7 +185,7 @@ context: |
   and never in a `Description` cell. A change that adds **no** config property adds **nothing** to
   `docs/configuration.md` — that is what turned it into a 148 KB essay once already. Operator
   knowledge that is neither a property nor capability behaviour gets its own topic doc under `docs/`
-  (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
+  (`clickhouse-server.md`, `clickhouse-replication.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 
   ## Testing
 

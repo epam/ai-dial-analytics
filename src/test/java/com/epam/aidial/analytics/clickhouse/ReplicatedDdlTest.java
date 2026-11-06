@@ -49,6 +49,23 @@ class ReplicatedDdlTest {
     }
 
     @Test
+    void deduplicationSettingsWrittenLastOrInTheMiddleLeaveNoDanglingComma() {
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE IF NOT EXISTS t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id "
+                + "SETTINGS ttl_only_drop_parts = 1, replicated_deduplication_window = 0, "
+                + "replicated_deduplication_window_for_async_inserts = 0"))
+                .isEqualTo("CREATE TABLE IF NOT EXISTS t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS "
+                        + NO_DEDUP + ", ttl_only_drop_parts = 1");
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (id UInt32) ENGINE = MergeTree ORDER BY id SETTINGS "
+                + "index_granularity = 8192, replicated_deduplication_window = 100, storage_policy = 'a,b' COMMENT 'x, y'"))
+                .isEqualTo("CREATE TABLE t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS " + NO_DEDUP
+                        + ", index_granularity = 8192, storage_policy = 'a,b' COMMENT 'x, y'");
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (id UInt32) ENGINE = MergeTree ORDER BY id SETTINGS "
+                + "replicated_deduplication_window = 100 COMMENT 'x'"))
+                .isEqualTo("CREATE TABLE t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS " + NO_DEDUP
+                        + " COMMENT 'x'");
+    }
+
+    @Test
     void renamedTwinStripsTheUuidClause() {
         assertThat(ReplicatedDdl.renamed("CREATE TABLE adas.orders UUID '00000000-0000-4000-8000-000000000001' "
                 + "(`id` UInt32) ENGINE = MergeTree ORDER BY id", "adas", "_adas_replicate_orders"))

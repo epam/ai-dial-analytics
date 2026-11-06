@@ -334,7 +334,7 @@ aggregate `INSERT … SELECT` statements. Which grants it needs depends on which
 | Table catalog schema evolution (`PATCH …/schema`)         | `ALTER TABLE … ADD/DROP/RENAME COLUMN`                                                                                                                               | `ALTER`                                                   |
 | Table catalog delete (`DELETE /v1/tables/{name}`)         | `DROP TABLE`                                                                                                                                                         | `DROP TABLE`                                              |
 | Class-1 materialize and aggregate refresh                 | `INSERT … SELECT` reading the input source **and** every enrichment table the declaration references                                                                 | `INSERT`, `SELECT` on both                                |
-| Startup table conversion (plain tables in a `Replicated` database, migrations enabled) | `CREATE TABLE`, `ALTER TABLE … ATTACH PARTITION ALL FROM` / `MODIFY SETTING`, `EXCHANGE TABLES`, `DROP TABLE`, `SELECT count()` | `CREATE TABLE`, `ALTER`, `SELECT`, `DROP TABLE` |
+| Startup table conversion (plain tables in a `Replicated` database, migrations enabled) | `CREATE TABLE`, `ALTER TABLE … ATTACH PARTITION ALL FROM` / `MODIFY SETTING`, `EXCHANGE TABLES`, `DROP TABLE`, `SELECT count()` | `CREATE TABLE`, `INSERT`, `ALTER`, `SELECT`, `DROP TABLE` |
 | Replica discovery and syncs (pipeline runs, ingest cycles, relayout) | `SELECT … FROM system.clusters`, `SYSTEM SYNC DATABASE REPLICA`, `SYSTEM SYNC REPLICA … LIGHTWEIGHT` | `SELECT ON system.clusters`, `SYSTEM SYNC REPLICA`, `SYSTEM SYNC DATABASE REPLICA` |
 | Enrichment relayout (once per table, after startup)       | `CREATE TABLE`, `INSERT … SELECT`, `EXCHANGE TABLES`, `ALTER TABLE … DROP PARTITION` / `MODIFY TTL` / `MODIFY SETTING` / `RESET SETTING` / `ADD INDEX`, `DROP TABLE` | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`, `DROP TABLE` |
 
@@ -349,8 +349,8 @@ GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>
 GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>
 ```
 
-Without the two `SYSTEM SYNC` grants every pipeline run and every ingest cycle is refused with `503`,
-because each first brings its replica up to date. Without `SELECT ON system.clusters` replica discovery
+Without the two `SYSTEM SYNC` grants every pipeline run and every ingest cycle would be refused with `503`,
+because each first brings its replica up to date, so startup issues both once and fails naming the missing grant. Without `SELECT ON system.clusters` replica discovery
 fails, ADAS logs a WARN, and every statement runs on the primary.
 
 The `system.parts` and `system.data_skipping_indices` grants are not covered by `<database>.*` either: without them the relayout fails with
@@ -379,7 +379,8 @@ aliases, used by `V9__ttl_only_drop_parts` on `dial_usage_log` and `rate_analyti
 `V12__force_merge_settled_partitions` on `dial_usage_log_payload` and `dial_usage_log` and by
 `V14__force_merge_settled_rate_analytics` on `rate_analytics`), plus
 `ALTER DROP COLUMN` for `V11__drop_dial_usage_log_payload_columns`. Each may be narrowed to the three ingest tables instead of
-`<database>.*`. The retention reconciliation after the migrations needs an eighth, `ALTER TTL` (alias
+`<database>.*`. The startup conversion's `MODIFY SETTING` (a replicated table that still deduplicates inserts)
+needs `ALTER SETTINGS` on every table it converts, catalog tables included. The retention reconciliation after the migrations needs an eighth, `ALTER TTL` (alias
 `ALTER MODIFY TTL`), on `dial_usage_log` and `dial_usage_log_payload`, but only on a start where
 `SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` is set and differs from the live `TTL`; it covers both `MODIFY TTL`,
 including the materialization that follows, and `REMOVE TTL` (verified against 26.8.34.13). The `dial_usage_log_payload` line below is **required**, not optional: V12 is the first

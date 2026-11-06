@@ -11,6 +11,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
@@ -110,7 +111,10 @@ class ClickHouseTopologyTest {
 
     @Test
     void changedAnsweringReplicaOnLaterRefreshIsCountedNotFatal() {
-        final ClickHouseTopology topology = topology(new FakeHttp("chi-0", "chi-0", "chi-0", "chi-0", "chi-1"),
+        final String[] answers = new String[ClickHouseTopology.IDENTITY_PROBES + 1];
+        Arrays.fill(answers, "chi-0");
+        answers[ClickHouseTopology.IDENTITY_PROBES] = "chi-1";
+        final ClickHouseTopology topology = topology(new FakeHttp(answers),
                 host -> List.of("10.0.0.1"), row("chi-0", true, true), row("chi-1", false, true));
         topology.startup();
         topology.refresh(false);

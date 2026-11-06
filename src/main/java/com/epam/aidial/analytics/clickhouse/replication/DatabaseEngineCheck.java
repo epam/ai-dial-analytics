@@ -46,7 +46,7 @@ public class DatabaseEngineCheck {
     }
 
     /**
-     * Checks the engine once and remembers the outcome.
+     * Checks the engine and remembers a verified outcome; an unreachable server is asked again on the next call.
      *
      * @throws IllegalStateException when the database is not {@code Replicated}, does not exist, or cannot be reached
      *                               with migrations enabled
@@ -65,8 +65,8 @@ public class DatabaseEngineCheck {
                 log.warn("ClickHouse at {}:{} is unreachable, so the engine of database '{}' could not be checked; "
                         + "starting unverified because clickhouse.migrations.enabled is false", connection.host(),
                         connection.port(), database);
-                outcome = Outcome.UNREACHABLE;
-                return outcome;
+                // Not remembered: ClickHouse may still be starting, and the storage phase asks again later.
+                return Outcome.UNREACHABLE;
             }
             throw new IllegalStateException("Could not check the engine of ClickHouse database '" + database + "'", ex);
         }

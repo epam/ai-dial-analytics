@@ -2,6 +2,9 @@ package com.epam.aidial.analytics.clickhouse;
 
 import com.clickhouse.client.api.ClientFaultCause;
 import com.clickhouse.client.api.ServerException;
+import org.apache.hc.client5.http.ConnectTimeoutException;
+import org.apache.hc.core5.http.ConnectionClosedException;
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 
 import java.net.ConnectException;
@@ -185,6 +188,12 @@ class ClickHouseFailuresTest {
         assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new java.net.ConnectException("refused"))))
                 .isTrue();
         assertThat(ClickHouseFailures.isConnectFailure(new java.net.SocketTimeoutException("read"))).isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectionRequestTimeoutException("lease"))))
+                .as("a pool lease timeout says nothing about the replica").isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectionClosedException("closed"))))
+                .as("a connection dropped mid-response may have run the statement").isFalse();
+        assertThat(ClickHouseFailures.isConnectFailure(new RuntimeException(new ConnectTimeoutException("connect"))))
+                .isTrue();
         assertThat(ClickHouseFailures.isConnectFailure(serverError(242))).isFalse();
     }
 

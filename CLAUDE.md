@@ -82,7 +82,7 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   description, a `Required` column that is `Yes`/`No` or a short condition. Behaviour, rationale and
   cost go to `openspec/specs/<capability>/spec.md`; a change adding no property adds nothing to
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
-  (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
+  (`clickhouse-server.md`, `clickhouse-replication.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
 
 ## Public-repo hygiene

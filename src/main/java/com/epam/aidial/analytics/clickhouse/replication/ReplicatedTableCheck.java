@@ -28,7 +28,8 @@ import java.util.Set;
  * The last step of the storage phase: every table the service owns is a {@code Replicated*MergeTree} with insert
  * deduplication off, or startup fails naming each offender. The owned tables are those the ClickHouse migrations
  * create, the Flyway history table, and every {@code ACTIVE} catalog table. A table the catalog lists but ClickHouse
- * does not have is the existing reconciliation's concern, not this check's.
+ * does not have is the existing reconciliation's concern, not this check's. A table left over from an interrupted
+ * conversion also fails the check, so no instance serves writes until a start with migrations enabled resumes it.
  */
 @Slf4j
 @Component
@@ -62,6 +63,15 @@ public class ReplicatedTableCheck {
             live.put(row.getString("name"), row);
         }
         final List<String> offenders = new ArrayList<>();
+        // A conversion twin means a conversion was cut short. The service must not serve writes past one: the next
+        // start with migrations enabled resumes it from the row counts, which only holds while nothing has written.
+        for (final String table : live.keySet()) {
+            if (table.startsWith(ReplicatedTableConversion.PREFIX)) {
+                offenders.add("'" + table + "' is left over from an interrupted conversion of '"
+                        + table.substring(ReplicatedTableConversion.PREFIX.length())
+                        + "'; a start with clickhouse.migrations.enabled resumes it");
+            }
+        }
         for (final String table : owned) {
             final GenericRecord row = live.get(table);
             if (row == null) {

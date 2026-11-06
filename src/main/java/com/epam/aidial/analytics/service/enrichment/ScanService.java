@@ -145,8 +145,11 @@ public class ScanService {
         return scanned.page();
     }
 
-    /** One scan's page, and how long its statement took ({@code null} when no statement ran). */
-    private record Scanned(ScanPage page, Long statementMs) {}
+    /**
+     * One scan's page, how long its statement took and the replica it ran on (both {@code null} when no statement
+     * ran). The replica is carried out because the outcome line is logged after the run has closed.
+     */
+    private record Scanned(ScanPage page, Long statementMs, String replica) {}
 
     /**
      * The outcome line of a runner scan: the pipeline, its generation, the rows, {@code has_more}, {@code lag_s},
@@ -163,11 +166,11 @@ public class ScanService {
             return;
         }
         final String queryId = scanned.statementMs() == null ? null : StatementTag.current();
-        log.info("scan pipeline={} gen={} rows={} has_more={} lag_s={} statement_ms={} total_ms={} query_id={}",
+        log.info("scan pipeline={} gen={} rows={} has_more={} lag_s={} statement_ms={} total_ms={} query_id={} replica={}",
                 pipelineName, resolved.declaration().generation(), page.rows().size(), page.hasMore(),
                 page.lagSeconds() == null ? "-" : page.lagSeconds(),
                 scanned.statementMs() == null ? "-" : scanned.statementMs(), totalMs,
-                queryId == null ? "-" : queryId);
+                queryId == null ? "-" : queryId, scanned.replica() == null ? "-" : scanned.replica());
     }
 
     private Scanned run(ResolvedEnrichPipeline resolved, String cursor, Integer limit, Instant from, Instant to) {
@@ -184,7 +187,7 @@ public class ScanService {
         if (plan.withholdsEverything()) {
             // An enrichment this read depends on has recorded no usable position, so no row is safely
             // readable yet. An empty page echoing the cursor is the honest answer — rows are late, not absent.
-            return new Scanned(toPage(new ArrayList<>(), source.name(), cursor, effectiveLimit), null);
+            return new Scanned(toPage(new ArrayList<>(), source.name(), cursor, effectiveLimit), null, null);
         }
 
         SelectQuery<Record> select = buildScan(plan, cursorValues, effectiveLimit, from, to);
@@ -195,7 +198,7 @@ public class ScanService {
             List<Map<String, Object>> rows = PipelineReadBudget.run(
                     executor, select, plan.model(), "enrichment scan", readBudget, new StatementTag(pipelineName, "scan"));
             final long statementMs = Elapsed.millisSince(statementStarted);
-            return new Scanned(toPage(rows, source.name(), cursor, effectiveLimit), statementMs);
+            return new Scanned(toPage(rows, source.name(), cursor, effectiveLimit), statementMs, run.replica());
         }
     }
 

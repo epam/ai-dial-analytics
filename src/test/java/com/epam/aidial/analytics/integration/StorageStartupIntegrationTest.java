@@ -97,7 +97,7 @@ class StorageStartupIntegrationTest {
     }
 
     @Test
-    void migrationsDisabledOverReplicatedTablesStartsAndRunsNoScheduledJobBeforeTheGateOpens() {
+    void migrationsDisabledOverReplicatedTablesStartsAndRunsNoScheduledJobBeforeTheGateOpens() throws InterruptedException {
         // Provisioned replicated by a start with migrations enabled, then started again with them disabled.
         try (ConfigurableApplicationContext provisioning = startup("st_enabled", ClickHouseContainerSupport.DATABASE, true)
                 .start()) {
@@ -109,7 +109,7 @@ class StorageStartupIntegrationTest {
             assertThat(context.getBean(StorageReadyGate.class).isOpen()).isTrue();
             final long deadline = System.nanoTime() + 5_000_000_000L;
             while (GateSpy.OBSERVED.isEmpty() && System.nanoTime() < deadline) {
-                MultiReplicaClickHouseSupport.sleep(10);
+                Thread.sleep(10);
             }
         }
         assertThat(GateSpy.OBSERVED).as("the scheduled job ran, and only once the gate was open")

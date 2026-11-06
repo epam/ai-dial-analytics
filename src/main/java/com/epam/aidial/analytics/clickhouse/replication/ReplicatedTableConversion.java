@@ -92,6 +92,7 @@ public class ReplicatedTableConversion {
         final Map<String, Table> tables = tables();
         final List<Table> plain = tables.values().stream()
                 .filter(Table::plain)
+                .filter(table -> !innerTable(table.name()))
                 .filter(table -> !table.name().startsWith(PREFIX))
                 .toList();
         refuseDivergedCopies(plain);
@@ -100,7 +101,9 @@ public class ReplicatedTableConversion {
             if (table.name().startsWith(PREFIX)) {
                 continue;
             }
-            if (table.plain()) {
+            if (table.plain() && innerTable(table.name())) {
+                log.warn("Leaving materialized view storage table '{}' plain: views are not converted", table.name());
+            } else if (table.plain()) {
                 convertWithRetry(table);
             } else if (table.replicated() && !ReplicatedDdl.disablesDeduplication(table.engineFull())) {
                 log.info("Switching insert deduplication off on replicated table '{}'", table.name());
@@ -157,8 +160,9 @@ public class ReplicatedTableConversion {
     /**
      * Resumes or removes an interrupted conversion. A twin beside a plain original was cut short before its exchange:
      * the original still serves, so the twin is dropped and the table converts afresh. A plain twin beside a
-     * replicated original was cut short after its exchange: the counts decide whether to finish (drop the old copy) or
-     * exchange back.
+     * replicated original was cut short after its exchange: the converted table holding at least the old copy's rows
+     * finishes (drops the old copy), fewer exchanges back. Nothing writes in between: the table check refuses to serve
+     * while a twin exists.
      */
     private void resumeLeftovers(Map<String, Table> tables) {
         for (final Table twin : tables.values()) {
@@ -174,11 +178,15 @@ public class ReplicatedTableConversion {
             } else if (original.plain()) {
                 log.info("Removing the twin of an interrupted conversion of '{}' before its exchange", name);
                 ddl("DROP TABLE " + quote(twin.name()));
-            } else if (twin.plain() && count(name) == count(twin.name())) {
+            } else if (twin.plain() && count(name) >= count(twin.name())) {
+                // The table check refuses to serve while a twin exists, so the converted table has taken no writes
+                // since the exchange; at least as many rows as the old copy means nothing was lost.
                 log.info("Finishing an interrupted conversion of '{}' after its exchange", name);
                 ddl("DROP TABLE " + quote(twin.name()));
             } else if (twin.plain()) {
-                log.warn("An interrupted conversion of '{}' left different row counts; exchanging back", name);
+                // Fewer rows (lost in the copy, or collapsed by a merge of the converted table): the old copy is
+                // restored and the table converts afresh below.
+                log.warn("An interrupted conversion of '{}' left fewer rows in the converted table; exchanging back", name);
                 ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin.name()));
                 ddl("DROP TABLE " + quote(twin.name()));
             } else {
@@ -213,12 +221,18 @@ public class ReplicatedTableConversion {
         final long started = System.nanoTime();
         log.info("Converting plain table '{}' ({}) to its replicated form", name, table.engine());
         ddl("DROP TABLE IF EXISTS " + quote(twin));
-        ddl(ReplicatedDdl.toReplicated(ReplicatedDdl.renamed(table.createTableQuery(), connection.sessionDatabase(), twin)));
-        ddl("ALTER TABLE " + quote(twin) + " ATTACH PARTITION ALL FROM " + quote(name));
-        final long before = count(name);
-        if (count(twin) != before) {
-            ddl("DROP TABLE " + quote(twin));
-            return false;
+        try {
+            ddl(ReplicatedDdl.toReplicated(ReplicatedDdl.renamed(table.createTableQuery(), connection.sessionDatabase(), twin)));
+            ddl("ALTER TABLE " + quote(twin) + " ATTACH PARTITION ALL FROM " + quote(name));
+            final long before = count(name);
+            if (count(twin) != before) {
+                ddl("DROP TABLE " + quote(twin));
+                return false;
+            }
+        } catch (RuntimeException ex) {
+            // Before the exchange the original still serves: remove the twin so nothing is left over.
+            dropQuietly(twin);
+            throw ex;
         }
         ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin));
         final long converted = count(name);
@@ -237,6 +251,11 @@ public class ReplicatedTableConversion {
         return true;
     }
 
+    /** A materialized view's implicit storage table ({@code .inner.<view>} / {@code .inner_id.<uuid>}). */
+    private static boolean innerTable(String name) {
+        return name.startsWith(".inner");
+    }
+
     private Map<String, Table> tables() {
         final Map<String, Table> tables = new LinkedHashMap<>();
         for (final GenericRecord row : writer.primaryClient().queryAll(TABLES, Map.of("db", connection.sessionDatabase()))) {
@@ -251,6 +270,14 @@ public class ReplicatedTableConversion {
         final List<GenericRecord> rows = writer.primaryClient().queryAll("SELECT count() AS n FROM " + quote(table),
                 new QuerySettings().serverSetting("final", "0"));
         return rows.isEmpty() ? 0L : rows.getFirst().getLong("n");
+    }
+
+    private void dropQuietly(String table) {
+        try {
+            ddl("DROP TABLE IF EXISTS " + quote(table));
+        } catch (RuntimeException ex) {
+            log.warn("Could not remove conversion twin '{}'; the next start removes it: {}", table, ex.getMessage());
+        }
     }
 
     private void ddl(String statement) {

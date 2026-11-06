@@ -4,12 +4,13 @@ import com.clickhouse.client.api.Client;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClients;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
+import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import lombok.extern.slf4j.Slf4j;
 
 /**
  * The two driver clients of one non-primary replica — the read credential's and the writer credential's — built on
  * first use through {@link ClickHouseClients}, so the transport policy every client shares holds here too. Closed
- * when the replica leaves the discovered set.
+ * when the replica is no longer registered (or moves host); a closed holder answers unavailable.
  */
 @Slf4j
 final class ReplicaClients implements AutoCloseable {
@@ -34,11 +35,13 @@ final class ReplicaClients implements AutoCloseable {
     }
 
     Client read() {
+        requireOpen();
         Client local = read;
         if (local == null) {
             synchronized (this) {
                 local = read;
                 if (local == null) {
+                    requireOpen();
                     local = ClickHouseClients.builder(connection, host, port, connection.user(), connection.password()).build();
                     read = local;
                 }
@@ -48,17 +51,26 @@ final class ReplicaClients implements AutoCloseable {
     }
 
     Client write() {
+        requireOpen();
         Client local = write;
         if (local == null) {
             synchronized (this) {
                 local = write;
                 if (local == null) {
+                    requireOpen();
                     local = ClickHouseClients.builder(connection, host, port, writer.user(), writer.password()).build();
                     write = local;
                 }
             }
         }
         return local;
+    }
+
+    /** Refuses a closed holder as unavailable (503), never as a statement error, and never rebuilds a client. */
+    private void requireOpen() {
+        if (closed) {
+            throw new ClickHouseUnavailableException("ClickHouse replica " + host + " left the routing set", null);
+        }
     }
 
     @Override

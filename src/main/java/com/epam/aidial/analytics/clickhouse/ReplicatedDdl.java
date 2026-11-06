@@ -1,5 +1,7 @@
 package com.epam.aidial.analytics.clickhouse;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -28,7 +30,7 @@ public final class ReplicatedDdl {
     private static final Pattern SETTINGS = Pattern.compile("\\bSETTINGS\\b");
     private static final Pattern COMMENT = Pattern.compile("\\sCOMMENT\\s+'");
     private static final Pattern EXISTING_DEDUP = Pattern.compile(
-            "\\breplicated_deduplication_window(?:_for_async_inserts)?\\s*=\\s*\\d+\\s*,?\\s*");
+            "replicated_deduplication_window(?:_for_async_inserts)?\\s*=");
     private static final Pattern NO_DEDUP = Pattern.compile("\\breplicated_deduplication_window = 0\\b");
     private static final Pattern NO_ASYNC_DEDUP =
             Pattern.compile("\\breplicated_deduplication_window_for_async_inserts = 0\\b");
@@ -116,10 +118,19 @@ public final class ReplicatedDdl {
         final Matcher settings = SETTINGS.matcher(tail);
         if (settings.find()) {
             final String before = tail.substring(0, settings.end());
-            String after = EXISTING_DEDUP.matcher(tail.substring(settings.end())).replaceAll("");
-            after = after.replaceFirst("^\\s*", "");
-            final boolean empty = after.isEmpty() || after.startsWith("COMMENT") || after.startsWith(";");
-            return head + before + " " + NO_INSERT_DEDUPLICATION + (empty ? (after.isEmpty() ? "" : " " + after) : ", " + after);
+            final String after = tail.substring(settings.end());
+            // The settings list runs up to a trailing table COMMENT, if any; it is rebuilt entry by entry so a
+            // deduplication setting written anywhere in it is replaced without leaving a dangling comma.
+            final Matcher comment = COMMENT.matcher(after);
+            final int listEnd = comment.find() ? comment.start() : after.length();
+            final List<String> kept = new ArrayList<>();
+            for (final String entry : topLevelEntries(after.substring(0, listEnd))) {
+                if (!EXISTING_DEDUP.matcher(entry).lookingAt()) {
+                    kept.add(entry);
+                }
+            }
+            return head + before + " " + NO_INSERT_DEDUPLICATION + (kept.isEmpty() ? "" : ", " + String.join(", ", kept))
+                    + after.substring(listEnd);
         }
         final Matcher comment = COMMENT.matcher(tail);
         if (comment.find()) {
@@ -127,6 +138,30 @@ public final class ReplicatedDdl {
                     + tail.substring(comment.start());
         }
         return head + tail + "\nSETTINGS " + NO_INSERT_DEDUPLICATION;
+    }
+
+    /** The comma-separated entries of a {@code SETTINGS} list, trimmed; commas inside quotes or parentheses do not split. */
+    private static List<String> topLevelEntries(String list) {
+        final List<String> entries = new ArrayList<>();
+        boolean quoted = false;
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < list.length(); i++) {
+            final char c = list.charAt(i);
+            if (c == '\'' && (i == 0 || list.charAt(i - 1) != '\\')) {
+                quoted = !quoted;
+            } else if (!quoted && c == '(') {
+                depth++;
+            } else if (!quoted && c == ')') {
+                depth--;
+            } else if (!quoted && depth == 0 && c == ',') {
+                entries.add(list.substring(start, i).trim());
+                start = i + 1;
+            }
+        }
+        entries.add(list.substring(start).trim());
+        entries.removeIf(String::isEmpty);
+        return entries;
     }
 
     /** {@code rest}, which starts with a replicated engine's argument list, without that list. */

@@ -173,6 +173,37 @@ public class ReplicaRouter {
         }
     }
 
+    /**
+     * Issues both sync statements once on the primary, so a writer credential missing the {@code SYSTEM SYNC REPLICA}
+     * or {@code SYSTEM SYNC DATABASE REPLICA} grant fails startup naming it, instead of every ingest cycle and pipeline
+     * run failing later. Any other failure is only logged: the syncs are retried per cycle and per run.
+     *
+     * @param table a table of the session database, synchronized to prove the table-level grant; it may be absent or
+     *              not yet replicated (a fresh install, or before the conversion), because access is checked first
+     * @throws IllegalStateException when the writer credential is denied either statement
+     */
+    public void verifySyncGrants(String table) {
+        final ReplicaTarget primary = topology.primary(ReplicaTarget.Route.PRIMARY);
+        final String database = connection.sessionDatabase();
+        verifyGrant(primary, "SYSTEM SYNC DATABASE REPLICA " + quote(database), "SYSTEM SYNC DATABASE REPLICA", database);
+        verifyGrant(primary, "SYSTEM SYNC REPLICA " + quote(table) + " LIGHTWEIGHT", "SYSTEM SYNC REPLICA", database);
+    }
+
+    private void verifyGrant(ReplicaTarget primary, String statement, String grant, String database) {
+        try {
+            issue(primary, statement);
+        } catch (UnknownTableSkipped skipped) {
+            // The grant is checked before the table is looked up, so a missing table means the grant is held.
+            log.debug("The {} grant is held; the table it was checked on does not exist yet", grant);
+        } catch (RuntimeException ex) {
+            if (ClickHouseFailures.isAccessDenied(ex)) {
+                throw new IllegalStateException("The ClickHouse writer credential lacks the " + grant + " grant: GRANT "
+                        + grant + " ON " + database + ".* TO <writer> (see docs/clickhouse-server.md)", ex);
+            }
+            log.warn("Could not verify the {} grant on the primary: {}", grant, ex.getMessage());
+        }
+    }
+
     private void sync(ReplicaTarget home, SyncPlan plan) {
         final String database = connection.sessionDatabase();
         timed(home, "_database", () -> issue(home, "SYSTEM SYNC DATABASE REPLICA " + quote(database)));

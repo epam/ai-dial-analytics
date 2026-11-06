@@ -14,10 +14,7 @@ import java.time.Duration;
 public record ClickHouseDdlProperties(Duration taskTimeout) {
 
     public ClickHouseDdlProperties {
-        taskTimeout = DurationRules.positive("clickhouse.ddl.task-timeout", taskTimeout, Duration.ofSeconds(30));
-        if (taskTimeout.toSeconds() < 1) {
-            throw new IllegalArgumentException("clickhouse.ddl.task-timeout must be at least 1s, but was " + taskTimeout);
-        }
+        taskTimeout = DurationRules.atLeast("clickhouse.ddl.task-timeout", taskTimeout, Duration.ofSeconds(30), Duration.ofSeconds(1));
     }
 
     /** The shipped default. */

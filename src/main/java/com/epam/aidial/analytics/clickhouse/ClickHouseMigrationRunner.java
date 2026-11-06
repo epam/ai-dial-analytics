@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -102,9 +103,24 @@ public class ClickHouseMigrationRunner {
         log.info("ClickHouse schema migrations complete ({} applied)", applied);
     }
 
+    /**
+     * Pre-creates the history table, but only into a database that is empty or already has it: into a non-empty
+     * database without one, Flyway refuses to migrate ("non-empty schema … without a schema history table"), and an
+     * empty history table created here would bypass that guard and replay every migration over tables provisioned
+     * some other way.
+     */
     private void createHistoryTable(String url) {
         try (Connection connection = DriverManager.getConnection(url, writerProperties.user(), writerProperties.password());
                 Statement statement = connection.createStatement()) {
+            try (ResultSet rows = statement.executeQuery("SELECT countIf(name = '" + HISTORY_TABLE + "') AS history, "
+                    + "countIf(name != '" + HISTORY_TABLE + "') AS others FROM system.tables WHERE database = currentDatabase()")) {
+                rows.next();
+                if (rows.getLong("history") == 0 && rows.getLong("others") > 0) {
+                    log.warn("ClickHouse database holds tables but no {} table; not pre-creating it, so Flyway's "
+                            + "non-empty-schema guard applies", HISTORY_TABLE);
+                    return;
+                }
+            }
             statement.execute(HISTORY_DDL);
         } catch (SQLException ex) {
             throw new IllegalStateException("Could not create the replicated Flyway history table", ex);

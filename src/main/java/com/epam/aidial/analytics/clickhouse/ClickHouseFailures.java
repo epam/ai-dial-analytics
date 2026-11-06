@@ -126,6 +126,9 @@ public final class ClickHouseFailures {
     /** {@code UNKNOWN_TABLE} — a replica behind on DDL does not know a table yet. */
     private static final int UNKNOWN_TABLE = 60;
 
+    /** {@code ACCESS_DENIED}: the credential lacks a grant the statement needs. */
+    private static final int ACCESS_DENIED = 497;
+
     private ClickHouseFailures() {
     }
 
@@ -198,8 +201,12 @@ public final class ClickHouseFailures {
                     || cause instanceof NoRouteToHostException) {
                 return true;
             }
+            // client-v2's ConnectionInitiationException and HttpClient's ConnectTimeoutException; not a pool lease timeout
+            // (ConnectionRequestTimeoutException) or a connection dropped mid-response (ConnectionClosedException), which
+            // say nothing about whether the replica is down.
             final String type = cause.getClass().getSimpleName().toLowerCase();
-            if (type.contains("connect") && !(cause instanceof ServerException)) {
+            if (type.contains("connect") && !type.contains("request") && !type.contains("closed")
+                    && !(cause instanceof ServerException)) {
                 return true;
             }
         }
@@ -218,6 +225,16 @@ public final class ClickHouseFailures {
                     case UNKNOWN_TABLE, UNKNOWN_IDENTIFIER, NO_SUCH_COLUMN_IN_TABLE -> true;
                     default -> false;
                 };
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code ex} carries {@code ACCESS_DENIED}: the credential lacks a grant the statement needs. */
+    public static boolean isAccessDenied(Throwable ex) {
+        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ServerException server && server.getCode() == ACCESS_DENIED) {
+                return true;
             }
         }
         return false;

@@ -128,7 +128,8 @@ at startup and before the migrations run, every table in it that uses a non-repl
 engine. It SHALL find these tables in `system.tables` for the session database, not in a list kept by the
 service. The session database therefore belongs to the service: every `MergeTree`-family table in it is
 converted, the Flyway history table and the relayout's reserved-prefix copies included. Tables of other engine
-families, such as views or dictionaries, are left untouched.
+families, such as views or dictionaries, are left untouched, and so is a materialized view's implicit storage
+table (`.inner.<view>` / `.inner_id.<uuid>`), which its view references by UUID.
 
 Converting one table SHALL take these steps, issued on the primary:
 
@@ -148,7 +149,11 @@ replicated_deduplication_window_for_async_inserts = 0`.
 Every step SHALL leave the database usable. An interruption, or a count mismatch before the exchange, SHALL
 leave the original table in service and remove the twin. A pre-exchange mismatch SHALL be retried once from
 step 1 before the table is given up. A mismatch after the exchange SHALL exchange the two tables back. A later
-start SHALL detect the remains of an interrupted conversion by its reserved prefix and resume or clean it up.
+start SHALL detect the remains of an interrupted conversion by its reserved prefix and resume or clean it up: a
+twin beside a plain table is dropped and the table converted again; a plain twin beside a converted table is
+dropped when the converted table holds at least the twin's rows, and exchanged back otherwise. While any
+reserved-prefix table exists, the startup table check SHALL fail, so no instance serves writes into a table whose
+conversion has not finished and a resume never compares counts a write has moved.
 That prefix SHALL differ from the relayout's. When a table is given up, it stays plain and the startup table
 check then refuses it, naming the table and the reason.
 
@@ -185,6 +190,14 @@ upgrade documentation SHALL require a deploy that stops the previous version bef
 - **WHEN** the service stops after attaching a table's data to its twin and before the exchange
 - **THEN** the original table still serves its data
 - **AND** the next start removes the twin and converts the table again
+
+#### Scenario: A conversion interrupted after its exchange is not served until resumed
+
+- **GIVEN** a start that exchanged `orders_raw` with its twin and failed before dropping the old copy
+- **WHEN** any instance starts, with migrations enabled or not
+- **THEN** with migrations disabled the table check fails naming the leftover twin, and no traffic is served
+- **AND** with migrations enabled the leftover is resolved first, the converted table is kept, and the
+  service starts
 
 #### Scenario: Diverged replicas are not converted
 
@@ -317,8 +330,14 @@ that no routing rule in this specification names SHALL also execute on the prima
 Each ingest cycle SHALL first issue `SYSTEM SYNC REPLICA … LIGHTWEIGHT` on the primary for the ingest ledger and
 for the failure ledger. A replica that has just become the primary may not have fetched every ledger entry yet,
 and without the sync it would re-ingest blobs already recorded. A cycle whose ledger sync fails SHALL be skipped
-and count as a failed cycle, like any other ClickHouse failure of the cycle. The sync is bounded by
+and count as a failed cycle, like any other ClickHouse failure of the cycle. The failure retry sweep SHALL issue the
+same syncs before it reads the ledgers, and skip the sweep when they fail. The sync is bounded by
 `clickhouse.replicas.sync-timeout`.
+
+After replica discovery and before any DDL, the storage phase SHALL issue `SYSTEM SYNC DATABASE REPLICA` and one
+`SYSTEM SYNC REPLICA … LIGHTWEIGHT` on the primary, and SHALL fail startup, naming the missing grant, when the
+writer credential is denied either. A deploy missing a grant therefore fails having changed nothing. Any other
+failure of these checks (a table not yet replicated or not yet created) is logged and startup continues.
 
 Skipping is deliberate, even when the previous primary is down holding ledger entries no other replica has: ingest
 then stays stopped until that replica returns or an operator drops it from the database. A re-ingested row would
@@ -660,8 +679,8 @@ Every pipeline run's log line and trace span SHALL name the replica it ran on.
 The routing keys SHALL be validated at startup, and an invalid value SHALL fail startup:
 
 - `clickhouse.routing.queries` and `clickhouse.routing.pipelines`, each `replicas` or `primary`;
-- `clickhouse.replicas.discovery-interval`, `clickhouse.replicas.sync-timeout` and `clickhouse.ddl.task-timeout`,
-  each a positive duration.
+- `clickhouse.replicas.discovery-interval` at least `5s`, and `clickhouse.replicas.sync-timeout` and
+  `clickhouse.ddl.task-timeout` each at least `1s`.
 
 #### Scenario: An invalid routing value fails startup
 

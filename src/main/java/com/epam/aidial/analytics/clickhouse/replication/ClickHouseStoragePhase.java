@@ -20,6 +20,7 @@ import java.util.Map;
  *   <li>the database-engine check ({@link DatabaseEngineCheck}; normally already run ahead of the PostgreSQL
  *       migrations);</li>
  *   <li>replica discovery, which fails startup when {@code clickhouse.host} reaches several replicas;</li>
+ *   <li>the writer credential's {@code SYSTEM SYNC} grants ({@link ReplicaRouter#verifySyncGrants}), before any DDL;</li>
  *   <li>under the storage-phase lock ({@link StoragePhaseLock}), when {@code clickhouse.migrations.enabled}: the
  *       conversion of plain tables ({@link ReplicatedTableConversion}), the ClickHouse migrations with their
  *       replicated pre-creates ({@link ClickHouseMigrationRunner}) and the retention reconciliation
@@ -45,11 +46,12 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
     private final IngestTtlReconciler ttlReconciler;
     private final ReplicatedTableCheck tableCheck;
     private final StorageReadyGate gate;
+    private final ReplicaRouter router;
     private final boolean migrationsEnabled;
 
     public ClickHouseStoragePhase(DatabaseEngineCheck engineCheck, ClickHouseTopology topology, StoragePhaseLock lock,
             ReplicatedTableConversion conversion, ClickHouseMigrationRunner migrations, IngestTtlReconciler ttlReconciler,
-            ReplicatedTableCheck tableCheck, StorageReadyGate gate,
+            ReplicatedTableCheck tableCheck, StorageReadyGate gate, ReplicaRouter router,
             @Value("${clickhouse.migrations.enabled:true}") boolean migrationsEnabled) {
         this.engineCheck = engineCheck;
         this.topology = topology;
@@ -59,6 +61,7 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
         this.ttlReconciler = ttlReconciler;
         this.tableCheck = tableCheck;
         this.gate = gate;
+        this.router = router;
         this.migrationsEnabled = migrationsEnabled;
     }
 
@@ -71,6 +74,8 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
             return;
         }
         topology.startup();
+        // Before any DDL: a deploy missing the grants fails here having changed nothing, rather than after converting.
+        router.verifySyncGrants(ClickHouseMigrationRunner.HISTORY_TABLE);
         lock.run(() -> {
             Map<String, String> reasons = Map.of();
             if (migrationsEnabled) {

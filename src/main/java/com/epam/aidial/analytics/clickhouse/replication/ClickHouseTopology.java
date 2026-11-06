@@ -17,6 +17,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -55,8 +56,12 @@ import java.util.function.Function;
 @Component
 public class ClickHouseTopology {
 
-    /** Fresh connections the startup identity check opens to {@code clickhouse.host}. */
-    static final int IDENTITY_PROBES = 4;
+    /**
+     * Fresh connections the startup identity check opens to {@code clickhouse.host}. Behind a balancer spreading at
+     * random over two replicas, all of them land on one replica with probability 2^(1-n): 16 makes a missed spread
+     * about 3 in 100000.
+     */
+    static final int IDENTITY_PROBES = 16;
 
     /** The cluster rows the {@code Replicated} database contributes for itself. */
     static final String CLUSTER_ROWS = "SELECT database_replica_name AS name, host_name AS host, is_local AS local, "
@@ -140,7 +145,15 @@ public class ClickHouseTopology {
         }
         final long interval = replicasProperties.discoveryInterval().toMillis();
         refresher = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon().name("clickhouse-topology").factory());
-        refresher.scheduleWithFixedDelay(() -> refresh(false), interval, interval, TimeUnit.MILLISECONDS);
+        // A throwing task would cancel every later run of a fixed-delay schedule, so nothing escapes the refresh.
+        refresher.scheduleWithFixedDelay(() -> {
+            try {
+                refresh(false);
+            } catch (RuntimeException ex) {
+                meters.discovery(false);
+                log.warn("ClickHouse replica discovery failed: {}; keeping the last discovered replica set", ex.getMessage(), ex);
+            }
+        }, interval, interval, TimeUnit.MILLISECONDS);
     }
 
     /** One refresh; {@code startup} turns a spreading primary endpoint into a failure. */
@@ -177,10 +190,13 @@ public class ClickHouseTopology {
         }
         snapshot = new Snapshot(true, primaryName, List.copyOf(replicas));
         excluded.clear();
-        final Set<String> present = new LinkedHashSet<>();
-        replicas.forEach(replica -> present.add(replica.name()));
+        // Clients are kept while the replica stays registered at the same host, even when it is inactive or slow to
+        // answer for one refresh: a run or query already holding its Target keeps working, and a replica that comes
+        // back reuses them. They are closed once the replica is unregistered or moves to another host.
+        final Map<String, String> registeredHosts = new HashMap<>();
+        rows.forEach(row -> registeredHosts.put(row.name(), addressing.address(row.host(), connection.port()).host()));
         clients.entrySet().removeIf(entry -> {
-            if (present.contains(entry.getKey())) {
+            if (entry.getValue().host().equals(registeredHosts.get(entry.getKey()))) {
                 return false;
             }
             entry.getValue().close();

@@ -175,10 +175,20 @@ public class GroupFetchService {
         }
     }
 
-    /** What a group read synchronizes on its home: the source, then every enrichment its model can join. */
+    /**
+     * What a group read synchronizes on its home: the source, then every enrichment one of its columns comes from
+     * (filter, preference, ordering, group key, response and bound columns). An enrichment the call never reads is
+     * not synced, so a replica lagging on it cannot refuse the call.
+     */
     private static SyncPlan syncPlan(Assembly a) {
-        return SyncPlan.of(List.of(a.source()),
-                a.model().enrichments().stream().map(enrichment -> enrichment.table().getName()).toList(), null);
+        Set<String> referenced = new LinkedHashSet<>(a.filter().columns());
+        if (a.prefer() != null) {
+            referenced.addAll(a.prefer().columns());
+        }
+        referenced.addAll(a.bound());
+        referenced.addAll(a.response());
+        referenced.addAll(a.policy());
+        return SyncPlan.of(List.of(a.source()), List.copyOf(EnrichmentJoins.referencedEnrichments(a.model(), referenced)), null);
     }
 
     private GroupPage fetchOnHome(Assembly a, String groupKey, Integer limit) {

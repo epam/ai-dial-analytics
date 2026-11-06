@@ -172,8 +172,11 @@ A deployment already on a `Replicated` database whose ADAS tables are plain `Mer
 - **Watching it.** Each table logs `Converting plain table …` and `Converted … rows in … ms`. Readiness
   stays down, `/v1` answers `503` and scheduled jobs do not run until it finishes. Liveness keeps
   answering, so a long conversion is not killed by a liveness probe.
-- **Leftovers.** An interrupted conversion leaves a `_adas_replicate_` table. The next start removes
-  it, or finishes the exchange it belonged to.
+- **Leftovers.** An interrupted conversion leaves a `_adas_replicate_` table. The next start with
+  migrations enabled removes it, or finishes the exchange it belonged to. Until then every start fails
+  the table check, naming the leftover, so nothing writes into a half-converted table.
+- **Materialized views.** A view's implicit storage table (`.inner.<view>`, `.inner_id.<uuid>`) is left
+  plain, because the view references it by UUID.
 - **Refusal.** When another replica is registered in the database, active or not, and a plain table
   exists, ADAS refuses before any DDL, naming the tables and replicas. The exception is when every
   other replica is reachable and holds no rows of it. Each replica's plain copy holds its own rows,
@@ -216,7 +219,7 @@ the steps below on the server with `clickhouse-client` or over HTTP. `<db>` is t
 
    ```bash
    q() { clickhouse-client -q "$1"; }
-   for t in $(q "SELECT name FROM system.tables WHERE database = '<db>' AND engine LIKE '%MergeTree'"); do
+   for t in $(q "SELECT name FROM system.tables WHERE database = '<db>' AND engine LIKE '%MergeTree' AND engine NOT LIKE 'Replicated%'"); do
      ddl=$(q "SELECT create_table_query FROM system.tables WHERE database = '<db>' AND name = '$t' FORMAT TSVRaw" \
        | sed -E "s/^CREATE TABLE <db>\./CREATE TABLE <db>_replicated./; s/ENGINE = ([A-Za-z]*)MergeTree/ENGINE = Replicated\1MergeTree/; \
                  s/ SETTINGS / SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0, /")

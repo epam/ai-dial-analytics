@@ -21,7 +21,9 @@ act immediately before Flyway applies a pending migration that declares
 from that statement, with the engine replaced by its `Replicated` counterpart and the two deduplication settings
 added to the statement's own settings. The migration's statement then finds the table and does nothing. The
 Flyway history table SHALL likewise be created as a `ReplicatedMergeTree` with the same settings before Flyway
-first reads it, so every replica sees one migration history.
+first reads it, so every replica sees one migration history. It SHALL be pre-created only into a database that is
+empty or already holds it: a database holding other tables but no history table keeps Flyway's own refusal to
+migrate a non-empty schema, instead of replaying every migration over tables provisioned some other way.
 
 A migration written after this requirement SHALL declare its `Replicated*MergeTree` engine and the two
 deduplication settings itself. The migrations SHALL run once for the database: a replica that joins later

@@ -50,7 +50,13 @@ class ClickHouseReplicationPropertiesTest {
                 .hasMessageContaining("clickhouse.replicas.discovery-interval");
         assertThatThrownBy(() -> new ClickHouseReplicasProperties(null, Duration.ZERO))
                 .hasMessageContaining("clickhouse.replicas.sync-timeout");
+        assertThatThrownBy(() -> new ClickHouseReplicasProperties(null, Duration.ofMillis(500)))
+                .hasMessageContaining("clickhouse.replicas.sync-timeout")
+                .hasMessageContaining("at least 1s");
         assertThatThrownBy(() -> new ClickHouseDdlProperties(Duration.ofSeconds(-1)))
                 .hasMessageContaining("clickhouse.ddl.task-timeout");
+        assertThatThrownBy(() -> new ClickHouseDdlProperties(Duration.ofMillis(500)))
+                .hasMessageContaining("clickhouse.ddl.task-timeout")
+                .hasMessageContaining("at least 1s");
     }
 }

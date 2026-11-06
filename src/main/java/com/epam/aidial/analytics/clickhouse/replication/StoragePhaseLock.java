@@ -57,12 +57,24 @@ public class StoragePhaseLock {
         call(connection, "SELECT pg_advisory_lock(?, ?) IS NOT NULL");
     }
 
+    /**
+     * Releases the lock. A session-level advisory lock outlives {@code close()} on a pooled connection, which only
+     * returns it to the pool, so when the unlock fails the physical connection is aborted: closing the session is what
+     * releases the lock for the other instances.
+     */
     private static void unlock(Connection connection) {
         try {
-            call(connection, "SELECT pg_advisory_unlock(?, ?)");
+            if (call(connection, "SELECT pg_advisory_unlock(?, ?)")) {
+                return;
+            }
+            log.warn("The ClickHouse storage-phase lock was not held at release; aborting its connection");
         } catch (SQLException ex) {
-            log.warn("Could not release the ClickHouse storage-phase lock; it is released with its connection: {}",
-                    ex.getMessage());
+            log.warn("Could not release the ClickHouse storage-phase lock; aborting its connection: {}", ex.getMessage());
+        }
+        try {
+            connection.abort(Runnable::run);
+        } catch (SQLException | RuntimeException ex) {
+            log.warn("Could not abort the ClickHouse storage-phase lock's connection: {}", ex.getMessage());
         }
     }
 
