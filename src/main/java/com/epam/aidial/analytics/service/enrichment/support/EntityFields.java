@@ -26,7 +26,9 @@ public record EntityFields(Map<String, Field> byName) {
     /**
      * One resolvable field, and the table it belongs to. The owning table is carried because a
      * refusal must name the enrichment a qualified column came from, and because the sensitive gate
-     * is enforced per table.
+     * is enforced per table. A computed field ({@code ComputedFields}) is an enrichment field whose
+     * {@code column} is a transient descriptor; it is refused by name wherever a declaration would compute
+     * over it.
      *
      * @param enrichment whether the field is reached through the entity's grain join rather than
      *     declared on the base table itself

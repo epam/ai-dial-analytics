@@ -2792,6 +2792,20 @@ stored whole it reads as `NULL`. The same migration SHALL extend the seeded desc
 that under delta storage a chat request is re-serialized without its history's `cache_control` markers and carries
 only its new history, replacing it only while it is still the seeded text.
 
+The payload enrichment's part of the entity schema SHALL also carry two **computed fields**,
+`"dial_usage_log_payload.request_body_full"` (`string`, nullable) and `"dial_usage_log_payload.request_body_rebuild"`
+(`enum` with values `stored`, `rebuilt`, `resolvable`, `partial`, nullable), specified by the data-sync capability ("A rebuilt
+request body is readable beside the stored one"). They SHALL be defined by the service, not by catalog rows: no
+`column_mapping` row and no migration SHALL exist for them, and nothing a catalog row drives — `GET
+/v1/tables/dial_usage_log_payload`, schema `PATCH`, row writes, row policies, grants, catalog export and import,
+relayout and the DDL renderer — SHALL list, accept or act on them. Each SHALL be `heavy`, SHALL be `sensitive`
+when the `request_body` or the `request_cache_control` catalog row is, and SHALL be defined exactly when the
+`request_body` catalog row is present, placed after the enrichment's catalog columns, `request_body_full` first. A
+caller SHALL see them only when it may see every sensitive column among `request_body` and `request_cache_control`,
+so a caller who may see `request_body` but not a sensitive `request_cache_control` sees neither field. Each SHALL carry a fixed description and
+display name, and SHALL be reported `projection_only` (see the query-schema-discovery capability). A computed field
+SHALL be projection-only on every surface: its value is completed after the statement that reads it has run.
+
 **BREAKING**: those five columns SHALL NOT be exposed as columns of `dial_usage_log`. A query naming
 any of them as a bare field of `dial_usage_log` SHALL be rejected as an unknown field, exactly as any
 other undeclared name is.
@@ -2871,6 +2885,30 @@ the API could try to modify (see "Table TTL").
 
 - **WHEN** a caller not entitled to sensitive columns reads the schema of `dial_usage_log`
 - **THEN** `request_cache_control` is not listed, exactly as for the body columns
+
+#### Scenario: The rebuild fields resolve in the entity schema
+
+- **WHEN** `GET /v1/queries/entities/schema/dial_usage_log` is called by a caller entitled to the payload table's
+  sensitive columns
+- **THEN** the schema carries `"dial_usage_log_payload.request_body_full"` typed `string` and
+  `"dial_usage_log_payload.request_body_rebuild"` typed `enum` with `enum_values` `["stored", "rebuilt", "resolvable", "partial"]`,
+  both reported `sensitive: true`, `heavy: true` and `projection_only: true`, after the payload's catalog columns
+
+#### Scenario: A caller without sensitive access does not see the rebuild fields
+
+- **WHEN** a caller not entitled to the payload table's sensitive columns reads the schema of `dial_usage_log`
+- **THEN** neither rebuild field is listed, and a query naming one is rejected as an unknown field
+
+#### Scenario: The table read surface lists stored columns only
+
+- **WHEN** a caller holding `TABLE_GET` reads `GET /v1/tables/dial_usage_log_payload`
+- **THEN** the response lists the catalog columns, `request_body` and `request_cache_control` included, and lists
+  neither rebuild field
+
+#### Scenario: No catalog migration adds the rebuild fields
+
+- **WHEN** the catalog is read after the table-catalog migrations run
+- **THEN** `column_mapping` holds no row for `request_body_full` or `request_body_rebuild`
 
 ### Requirement: An object column is always non-nullable
 

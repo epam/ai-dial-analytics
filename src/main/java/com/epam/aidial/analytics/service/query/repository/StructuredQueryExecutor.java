@@ -6,13 +6,16 @@ import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseBudget;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
+import com.epam.aidial.analytics.clickhouse.StatementTag;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.observability.SqlLog;
 import com.epam.aidial.analytics.observability.trace.LogExecution;
+import com.epam.aidial.analytics.service.query.ComputedField;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
+import com.epam.aidial.analytics.service.query.rebuild.ComputedFieldCompleter;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import lombok.RequiredArgsConstructor;
@@ -71,6 +74,14 @@ public class StructuredQueryExecutor {
     private final DSLContext renderContext;
     private final ClickHouseClientWrapper clickHouse;
     private final RowPolicyFilter rowPolicies;
+    /** Completes the computed fields a statement projects. */
+    private final ComputedFieldCompleter completer;
+
+    /** What a rebuild statement's id is minted from on the query surfaces: {@code adas-query-rebuild-{uuid}}. */
+    static final StatementTag QUERY_REBUILD = new StatementTag("query", "rebuild");
+
+    /** As {@link #QUERY_REBUILD} for a pipeline read that carries no tag of its own: {@code adas-pipeline-rebuild-{uuid}}. */
+    static final StatementTag PIPELINE_REBUILD = new StatementTag("pipeline", "rebuild");
 
     /**
      * Translates and runs {@code query} against the resolved {@code model}.
@@ -112,11 +123,14 @@ public class StructuredQueryExecutor {
         final boolean partitionLocal = model.partitionLocal() && queryBuilder.readsFinal(model, query);
         final QuerySettings settings = rowPolicies.apply(FinalSettings.mergedOver(FinalSettings.userRead(partitionLocal), extra));
         final SelectQuery<Record> select = queryBuilder.build(renderContext, model, query, maxLimit);
-        final String sql = select.getSQL(ParamType.INLINED);
+        final String sql = render(select);
         SqlLog.LOG.debug("Executing structured {} query: {}", model.entity(), sql);
         final long startedAt = System.nanoTime();
         final List<Map<String, Object>> rows = materialize(sql, select, settings);
         final Long totalCount = totalCount(model, query, settings, startedAt);
+        // After the total, not before: the count is part of the read the caller asked for and fails it when it times
+        // out, while a rebuild short of time only degrades its rows to partial — so the count gets the budget first.
+        complete(select, rows, settings, startedAt, ComputedFieldCompleter.Surface.QUERY, null);
         log.debug("Structured {} query returned {} row(s), totalCount={}", model.entity(), rows.size(), totalCount);
         return new QueryResultPage(outputColumns(select), rows, totalCount);
     }
@@ -228,8 +242,10 @@ public class StructuredQueryExecutor {
      * <em>every</em> entity it reads final is partition-local, since one statement carries one setting.
      */
     public QueryResultPage executeComposite(SelectQuery<Record> select, QuerySettings extra, boolean partitionLocal) {
+        // Translation refuses a computed field anywhere in a composite plan, since an enclosing block would read its
+        // stand-in; the render guard in run() asserts it, rather than let a raw tuple reach the caller.
         final QuerySettings settings = rowPolicies.apply(FinalSettings.mergedOver(FinalSettings.userRead(partitionLocal), extra));
-        return new QueryResultPage(outputColumns(select), run(select, settings, "composite"), null);
+        return new QueryResultPage(outputColumns(select), run(select, settings, "composite", ComputedFieldCompleter.Surface.QUERY, null), null);
     }
 
     /**
@@ -245,10 +261,23 @@ public class StructuredQueryExecutor {
     /**
      * As {@link #executeScan(SelectQuery, QuerySettings)} for a statement over {@code model}'s entity, so the
      * read deduplicates inside each partition when the model is partition-local. Every pipeline read holds
-     * the model it rendered its joins from, and this is the overload it should use.
+     * the model it rendered its joins from; one that is tagged ({@code PipelineReadBudget}, the aggregate preview) goes
+     * through {@link #executeScan(SelectQuery, QuerySettings, QueryEntityModel, StatementTag)}.
      */
     public List<Map<String, Object>> executeScan(SelectQuery<Record> select, QuerySettings extra, QueryEntityModel model) {
-        return scan(select, extra, model.partitionLocal());
+        return scan(select, extra, model.partitionLocal(), null);
+    }
+
+    /**
+     * As {@link #executeScan(SelectQuery, QuerySettings, QueryEntityModel)} for a statement run on a pipeline's behalf
+     * under {@code tag} (whose id {@code extra} already carries): every request-body rebuild statement the read's
+     * computed fields cost gets a fresh {@code adas-{pipeline}-{stage}-rebuild-{uuid}} id of its own, so it can be
+     * attributed to the pipeline in {@code system.query_log}. The thread's MDC keeps the triggering statement's id, which
+     * is the one the call's outcome line describes.
+     */
+    public List<Map<String, Object>> executeScan(SelectQuery<Record> select, QuerySettings extra, QueryEntityModel model,
+            StatementTag tag) {
+        return scan(select, extra, model.partitionLocal(), new StatementTag(tag.pipeline(), tag.stage() + "-rebuild"));
     }
 
     /**
@@ -268,17 +297,20 @@ public class StructuredQueryExecutor {
      * overloads survive as the escape hatch for a statement that genuinely has no entity in hand.
      */
     public List<Map<String, Object>> executeScan(SelectQuery<Record> select, QuerySettings extra) {
-        return scan(select, extra, false);
+        return scan(select, extra, false, null);
     }
 
-    private List<Map<String, Object>> scan(SelectQuery<Record> select, QuerySettings extra, boolean partitionLocal) {
-        return run(select, FinalSettings.pipelineRead(extra, partitionLocal), "scan");
+    private List<Map<String, Object>> scan(SelectQuery<Record> select, QuerySettings extra, boolean partitionLocal, StatementTag rebuild) {
+        return run(select, FinalSettings.pipelineRead(extra, partitionLocal), "scan", ComputedFieldCompleter.Surface.PIPELINE, rebuild);
     }
 
-    private List<Map<String, Object>> run(SelectQuery<Record> select, QuerySettings settings, String kind) {
-        final String sql = select.getSQL(ParamType.INLINED);
+    private List<Map<String, Object>> run(SelectQuery<Record> select, QuerySettings settings, String kind,
+            ComputedFieldCompleter.Surface surface, StatementTag rebuild) {
+        final String sql = render(select);
         SqlLog.LOG.debug("Executing {} query: {}", kind, sql);
+        final long startedAt = System.nanoTime();
         final List<Map<String, Object>> rows = materialize(sql, select, settings);
+        complete(select, rows, settings, startedAt, surface, rebuild);
         log.debug("{} query returned {} row(s)", kind, rows.size());
         return rows;
     }
@@ -291,9 +323,10 @@ public class StructuredQueryExecutor {
      * every projected column is seeded to null and the record's actual (non-null,
      * {@link #normalize normalized}) values overwrite the seeds. (Null cells survive serialization via the
      * JsonMapper's ALWAYS content inclusion.)
+     *
+     * <p>A computed field's stand-in cells are left as they are here and replaced afterwards by {@link #complete}.
      */
-    private List<Map<String, Object>> materialize(
-            String sql, SelectQuery<Record> select, QuerySettings settings) {
+    private List<Map<String, Object>> materialize(String sql, SelectQuery<Record> select, QuerySettings settings) {
         final List<String> outputColumns = outputColumns(select);
         final List<Map<String, Object>> rows = new ArrayList<>();
         for (final GenericRecord record : clickHouse.query(sql, settings)) {
@@ -303,6 +336,44 @@ public class StructuredQueryExecutor {
             rows.add(row);
         }
         return rows;
+    }
+
+    /**
+     * Completes the computed fields {@code select} projects in {@code rows} (see {@link ComputedFieldCompleter}). Every
+     * read the service runs passes here once its own statements are done, which is why a computed field is completed
+     * here and nowhere else. Each rebuild statement runs under {@code settings} with what is left of their wall-clock
+     * ceiling since {@code startedAt}, and is not issued once less than a second is left
+     * ({@link ClickHouseBudget#remainingTimeIfAny}): the rebuild shares the read's ceiling rather than earning a fresh
+     * floor per statement. The settings never carry the triggering statement's query id: each statement carries a fresh
+     * id of its own, minted from {@code rebuild} for a tagged pipeline read and otherwise from {@link #QUERY_REBUILD} or
+     * {@link #PIPELINE_REBUILD}, so every rebuild statement can be found in {@code system.query_log}.
+     */
+    private void complete(SelectQuery<Record> select, List<Map<String, Object>> rows, QuerySettings settings, long startedAt,
+            ComputedFieldCompleter.Surface surface, StatementTag rebuild) {
+        final List<ComputedFieldCompleter.Slot> slots = ComputedFieldCompleter.slots(select.getSelect());
+        if (!slots.isEmpty()) {
+            final StatementTag tag = rebuild != null ? rebuild
+                    : surface == ComputedFieldCompleter.Surface.QUERY ? QUERY_REBUILD : PIPELINE_REBUILD;
+            completer.complete(slots, rows, () -> {
+                final QuerySettings left = ClickHouseBudget.remainingTimeIfAny(settings, Duration.ofNanos(System.nanoTime() - startedAt));
+                if (left == null) {
+                    return null;
+                }
+                // remainingTime hands back the caller's own object when there was nothing to reduce or drop; never tag that.
+                final QuerySettings tagged = left == settings ? FinalSettings.mergedOver(new QuerySettings(), left) : left;
+                tagged.setQueryId(tag.mint());
+                return tagged;
+            }, surface);
+        }
+    }
+
+    /**
+     * {@code select} inlined, as every statement here runs, under the stand-in guard ({@link ComputedField#render}): a
+     * computed field's stand-in may render only as one of the select entries {@link #complete} replaces, so a clause
+     * that slipped past translation fails the read here instead of computing over the stand-in.
+     */
+    private static String render(SelectQuery<Record> select) {
+        return ComputedField.render(() -> select.getSQL(ParamType.INLINED), ComputedFieldCompleter.slots(select.getSelect()).size());
     }
 
     /** The statement's projected column names, in order — the key set {@link #materialize} gives every row. */
@@ -325,7 +396,7 @@ public class StructuredQueryExecutor {
         }
         if (query.page() instanceof OffsetPage offset && offset.includeTotal()) {
             final SelectQuery<Record> countQuery = queryBuilder.buildCount(renderContext, model, query);
-            final String countSql = countQuery.getSQL(ParamType.INLINED);
+            final String countSql = render(countQuery);
             final Duration elapsed = Duration.ofNanos(System.nanoTime() - startedAt);
             final List<GenericRecord> result =
                     clickHouse.query(countSql, ClickHouseBudget.remainingTime(settings, elapsed));
