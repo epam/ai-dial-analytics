@@ -259,6 +259,9 @@ abstract class AbstractClickHouseIntegrationTest {
                             .setUsername(container.getUsername())
                             .setPassword(container.getPassword())
                             .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
+                            // As the production row-inserting clients do: the server's async_insert default
+                            // would hold every fixture INSERT for the async flush's busy timeout.
+                            .serverSetting("async_insert", "0")
                             .build();
                     writeClient = local;
                 }

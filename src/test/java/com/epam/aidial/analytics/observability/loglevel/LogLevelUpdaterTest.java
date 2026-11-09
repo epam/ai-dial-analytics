@@ -11,6 +11,7 @@ import org.springframework.boot.logging.LogLevel;
 import org.springframework.boot.logging.LoggerConfiguration;
 import org.springframework.boot.logging.LoggingSystem;
 
+import java.lang.ref.Reference;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
@@ -280,9 +281,14 @@ class LogLevelUpdaterTest {
     }
 
     private LogLevel effective(String name) {
-        // Resolving the logger makes it known to the context, as a class using it would.
-        LogManager.getLogger(name);
-        return Objects.requireNonNull(loggingSystem.getLoggerConfiguration(name)).getEffectiveLevel();
+        // Resolving the logger makes it known to the context, as a class using it would. The context holds it weakly,
+        // so it is kept reachable until the lookup is done, or a collection in between leaves nothing to look up.
+        final Object logger = LogManager.getLogger(name);
+        try {
+            return Objects.requireNonNull(loggingSystem.getLoggerConfiguration(name)).getEffectiveLevel();
+        } finally {
+            Reference.reachabilityFence(logger);
+        }
     }
 
     private List<String> messages() {
