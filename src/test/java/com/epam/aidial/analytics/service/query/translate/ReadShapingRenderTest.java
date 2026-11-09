@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,6 +64,10 @@ class ReadShapingRenderTest {
     private static final String EMAIL = "usage_client_identity.user_email";
     private static final String KIND = "usage_client_identity.client_kind";
     private static final String TRACES = "usage_client_identity.traces";
+    private static final String SESSION_ID = "usage_session.session_id";
+    private static final String TITLE = "trace_summary.title";
+    private static final String DUMP = "raw_dump.blob";
+    private static final OffsetPage PAGE_25 = new OffsetPage(0, 25, false);
 
     private final DSLContext ctx = new QueryDslConfiguration().clickhouseRenderContext();
     private final StructuredQueryBuilder builder = newBuilder();
@@ -73,6 +78,11 @@ class ReadShapingRenderTest {
     }
 
     private static QueryEntityModel model() {
+        return model(false);
+    }
+
+    /** The test model, its enrichments in reverse order when {@code reversed}: the catalog does not fix that order. */
+    private static QueryEntityModel model(boolean reversed) {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         bind(bindings, "event_id", "dial_usage_log", "event_id", QueryFieldType.UUID, false);
         bind(bindings, "request_time", "dial_usage_log", "request_time", QueryFieldType.TIMESTAMP, false);
@@ -86,6 +96,9 @@ class ReadShapingRenderTest {
         bind(bindings, EMAIL, "usage_client_identity", "user_email", QueryFieldType.STRING, false);
         bind(bindings, KIND, "usage_client_identity", "client_kind", QueryFieldType.ENUM, false);
         bind(bindings, TRACES, "usage_client_identity", "traces", QueryFieldType.STRING, true);
+        bind(bindings, SESSION_ID, "usage_session", "session_id", QueryFieldType.STRING, false);
+        bind(bindings, TITLE, "trace_summary", "title", QueryFieldType.STRING, false);
+        bind(bindings, DUMP, "raw_dump", "blob", QueryFieldType.STRING, true);
 
         final EnrichmentJoin payload = EnrichmentJoin.keyed(DSL.table(DSL.name(PAYLOAD)),
                 DSL.field(DSL.name("dial_usage_log", "event_id")), DSL.field(DSL.name(PAYLOAD, "event_id")),
@@ -94,8 +107,26 @@ class ReadShapingRenderTest {
         final EnrichmentJoin identity = EnrichmentJoin.keyed(DSL.table(DSL.name("usage_client_identity")),
                 DSL.field(DSL.name("dial_usage_log", "event_id")),
                 DSL.field(DSL.name("usage_client_identity", "event_id")), null, null, Set.of(EMAIL, KIND, TRACES), null);
+        // Aligned on the payload's keys, light columns only.
+        final EnrichmentJoin session = EnrichmentJoin.keyed(DSL.table(DSL.name("usage_session")),
+                DSL.field(DSL.name("dial_usage_log", "event_id")), DSL.field(DSL.name("usage_session", "event_id")),
+                DSL.field(DSL.name("dial_usage_log", "request_time")), DSL.field(DSL.name("usage_session", "request_time")),
+                Set.of(SESSION_ID), null);
+        // Aligned on the source's partition column, but keyed on another source grain key.
+        final EnrichmentJoin summary = EnrichmentJoin.keyed(DSL.table(DSL.name("trace_summary")),
+                DSL.field(DSL.name("dial_usage_log", "trace_id")), DSL.field(DSL.name("trace_summary", "trace_id")),
+                DSL.field(DSL.name("dial_usage_log", "request_time")), DSL.field(DSL.name("trace_summary", "request_time")),
+                Set.of(TITLE), null);
+        // A heavy column on a join whose grain-key fields the model does not know.
+        final EnrichmentJoin dump = new EnrichmentJoin(DSL.table(DSL.name("raw_dump")),
+                DSL.field(DSL.name("dial_usage_log", "trace_id")).eq(DSL.field(DSL.name("raw_dump", "trace_id"))),
+                null, null, null, null, Set.of(DUMP), null);
+        final List<EnrichmentJoin> joins = new ArrayList<>(List.of(payload, identity, session, summary, dump));
+        if (reversed) {
+            Collections.reverse(joins);
+        }
         return new QueryEntityModel("dial_usage_log", DSL.table(DSL.name("dial_usage_log")), bindings,
-                List.of(payload, identity), List.of(), null, true, true);
+                List.copyOf(joins), List.of(), null, true, true);
     }
 
     private static void bind(Map<String, QueryFieldBinding> bindings, String flatName, String table, String col,
@@ -105,7 +136,11 @@ class ReadShapingRenderTest {
     }
 
     private String render(StructuredQuery query) {
-        return builder.build(ctx, model(), query, StructuredQueryBuilder.MAX_LIMIT).getSQL(ParamType.INLINED);
+        return renderOn(model(), query);
+    }
+
+    private String renderOn(QueryEntityModel model, StructuredQuery query) {
+        return builder.build(ctx, model, query, StructuredQueryBuilder.MAX_LIMIT).getSQL(ParamType.INLINED);
     }
 
     private String unshaped(StructuredQuery query) {
@@ -357,6 +392,176 @@ class ReadShapingRenderTest {
         assertThat(composite).isEqualTo(unshaped(query)).doesNotContainIgnoringCase("__adas");
         assertThat(nested).doesNotContainIgnoringCase("__adas");
         assertThat(compositePushable).isEqualTo(unshaped(pushable)).doesNotContainIgnoringCase("__adas");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // A2. Late materialization of light columns of an aligned enrichment
+
+    private static StructuredQuery newestPage(List<OutputColumn> select) {
+        return row(WINDOW, select, newestFirst(), PAGE_25);
+    }
+
+    private static StructuredQuery headerPage() {
+        return newestPage(List.of(col(field("request_time")), col(field(TAGS)), col(field("trace_id"))));
+    }
+
+    /** The {@code ON} restriction a late join on {@code table}'s {@code (event_id, request_time)} carries. */
+    private static String pageKeyed(String table) {
+        return "(\"" + table + "\".\"event_id\", \"" + table + "\".\"request_time\") in (select \"__adas_lm_key\"";
+    }
+
+    @Test
+    void headerPageJoinsThePayloadForThePageKeys() {
+        final String sql = render(headerPage());
+
+        assertThat(sql)
+                .containsIgnoringCase("left outer join \"dial_usage_log_payload\" final on ((\"dial_usage_log\".\"event_id\""
+                        + " = \"dial_usage_log_payload\".\"event_id\") and (\"dial_usage_log\".\"request_time\""
+                        + " = \"dial_usage_log_payload\".\"request_time\") and " + "(" + pageKeyed(PAYLOAD))
+                .containsIgnoringCase("(((\"dial_usage_log\".\"event_id\", \"dial_usage_log\".\"request_time\") in (select")
+                .containsIgnoringCase("\"dial_usage_log\".\"event_id\" is null")
+                .containsIgnoringCase("\"dial_usage_log\".\"request_time\" is null")
+                // The sort names the projected request_time, so it resolves to that output in both statements.
+                .endsWithIgnoringCase("order by \"request_time\" desc limit 25 offset 0");
+        final List<String> keys = pageKeySubqueries(sql);
+        assertThat(keys).hasSize(2);
+        assertThat(keys.get(0)).isEqualTo(keys.get(1))
+                .doesNotContainIgnoringCase(PAYLOAD)
+                .containsIgnoringCase("\"dial_usage_log\".\"request_time\" \"request_time\"")
+                .containsIgnoringCase("\"dial_usage_log\".\"request_time\" >=")
+                .containsIgnoringCase("order by \"request_time\" desc limit 25");
+        // No derived payload table, and no window transferred onto it either.
+        assertThat(sql).doesNotContainIgnoringCase("\"dial_usage_log_payload\".\"request_time\" >=");
+    }
+
+    @Test
+    void filteredLightColumnKeepsTodaysJoin() {
+        final FilterNode conversation = cmp(ComparisonOp.EQ, fn("json_extract_string", field(TAGS), str("conversation_id")),
+                str("c1"));
+        final StructuredQuery query = row(and(WINDOW, conversation), List.of(col(field("trace_id")), col(field(TAGS))),
+                newestFirst(), PAGE_25);
+        final String sql = render(query);
+
+        assertThat(sql).doesNotContainIgnoringCase("__adas_lm").containsIgnoringCase("\"dial_usage_log_payload\".\"request_time\" >=");
+        // Nothing else of the read shaping applies to this block either, so it is the unshaped statement.
+        assertThat(sql).isEqualTo(unshaped(query));
+    }
+
+    @Test
+    void sortedLightColumnKeepsTodaysJoin() {
+        final List<StructuredQuery> queries = List.of(
+                row(WINDOW, List.of(col(field("trace_id")), col(field(NOTE))), List.of(new SortItem(NOTE, SortDir.ASC, null)),
+                        PAGE_25),
+                row(WINDOW, List.of(col(field("trace_id")), col(fn("lower", field(NOTE)), "n")),
+                        List.of(new SortItem("n", SortDir.ASC, null)), PAGE_25));
+        for (final StructuredQuery query : queries) {
+            assertThat(render(query)).as(query.toString()).doesNotContainIgnoringCase("__adas_lm");
+        }
+
+        // Beside a projection-only heavy column of another enrichment on the same keys, only the heavy one is late.
+        final String sql = render(row(WINDOW, List.of(col(field(BODY)), col(field(SESSION_ID))),
+                List.of(new SortItem(SESSION_ID, SortDir.ASC, null)), PAGE_25));
+        final List<String> keys = pageKeySubqueries(sql);
+        assertThat(keys).hasSize(2);
+        assertThat(keys.getFirst()).containsIgnoringCase("usage_session").doesNotContainIgnoringCase(PAYLOAD);
+        assertThat(sql).containsIgnoringCase(pageKeyed(PAYLOAD)).doesNotContainIgnoringCase(pageKeyed("usage_session"));
+    }
+
+    @Test
+    void lightColumnOfAnUnalignedEnrichmentKeepsTodaysJoin() {
+        assertThat(render(newestPage(List.of(col(field("trace_id")), col(field(EMAIL))))))
+                .doesNotContainIgnoringCase("__adas_lm");
+    }
+
+    @Test
+    void heavyAndLightEnrichmentsOnTheSameKeysShareOnePage() {
+        for (final List<OutputColumn> select : List.of(
+                List.of(col(field("trace_id")), col(field(BODY)), col(field(SESSION_ID))),
+                List.of(col(field("trace_id")), col(field(TAGS)), col(field(SESSION_ID))))) {
+            final String sql = render(newestPage(select));
+            final List<String> keys = pageKeySubqueries(sql);
+            assertThat(keys).as(select.toString()).hasSize(3);
+            assertThat(Set.copyOf(keys)).hasSize(1);
+            assertThat(keys.getFirst()).doesNotContainIgnoringCase(PAYLOAD).doesNotContainIgnoringCase("usage_session");
+            assertThat(sql).containsIgnoringCase(pageKeyed(PAYLOAD)).containsIgnoringCase(pageKeyed("usage_session"));
+        }
+    }
+
+    @Test
+    void lightEnrichmentOnAnotherGrainKeyDoesNotDisqualifyThePage() {
+        for (final List<OutputColumn> select : List.of(
+                List.of(col(field("trace_id")), col(field(BODY)), col(field(TITLE))),
+                List.of(col(field("trace_id")), col(field(TAGS)), col(field(TITLE))))) {
+            final String sql = render(newestPage(select));
+            assertThat(pageKeySubqueries(sql)).as(select.toString()).hasSize(2);
+            assertThat(sql).containsIgnoringCase(pageKeyed(PAYLOAD))
+                    .containsIgnoringCase("\"trace_summary\"")
+                    .doesNotContainIgnoringCase("(\"trace_summary\".\"trace_id\", \"trace_summary\".\"request_time\") in (select \"__adas_lm");
+        }
+    }
+
+    @Test
+    void lightOnlyPageKeysOnWhatItDefersWhateverTheEnrichmentOrder() {
+        for (final boolean reversed : new boolean[] {false, true}) {
+            // A whole document outranks a scalar: the payload's keys, whichever enrichment comes first.
+            final StructuredQuery document = newestPage(List.of(col(field("event_id")), col(field(TITLE)), col(field(TAGS))));
+            final String sql = renderOn(model(reversed), document);
+            assertThat(sql).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD))
+                    .doesNotContainIgnoringCase("(\"trace_summary\".\"trace_id\", \"trace_summary\".\"request_time\") in (select \"__adas_lm");
+            assertThat(pageKeySubqueries(sql).getFirst()).containsIgnoringCase("\"dial_usage_log\".\"event_id\" \"__adas_lm_key\"");
+
+            // More deferred columns outrank fewer: note and status_code of the payload over one trace_summary title.
+            final StructuredQuery scalars = newestPage(List.of(col(field(TITLE)), col(field(NOTE)), col(field(STATUS))));
+            assertThat(renderOn(model(reversed), scalars)).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD));
+
+            // A tie goes to the grain key's name: event_id before trace_id.
+            final StructuredQuery tie = newestPage(List.of(col(field(TITLE)), col(field(NOTE))));
+            assertThat(renderOn(model(reversed), tie)).as("reversed=" + reversed).containsIgnoringCase(pageKeyed(PAYLOAD));
+        }
+    }
+
+    @Test
+    void lightOnlyPageTakesItsKeysFromItsOnlyLightCandidate() {
+        // trace_summary is the only late enrichment, so its own grain key (trace_id, not unique) keys the page.
+        final String sql = render(newestPage(List.of(col(field("event_id")), col(field(TITLE)))));
+
+        final List<String> keys = pageKeySubqueries(sql);
+        assertThat(keys).hasSize(2);
+        assertThat(keys.getFirst()).containsIgnoringCase("\"dial_usage_log\".\"trace_id\" \"__adas_lm_key\"")
+                .containsIgnoringCase("\"dial_usage_log\".\"request_time\" \"__adas_lm_part\"")
+                .doesNotContainIgnoringCase("trace_summary");
+        assertThat(sql).containsIgnoringCase("(\"trace_summary\".\"trace_id\", \"trace_summary\".\"request_time\") in (select \"__adas_lm_key\"")
+                .containsIgnoringCase("((\"dial_usage_log\".\"trace_id\", \"dial_usage_log\".\"request_time\") in (select");
+    }
+
+    @Test
+    void lightOnlyShapesWhosePageCannotBeChosenFirstKeepTodaysJoin() {
+        final List<OutputColumn> withTags = List.of(col(field("trace_id")), col(field(TAGS)));
+        final List<StructuredQuery> queries = List.of(
+                new StructuredQuery("dial_usage_log", WINDOW, QueryMode.ROW, true, withTags, null, null, newestFirst(), PAGE_25),
+                newestPage(List.of(col(field(TAGS)), col(new WindowExpr(fn("row_number"), null, null, null), "rn"))),
+                newestPage(List.of(col(field(TAGS)), col(fn("array_join", fn("split_string", field("trace_id"), str("-"))),
+                        "part"))),
+                new StructuredQuery("dial_usage_log", WINDOW, QueryMode.AGGREGATE, false,
+                        List.of(col(field(NOTE)), col(fn("count"), "c")), List.of(NOTE), null, null, null));
+        for (final StructuredQuery query : queries) {
+            assertThat(render(query)).as(query.toString()).doesNotContainIgnoringCase("__adas_lm");
+        }
+    }
+
+    @Test
+    void heavyColumnOfAnEnrichmentThatCannotBeKeyedDisqualifiesTheBlock() {
+        assertThat(render(newestPage(List.of(col(field(DUMP)), col(field(TAGS))))))
+                .doesNotContainIgnoringCase("__adas_lm");
+    }
+
+    @Test
+    void compositeOverloadRendersLightPageUnshaped() {
+        final StructuredQuery query = headerPage();
+        final String composite = builder.build(ctx, model(), query, StructuredQueryBuilder.MAX_LIMIT, LimitPolicy.GOVERNED)
+                .getSQL(ParamType.INLINED);
+
+        assertThat(composite).isEqualTo(unshaped(query)).doesNotContainIgnoringCase("__adas");
     }
 
     // ---------------------------------------------------------------------------------------------------------

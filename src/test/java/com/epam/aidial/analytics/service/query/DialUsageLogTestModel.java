@@ -213,6 +213,22 @@ public final class DialUsageLogTestModel {
                 ENTITY, base.table(), bindings, List.copyOf(joins), List.copyOf(schema), null, base.partitionLocal());
     }
 
+    /**
+     * {@link #model()} with the payload joined as the catalog joins an aligned enrichment: keyed on {@code event_id} and
+     * partition-aligned on {@code request_time}, so the read path can join it for a page's keys.
+     */
+    public static QueryEntityModel modelWithAlignedPayload() {
+        final QueryEntityModel base = model();
+        final EnrichmentJoin unkeyed = base.enrichments().getFirst();
+        final EnrichmentJoin aligned = EnrichmentJoin.keyed(
+                unkeyed.table(),
+                DSL.field(DSL.name(ENTITY, "event_id")), DSL.field(DSL.name(PAYLOAD, "event_id")),
+                DSL.field(DSL.name(ENTITY, "request_time")), DSL.field(DSL.name(PAYLOAD, "request_time")),
+                unkeyed.exposedNames(), null);
+        return new QueryEntityModel(
+                ENTITY, base.table(), base.bindings(), List.of(aligned), base.baseSchema(), null, base.partitionLocal());
+    }
+
     private static void addEnrichment(
             Map<String, QueryFieldBinding> bindings, List<QuerySchemaFieldDto> schema, Set<String> exposed,
             String name, QueryFieldType type) {

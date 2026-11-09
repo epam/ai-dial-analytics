@@ -15,6 +15,8 @@ import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
+import com.epam.aidial.analytics.service.query.model.SortDir;
+import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
@@ -85,6 +87,17 @@ class WindowTransferRenderTest {
         return query(filter, false, select);
     }
 
+    /**
+     * {@code query} sorted on the aligned column too, so the block is not late-materialized and {@code ident} keeps its
+     * derived table (a projection-only aligned column is joined for the page's keys instead; see the structured-query
+     * spec's "Projection-only enrichment columns are fetched for the returned page only").
+     */
+    private static StructuredQuery sortedOnSession(FilterNode filter, String... select) {
+        final StructuredQuery query = query(filter, select);
+        return new StructuredQuery(query.entity(), query.filter(), query.mode(), false, query.select(), null, null,
+                List.of(new SortItem(SESSION, SortDir.ASC, null)), query.page());
+    }
+
     private static FilterNode cmp(ComparisonOp op, String field, Expr value) {
         return new ComparisonNode(op, List.of(new FieldExpr(field), value));
     }
@@ -118,11 +131,21 @@ class WindowTransferRenderTest {
 
     @Test
     void windowOnlyReadTransfersItsWindowOntoTheAlignedEnrichment() {
-        final String sql = render(query(window(), "event_id", SESSION));
+        final String sql = render(sortedOnSession(window(), "event_id", SESSION));
 
         assertThat(identDerived(sql)).contains("\"ident\".\"day\" >=").doesNotContain(GRAIN_SET).doesNotContain(PARTITION_SET)
                 .doesNotContain("\"events\"");
         assertThat(sql).contains(TUPLE_JOIN).contains("where \"events\".\"day\" >=");
+    }
+
+    @Test
+    void windowOnlyPageProjectingTheAlignedColumnOnlyIsPageKeyed() {
+        final String sql = render(query(window(), "event_id", SESSION));
+
+        assertThat(sql).doesNotContain("(select \"ident\".\"event_id\"").doesNotContain(GRAIN_SET).doesNotContain(PARTITION_SET)
+                .contains("left outer join \"ident\" FINAL on")
+                .contains("(\"ident\".\"event_id\", \"ident\".\"day\") IN (select \"__adas_lm_key\", \"__adas_lm_part\"");
+        assertThat(sql.indexOf("\"ident\".\"day\" >=")).as("no window is transferred onto the page-keyed join: %s", sql).isLessThan(0);
     }
 
     @Test
@@ -135,14 +158,15 @@ class WindowTransferRenderTest {
 
     @Test
     void anotherSourceConjunctKeepsBothKeySets() {
-        final String sql = render(query(and(window(), cmp(ComparisonOp.EQ, "deployment", str("d"))), "event_id", SESSION));
+        final String sql = render(sortedOnSession(and(window(), cmp(ComparisonOp.EQ, "deployment", str("d"))), "event_id", SESSION));
 
         assertThat(identDerived(sql)).contains(GRAIN_SET).contains(PARTITION_SET);
     }
 
     @Test
     void disjunctionOverThePartitionColumnKeepsBothKeySets() {
-        final String sql = render(query(or(window(), cmp(ComparisonOp.LT, "day", str("2025-01-01 00:00:00"))), "event_id", SESSION));
+        final String sql = render(sortedOnSession(or(window(), cmp(ComparisonOp.LT, "day", str("2025-01-01 00:00:00"))), "event_id",
+                SESSION));
 
         assertThat(identDerived(sql)).contains(GRAIN_SET).contains(PARTITION_SET);
     }

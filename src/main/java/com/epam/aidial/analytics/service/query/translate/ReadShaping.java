@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
+import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.QueryFunctionCatalog;
@@ -37,6 +38,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -53,8 +55,9 @@ import java.util.function.Consumer;
  * that changes no result (see {@code openspec/specs/structured-query/spec.md}):
  *
  * <ul>
- *   <li>{@link #latePlan late materialization} — a row page whose heavy enrichment columns are projection-only
- *       picks its page's source keys first and joins the heavy enrichments for exactly those keys;
+ *   <li>{@link #latePlan late materialization} — a row page whose heavy enrichment columns, or whose every column of
+ *       a partition-aligned enrichment, are projection-only picks its page's source keys first and joins those late
+ *       enrichments for exactly those keys;
  *   <li>{@link #pushableConjuncts conjunct pushdown} — an allow-listed enrichment-only conjunct that is false on
  *       an unmatched row is also evaluated inside the enrichment's derived table;
  *   <li>{@link #planCalls call pushdown} — an allow-listed call over a heavy text column whose value on an
@@ -105,7 +108,7 @@ final class ReadShaping {
     // A. Late materialization
 
     /**
-     * What a late-materialized block needs: the heavy enrichments joined for the page's keys, the join whose
+     * What a late-materialized block needs: the late enrichments joined for the page's keys, the join whose
      * source key (and aligned source partition) every one of them shares, the select entries the page block
      * keeps (under their resolved names, since a sort item names them), and the page block's row bound.
      */
@@ -115,6 +118,12 @@ final class ReadShaping {
     /**
      * The late-materialization plan for {@code query}, or {@code null} when the block does not qualify.
      * {@code limit} is the block's rendered row limit (the default substituted) and {@code offset} its offset.
+     * The late enrichments are the heavy ones (an enrichment the block references a heavy column of) and the light
+     * ones (a partition-aligned enrichment read only in the projection, on the key join's keys). A heavy one that is
+     * not keyable, or is on other keys, disqualifies the block; a light candidate that fails a condition only keeps
+     * its ordinary join. The key join is the first heavy late enrichment (all of them share its keys), else the light
+     * candidate {@link #lightKeyJoin} picks. A block with no heavy late enrichment whose filter qualifies for a partition
+     * pre-selection does not qualify.
      */
     static LatePlan latePlan(QueryEntityModel model, StructuredQuery query, long offset, int limit) {
         if (query.mode() != QueryMode.ROW || query.distinct() || query.having() != null
@@ -129,6 +138,7 @@ final class ReadShaping {
         final Set<String> tables = new LinkedHashSet<>();
         final Set<String> heavyFields = new HashSet<>();
         EnrichmentJoin keyJoin = null;
+        // Heavy late enrichments: every one keyable, all on the same keys, else the block does not qualify.
         for (final EnrichmentJoin enrichment : model.enrichments()) {
             final Set<String> heavy = heavyFieldsOf(model, enrichment);
             if (Collections.disjoint(heavy, referenced)) {
@@ -145,11 +155,9 @@ final class ReadShaping {
             tables.add(enrichment.table().getName());
             heavyFields.addAll(heavy);
         }
-        if (tables.isEmpty()) {
-            return null;
-        }
         // Heavy columns only in the projection: not in the filter, not sorted directly or through a select output.
-        if (!Collections.disjoint(StructuredQueryBuilder.referencedFields(query.filter()), heavyFields)) {
+        final Set<String> filtered = StructuredQueryBuilder.referencedFields(query.filter());
+        if (!Collections.disjoint(filtered, heavyFields)) {
             return null;
         }
         final Set<String> sorted = new HashSet<>();
@@ -164,6 +172,39 @@ final class ReadShaping {
             return null;
         }
         final List<String> names = OutputColumnNaming.resolve(query.select());
+        // Light late enrichments: aligned, no heavy column referenced, every referenced column projection-only and
+        // on the key join's keys. A candidate that fails any of these keeps today's join and never disqualifies.
+        final Set<String> outsideProjection = new HashSet<>(filtered);
+        outsideProjection.addAll(sorted);
+        for (int i = 0; i < query.select().size(); i++) {
+            if (sorted.contains(names.get(i))) {
+                outsideProjection.addAll(referencedFields(query.select().get(i).expr()));
+            }
+        }
+        final boolean heavyLate = !tables.isEmpty();
+        // A pre-selection restricts the page block only. The outer statement's other joins, the lookup's own enrichment
+        // among them, would keep only what ClickHouse carries into them from the outer IN (K), which is not established,
+        // so a light-only block keeps today's statement, where the pre-selection bounds them.
+        if (!heavyLate && preselects(model, query.filter())) {
+            return null;
+        }
+        final List<EnrichmentJoin> candidates = new ArrayList<>();
+        for (final EnrichmentJoin enrichment : model.enrichments()) {
+            if (lightCandidate(model, enrichment, referenced, outsideProjection)) {
+                candidates.add(enrichment);
+            }
+        }
+        if (keyJoin == null) {
+            keyJoin = lightKeyJoin(model, candidates, referenced);
+        }
+        for (final EnrichmentJoin candidate : candidates) {
+            if (sameSourceKeys(keyJoin, candidate)) {
+                tables.add(candidate.table().getName());
+            }
+        }
+        if (tables.isEmpty()) {
+            return null;
+        }
         final List<OutputColumn> pageEntries = new ArrayList<>();
         for (int i = 0; i < query.select().size(); i++) {
             final OutputColumn column = query.select().get(i);
@@ -223,6 +264,66 @@ final class ReadShaping {
                 || a.sourcePartition().getQualifiedName().equals(b.sourcePartition().getQualifiedName());
     }
 
+    /**
+     * Whether {@code enrichment} is a light candidate: partition-aligned, the block references some of its columns but
+     * none of its heavy ones, and none of those it references is read outside the projection.
+     */
+    private static boolean lightCandidate(QueryEntityModel model, EnrichmentJoin enrichment, Set<String> referenced,
+            Set<String> outsideProjection) {
+        if (!enrichment.partitionAligned() || !Collections.disjoint(heavyFieldsOf(model, enrichment), referenced)) {
+            return false;
+        }
+        final Set<String> reads = new HashSet<>(enrichment.exposedNames());
+        reads.retainAll(referenced);
+        return !reads.isEmpty() && Collections.disjoint(reads, outsideProjection);
+    }
+
+    /**
+     * The key join of a block with no heavy late enrichment, or {@code null} with no light candidate: the candidate whose
+     * source keys defer the most — the most referenced {@code object} columns across the candidates on those keys, then
+     * the most referenced columns — ties broken by the source grain key's name, then the table's. Decided by what is
+     * deferred rather than by the entity's enrichment order, which the catalog does not fix.
+     */
+    private static EnrichmentJoin lightKeyJoin(QueryEntityModel model, List<EnrichmentJoin> candidates, Set<String> referenced) {
+        final Comparator<EnrichmentJoin> order = Comparator
+                .comparingInt((EnrichmentJoin c) -> -deferred(model, candidates, c, referenced, true))
+                .thenComparingInt(c -> -deferred(model, candidates, c, referenced, false))
+                .thenComparing(c -> c.sourceKey().getQualifiedName().toString())
+                .thenComparing(c -> c.table().getName());
+        return candidates.stream().min(order).orElse(null);
+    }
+
+    /**
+     * How many referenced columns, or only referenced {@code object} columns, the candidates on {@code keyJoin}'s source
+     * keys hold.
+     */
+    private static int deferred(QueryEntityModel model, List<EnrichmentJoin> candidates, EnrichmentJoin keyJoin,
+            Set<String> referenced, boolean objectsOnly) {
+        int count = 0;
+        for (final EnrichmentJoin candidate : candidates) {
+            if (!sameSourceKeys(keyJoin, candidate)) {
+                continue;
+            }
+            for (final String name : candidate.exposedNames()) {
+                final QueryFieldBinding binding = model.bindings().get(name);
+                if (referenced.contains(name) && (!objectsOnly || binding != null && binding.type() == QueryFieldType.OBJECT)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /** Whether {@code filter} has a top-level conjunct a partition pre-selection is drawn from. */
+    private static boolean preselects(QueryEntityModel model, FilterNode filter) {
+        for (final PushedConjunct conjunct : pushableConjuncts(model, filter, Set.of())) {
+            if (preselectionLookup(model, conjunct.node())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static Set<String> heavyFieldsOf(QueryEntityModel model, EnrichmentJoin enrichment) {
         final Set<String> heavy = new HashSet<>();
         for (final String name : enrichment.exposedNames()) {
@@ -268,8 +369,8 @@ final class ReadShaping {
      * field type's default (both checked by {@link #pushableConjunctField}), over a field that is not heavy. A
      * substring match also rejects an unmatched row, but is not selective: it would cost a scan to name nearly every
      * partition. A heavy field is left out because the pre-selection reads its column across every partition, which
-     * for a body is the very read the shaping exists to avoid. Whether the field's enrichment is aligned is the
-     * pre-selection's own check.
+     * for a body is the very read the shaping exists to avoid. Whether the field's enrichment is aligned is
+     * {@link #preselectionLookup}'s check.
      */
     static boolean lookup(QueryEntityModel model, FilterNode conjunct) {
         final String field = pushableConjunctField(model, conjunct);
@@ -278,6 +379,15 @@ final class ReadShaping {
                 && (op == ComparisonOp.EQ || op == ComparisonOp.IN)
                 && args.getFirst() instanceof FieldExpr
                 && !heavy(model, field);
+    }
+
+    /**
+     * Whether {@code conjunct} yields a partition pre-selection: a {@link #lookup} whose enrichment the pre-selection
+     * applies to ({@link PartitionPreselection#applies}). The one test both the pushdown that emits a pre-selection and
+     * the late-materialization guard that defers to one decide by.
+     */
+    static boolean preselectionLookup(QueryEntityModel model, FilterNode conjunct) {
+        return lookup(model, conjunct) && PartitionPreselection.applies(model.ownerOf(pushableConjunctField(model, conjunct)));
     }
 
     /**

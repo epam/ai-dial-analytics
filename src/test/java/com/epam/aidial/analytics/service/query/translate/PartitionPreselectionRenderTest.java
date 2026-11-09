@@ -52,6 +52,7 @@ class PartitionPreselectionRenderTest {
     private static final String BODY = "ident.body";
     private static final String TAG = "labels.tag";
     private static final String REGION = "users.region";
+    private static final String TOPIC = "chats.topic";
     private static final String PRESELECTION = "SETTINGS final = 0";
 
     private final DSLContext ctx = new QueryDslConfiguration().clickhouseRenderContext();
@@ -76,11 +77,16 @@ class PartitionPreselectionRenderTest {
         bind(bindings, BODY, "ident", "body", QueryFieldType.STRING, true);
         bind(bindings, TAG, "labels", "tag", QueryFieldType.STRING, false);
         bind(bindings, REGION, "users", "region", QueryFieldType.STRING, false);
+        bind(bindings, TOPIC, "chats", "topic", QueryFieldType.STRING, false);
         final EnrichmentJoin users = EnrichmentJoin.keyed(DSL.table(DSL.name("users")), DSL.field(DSL.name("events", "user_id")),
                 DSL.field(DSL.name("users", "user_id")), null, null, Set.of(REGION), null);
+        // Aligned on day, but keyed on another source grain key than ident and labels.
+        final EnrichmentJoin chats = EnrichmentJoin.keyed(DSL.table(DSL.name("chats")), DSL.field(DSL.name("events", "user_id")),
+                DSL.field(DSL.name("chats", "user_id")), DSL.field(DSL.name("events", "day")), DSL.field(DSL.name("chats", "day")),
+                Set.of(TOPIC), PartitionGranularity.DAY);
         return new QueryEntityModel("events", DSL.table(DSL.name("events")), bindings,
                 List.of(aligned("ident", Set.of(SESSION, SCORE, BODY), PartitionGranularity.DAY),
-                        aligned("labels", Set.of(TAG), PartitionGranularity.DAY), users),
+                        aligned("labels", Set.of(TAG), PartitionGranularity.DAY), users, chats),
                 List.of(), null, true, false);
     }
 
@@ -163,6 +169,25 @@ class PartitionPreselectionRenderTest {
                 .contains("\"users\".\"user_id\" IN (select \"events\".\"user_id\" from \"events\" where (toYYYYMMDD(\"events\".\"day\") IN "
                         + "(SELECT DISTINCT");
         assertThat(occurrences(sql, PRESELECTION)).isEqualTo(2);
+    }
+
+    @Test
+    void preselectedLightPageKeepsTodaysStatement() {
+        final FilterNode lookup = cmp(ComparisonOp.EQ, SESSION, str("s1"));
+
+        // Beside the unaligned users join, which the pre-selection keys, the light labels column keeps today's statement
+        // (the case preselectionKeysOnlyTheJoinsWithoutAnAlignedPair renders). So does a page beside an aligned join on
+        // another grain key, and so does one whose every join is on the page's keys: in the outer statement the lookup's
+        // own ident join would keep only what ClickHouse carries into it from IN (K), while today the pre-selection's
+        // restriction is carried into it through day = day.
+        assertThat(render(query(lookup, SESSION, TAG, REGION))).doesNotContain("__adas_lm");
+        assertThat(render(query(lookup, SESSION, TAG, TOPIC))).doesNotContain("__adas_lm");
+        final String sql = render(query(lookup, SESSION, TAG));
+        assertThat(sql).doesNotContain("__adas_lm").contains("left outer join \"labels\" FINAL on");
+        assertThat(occurrences(sql, PRESELECTION)).isEqualTo(1);
+
+        // A heavy late enrichment makes it a heavy page, late-materialized as before whatever else it joins.
+        assertThat(render(query(lookup, BODY, TAG, REGION))).contains("__adas_lm_key");
     }
 
     @Test

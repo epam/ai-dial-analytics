@@ -59,6 +59,7 @@ class ReadShapingIntegrationTest extends AbstractClickHouseIntegrationTest {
     private static final String PAYLOAD = "dial_usage_log_payload";
     private static final String BODY = PAYLOAD + ".request_body";
     private static final String RESPONSE = PAYLOAD + ".response_body";
+    private static final String TAGS = PAYLOAD + ".request_tags";
 
     @Autowired
     private CatalogQueryService catalog;
@@ -106,9 +107,11 @@ class ReadShapingIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     private void insertPayload(int i, String at, String body, String response, String updatedAt) {
         final String trace = "t%02d".formatted(i);
+        // Headers differ per version, so a read of an unmerged key shows which version it chose.
+        final String tags = "'{\"conversation_id\":\"c" + i + "\",\"version\":\"" + updatedAt + "\"}'";
         execute("INSERT INTO " + PAYLOAD + " (event_id, request_time, _updated_at, trace_id, core_span_id, request_body,"
-                + " response_body) VALUES ('" + eventIdFor(trace) + "', '" + fixtureTime(at) + "', '" + updatedAt + "', '"
-                + trace + "', 's', " + body + ", " + response + ")");
+                + " response_body, request_tags) VALUES ('" + eventIdFor(trace) + "', '" + fixtureTime(at) + "', '" + updatedAt
+                + "', '" + trace + "', 's', " + body + ", " + response + ", " + tags + ")");
     }
 
     private QueryEntityModel model() {
@@ -204,6 +207,21 @@ class ReadShapingIntegrationTest extends AbstractClickHouseIntegrationTest {
         assertIdentical(row(WINDOW, select, sort("trace_id", SortDir.ASC), new OffsetPage(3, 6, false)), "__adas_lm_key");
         // Every row, under the default page. (A raw read cannot be exercised here: the application runs with
         // query.force-final, so `final: false` still reads final; ReadShapingRenderTest covers the raw shape.)
+        assertIdentical(row(WINDOW, select, sort("trace_id", SortDir.ASC), null), "__adas_lm_key");
+    }
+
+    @Test
+    void lightOnlyPayloadPagesReturnTheUnshapedRows() {
+        // Only light payload columns, all projection-only: the aligned payload is joined for the page's keys. Rows with no
+        // payload row (t03, t07), the unmerged t02/t06 versions and the tie at 00:00:08 are all in range. This suite reads
+        // final (query.force-final); a raw read's fan-out is covered by the requirement's equivalence argument, not here.
+        final List<OutputColumn> select = List.of(col(field("trace_id")), col(field("request_time")), col(field(TAGS)),
+                col(fn("json_extract_string", field(TAGS), str("version")), "version"));
+        // The first page holds all three rows tying at 00:00:08; neither statement fixes their order, so break the tie.
+        assertIdentical(row(WINDOW, select, sort("request_time", SortDir.DESC, "trace_id", SortDir.ASC), new OffsetPage(0, 5, false)),
+                "__adas_lm_key");
+        assertIdentical(row(WINDOW, select, sort("request_time", SortDir.ASC), new OffsetPage(2, 5, false)), "__adas_lm_key");
+        assertIdentical(row(WINDOW, select, sort("trace_id", SortDir.ASC), new OffsetPage(3, 6, false)), "__adas_lm_key");
         assertIdentical(row(WINDOW, select, sort("trace_id", SortDir.ASC), null), "__adas_lm_key");
     }
 
