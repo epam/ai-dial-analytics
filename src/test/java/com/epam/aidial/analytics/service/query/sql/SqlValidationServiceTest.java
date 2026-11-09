@@ -56,7 +56,8 @@ class SqlValidationServiceTest {
                 catalog,
                 new StructuredQueryExecutor(builder, renderContext, clickHouse,
                         com.epam.aidial.analytics.service.security.RowPolicyFilterStubs.inert(),
-                        com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs.inPlace()),
+                        com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs.inPlace(),
+                        mock(com.epam.aidial.analytics.service.query.rebuild.ComputedFieldCompleter.class)),
                 new CompositeQueryBuilder(builder),
                 renderContext,
                 budget);

@@ -17,6 +17,7 @@ import java.util.Map;
 
 import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -551,6 +552,72 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
             mockMvc.perform(delete("/v1/tables/" + GROUP_ENRICHMENT)
                     .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
         }
+    }
+
+    /**
+     * Binding the rebuilt request body is refused to an author who may not read it, exactly as binding
+     * {@code request_body} is — and also when only the cache markers are sensitive, since the rebuilt body returns
+     * their values too.
+     */
+    @Test
+    void rebuiltBodyRefusesAuthorWhoMayNotReadTheBodyOrItsMarkers() throws Exception {
+        mockMvc.perform(delete("/v1/pipelines/" + pipelineName).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+        final String transform = Transforms.llm()
+                .requestTemplate("{\"messages\":[{\"role\":\"user\",\"content\":\"Body: {{body}}\"}]}")
+                .input("body", "dial_usage_log_payload.request_body_full")
+                .proseOutputs("tox_score")
+                .member();
+        final String registration = "{\"name\":\"authz-rebuilt-body\"," + transform + ","
+                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\",\"trigger\":{\"kind\":\"schedule\"},\"enabled\":true}";
+        final List<ColumnMappingEntity> payload = columnMappings.findByTableNameOrderByOrdinal("dial_usage_log_payload");
+        final ColumnMappingEntity body = payload.stream().filter(column -> "request_body".equals(column.getSourceName()))
+                .findFirst().orElseThrow();
+        final ColumnMappingEntity markers = payload.stream()
+                .filter(column -> "request_cache_control".equals(column.getSourceName())).findFirst().orElseThrow();
+        final boolean bodySensitive = body.isSensitive();
+        final boolean markersSensitive = markers.isSensitive();
+        try {
+            body.setSensitive(true);
+            columnMappings.save(body);
+            mockMvc.perform(post("/v1/pipelines").header(HttpHeaders.AUTHORIZATION, bearer(registryAuthor()))
+                            .contentType(MediaType.APPLICATION_JSON).content(registration))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("sensitive_column_not_entitled"));
+
+            body.setSensitive(false);
+            columnMappings.save(body);
+            markers.setSensitive(true);
+            columnMappings.save(markers);
+            mockMvc.perform(post("/v1/pipelines").header(HttpHeaders.AUTHORIZATION, bearer(registryAuthor()))
+                            .contentType(MediaType.APPLICATION_JSON).content(registration))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("sensitive_column_not_entitled"))
+                    .andExpect(jsonPath("$.message").value(containsString("request_body_full")));
+        } finally {
+            body.setSensitive(bodySensitive);
+            columnMappings.save(body);
+            markers.setSensitive(markersSensitive);
+            columnMappings.save(markers);
+        }
+    }
+
+    /** A {@code sql} transform's output expression cannot read a computed field: it exists only after a read's statement. */
+    @Test
+    void sqlTransformCannotReadTheRebuiltBody() throws Exception {
+        mockMvc.perform(delete("/v1/pipelines/" + pipelineName).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(post("/v1/pipelines").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"authz-sql-rebuilt-body\","
+                                + Transforms.sql().output("tox_score", "length(\\\"dial_usage_log_payload.request_body_full\\\")").member()
+                                + ",\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"schedule\"},\"enabled\":true}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString(
+                        "output variable 'tox_score' references 'dial_usage_log_payload.request_body_full'")))
+                .andExpect(jsonPath("$.message").value(containsString("bound as a transform input")));
     }
 
     private static String registryAuthor() {

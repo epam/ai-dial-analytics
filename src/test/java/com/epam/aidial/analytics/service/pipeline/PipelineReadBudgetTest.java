@@ -111,7 +111,7 @@ class PipelineReadBudgetTest {
             PipelineReadBudget.run(executor, null, null, "materialize window probe", remaining, tag);
 
             final ArgumentCaptor<QuerySettings> settings = ArgumentCaptor.forClass(QuerySettings.class);
-            verify(executor, times(2)).executeScan(any(), settings.capture(), any());
+            verify(executor, times(2)).executeScan(any(), settings.capture(), any(), any());
             final List<String> ids = settings.getAllValues().stream().map(QuerySettings::getQueryId).toList();
             assertThat(ids).doesNotHaveDuplicates().allSatisfy(id -> assertThat(id).startsWith("adas-p1-reprobe-"));
             assertThat(settings.getAllValues().get(1).getAllSettings())

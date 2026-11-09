@@ -345,6 +345,43 @@ class FlightSqlIntegrationTest extends AbstractClickHouseIntegrationTest {
         }
     }
 
+    /** The rebuilt request body and its status stream as nullable Utf8, with the values the JSON SQL endpoint returns. */
+    @Test
+    void computedFieldsStreamAsUtf8WithTheValuesExecuteSqlReturns() throws Exception {
+        final String root = "00000000-0000-4000-8000-000000000101";
+        final String child = "00000000-0000-4000-8000-000000000102";
+        final String time = fixtureTime("10:00:00.000");
+        enrichmentClient().queryAll("INSERT INTO dial_usage_log_payload (event_id, request_time, trace_id, core_span_id, request_hash,"
+                + " request_parent_hash, request_ancestor_hashes, request_body) VALUES"
+                + " (toUUID('" + eventIdFor("trace-0000") + "'), '" + time + "', 'trace-0000', '', toUUID('" + root + "'),"
+                + " toUUID('00000000-0000-0000-0000-000000000000'), [], '{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}],\"model\":\"m\"}'),"
+                + " (toUUID('" + eventIdFor("trace-0001") + "'), '" + time + "', 'trace-0001', '', toUUID('" + child + "'),"
+                + " toUUID('" + root + "'), [toUUID('" + root + "')],"
+                + " '{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"},{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}')");
+        enrichmentClient().queryAll("INSERT INTO dial_usage_log (event_id, request_time, trace_id) VALUES (toUUID('"
+                + eventIdFor("trace-0001") + "'), '" + time + "', 'trace-0001')");
+        final String sql = "SELECT trace_id, \"dial_usage_log_payload.request_body_full\", \"dial_usage_log_payload.request_body_rebuild\""
+                + " FROM dial_usage_log WHERE trace_id = 'trace-0001' LIMIT 1";
+        final String rest = mockMvc.perform(post("/v1/queries/execute-sql").contentType(APPLICATION_JSON)
+                        .content("{\"sql\":\"" + sql.replace("\"", "\\\"") + "\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        final FlightInfo info = sqlClient.execute(sql);
+        final Schema schema = info.getSchemaOptional().orElseThrow();
+        assertThat(schema.findField("dial_usage_log_payload.request_body_full").getType()).isEqualTo(ArrowType.Utf8.INSTANCE);
+        assertThat(schema.findField("dial_usage_log_payload.request_body_full").isNullable()).isTrue();
+        assertThat(schema.findField("dial_usage_log_payload.request_body_rebuild").getType()).isEqualTo(ArrowType.Utf8.INSTANCE);
+        final List<Map<String, Object>> rows = executeQuery(sql);
+
+        assertThat(rows).hasSize(1);
+        assertThat(rows.getFirst().get("dial_usage_log_payload.request_body_rebuild")).isEqualTo("rebuilt");
+        final String full = (String) rows.getFirst().get("dial_usage_log_payload.request_body_full");
+        assertThat(full).isEqualTo("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"},{\"content\":\"a1\",\"role\":\"assistant\"},"
+                + "{\"content\":\"u2\",\"role\":\"user\"}],\"model\":\"m\"}");
+        assertThat(new com.epam.aidial.analytics.configuration.JsonMapperConfiguration().jsonMapper().readTree(rest)
+                .get("rows").get(0).get("dial_usage_log_payload.request_body_full").asString()).isEqualTo(full);
+    }
+
     @Test
     void starSchemaOmitsHeavyAndEnrichmentFields() {
         // The canonical external-client statement (pandas/ADBC sends nothing but this text): the Arrow

@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.sync.delta;
 
 import com.clickhouse.client.api.query.GenericRecord;
+import com.epam.aidial.analytics.clickhouse.QueryParameterChunks;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
 
 import java.time.LocalDate;
@@ -14,22 +15,19 @@ import java.util.UUID;
 /**
  * The {@link ParentLookup} over the payload table, on the writer credential like the rest of ingest's own reads.
  *
- * <p>The candidates go out in chunks of {@value #CHUNK} per query. The client sends query parameters in the request
- * URI, which the server bounds ({@code http_max_uri_size}), so one query per flush could outgrow it. Each query is
+ * <p>The candidates go out in chunks of {@value QueryParameterChunks#SIZE} per query ({@link QueryParameterChunks}), so
+ * one query per flush cannot outgrow the request URI the client sends its parameters in. Each query is
  * bounded to the partitions the candidates can live in: a parent shares its child's UTC day, and the partition key is
  * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_hash} skip index (ClickHouse
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
  * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do. Each query
  * runs under {@code max_execution_time}. The bound is per query, not per lookup: a flush asks about at most
- * {@code RequestDeltaEncoder.MAX_TABLE_CANDIDATES} paths in chunks of {@link #CHUNK}, so its lookup can take up to
+ * {@code RequestDeltaEncoder.MAX_TABLE_CANDIDATES} paths in chunks of {@value QueryParameterChunks#SIZE}, so its lookup can take up to
  * about 17 times {@link #TIMEOUT_SECONDS}. A query that times out ends the lookup, and its requests are stored as chain
  * roots.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
-
-    /** Candidate paths per query: about 37 URI bytes each, so a chunk stays well inside common URI limits. */
-    static final int CHUNK = 1000;
 
     /**
      * Server-side bound on one lookup query, not on the whole lookup of a flush, which sends one query per chunk.
@@ -79,12 +77,12 @@ public final class ClickHouseParentLookup implements ParentLookup {
         List<String> candidates = new ArrayList<>(paths.size());
         paths.forEach(path -> candidates.add(path.toString()));
         Map<UUID, List<UUID>> found = new HashMap<>();
-        for (int start = 0; start < candidates.size(); start += CHUNK) {
+        for (List<String> chunk : QueryParameterChunks.of(candidates)) {
             Map<String, Object> params = Map.of(
                     "from", first + " 00:00:00.000",
                     "to", last.plusDays(1) + " 00:00:00.000",
                     "days", String.join(",", partitions),
-                    "paths", String.join(",", candidates.subList(start, Math.min(candidates.size(), start + CHUNK))));
+                    "paths", String.join(",", chunk));
             for (GenericRecord row : writer.query(sql, params)) {
                 String ancestors = row.getString("ancestors");
                 List<UUID> lineage = new ArrayList<>();

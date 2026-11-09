@@ -532,7 +532,8 @@ refused with `503 clickhouse_unavailable` like any other sync failure.
 Every statement that executes a user query SHALL execute on one replica chosen per request. This covers
 `POST /v1/queries/execute`, `execute-sql`, `execute-csv` and `execute-sql-csv`, and Flight SQL statement
 execution. When a request includes a total count, its row statement and its count statement SHALL execute on
-the same replica.
+the same replica. The statements that rebuild a computed field such as `request_body_full` for the returned rows
+SHALL execute on that replica too.
 
 The replica SHALL be chosen as follows:
 
@@ -585,6 +586,11 @@ discovery, translation and validation execute no ClickHouse statement and are un
 
 - **WHEN** a query with `include_total` executes
 - **THEN** its row statement and its count statement execute on the same replica
+
+#### Scenario: Rebuild statements follow the query's replica
+
+- **WHEN** a query projecting `request_body_full` executes on replica `chi-1`
+- **THEN** the statements that rebuild its rows' request bodies also execute on `chi-1`
 
 #### Scenario: A replica behind on DDL does not fail a query
 

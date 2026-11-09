@@ -41,6 +41,7 @@ import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
 import com.epam.aidial.analytics.service.pipeline.preview.SampledPosition;
+import com.epam.aidial.analytics.service.query.ComputedField;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -926,8 +927,9 @@ public class MaterializeService {
 
         String columnList = String.join(", ",
                 targetColumns.stream().map(c -> renderContext.render(DSL.name(c))).toList());
+        // An INSERT writes what its SELECT computes, so no computed field's stand-in may render in it.
         String sql = "INSERT INTO " + renderContext.render(DSL.name(target)) + " (" + columnList + ") "
-                + select.getSQL(ParamType.INLINED);
+                + ComputedField.render(() -> select.getSQL(ParamType.INLINED), 0);
         log.debug("Materializing pipeline '{}' from '{}' into '{}'", declaration.name(), source, target);
         // Again, immediately before the statement: the check at the start of the call ran before the probe, and a
         // relayout can take its hold while the probe (or a narrowing re-probe) runs; an INSERT reaching the old
