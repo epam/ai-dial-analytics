@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.pipeline.model.TruncUnit;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.QueryFunctionCatalog;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
 import com.epam.aidial.analytics.service.query.model.CaseBranch;
@@ -195,6 +196,12 @@ public final class AggregateSqlValidator {
      * @param operation  short label naming the operation in a sensitive-column refusal
      */
     SqlInsertPlan read(String sql, String inputTable, String target, String operation) {
+        // A computed field is refused by name before the text is planned: the planner resolves against the caller's
+        // model, which hides a field the caller may not see, so the plan's failure would otherwise turn this refusal
+        // into the entitlement 403 below.
+        if (StringUtils.isNotBlank(sql)) {
+            ComputedFields.requireNoneComputed("the SQL declaration", QualifiedColumnTokens.referencedNames(sql));
+        }
         try {
             return sqlReader.require(sql);
         } catch (PipelineValidationException ex) {
@@ -258,7 +265,10 @@ public final class AggregateSqlValidator {
         final Set<String> referenced = new LinkedHashSet<>();
         select.forEach(expr -> ExprColumnCollector.collect(expr, referenced));
         ExprColumnCollector.collect(query.filter(), referenced);
-        // The entitlement gate first: a caller who may not see a sensitive column should be told that, not told about
+        // A computed field is completed after a read's statement runs, so no aggregate statement can compute over one.
+        // A check by name, so it precedes the entitlement gate, as it does on every write.
+        ComputedFields.requireNoneComputed("the SQL declaration", referenced);
+        // Then the entitlement gate: a caller who may not see a sensitive column should be told that, not told about
         // the shape of the expression it sits in.
         governance.enforceSensitive(inputTable, input, referenced, operation);
 

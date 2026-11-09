@@ -13,6 +13,7 @@ import com.epam.aidial.analytics.service.pipeline.model.TruncUnit;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumn;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewColumnRole;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.query.QueryFunctionCatalog;
 import com.epam.aidial.analytics.service.query.sql.SqlInsertPlan;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
@@ -547,6 +548,8 @@ public class AggregateSpecValidator {
                 throw new PipelineValidationException(
                         "each group_by entry must declare exactly one of 'column' or 'trunc'");
             }
+            // A computed field is completed after a read's statement runs, so no aggregate statement can group it.
+            ComputedFields.requireNotComputed("group_by", key.inputColumn());
             if (key.isBucket()) {
                 buckets++;
                 validateBucket(key, inputTable, input);
@@ -748,6 +751,7 @@ public class AggregateSpecValidator {
                     throw new PipelineValidationException(
                             unknownField("measure column", measure.getColumn(), inputTable, input));
                 }
+                ComputedFields.requireNotComputed("measure '" + measure.getName() + "'", measure.getColumn());
                 requireEnrichmentAbsenceIsRepresentable("measure column", measure.getColumn(), input);
             }
         }
