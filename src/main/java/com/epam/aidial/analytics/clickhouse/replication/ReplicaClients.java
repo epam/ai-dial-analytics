@@ -7,6 +7,8 @@ import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import lombok.extern.slf4j.Slf4j;
 
+import java.net.ConnectException;
+
 /**
  * The two driver clients of one non-primary replica — the read credential's and the writer credential's — built on
  * first use through {@link ClickHouseClients}, so the transport policy every client shares holds here too. Closed
@@ -66,10 +68,15 @@ final class ReplicaClients implements AutoCloseable {
         return local;
     }
 
-    /** Refuses a closed holder as unavailable (503), never as a statement error, and never rebuilds a client. */
+    /**
+     * Refuses a closed holder as unavailable (503), never as a statement error, and never rebuilds a client. The cause
+     * is a {@link ConnectException}, so {@code ClickHouseFailures} classifies it as a connection that could not be made:
+     * the statement wrappers keep the 503 when they re-wrap it, and a user query re-runs on the primary.
+     */
     private void requireOpen() {
         if (closed) {
-            throw new ClickHouseUnavailableException("ClickHouse replica " + host + " left the routing set", null);
+            final String message = "ClickHouse replica " + host + " left the routing set";
+            throw new ClickHouseUnavailableException(message, new ConnectException(message));
         }
     }
 

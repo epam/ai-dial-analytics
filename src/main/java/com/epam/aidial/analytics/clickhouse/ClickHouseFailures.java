@@ -129,6 +129,9 @@ public final class ClickHouseFailures {
     /** {@code ACCESS_DENIED}: the credential lacks a grant the statement needs. */
     private static final int ACCESS_DENIED = 497;
 
+    /** {@code UNFINISHED}: a synchronous mutation or ALTER finished on the active replicas only. */
+    private static final int UNFINISHED = 341;
+
     private ClickHouseFailures() {
     }
 
@@ -234,6 +237,19 @@ public final class ClickHouseFailures {
     public static boolean isAccessDenied(Throwable ex) {
         for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
             if (cause instanceof ServerException server && server.getCode() == ACCESS_DENIED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether {@code ex} carries {@code UNFINISHED}: a mutation or ALTER waited for on every replica
+     * ({@code mutations_sync = 2}) finished on the active ones, and inactive replicas apply it when they recover.
+     */
+    public static boolean isUnfinished(Throwable ex) {
+        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (cause instanceof ServerException server && server.getCode() == UNFINISHED) {
                 return true;
             }
         }

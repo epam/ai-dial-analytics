@@ -142,4 +142,42 @@ class ClickHouseTopologyTest {
         topology.startup();
         assertThat(topology.candidates()).extracting(Replica::name).containsExactly("chi-0", "chi-1");
     }
+
+    /** ClickHouse reports activity NULL when it cannot ask Keeper: that is a failed refresh, not zero replicas. */
+    @Test
+    void unknownActivityKeepsTheLastReplicaSet() {
+        final GenericRecord primary = row("chi-0", true, true);
+        final GenericRecord other = row("chi-1", false, true);
+        final ClickHouseTopology topology = topology(new FakeHttp("chi-0"), host -> List.of("10.0.0.1"), primary, other);
+        topology.startup();
+        given(other.getBoolean("activity_unknown")).willReturn(true);
+        topology.refresh(false);
+        assertThat(topology.candidates()).extracting(Replica::name).containsExactly("chi-0", "chi-1");
+        assertThat(registry.get(ReplicaMeters.DISCOVERY).tag("outcome", "failed").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void missingLocalRowFailsTheRefresh() {
+        final ClickHouseTopology topology = topology(new FakeHttp("chi-0"), host -> List.of("10.0.0.1"),
+                row("chi-1", false, true));
+        topology.startup();
+        assertThat(topology.discovered()).isFalse();
+        assertThat(registry.get(ReplicaMeters.DISCOVERY).tag("outcome", "failed").counter().count()).isEqualTo(1.0);
+    }
+
+    /** Startup discovery failed, so the fresh-connection check runs on the first refresh that succeeds. */
+    @Test
+    void spreadIsCheckedOnTheFirstSuccessfulRefreshAfterStartupFailed() {
+        given(writer.primaryClient()).willReturn(client);
+        given(client.queryAll(anyString(), anyMap())).willThrow(new IllegalStateException("unreachable"))
+                .willReturn(List.of(row("chi-0", true, true), row("chi-1", false, true)));
+        final ClickHouseTopology topology = new ClickHouseTopology(CONNECTION, new ClickHouseWriterProperties("w", ""),
+                ClickHouseReplicasProperties.defaults(), writer, mock(ClickHouseClientWrapper.class),
+                new ReplicaMeters(registry), new FakeHttp("chi-0", "chi-1"), ReplicaAddressing.REPORTED,
+                host -> List.of("10.0.0.9"));
+        topology.startup();
+        topology.refresh(false);
+        assertThat(topology.discovered()).isTrue();
+        assertThat(registry.get(ReplicaMeters.PRIMARY_SPREAD).counter().count()).isEqualTo(1.0);
+    }
 }

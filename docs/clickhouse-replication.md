@@ -29,7 +29,8 @@ the rows that carry a database replica name, so a `remote_servers` cluster of th
   `503 clickhouse_unavailable`, and no cursor or position moves.
 - **User queries** stay off the primary while two or more non-primary replicas are healthy, and
   include it when there is exactly one. Health is each replica's own `/replicas_status`, so the lag
-  threshold is the server's `max_replica_delay_for_distributed_queries`. A query re-runs once on the
+  threshold is the server's replicated MergeTree settings `min_relative_delay_to_close` (default 300 s)
+  and `min_absolute_delay_to_close`, judged over every replicated table on that server. A query re-runs once on the
   primary when its replica cannot be reached or reports an unknown table or column, which means the
   replica has not applied a recent DDL yet.
 - **A single server** resolves every route to itself.
@@ -102,8 +103,11 @@ The sync step waits only for writes already committed. A source part committed a
 visible before its payload part, so the window's upper bound must exclude it. The safety lag
 (`enrichment.scan.safety-lag`, default 5 s) must therefore exceed the clock skew among every
 ClickHouse node and ADAS pod, plus the longest insert, plus the time from the first sync to the probe.
-Run **NTP on every ClickHouse node and every ADAS pod**. Skew of milliseconds leaves the default with
-plenty of room.
+ADAS bounds the last term itself: a round of table syncs that takes longer than half the safety lag
+is repeated, and a run whose home is that slow three rounds in a row is refused with `503` (the
+`clickhouse.replicas.sync` meter counts it under table `_rounds`, outcome `slow`). Raise the safety
+lag when a home is routinely that slow. Run **NTP on every ClickHouse node and every ADAS pod**.
+Skew of milliseconds leaves the rest of the default with plenty of room.
 
 ## Scale-up, scale-down and failover
 

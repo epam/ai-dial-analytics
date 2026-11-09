@@ -42,6 +42,23 @@ class ReplicatedDdlTest {
     }
 
     @Test
+    void lowercaseKeywordsAreRecognized() {
+        assertThat(ReplicatedDdl.isCreateIfNotExists("create table if not exists t (id UInt32) engine = MergeTree order by id"))
+                .isTrue();
+        assertThat(ReplicatedDdl.toReplicated("create table t (id UInt32) engine = MergeTree order by id settings index_granularity = 8192"))
+                .isEqualTo("create table t (id UInt32) ENGINE = ReplicatedMergeTree order by id settings " + NO_DEDUP
+                        + ", index_granularity = 8192");
+    }
+
+    /** The word in a table comment is not the SETTINGS clause. */
+    @Test
+    void settingsInsideTheTableCommentAreNotTheClause() {
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (id UInt32) ENGINE = MergeTree ORDER BY id COMMENT 'no SETTINGS here'"))
+                .isEqualTo("CREATE TABLE t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS " + NO_DEDUP
+                        + " COMMENT 'no SETTINGS here'");
+    }
+
+    @Test
     void settingsGoBeforeTrailingComment() {
         assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (id UInt32) ENGINE = MergeTree ORDER BY id COMMENT 'x'"))
                 .isEqualTo("CREATE TABLE t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS " + NO_DEDUP

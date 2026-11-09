@@ -26,9 +26,10 @@ public final class ReplicatedDdl {
     private static final Pattern CREATE = Pattern.compile(
             "^\\s*CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?((?:`[^`]*`|\"[^\"]*\"|[^\\s(`\"])+)"
                     + "(\\s+UUID\\s+'[^']*')?", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ENGINE = Pattern.compile("\\bENGINE\\s*=\\s*(\\w+)");
-    private static final Pattern SETTINGS = Pattern.compile("\\bSETTINGS\\b");
-    private static final Pattern COMMENT = Pattern.compile("\\sCOMMENT\\s+'");
+    // Keywords match in any case; engine names are case-sensitive in ClickHouse, so the name group is not.
+    private static final Pattern ENGINE = Pattern.compile("(?i:\\bENGINE)\\s*=\\s*(\\w+)");
+    private static final Pattern SETTINGS = Pattern.compile("\\bSETTINGS\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMMENT = Pattern.compile("\\sCOMMENT\\s+'", Pattern.CASE_INSENSITIVE);
     private static final Pattern EXISTING_DEDUP = Pattern.compile(
             "replicated_deduplication_window(?:_for_async_inserts)?\\s*=");
     private static final Pattern NO_DEDUP = Pattern.compile("\\breplicated_deduplication_window = 0\\b");
@@ -116,7 +117,7 @@ public final class ReplicatedDdl {
         final String head = statement.substring(0, engine.end());
         String tail = statement.substring(engine.end());
         final Matcher settings = SETTINGS.matcher(tail);
-        if (settings.find()) {
+        if (findOutsideQuotes(settings, tail)) {
             final String before = tail.substring(0, settings.end());
             final String after = tail.substring(settings.end());
             // The settings list runs up to a trailing table COMMENT, if any; it is rebuilt entry by entry so a
@@ -138,6 +139,26 @@ public final class ReplicatedDdl {
                     + tail.substring(comment.start());
         }
         return head + tail + "\nSETTINGS " + NO_INSERT_DEDUPLICATION;
+    }
+
+    /** Advances {@code matcher} to its next match over {@code text} that is not inside a {@code '…'} literal. */
+    private static boolean findOutsideQuotes(Matcher matcher, String text) {
+        while (matcher.find()) {
+            if (!insideQuotes(text, matcher.start())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean insideQuotes(String text, int index) {
+        boolean quoted = false;
+        for (int i = 0; i < index; i++) {
+            if (text.charAt(i) == '\'' && (i == 0 || text.charAt(i - 1) != '\\')) {
+                quoted = !quoted;
+            }
+        }
+        return quoted;
     }
 
     /** The comma-separated entries of a {@code SETTINGS} list, trimmed; commas inside quotes or parentheses do not split. */

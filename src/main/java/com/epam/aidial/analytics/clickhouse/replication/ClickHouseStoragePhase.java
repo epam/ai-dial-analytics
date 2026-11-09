@@ -1,7 +1,9 @@
 package com.epam.aidial.analytics.clickhouse.replication;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseMigrationRunner;
+import com.epam.aidial.analytics.configuration.ClickHouseReplicasProperties;
 import com.epam.aidial.analytics.sync.IngestTtlReconciler;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
@@ -9,7 +11,11 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The ClickHouse storage phase, the first {@code ApplicationRunner}. It verifies and prepares the storage, then opens
@@ -28,9 +34,11 @@ import java.util.Map;
  *   <li>still under the lock, the table check ({@link ReplicatedTableCheck}), whether or not migrations ran.</li>
  * </ol>
  *
- * <p>When ClickHouse could not be reached with migrations disabled, the storage cannot be verified and the gate opens
- * unverified, as the service has always started without ClickHouse. See
- * {@code openspec/specs/clickhouse-replication/spec.md}.
+ * <p>When ClickHouse could not be reached with migrations disabled, the storage cannot be verified yet: the service
+ * starts with the gate closed (readiness down, {@code /v1} answering {@code 503}, scheduled jobs skipped) and retries
+ * the phase in the background every {@code clickhouse.replicas.discovery-interval} until it completes. A retry that
+ * reaches ClickHouse and fails a check (an {@code Atomic} database, a plain table) logs an ERROR and keeps the gate
+ * closed. See {@code openspec/specs/clickhouse-replication/spec.md}.
  */
 @Slf4j
 @Component
@@ -48,11 +56,13 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
     private final StorageReadyGate gate;
     private final ReplicaRouter router;
     private final boolean migrationsEnabled;
+    private final Duration retryInterval;
+    private volatile ScheduledExecutorService retrier;
 
     public ClickHouseStoragePhase(DatabaseEngineCheck engineCheck, ClickHouseTopology topology, StoragePhaseLock lock,
             ReplicatedTableConversion conversion, ClickHouseMigrationRunner migrations, IngestTtlReconciler ttlReconciler,
             ReplicatedTableCheck tableCheck, StorageReadyGate gate, ReplicaRouter router,
-            @Value("${clickhouse.migrations.enabled:true}") boolean migrationsEnabled) {
+            ClickHouseReplicasProperties replicas, @Value("${clickhouse.migrations.enabled:true}") boolean migrationsEnabled) {
         this.engineCheck = engineCheck;
         this.topology = topology;
         this.lock = lock;
@@ -63,16 +73,23 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
         this.gate = gate;
         this.router = router;
         this.migrationsEnabled = migrationsEnabled;
+        this.retryInterval = replicas.discoveryInterval();
     }
 
     @Override
     public void run(ApplicationArguments args) {
         if (engineCheck.check() == DatabaseEngineCheck.Outcome.UNREACHABLE) {
-            log.warn("ClickHouse storage not verified: ClickHouse was unreachable at startup");
-            gate.open();
-            topology.startRefreshing();
+            log.warn("ClickHouse storage not verified: ClickHouse was unreachable at startup. Scheduled jobs, /v1 and "
+                    + "Flight SQL stay disabled, and readiness down, until a retry every {} s verifies it",
+                    retryInterval.toSeconds());
+            retryInBackground();
             return;
         }
+        verify();
+    }
+
+    /** The phase from discovery on, once the engine check has reached ClickHouse; opens the gate when it completes. */
+    private void verify() {
         topology.startup();
         // Before any DDL: a deploy missing the grants fails here having changed nothing, rather than after converting.
         router.verifySyncGrants(ClickHouseMigrationRunner.HISTORY_TABLE);
@@ -88,5 +105,37 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
         });
         topology.startRefreshing();
         gate.open();
+    }
+
+    private void retryInBackground() {
+        final ScheduledExecutorService local = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().daemon().name("clickhouse-storage-phase").factory());
+        retrier = local;
+        local.scheduleWithFixedDelay(() -> {
+            if (gate.isOpen()) {
+                local.shutdown();
+                return;
+            }
+            try {
+                if (engineCheck.check() == DatabaseEngineCheck.Outcome.UNREACHABLE) {
+                    return;
+                }
+                verify();
+                log.info("ClickHouse storage verified after a delayed start");
+                local.shutdown();
+            } catch (RuntimeException ex) {
+                // At startup this would have aborted the service; now it can only keep the gate closed and say why.
+                log.error("ClickHouse storage verification failed; scheduled jobs, /v1 and Flight SQL stay disabled and "
+                        + "it is retried in {} s: {}", retryInterval.toSeconds(), ex.getMessage(), ex);
+            }
+        }, retryInterval.toMillis(), retryInterval.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    @PreDestroy
+    void shutdown() {
+        final ScheduledExecutorService local = retrier;
+        if (local != null) {
+            local.shutdownNow();
+        }
     }
 }

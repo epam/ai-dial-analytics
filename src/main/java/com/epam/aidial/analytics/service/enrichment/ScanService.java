@@ -618,9 +618,9 @@ public class ScanService {
     }
 
     /** What a read of {@code plan} synchronizes on its home: the source, then every enrichment its statement joins. */
-    private static SyncPlan syncPlan(ScanPlan plan) {
+    private SyncPlan syncPlan(ScanPlan plan) {
         return SyncPlan.of(List.of(plan.source()), EnrichmentJoins.referencedEnrichments(plan.model(), plan.statement()),
-                null);
+                null).withSafetyLag(scanProperties.safetyLag());
     }
 
     private String newestGroupKey(ScanPlan plan, Instant from) {

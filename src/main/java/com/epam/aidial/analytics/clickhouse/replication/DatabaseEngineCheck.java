@@ -17,8 +17,8 @@ import java.util.Map;
  * before any ClickHouse DDL, so a refusal leaves ClickHouse and the catalog untouched.
  *
  * <p>When ClickHouse cannot be reached the engine cannot be checked. With migrations enabled that fails startup, as
- * the migrations would; with migrations disabled the service starts unverified, as it always has without ClickHouse,
- * and logs a WARN. See {@code openspec/specs/clickhouse-replication/spec.md} "The service runs only on a Replicated
+ * the migrations would; with migrations disabled the service starts with its storage gate closed, logs a WARN, and the
+ * storage phase retries the check in the background. See {@code openspec/specs/clickhouse-replication/spec.md} "The service runs only on a Replicated
  * database".
  */
 @Slf4j
@@ -63,7 +63,8 @@ public class DatabaseEngineCheck {
         } catch (RuntimeException ex) {
             if (ClickHouseFailures.isUnavailable(ex) && !migrationsEnabled) {
                 log.warn("ClickHouse at {}:{} is unreachable, so the engine of database '{}' could not be checked; "
-                        + "starting unverified because clickhouse.migrations.enabled is false", connection.host(),
+                        + "starting with scheduled jobs, /v1 and Flight SQL disabled until a retry reaches it, because "
+                        + "clickhouse.migrations.enabled is false", connection.host(),
                         connection.port(), database);
                 // Not remembered: ClickHouse may still be starting, and the storage phase asks again later.
                 return Outcome.UNREACHABLE;

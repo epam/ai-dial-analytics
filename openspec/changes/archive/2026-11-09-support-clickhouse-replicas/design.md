@@ -243,7 +243,7 @@ Discovery keeps only the rows carrying a database replica name; the operator's r
   - A **headless Service** over all pods resolves to several addresses. Startup fails when `clickhouse.host` resolves to more than one address while the database has more than one active replica.
   - A **ClusterIP Service** over all pods resolves to one virtual address, so a DNS check cannot see it. Startup therefore also checks identity: it opens several fresh connections (no keep-alive) to `clickhouse.host` and asks each which replica answered (`is_local`). It fails when they disagree. Each discovery refresh also compares the replica that answered with the previous one. A change is logged at WARN and counted, because it means either a failover or an endpoint that spreads. On every refresh the check runs on one connection, and only at startup on several, so its cost stays negligible.
 - **Addressing.** Replicas are addressed by `host_name` on `clickhouse.port`. That requires resolvable host names, such as StatefulSet pod FQDNs behind a headless Service, and one HTTP port across replicas. Both are documented.
-- **User-read health.** It comes from each replica's own `/replicas_status`, whose lag threshold is the server's `max_replica_delay_for_distributed_queries`. That keeps the threshold in infrastructure.
+- **User-read health.** It comes from each replica's own `/replicas_status`, whose lag threshold is the server's replicated MergeTree settings `min_relative_delay_to_close` / `min_absolute_delay_to_close`. That keeps the threshold in infrastructure.
 - **Caveats.**
   - `/replicas_status` still answers OK while Keeper is down. That is acceptable for reads, which keep working without Keeper.
   - It judges every replicated table on the server, other databases included, so a lagging table outside ADAS's database takes the replica out of user reads.
@@ -295,8 +295,9 @@ three statements:
 On a replicated table, `mutations_sync = 1` waits only for the initiating replica. Every other replica runs the
 TTL mutation after the reset has reached it, and so rewrites the whole table instead of recomputing TTL
 information. The step uses `mutations_sync = 2`, which waits for the active replicas. A replica that is down at
-that moment rewrites on recovery, which costs work but loses nothing. How 25.3–26.8 report the inactive replica
-under `mutations_sync = 2` is verified in the multi-replica test. No other runtime statement depends on a
+that moment rewrites on recovery, which costs work but loses nothing. The step does not wait for inactive replicas
+(`replication_wait_for_inactive_replica_timeout = 0`), treats the `UNFINISHED` ClickHouse may report for them as
+success, and resets the setting in a `finally`, so no reporting variant leaves it in place. No other runtime statement depends on a
 mutation having finished.
 
 ### D9. Keeper and replication failures are `503`

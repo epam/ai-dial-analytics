@@ -49,12 +49,16 @@ public class ReplicaRouter {
     /** The span attribute naming the replica a pipeline run executes on. */
     public static final String REPLICA_ATTRIBUTE = "clickhouse.replica";
 
+    /** The table-sync rounds a run may take to get one under half its safety lag. */
+    static final int SYNC_ROUNDS = 3;
+
     private final ClickHouseTopology topology;
     private final ClickHouseRoutingProperties routing;
     private final ClickHouseReplicasProperties replicas;
     private final ClickHouseProperties connection;
     private final ReplicaMeters meters;
     private final AtomicLong spread = new AtomicLong();
+
 
     public ReplicaRouter(ClickHouseTopology topology, ClickHouseRoutingProperties routing,
             ClickHouseReplicasProperties replicas, ClickHouseProperties connection, ReplicaMeters meters) {
@@ -207,8 +211,29 @@ public class ReplicaRouter {
     private void sync(ReplicaTarget home, SyncPlan plan) {
         final String database = connection.sessionDatabase();
         timed(home, "_database", () -> issue(home, "SYSTEM SYNC DATABASE REPLICA " + quote(database)));
-        for (final String table : plan.tables()) {
-            syncTable(home, table);
+        // A table sync waits only for writes committed when it starts, and the window's safety lag is applied at the
+        // probe right after the last one: a round that took too long would leave a write committed during it, and
+        // not yet fetched, below the horizon. A later round starts later, so it is repeated until one is quick.
+        for (int round = 1; ; round++) {
+            final long started = System.nanoTime();
+            for (final String table : plan.tables()) {
+                syncTable(home, table);
+            }
+            final Duration took = Duration.ofNanos(System.nanoTime() - started);
+            if (plan.safetyLag() == null || plan.safetyLag().isZero() || plan.tables().isEmpty()
+                    || took.compareTo(plan.safetyLag().dividedBy(2)) <= 0) {
+                return;
+            }
+            if (round == SYNC_ROUNDS) {
+                meters.sync("_rounds", "slow", took);
+                log.warn("ClickHouse replica '{}' took {} ms to sync the run's tables {} times in a row, more than half the "
+                        + "safety lag ({} ms): the run is refused. Raise the safety lag if the replica is routinely this "
+                        + "slow", home.name(), took.toMillis(), SYNC_ROUNDS, plan.safetyLag().toMillis());
+                throw new ClickHouseUnavailableException("The pipeline's ClickHouse replica could not be brought up to "
+                        + "date within the safety lag", null);
+            }
+            log.debug("ClickHouse replica '{}' took {} ms to sync the run's tables; syncing again", home.name(),
+                    took.toMillis());
         }
     }
 
@@ -228,10 +253,11 @@ public class ReplicaRouter {
             if (!target.primary() && ClickHouseFailures.isConnectFailure(ex)) {
                 target.unreachable();
             }
-            log.warn("ClickHouse replica '{}' could not be brought up to date on '{}' ({}): the run is refused",
-                    target.name(), table, outcome);
-            throw new ClickHouseUnavailableException("The pipeline's ClickHouse replica could not be brought up to date",
-                    ex);
+            final boolean run = target.route() == ReplicaTarget.Route.PIPELINE;
+            log.warn("ClickHouse replica '{}' could not be brought up to date on '{}' ({}): {}", target.name(), table,
+                    outcome, run ? "the run is refused" : "the step that needed it is refused");
+            throw new ClickHouseUnavailableException(run ? "The pipeline's ClickHouse replica could not be brought up to date"
+                    : "The ClickHouse primary could not be brought up to date", ex);
         } finally {
             meters.sync(table, outcome, Duration.ofNanos(System.nanoTime() - started));
         }

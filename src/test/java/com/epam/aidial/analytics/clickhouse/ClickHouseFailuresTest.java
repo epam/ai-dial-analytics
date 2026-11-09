@@ -37,6 +37,13 @@ class ClickHouseFailuresTest {
     }
 
     @Test
+    void unfinishedIsRecognizedAndNotUnavailable() {
+        assertThat(ClickHouseFailures.isUnfinished(new RuntimeException(serverError(341)))).isTrue();
+        assertThat(ClickHouseFailures.isUnfinished(serverError(159))).isFalse();
+        assertThat(ClickHouseFailures.isUnavailable(serverError(341))).isFalse();
+    }
+
+    @Test
     void transportFailuresAreUnavailable() {
         assertThat(ClickHouseFailures.isUnavailable(new ConnectException("refused"))).isTrue();
         assertThat(ClickHouseFailures.isUnavailable(new SocketTimeoutException("read timed out"))).isTrue();

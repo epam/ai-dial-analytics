@@ -167,7 +167,7 @@ endpoints need no credential in any security mode.
 | Endpoint | Use | Checks | Answers |
 |---|---|---|---|
 | `GET /actuator/health/liveness` | Liveness probe, Docker `HEALTHCHECK` | Application state only, no dependency | `200 {"status":"UP"}`, else `503` |
-| `GET /actuator/health/readiness` | Readiness probe | Startup (migrations included) complete, PostgreSQL catalog reachable | `200 {"status":"UP",...}`, else `503` |
+| `GET /actuator/health/readiness` | Readiness probe | Startup (migrations included) complete, ClickHouse storage verified, PostgreSQL catalog reachable | `200 {"status":"UP",...}`, else `503` |
 | `GET /actuator/health` | Diagnostics | All contributors, with details | `200` / `503` |
 | `GET /actuator/prometheus` | Prometheus scrape (pull) | — | Prometheus text format |
 

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table.relayout;
 
 import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
+import com.epam.aidial.analytics.clickhouse.ClickHouseFailures;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
 import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
@@ -529,7 +530,10 @@ public class EnrichmentRelayoutService {
      * read when the mutation runs, and left in place it would turn every later TTL change into a recalculation only.
      * It waits for every active replica ({@code mutations_sync = 2}), not only the primary: a replica that ran the
      * mutation after the reset reached it would rewrite the whole table. A replica down at that moment applies the
-     * mutation on recovery, which costs work and loses nothing.
+     * mutation on recovery, which costs work and loses nothing: the wait does not cover inactive replicas
+     * ({@code replication_wait_for_inactive_replica_timeout = 0}), and the {@code UNFINISHED} ClickHouse then reports
+     * for them is a success. The reset runs whatever the modification's outcome, so a failure never leaves the setting
+     * behind.
      */
     private void applyTtl(Plan plan) {
         if (plan.ttl() == null) {
@@ -537,9 +541,18 @@ public class EnrichmentRelayoutService {
         }
         ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of("MODIFY SETTING materialize_ttl_recalculate_only = 1"
                 + (plan.ttlOnlyDropParts() ? ", ttl_only_drop_parts = 1" : ""))));
-        ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of(ddlRenderer.modifyTtlCommand(plan.ttl())))
-                + " SETTINGS mutations_sync = 2");
-        ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of("RESET SETTING materialize_ttl_recalculate_only")));
+        try {
+            ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of(ddlRenderer.modifyTtlCommand(plan.ttl())))
+                    + " SETTINGS mutations_sync = 2, replication_wait_for_inactive_replica_timeout = 0");
+        } catch (RuntimeException ex) {
+            if (!ClickHouseFailures.isUnfinished(ex)) {
+                throw ex;
+            }
+            log.info("Relayout of '{}': the TTL mutation finished on every active replica; inactive ones apply it on "
+                    + "recovery", plan.table());
+        } finally {
+            ddl.execute(ddlRenderer.renderAlter(plan.table(), List.of("RESET SETTING materialize_ttl_recalculate_only")));
+        }
     }
 
     /**

@@ -47,7 +47,7 @@ management:
         enabled: true
       group:
         readiness:
-          include: readinessState,db
+          include: readinessState,db,storageReady
   opentelemetry:
     resource-attributes:
       "service.name": ${OTEL_SERVICE_NAME:ai-dial-analytics}

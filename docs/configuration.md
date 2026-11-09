@@ -182,7 +182,7 @@ work is routed over them. Topology, requirements and the failover runbook are in
 | `CLICKHOUSE_ROUTING_QUERIES`             | `clickhouse.routing.queries`             | `replicas` | No       | Where user queries run: `replicas` (healthy replicas) or `primary`.                      |
 | `CLICKHOUSE_ROUTING_PIPELINES`           | `clickhouse.routing.pipelines`           | `replicas` | No       | Where pipeline runs run: `replicas` (each pipeline's home replica) or `primary`.          |
 | `CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL` | `clickhouse.replicas.discovery-interval` | `30s`      | No       | How often the replica set is re-read from `system.clusters`; at least `5s`.              |
-| `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT`       | `clickhouse.replicas.sync-timeout`       | `30s`      | No       | Bound of one replica sync before a pipeline run or an ingest cycle; at least `1s`.        |
+| `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT`       | `clickhouse.replicas.sync-timeout`       | `30s`      | No       | Bound of one replica sync (pipeline run, ingest cycle, relayout step); at least `1s`.     |
 | `CLICKHOUSE_DDL_TASK_TIMEOUT`            | `clickhouse.ddl.task-timeout`            | `30s`      | No       | How long a DDL waits for the other replicas before returning; at least `1s`.             |
 
 ### PostgreSQL table catalog

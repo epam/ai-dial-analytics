@@ -7,7 +7,9 @@ import org.springframework.core.task.TaskDecorator;
 /**
  * Skips a scheduled run that fires before the ClickHouse storage phase has opened the {@link StorageReadyGate}.
  * Applied to the <em>user</em> task of every schedule on both schedulers ({@link GatedTaskScheduler}), so a job
- * added later is held back without remembering to check. A skipped run is not retried: the job's next fire runs.
+ * added later is held back without remembering to check. A skipped run is not retried here; {@link GatedTaskScheduler}
+ * runs a trigger-scheduled (cron) job once when the gate opens if a fire was skipped, since its next fire may be a day
+ * away.
  */
 @Slf4j
 final class StorageReadyTaskDecorator implements TaskDecorator {
@@ -18,11 +20,21 @@ final class StorageReadyTaskDecorator implements TaskDecorator {
         this.gate = gate;
     }
 
+    StorageReadyGate gate() {
+        return gate;
+    }
+
     @Override
     public Runnable decorate(Runnable task) {
+        return decorate(task, () -> { });
+    }
+
+    /** As {@link #decorate(Runnable)}, calling {@code onSkip} on every skipped run. */
+    Runnable decorate(Runnable task, Runnable onSkip) {
         return () -> {
             if (!gate.isOpen()) {
                 log.debug("Scheduled run skipped: the ClickHouse storage phase has not completed");
+                onSkip.run();
                 return;
             }
             task.run();

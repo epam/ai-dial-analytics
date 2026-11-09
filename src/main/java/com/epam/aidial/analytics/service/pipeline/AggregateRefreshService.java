@@ -265,7 +265,8 @@ public class AggregateRefreshService {
         // freshness bound names positions committed before the syncs): probe and write both execute there. A sync
         // that cannot complete refuses the run before any read, leaving the cursor where it was.
         try (ReplicaRouter.PipelineRun run = replicas.openRun(name, SyncPlan.of(List.of(input),
-                EnrichmentJoins.referencedEnrichments(model, declaration.referencedFields()), null))) {
+                EnrichmentJoins.referencedEnrichments(model, declaration.referencedFields()), null)
+                .withSafetyLag(properties.safetyLag()))) {
             return new Ran(refreshOnHome(pipeline, input, model, cursorColumns, declaration, filter, bound), run.replica());
         }
     }

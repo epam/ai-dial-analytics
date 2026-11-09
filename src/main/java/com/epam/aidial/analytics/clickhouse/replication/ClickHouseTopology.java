@@ -65,8 +65,8 @@ public class ClickHouseTopology {
 
     /** The cluster rows the {@code Replicated} database contributes for itself. */
     static final String CLUSTER_ROWS = "SELECT database_replica_name AS name, host_name AS host, is_local AS local, "
-            + "is_active AS active FROM system.clusters WHERE cluster = {db:String} AND database_replica_name != '' "
-            + "AND is_active IS NOT NULL ORDER BY name";
+            + "ifNull(is_active, 0) AS active, is_active IS NULL AS activity_unknown FROM system.clusters "
+            + "WHERE cluster = {db:String} AND database_replica_name != '' ORDER BY name";
 
     /** One registered replica, active or not. */
     public record Registered(String name, String host, boolean local, boolean active) {}
@@ -116,11 +116,22 @@ public class ClickHouseTopology {
         this.resolver = resolver;
     }
 
-    /** Every replica registered in the database, active or not, read now through the primary. */
+    /**
+     * Every replica registered in the database, active or not, read now through the primary.
+     *
+     * <p>ClickHouse reports a replica's activity as {@code NULL} when it could not ask Keeper, so a Keeper outage would
+     * otherwise read as a database whose replicas are all inactive. That is a failed read, not an answer.
+     *
+     * @throws IllegalStateException when the primary could not read the replicas' activity from Keeper
+     */
     public List<Registered> registered() {
         final List<Registered> rows = new ArrayList<>();
         for (final GenericRecord row : writerClient.primaryClient().queryAll(CLUSTER_ROWS,
                 Map.of("db", connection.sessionDatabase()))) {
+            if (row.getBoolean("activity_unknown")) {
+                throw new IllegalStateException("ClickHouse could not read the activity of replica '" + row.getString("name")
+                        + "' from Keeper");
+            }
             rows.add(new Registered(row.getString("name"), row.getString("host"), row.getBoolean("local"),
                     row.getBoolean("active")));
         }
@@ -168,6 +179,15 @@ public class ClickHouseTopology {
                     + "grant and that {} is reachable", ex.getMessage(),
                     last.discovered() ? "keeping the last discovered replica set" : "routing every statement to the primary",
                     connection.host());
+            return;
+        }
+        if (rows.stream().noneMatch(Registered::local)) {
+            // A Replicated database always lists the replica answering the read; no such row means the database's
+            // cluster could not be built, so this is a failed refresh rather than an empty replica set.
+            meters.discovery(false);
+            log.warn("ClickHouse replica discovery found no local replica of '{}' through {}; {}", connection.sessionDatabase(),
+                    connection.host(), snapshot.discovered() ? "keeping the last discovered replica set"
+                            : "routing every statement to the primary");
             return;
         }
         final List<Registered> active = rows.stream().filter(Registered::active).toList();
@@ -223,16 +243,23 @@ public class ClickHouseTopology {
             meters.primarySpread();
             log.warn(message);
         }
-        if (startup) {
+        if (startup || !snapshot.discovered()) {
+            // The fresh-connection check runs on the first successful discovery, which is a later refresh when the
+            // startup one failed or ClickHouse was unreachable at startup; only at startup can it fail the service.
             final Set<String> answered = new LinkedHashSet<>();
             for (int i = 0; i < IDENTITY_PROBES; i++) {
                 http.answeringReplica(connection.host(), connection.port(), writer.user(), writer.password(),
                         connection.sessionDatabase()).ifPresent(answered::add);
             }
             if (answered.size() > 1) {
-                throw new IllegalStateException("clickhouse.host '" + connection.host() + "' is answered by different "
+                final String message = "clickhouse.host '" + connection.host() + "' is answered by different "
                         + "replicas " + answered + " over fresh connections; it must reach only the primary "
-                        + "(see docs/clickhouse-replication.md)");
+                        + "(see docs/clickhouse-replication.md)";
+                if (startup) {
+                    throw new IllegalStateException(message);
+                }
+                meters.primarySpread();
+                log.warn(message);
             }
             return;
         }

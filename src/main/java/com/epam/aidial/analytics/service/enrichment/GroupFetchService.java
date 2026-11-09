@@ -180,7 +180,7 @@ public class GroupFetchService {
      * (filter, preference, ordering, group key, response and bound columns). An enrichment the call never reads is
      * not synced, so a replica lagging on it cannot refuse the call.
      */
-    private static SyncPlan syncPlan(Assembly a) {
+    private SyncPlan syncPlan(Assembly a) {
         Set<String> referenced = new LinkedHashSet<>(a.filter().columns());
         if (a.prefer() != null) {
             referenced.addAll(a.prefer().columns());
@@ -188,7 +188,8 @@ public class GroupFetchService {
         referenced.addAll(a.bound());
         referenced.addAll(a.response());
         referenced.addAll(a.policy());
-        return SyncPlan.of(List.of(a.source()), List.copyOf(EnrichmentJoins.referencedEnrichments(a.model(), referenced)), null);
+        return SyncPlan.of(List.of(a.source()), List.copyOf(EnrichmentJoins.referencedEnrichments(a.model(), referenced)), null)
+                .withSafetyLag(scanProperties.safetyLag());
     }
 
     private GroupPage fetchOnHome(Assembly a, String groupKey, Integer limit) {

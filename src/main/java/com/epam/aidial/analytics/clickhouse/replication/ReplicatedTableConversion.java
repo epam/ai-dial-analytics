@@ -237,13 +237,21 @@ public class ReplicatedTableConversion {
         ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin));
         final long converted = count(name);
         final long original = count(twin);
-        if (converted != original) {
-            log.error("Converting '{}': the row counts differ after the exchange ({} against {}); exchanging back", name,
-                    converted, original);
+        if (converted < original) {
+            // Rows went missing in the copy. The old copy is restored, and the converted one is kept beside it rather
+            // than dropped: anything written to it since the exchange is still there, and the table check refuses to
+            // serve while it exists, so an operator can reconcile it (or the next start removes it).
+            log.error("Converting '{}': the converted table holds fewer rows than the old copy after the exchange ({} "
+                    + "against {}); exchanging back and keeping the converted copy as '{}'", name, converted, original, twin);
             ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin));
-            ddl("DROP TABLE " + quote(twin));
-            throw new IllegalStateException("the row counts differed after the exchange (" + converted + " against "
-                    + original + "); was a previous version still writing?");
+            throw new IllegalStateException("the converted table held fewer rows than the old copy after the exchange ("
+                    + converted + " against " + original + "); was a previous version still writing?");
+        }
+        if (converted > original) {
+            // Something wrote to the converted table after the exchange (a previous version still running): it holds
+            // every row of the old copy and the new writes, so it is kept, as a resumed conversion would keep it.
+            log.warn("Converting '{}': the converted table took {} write(s) after the exchange; was a previous version "
+                    + "still writing? Keeping the converted table", name, converted - original);
         }
         ddl("DROP TABLE " + quote(twin));
         log.info("Converted '{}' to its replicated form: {} rows in {} ms", name, converted,

@@ -49,4 +49,23 @@ class GatedTaskSchedulerTest {
         gate.open();
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(runs.get()).isPositive());
     }
+
+    /** A cron job whose fire was skipped runs once when the gate opens; its next fire may be a day away. */
+    @Test
+    void skippedCronJobRunsOnceWhenTheGateOpens() throws Exception {
+        scheduler.initialize();
+        final AtomicInteger runs = new AtomicInteger();
+        final AtomicInteger fires = new AtomicInteger();
+        // Fires a few times quickly, then not again for a day.
+        scheduler.schedule(runs::incrementAndGet, context -> fires.incrementAndGet() <= 3
+                ? java.time.Instant.now().plusMillis(10) : java.time.Instant.now().plus(Duration.ofDays(1)));
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> fires.get() > 3);
+        assertThat(runs).hasValue(0);
+
+        gate.open();
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(runs.get()).isEqualTo(1));
+        Thread.sleep(100);
+        assertThat(runs).hasValue(1);
+    }
 }

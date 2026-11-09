@@ -32,6 +32,10 @@ phase. Liveness SHALL report the instance alive, and readiness SHALL report it n
 completes. A readiness probe that keeps external traffic away is not sufficient on its own, because the
 instance's own scheduled jobs do not pass through it.
 
+A scheduled run that fires during the phase SHALL be skipped. A cron-scheduled job (the poll, the daily
+data-sync, the aggregate tick) whose fire was skipped SHALL run once when the phase completes, because its next
+fire may be a day away; a fixed-delay job simply fires again.
+
 When the engine is not `Replicated`, the service SHALL abort startup having changed nothing in ClickHouse or in
 the catalog. The log SHALL:
 
@@ -43,8 +47,12 @@ A redeploy after the operator has changed the engine SHALL start normally.
 
 When ClickHouse cannot be reached at startup, the engine cannot be checked. With
 `clickhouse.migrations.enabled` true the service SHALL fail startup, as the migrations would. With it false
-the service SHALL log a WARN and start unverified, as it always has without a reachable ClickHouse: every
-request that needs ClickHouse then answers `503 clickhouse_unavailable`.
+the service SHALL start with the storage phase incomplete and log a WARN: readiness SHALL report it not ready,
+every `/v1` endpoint (PostgreSQL-only ones included) SHALL answer `503 clickhouse_unavailable`, scheduled jobs
+SHALL be skipped, and Flight SQL SHALL not listen. It SHALL retry the phase in the background every
+`clickhouse.replicas.discovery-interval` and complete it once ClickHouse answers and every check passes. A retry
+that reaches ClickHouse and fails a check that would have aborted startup SHALL log an ERROR naming it and keep
+the phase incomplete; it is retried on the same interval.
 
 Once the startup conversion (see "Plain tables in the database are converted to replicated tables at startup")
 and the migrations have run, the service SHALL verify every table it owns before serving any ingest, pipeline
@@ -56,8 +64,11 @@ it owns are:
 - the Flyway history table;
 - every catalog table in status `ACTIVE`.
 
-A table that still fails the check SHALL abort startup, and the log SHALL name it. This happens only when the
-conversion did not run, because `clickhouse.migrations.enabled` is false, or when it refused the table. A table
+A table the startup conversion gave up on SHALL be checked too, whether or not the service owns it, so a plain
+table left behind (a relayout copy, a catalog table not `ACTIVE`) never takes writes that a later start's
+conversion would race. A table that still fails the check SHALL abort startup, and the log SHALL name it. This
+happens only when the conversion did not run, because `clickhouse.migrations.enabled` is false, or when it
+refused the table. A table
 the catalog lists but ClickHouse does not have is not this check's concern; the existing reconciliation reports
 it.
 
@@ -82,12 +93,26 @@ it.
 - **AND** no DDL was issued, no migration was recorded and no catalog row was written
 - **AND** no ingest, pipeline run or query is served
 
-#### Scenario: An unreachable ClickHouse with migrations disabled starts unverified
+#### Scenario: An unreachable ClickHouse with migrations disabled starts unready
 
 - **GIVEN** `clickhouse.migrations.enabled` false and no ClickHouse reachable at `clickhouse.host`
 - **WHEN** the service starts
-- **THEN** it starts, logs a WARN that the storage was not verified, and answers a query with HTTP 503
-  `clickhouse_unavailable`
+- **THEN** it starts, logs a WARN that the storage was not verified, reports liveness up and readiness down,
+  and answers `GET /v1/saved-queries` with HTTP 503 `clickhouse_unavailable`
+- **AND** no scheduled job runs
+
+#### Scenario: The storage is verified once ClickHouse becomes reachable
+
+- **GIVEN** a service that started while ClickHouse was unreachable, with migrations disabled
+- **WHEN** ClickHouse becomes reachable and its database and tables pass the checks
+- **THEN** within one `clickhouse.replicas.discovery-interval` the phase completes, readiness reports ready,
+  and `/v1`, scheduled jobs and Flight SQL are enabled
+
+#### Scenario: A delayed verification that fails keeps the instance unready
+
+- **GIVEN** a service that started while ClickHouse was unreachable, with migrations disabled
+- **WHEN** ClickHouse becomes reachable and a table it owns is plain
+- **THEN** an ERROR names the table, readiness stays down and `/v1` keeps answering HTTP 503
 
 #### Scenario: A redeploy after the engine was changed starts
 
@@ -160,7 +185,11 @@ replicated_deduplication_window_for_async_inserts = 0`.
 
 Every step SHALL leave the database usable. An interruption, or a count mismatch before the exchange, SHALL
 leave the original table in service and remove the twin. A pre-exchange mismatch SHALL be retried once from
-step 1 before the table is given up. A mismatch after the exchange SHALL exchange the two tables back. A later
+step 1 before the table is given up. After the exchange, a converted table holding at least the twin's rows
+SHALL be kept and the twin dropped, as a resume would; one holding more means a previous version wrote to it,
+which SHALL be logged at WARN. A converted table holding fewer rows SHALL be exchanged back, and the converted
+copy SHALL be kept under the reserved prefix rather than dropped, so a write it took is not lost; the table
+check then refuses to serve until an operator or a later start reconciles it. A later
 start SHALL detect the remains of an interrupted conversion by its reserved prefix and resume or clean it up: a
 twin beside a plain table is dropped and the table converted again; a plain twin beside a converted table is
 dropped when the converted table holds at least the twin's rows, and exchanged back otherwise. While any
@@ -242,9 +271,11 @@ upgrade documentation SHALL require a deploy that stops the previous version bef
 
 The service SHALL learn the replicas of its session database from ClickHouse rather than from configuration.
 It SHALL read the rows of `system.clusters` that the `Replicated` database contributes for itself. Those rows
-carry the session database's name as the cluster, a non-empty database replica name and a non-null activity
-flag. The `Replicated` engine maintains these rows as replicas join and leave. A `remote_servers` cluster that
-happens to share the database's name SHALL be ignored, because its rows carry neither marker. It SHALL read them through the primary
+carry the session database's name as the cluster and a non-empty database replica name. The `Replicated` engine
+maintains these rows as replicas join and leave. A `remote_servers` cluster that happens to share the database's
+name SHALL be ignored, because its rows carry no database replica name. ClickHouse reports a replica's activity
+as `NULL` when it cannot ask Keeper; a read with such a row, or with no row reported as local, SHALL count as a
+failed refresh rather than as a set of inactive replicas. It SHALL read them through the primary
 (`clickhouse.host`) on the writer credential, at startup and then every
 `clickhouse.replicas.discovery-interval` (default `30s`, minimum `5s`).
 
@@ -267,7 +298,9 @@ database has more than one active replica, the service SHALL fail startup, namin
 - several fresh connections to `clickhouse.host` are answered by different replicas, as through a ClusterIP
   Service that selects every replica.
 
-On every later refresh, the service SHALL log at WARN and count each of these: a host that has started
+When startup discovery did not succeed (ClickHouse unreachable, a missing grant), the fresh-connection check SHALL
+run on the first refresh that succeeds; it can no longer fail startup, so a spread SHALL be logged at WARN and
+counted. On every later refresh, the service SHALL log at WARN and count each of these: a host that has started
 resolving to several addresses, and a change in which replica answers through `clickhouse.host`. A failover
 looks the same as a spreading endpoint, so neither is an error after startup.
 
@@ -419,7 +452,10 @@ visible on the home before the enrichment rows it depends on. The run's window S
 its upper bound: the probe applies the safety lag, and the write reuses the probe's end. This holds when the
 safety lag exceeds three things together: the clock skew among the ClickHouse replicas and the service
 instances, the longest insert, and the time from the first sync to the probe. The operator documentation SHALL
-state this requirement.
+state this requirement. The service SHALL bound the last term itself: when a round of the run's table syncs took
+longer than half the window's safety lag (`enrichment.scan.safety-lag`, or `aggregate.safety-lag` for an aggregate
+refresh) and that lag is not zero, the home SHALL sync the tables again, and when three rounds in a row are that slow the run SHALL be
+refused with `503 clickhouse_unavailable` like any other sync failure.
 
 #### Scenario: A Class-1 window runs on its home replica
 
@@ -501,8 +537,9 @@ the same replica.
 The replica SHALL be chosen as follows:
 
 - **Healthy candidates.** The choice is among the active replicas whose `/replicas_status` endpoint answers
-  healthy at the latest discovery refresh. ClickHouse's own lag threshold decides health
-  (`max_replica_delay_for_distributed_queries`).
+  healthy at the latest discovery refresh. ClickHouse's own lag threshold decides health: the replicated
+  MergeTree settings `min_relative_delay_to_close` and `min_absolute_delay_to_close`, judged over every
+  replicated table on the server.
 - **Preference.** With two or more healthy non-primary replicas, the primary is not a candidate. With exactly
   one, the primary is a candidate beside it, because that one replica is also the home of every pipeline.
 - **Spread.** Successive requests are spread over the preferred candidates rather than pinned to one.
@@ -585,7 +622,10 @@ A replica that is stopped therefore delays neither startup nor a runtime DDL bey
 
 A mutation that a later statement of the same operation depends on SHALL wait for every active replica, not only
 the primary. The relayout's TTL application resets `materialize_ttl_recalculate_only` after its `MODIFY TTL`, so
-it waits with `mutations_sync = 2`. A replica that is down at that moment applies the mutation on recovery.
+it waits with `mutations_sync = 2`. A replica that is down at that moment applies the mutation on recovery: the
+wait SHALL not cover inactive replicas (`replication_wait_for_inactive_replica_timeout = 0`), the `UNFINISHED`
+ClickHouse reports for them SHALL be treated as success, and the reset SHALL run whatever the outcome of the
+`MODIFY TTL`, so the setting is never left in place.
 
 A DDL the primary executed SHALL be treated as applied even when another replica has not executed it yet. Such
 a replica applies it from the database's replication log when it recovers. On ClickHouse 25.3 a recovering replica can stall replaying a

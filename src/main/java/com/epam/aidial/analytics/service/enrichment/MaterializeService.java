@@ -289,7 +289,8 @@ public class MaterializeService {
         // On the pipeline's home replica from here on, brought up to date first: the syncs follow every catalog
         // read above (the freshness clamp names positions committed before them), and sit outside the statement
         // budget the call's clock starts below. A sync that cannot complete refuses the call (503) before any read.
-        try (ReplicaRouter.PipelineRun run = replicas.openRun(pipelineName, SyncPlan.of(List.of(source), joined, null))) {
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(pipelineName,
+                SyncPlan.of(List.of(source), joined, null).withSafetyLag(scanProperties.safetyLag()))) {
             // Stamped BEFORE the probe, not after. The drained horizon means "nothing matching below this
             // instant minus the safety lag", and the instant it is really making that claim about is the one
             // the probe evaluated `now64(3)` at. Reading the clock afterwards would move the horizon forward by

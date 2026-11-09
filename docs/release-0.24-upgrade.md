@@ -67,7 +67,15 @@ rewritten.
 **Rollback.** A release-0.23 build reads and writes the converted tables normally, but its table creates
 render plain engines, which `database_replicated_allow_only_replicated_engine = 1` refuses.
 
-## 4. `CLICKHOUSE_HOST`
+## 4. ClickHouse unreachable at startup
+
+With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, an instance that cannot reach ClickHouse at startup no longer
+serves unverified. It starts with readiness down, `/v1` answering `503` (the PostgreSQL-only endpoints
+included) and no scheduled job running, and retries the storage checks every
+`CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL` until they pass. A probe on `/actuator/health/readiness` keeps
+traffic away meanwhile; liveness is unaffected. With migrations enabled startup still fails, as before.
+
+## 5. `CLICKHOUSE_HOST`
 
 It now means the primary replica: ingest, API writes and DDL run there. A headless Service over every
 ClickHouse pod keeps working while there is one replica. Replace it with an endpoint that reaches only the

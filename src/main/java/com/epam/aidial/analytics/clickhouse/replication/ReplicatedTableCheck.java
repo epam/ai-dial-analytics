@@ -27,7 +27,8 @@ import java.util.Set;
 /**
  * The last step of the storage phase: every table the service owns is a {@code Replicated*MergeTree} with insert
  * deduplication off, or startup fails naming each offender. The owned tables are those the ClickHouse migrations
- * create, the Flyway history table, and every {@code ACTIVE} catalog table. A table the catalog lists but ClickHouse
+ * create, the Flyway history table, and every {@code ACTIVE} catalog table; a table the startup conversion gave up on
+ * is checked as well, whoever owns it. A table the catalog lists but ClickHouse
  * does not have is the existing reconciliation's concern, not this check's. A table left over from an interrupted
  * conversion also fails the check, so no instance serves writes until a start with migrations enabled resumes it.
  */
@@ -56,6 +57,9 @@ public class ReplicatedTableCheck {
      */
     public void check(Map<String, String> reasons) {
         final Set<String> owned = owned();
+        // A table the conversion gave up on fails too, owned or not (a relayout copy, a non-ACTIVE catalog table): left
+        // plain, it would take writes now and be converted by a later start while other instances write to it.
+        owned.addAll(reasons.keySet());
         final Map<String, GenericRecord> live = new LinkedHashMap<>();
         for (final GenericRecord row : writer.primaryClient().queryAll(
                 "SELECT name, engine, engine_full FROM system.tables WHERE database = {db:String}",

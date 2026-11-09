@@ -2031,11 +2031,14 @@ materialize as ClickHouse `Array(<element>)`. A `type=timestamp` column SHALL ma
 `DateTime64(3, 'UTC')` — the zone SHALL be declared rather than left to the ClickHouse server's, because
 the read path converts the zoneless value the driver surfaces to epoch milliseconds at UTC, and a time
 bucket materialized into such a column would otherwise re-bucket on read in the server's zone rather than
-the one it was computed in. If the `CREATE TABLE` fails or its outcome is ambiguous
-(e.g. a timeout under which ClickHouse may still create the table), the system SHALL issue a
-best-effort `DROP TABLE IF EXISTS`, set the definition to `status=FAILED`, and return an error using
-the `ErrorView` contract without leaking ClickHouse internals; a `FAILED` table MAY be re-posted
-(with its full schema) to retry. In `oidc` mode the endpoint SHALL require `TABLE_MODIFY`, held
+the one it was computed in. If the `CREATE TABLE` reports a failure but the table did not exist before
+it and exists on the primary afterwards, the primary executed it: the definition SHALL be set to
+`status=ACTIVE` and no `DROP` issued, because the other replicas apply it from the database log (see
+[clickhouse-replication](../clickhouse-replication/spec.md)). Otherwise, if the `CREATE TABLE` fails or
+its outcome is ambiguous (e.g. a timeout under which ClickHouse may still create the table), the system
+SHALL issue a best-effort `DROP TABLE IF EXISTS`, set the definition to `status=FAILED`, and return an
+error using the `ErrorView` contract without leaking ClickHouse internals; a `FAILED` table MAY be
+re-posted (with its full schema) to retry. In `oidc` mode the endpoint SHALL require `TABLE_MODIFY`, held
 globally or granted on the table, and a `system`-owned table SHALL reject it with HTTP 409 whatever the
 caller holds. Declaring any column `sensitive` here SHALL additionally require `TABLE_SENSITIVE` on the
 table, globally or granted on the `PENDING` table. Otherwise the request SHALL be rejected with
@@ -2169,10 +2172,19 @@ creating a column it could not then see.
 
 #### Scenario: ClickHouse failure marks the table FAILED
 
-- **WHEN** the ClickHouse `CREATE TABLE` fails during the define-and-materialize call
+- **WHEN** the ClickHouse `CREATE TABLE` fails during the define-and-materialize call, and the table
+  does not exist on the primary afterwards
 - **THEN** the system issues a best-effort `DROP TABLE IF EXISTS`, sets the definition to
   `status=FAILED`, and the response is an error using the `ErrorView` contract with no raw ClickHouse
   internals
+
+#### Scenario: A CREATE the primary executed is kept although it reported a failure
+
+- **GIVEN** a replica that is slow to apply DDL
+- **WHEN** the `CREATE TABLE` of the define-and-materialize call reports a failure after the primary
+  created the table
+- **THEN** no `DROP` is issued, the definition is `status=ACTIVE`, and the lagging replica creates the
+  table from the database log
 
 ### Requirement: Table responses carry caller-effective permissions
 
