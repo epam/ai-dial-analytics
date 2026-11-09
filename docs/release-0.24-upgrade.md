@@ -1,7 +1,7 @@
 # ADAS release-0.24 — upgrade notes
 
 What an environment has to do to move from **release-0.23** to **release-0.24**. An environment that has not
-applied the previous upgrade notes first follows [`release-0.4-upgrade.md`](release-0.4-upgrade.md).
+applied the previous upgrade notes first follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
 This release runs ADAS on replicated ClickHouse storage, on every deployment, a single server included
 ([`clickhouse-replication.md`](clickhouse-replication.md)). That makes it more than a redeploy:
