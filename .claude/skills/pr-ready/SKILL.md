@@ -5,26 +5,27 @@ allowed-tools: Bash(openspec:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(tr:
 ---
 
 Run every step and report each one as pass or fail. Fix what fails before opening or pushing the PR.
-`<base>` below is the PR's base branch as a remote ref, e.g. `origin/development` (use the remote
-that points at the GitHub repository).
+`<base>` below is the PR's base branch on the remote that points at the GitHub repository, e.g.
+`<remote>/development`.
 
-1. **OpenSpec change archived.** If the branch adds or edits a change under `openspec/changes/`
-   (outside `archive/`), archive it in this PR (`/opsx:archive`). Every task in `tasks.md` is ticked
-   first, and a verification task is ticked only once it has actually been run.
-
-2. **OpenSpec validates.** Run `openspec validate <change> --strict` for any unarchived change, then
-   `openspec validate --specs --strict`. Without `--strict` a missing `SHALL`/`MUST` is only a warning.
+1. **OpenSpec validates.** If the branch adds or edits a change under `openspec/changes/` (outside
+   `archive/`), run `openspec validate <change> --strict` first. Without `--strict` a missing
+   `SHALL`/`MUST` is only a warning.
    - The keyword must be in the requirement's body text; `SHALL` in the `### Requirement:` heading
      alone does not count.
    - New requirements go inside `## Requirements`, before any later `##` section such as
      `## Implementation notes`.
 
+2. **OpenSpec change archived.** Archive that change in this PR (`/opsx:archive`). Every task in
+   `tasks.md` is ticked first, and a verification task is ticked only once it has actually been run.
+   Then run `openspec validate --specs --strict` on the merged specs.
+
 3. **Hygiene sweep on added lines.** Take the patterns from the `CLAUDE.md` "Public-repo hygiene"
    section and run them over the lines this branch adds, not over whole files:
-   - Line pass: `git diff -U0 <base>...HEAD | grep -P '^\+(?!\+\+)' | grep -nP '<line pattern>'`
-   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -P '^\+(?!\+\+)' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
+   - Line pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+)\K.*' | grep -P '<line pattern>'`
+   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+)\K.*' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
 
-   Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
+   Locate a hit with `git grep -nP '<hit text>'`. Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
    section itself) is fine. Anything else gets rewritten.
 
 4. **PR title.** The repo squashes with the PR title only, so the title is the only commit text in
