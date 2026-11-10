@@ -11,21 +11,22 @@ Run every step and report each one as pass or fail. Fix what fails before openin
 1. **OpenSpec validates.** If the branch adds or edits a change under `openspec/changes/` (outside
    `archive/`), run `openspec validate <change> --strict` first. Without `--strict` a missing
    `SHALL`/`MUST` is only a warning.
-   - The keyword must be in the requirement's body text; `SHALL` in the `### Requirement:` heading
-     alone does not count.
-   - New requirements go inside `## Requirements`, before any later `##` section such as
-     `## Implementation notes`.
+   The keyword must be in the requirement's body text; `SHALL` in the `### Requirement:` heading alone
+   does not count.
 
 2. **OpenSpec change archived.** Archive that change in this PR (`/opsx:archive`). Every task in
    `tasks.md` is ticked first, and a verification task is ticked only once it has actually been run.
-   Then run `openspec validate --specs --strict` on the merged specs.
+   Then run `openspec validate --specs --strict` on the merged specs. A requirement that lands after a
+   later `##` section such as `## Implementation notes` fails here; move it back inside
+   `## Requirements`.
 
 3. **Hygiene sweep on added lines.** Take the patterns from the `CLAUDE.md` "Public-repo hygiene"
    section and run them over the lines this branch adds, not over whole files:
-   - Line pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+)\K.*' | grep -P '<line pattern>'`
-   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+)\K.*' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
+   - Line pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ )\K.*' | grep -P '<line pattern>'`
+   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ )\K.*' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
 
-   Locate a hit with `git grep -nP '<hit text>'`. Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
+   Locate a hit with `git grep -n` on one word of it (a wrapped phrase spans two lines, so add `-A1`).
+   Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
    section itself) is fine. Anything else gets rewritten.
 
 4. **PR title.** The repo squashes with the PR title only, so the title is the only commit text in
