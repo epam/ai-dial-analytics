@@ -84,6 +84,32 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
 
+## Pull-request rules (recurring review findings)
+
+Distilled from the GitHub review history. Each rule was raised on several PRs; check them before
+pushing or opening a PR.
+
+- **PR description uses `.github/pull_request_template.md`**: `Applicable issues` (link a GitHub issue,
+  creating one if needed), `Description of changes`, `Checklist` with the Apache 2.0 line. The
+  description becomes the squash commit, so the hygiene rules below apply to it too: no branch or
+  merge chatter, no task or design ids ("group 7", "D6"), no "Draft / not built yet / stacked on #N"
+  once that is no longer true. Refresh it after every material push.
+- **Archive the OpenSpec change in the PR that ships it** (`/opsx:archive`), with every task ticked and
+  any acceptance/verification step actually run. Never archive an unticked "Not yet run".
+- **Run `openspec validate <change> --strict` and `openspec validate --specs` before pushing.** The
+  validator reads only a requirement's first paragraph: it must contain `SHALL`/`MUST` (open with the
+  normative sentence, definitions after). New requirements go before `## Implementation notes`.
+- **Spec, docs and code must say the same thing.** Check order-of-checks, status values, error codes,
+  and reader docs (`docs/heavy-columns.md`, upgrade notes) against the shipped behaviour. Every test
+  that pins a behaviour gets a spec scenario.
+- **Scope and privacy by default.** A new key, cache, scope or copied column must name its tenant/user
+  boundary: blank or missing ids must not collapse into one shared scope, and identity columns must
+  not be copied next to sensitive payloads without a docs call-out. Caches shared between live and
+  backfill traffic are per-day or separate.
+- **Reject case variants and partial states explicitly** (by-name lookups, `validate-schema=false`,
+  migrations disabled) instead of letting them degrade silently.
+- **Deferred work becomes a GitHub issue**, not a sentence in the PR.
+
 ## Public-repo hygiene
 
 This repository is open source. Everything tracked — code, comments, Javadoc, tests, `application.yml`,
