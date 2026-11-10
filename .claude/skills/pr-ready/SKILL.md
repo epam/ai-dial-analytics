@@ -1,26 +1,35 @@
 ---
 name: pr-ready
 description: Check a branch before opening a pull request or pushing to an open one. Use before `gh pr create`, before pushing new commits to a PR, or when the user asks whether a PR is ready.
-allowed-tools: Bash(openspec:*), Bash(git:*), Bash(gh:*)
+allowed-tools: Bash(openspec:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(tr:*), Bash(./gradlew:*)
 ---
 
 Run every step and report each one as pass or fail. Fix what fails before opening or pushing the PR.
+`<base>` below is the PR's base branch as a remote ref, e.g. `origin/development` (use the remote
+that points at the GitHub repository).
 
 1. **OpenSpec change archived.** If the branch adds or edits a change under `openspec/changes/`
-   (outside `archive/`), it must be archived in this PR (`/opsx:archive`): every task in `tasks.md`
-   ticked, and any acceptance or verification step actually run. Never archive an unticked
-   "Not yet run".
+   (outside `archive/`), archive it in this PR (`/opsx:archive`). Every task in `tasks.md` is ticked
+   first, and a verification task is ticked only once it has actually been run.
 
-2. **OpenSpec validates.** Run `openspec validate <change> --strict` for any unarchived change and
-   `openspec validate --specs`. Every requirement needs `SHALL`/`MUST`, best in its opening sentence
-   (older OpenSpec versions read only the first paragraph). New requirements go inside
-   `## Requirements`, before any later `##` section such as `## Implementation notes`.
+2. **OpenSpec validates.** Run `openspec validate <change> --strict` for any unarchived change, then
+   `openspec validate --specs --strict`. Without `--strict` a missing `SHALL`/`MUST` is only a warning.
+   - The keyword must be in the requirement's body text; `SHALL` in the `### Requirement:` heading
+     alone does not count.
+   - New requirements go inside `## Requirements`, before any later `##` section such as
+     `## Implementation notes`.
 
-3. **Hygiene sweep.** Run the PCRE sweep from the `CLAUDE.md` "Public-repo hygiene" section over the
-   files the branch changes, plus its multiline pass.
+3. **Hygiene sweep on added lines.** Take the patterns from the `CLAUDE.md` "Public-repo hygiene"
+   section and run them over the lines this branch adds, not over whole files:
+   - Line pass: `git diff -U0 <base>...HEAD | grep -P '^\+(?!\+\+)' | grep -nP '<line pattern>'`
+   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -P '^\+(?!\+\+)' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
 
-4. **PR title.** The repo squashes with the PR title only, so the title is the commit in history: a
-   conventional-commit line (`feat:`, `fix:`, `docs:`, `!` for breaking) that follows the hygiene rules.
+   Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
+   section itself) is fine. Anything else gets rewritten.
+
+4. **PR title.** The repo squashes with the PR title only, so the title is the only commit text in
+   history. It is a conventional-commit line (`feat:`, `fix:`, `docs:`, `!` for breaking) that names
+   the main thing the PR adds and follows the hygiene rules.
 
 5. **PR description.** Use `.github/pull_request_template.md`:
    - `Applicable issues`: link a GitHub issue, or `n/a` for a small change.

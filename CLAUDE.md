@@ -62,7 +62,14 @@ CLI: `openspec list`, `openspec show <change>`, `openspec validate <change>`.
 When you change behavior, contracts, or invariants, update the relevant
 `openspec/specs/<capability>/` spec in the same change — it isn't optional polish. Before
 reporting a change complete, confirm the spec matches the shipped behavior (or state explicitly
-that no spec update was needed).
+that no spec update was needed). Every observable behaviour a test pins has a spec scenario, and
+reader docs (`docs/*.md`, upgrade notes) say the same thing: order of checks, status values, error
+codes.
+
+### Pull requests
+
+Before `gh pr create`, or before pushing to an open PR, run the `pr-ready` skill
+(`.claude/skills/pr-ready/SKILL.md`).
 
 ## Conventions quick reference
 
@@ -83,20 +90,13 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
   (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
-
-## Review rules (recurring review findings)
-
-- **Before `gh pr create` or pushing to an open PR, run the `pr-ready` skill**
-  (`.claude/skills/pr-ready/SKILL.md`): archive, OpenSpec validation, hygiene sweep, title,
-  description template, follow-up issues, build.
-- **Every observable behaviour a test pins has a spec scenario**, and reader docs
-  (`docs/heavy-columns.md`, upgrade notes) match it: order of checks, status values, error codes.
 - **Scope and privacy by default.** A new key, cache, scope or copied column names its tenant/user
   boundary: blank or missing ids must not collapse into one shared scope, and identity columns are not
-  copied next to sensitive payloads without a docs call-out.
-- **Fail explicitly, never degrade silently.** By-name lookups handle letter-case variants the same way
-  everywhere, and code that depends on schema validation or migrations fails explicitly when they are
-  disabled.
+  copied next to sensitive payloads unless the upgrade note and `docs/heavy-columns.md` say so.
+- **Fail explicitly, never degrade silently.** Code that depends on schema validation or migrations
+  fails with a clear error when they are disabled, instead of writing incomplete data.
+- **One case rule per name lookup.** A by-name check compares field and column names with the same
+  case sensitivity everywhere it runs.
 
 ## Public-repo hygiene
 
