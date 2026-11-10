@@ -10,7 +10,7 @@ Run every step and report each one as pass or fail. Fix what fails before openin
 
 1. **OpenSpec validates.** If the branch adds or edits a change under `openspec/changes/` (outside
    `archive/`), run `openspec validate <change> --strict` first. Without `--strict` a missing
-   `SHALL`/`MUST` is only a warning.
+   `SHALL`/`MUST` passes silently.
    The keyword must be in the requirement's body text; `SHALL` in the `### Requirement:` heading alone
    does not count.
 
@@ -22,8 +22,8 @@ Run every step and report each one as pass or fail. Fix what fails before openin
 
 3. **Hygiene sweep on added lines.** Take the patterns from the `CLAUDE.md` "Public-repo hygiene"
    section and run them over the lines this branch adds, not over whole files:
-   - Line pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ )\K.*' | grep -P '<line pattern>'`
-   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ )\K.*' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
+   - Line pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ (b|/\w+)/)\K.*' | grep -P '<line pattern>'`
+   - Wrapped-phrase pass: `git diff -U0 <base>...HEAD | grep -oP '^\+(?!\+\+ (b|/\w+)/)\K.*' | tr '\n' ' ' | grep -oP '<multiline pattern>'`
 
    Locate a hit with `git grep -n` on one word of it (a wrapped phrase spans two lines, so add `-A1`).
    Judge each hit. Text that quotes a forbidden word as a rule or an example (such as the hygiene
