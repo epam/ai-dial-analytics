@@ -15,7 +15,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * Runs a server-side {@code INSERT … SELECT} against ClickHouse on the dedicated <em>writer</em>
@@ -84,16 +83,16 @@ public class ClickHouseInsertSelectExecutor {
         settings.serverSetting(MAX_PARTITIONS_PER_INSERT_BLOCK, "0");
         ClickHouseBudget.apply(settings, Objects.requireNonNull(budget, "budget"));
         final String queryId = tag.applyTo(settings);
-        final Optional<ReplicaTarget> bound = Optional.of(ReplicaScope.requirePipelineRun("INSERT … SELECT into " + target));
+        final ReplicaTarget bound = ReplicaScope.requirePipelineRun("INSERT … SELECT into " + target);
         return clickHouseSpans.insertSelect(target, queryId, () -> {
-            replicaMeters.statement(bound.get().route(), bound.get().name());
+            replicaMeters.statement(bound.route(), bound.name());
             try (CommandResponse response = writer.client().execute(sql, settings).get()) {
                 return response.getWrittenRows();
             } catch (InterruptedException ex) {
                 throw ClickHouseWriterClient.interrupted("Interrupted while writing to ClickHouse", ex);
             } catch (Exception ex) {
-                if (bound.isPresent() && !bound.get().primary() && ClickHouseFailures.isConnectFailure(ex)) {
-                    bound.get().unreachable();
+                if (!bound.primary() && ClickHouseFailures.isConnectFailure(ex)) {
+                    bound.unreachable();
                 }
                 if (ClickHouseFailures.isUnavailable(ex)) {
                     throw new ClickHouseUnavailableException("ClickHouse is unreachable", ex);

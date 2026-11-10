@@ -74,9 +74,9 @@ final class MigrationPreCreate implements Callback {
     /** The replicated pre-create statements of a migration script: one per {@code CREATE TABLE IF NOT EXISTS}. */
     static List<String> preCreates(String script) {
         final List<String> creates = new ArrayList<>();
-        for (final String statement : ReplicatedDdl.stripLineComments(script).split(";")) {
+        for (final String statement : ReplicatedDdl.statements(script)) {
             if (ReplicatedDdl.isCreateIfNotExists(statement)) {
-                creates.add(ReplicatedDdl.toReplicated(statement.strip()));
+                creates.add(ReplicatedDdl.toReplicated(statement));
             }
         }
         return creates;

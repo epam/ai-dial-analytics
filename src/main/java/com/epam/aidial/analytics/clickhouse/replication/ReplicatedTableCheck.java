@@ -116,8 +116,8 @@ public class ReplicatedTableCheck {
         try {
             for (final Resource resource : new PathMatchingResourcePatternResolver().getResources(MIGRATIONS)) {
                 try (InputStream in = resource.getInputStream()) {
-                    final String script = ReplicatedDdl.stripLineComments(new String(in.readAllBytes(), StandardCharsets.UTF_8));
-                    for (final String statement : script.split(";")) {
+                    final String script = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                    for (final String statement : ReplicatedDdl.statements(script)) {
                         ReplicatedDdl.createdTable(statement).map(ReplicatedTableCheck::unqualified).ifPresent(tables::add);
                     }
                 }

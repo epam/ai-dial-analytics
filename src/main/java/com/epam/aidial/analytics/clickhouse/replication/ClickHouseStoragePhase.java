@@ -96,9 +96,12 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
         lock.run(() -> {
             Map<String, String> reasons = Map.of();
             if (migrationsEnabled) {
-                conversion.convert();
+                // Each step that issues DDL first confirms the lock is still held, so a lost lock stops the phase.
+                conversion.convert(lock::ensureHeld);
                 reasons = conversion.givenUp();
+                lock.ensureHeld();
                 migrations.migrate();
+                lock.ensureHeld();
                 ttlReconciler.reconcile();
             }
             tableCheck.check(reasons);
@@ -124,6 +127,14 @@ public class ClickHouseStoragePhase implements ApplicationRunner {
                 log.info("ClickHouse storage verified after a delayed start");
                 local.shutdown();
             } catch (RuntimeException ex) {
+                if (gate.isOpen()) {
+                    // The storage is verified; what failed is a component started on the gate's opening, which
+                    // readiness now reports. Verifying again would change nothing.
+                    log.error("ClickHouse storage verified after a delayed start, but a component waiting for it failed to "
+                            + "start; readiness stays down: {}", ex.getMessage(), ex);
+                    local.shutdown();
+                    return;
+                }
                 // At startup this would have aborted the service; now it can only keep the gate closed and say why.
                 log.error("ClickHouse storage verification failed; scheduled jobs, /v1 and Flight SQL stay disabled and "
                         + "it is retried in {} s: {}", retryInterval.toSeconds(), ex.getMessage(), ex);

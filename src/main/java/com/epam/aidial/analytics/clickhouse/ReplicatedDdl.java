@@ -28,14 +28,14 @@ public final class ReplicatedDdl {
                     + "(\\s+UUID\\s+'[^']*')?", Pattern.CASE_INSENSITIVE);
     // Keywords match in any case; engine names are case-sensitive in ClickHouse, so the name group is not.
     private static final Pattern ENGINE = Pattern.compile("(?i:\\bENGINE)\\s*=\\s*(\\w+)");
-    private static final Pattern SETTINGS = Pattern.compile("\\bSETTINGS\\b", Pattern.CASE_INSENSITIVE);
+    // The table's SETTINGS clause is a list of `name = value`; a column or key named `settings` is not followed by one.
+    private static final Pattern SETTINGS = Pattern.compile("\\bSETTINGS\\b(?=\\s+\\w+\\s*=)", Pattern.CASE_INSENSITIVE);
     private static final Pattern COMMENT = Pattern.compile("\\sCOMMENT\\s+'", Pattern.CASE_INSENSITIVE);
     private static final Pattern EXISTING_DEDUP = Pattern.compile(
             "replicated_deduplication_window(?:_for_async_inserts)?\\s*=");
     private static final Pattern NO_DEDUP = Pattern.compile("\\breplicated_deduplication_window = 0\\b");
     private static final Pattern NO_ASYNC_DEDUP =
             Pattern.compile("\\breplicated_deduplication_window_for_async_inserts = 0\\b");
-    private static final Pattern LINE_COMMENT = Pattern.compile("--[^\\n]*");
 
     private ReplicatedDdl() {
     }
@@ -55,9 +55,51 @@ public final class ReplicatedDdl {
         return engineFull != null && NO_DEDUP.matcher(engineFull).find() && NO_ASYNC_DEDUP.matcher(engineFull).find();
     }
 
-    /** {@code sql} with its {@code --} line comments removed, for a statement read from a migration file. */
-    public static String stripLineComments(String sql) {
-        return LINE_COMMENT.matcher(sql).replaceAll("");
+    /**
+     * The statements of a migration script, split on {@code ;} and with their comments removed. Quoted literals and
+     * identifiers ({@code '…'}, {@code "…"}, {@code `…`}) are kept intact, so a {@code ;}, {@code --} or {@code /*}
+     * inside one neither splits the statement nor starts a comment. Empty statements are dropped.
+     */
+    public static List<String> statements(String script) {
+        final List<String> statements = new ArrayList<>();
+        final StringBuilder current = new StringBuilder();
+        char quote = 0;
+        for (int i = 0; i < script.length(); i++) {
+            final char c = script.charAt(i);
+            if (quote != 0) {
+                current.append(c);
+                if (c == '\\' && i + 1 < script.length()) {
+                    current.append(script.charAt(++i));
+                } else if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '\'' || c == '"' || c == '`') {
+                quote = c;
+                current.append(c);
+            } else if (c == '-' && script.startsWith("--", i)) {
+                final int end = script.indexOf('\n', i);
+                i = end < 0 ? script.length() : end - 1;
+                current.append(' ');
+            } else if (c == '/' && script.startsWith("/*", i)) {
+                final int end = script.indexOf("*/", i + 2);
+                i = end < 0 ? script.length() : end + 1;
+                current.append(' ');
+            } else if (c == ';') {
+                addStatement(statements, current);
+            } else {
+                current.append(c);
+            }
+        }
+        addStatement(statements, current);
+        return statements;
+    }
+
+    private static void addStatement(List<String> statements, StringBuilder current) {
+        final String statement = current.toString().strip();
+        if (!statement.isEmpty()) {
+            statements.add(statement);
+        }
+        current.setLength(0);
     }
 
     /** The table a {@code CREATE TABLE} names, as written (possibly database-qualified or quoted), if it is one. */
@@ -70,7 +112,8 @@ public final class ReplicatedDdl {
     public static boolean isCreateIfNotExists(String statement) {
         final Matcher create = CREATE.matcher(statement);
         final Matcher engine = ENGINE.matcher(statement);
-        return create.find() && create.group(1) != null && engine.find() && isMergeTreeFamily(engine.group(1));
+        return create.find() && create.group(1) != null && findTopLevel(engine, statement)
+                && isMergeTreeFamily(engine.group(1));
     }
 
     /**
@@ -83,7 +126,7 @@ public final class ReplicatedDdl {
             throw new IllegalArgumentException("not a CREATE TABLE statement");
         }
         final Matcher engine = ENGINE.matcher(statement);
-        if (!engine.find() || !isMergeTreeFamily(engine.group(1))) {
+        if (!findTopLevel(engine, statement) || !isMergeTreeFamily(engine.group(1))) {
             throw new IllegalArgumentException("the statement declares no MergeTree-family engine");
         }
         final String name = engine.group(1);
@@ -107,58 +150,96 @@ public final class ReplicatedDdl {
         if (!create.find()) {
             throw new IllegalArgumentException("not a CREATE TABLE statement");
         }
-        return createTableQuery.substring(0, create.start(2)) + quote(database) + "." + quote(twin)
+        return createTableQuery.substring(0, create.start(2)) + ClickHouseIdentifiers.quote(database) + "." + ClickHouseIdentifiers.quote(twin)
                 + createTableQuery.substring(create.end());
     }
 
     private static String withNoDeduplication(String statement) {
         final Matcher engine = ENGINE.matcher(statement);
-        engine.find();
+        findTopLevel(engine, statement);
         final String head = statement.substring(0, engine.end());
-        String tail = statement.substring(engine.end());
-        final Matcher settings = SETTINGS.matcher(tail);
-        if (findOutsideQuotes(settings, tail)) {
-            final String before = tail.substring(0, settings.end());
-            final String after = tail.substring(settings.end());
+        final String tail = statement.substring(engine.end());
+        final boolean[] topLevel = topLevel(tail);
+        // SETTINGS is the last clause of a CREATE TABLE but a trailing COMMENT, so its last top-level match is the one.
+        final Matcher settingsMatcher = SETTINGS.matcher(tail);
+        int settingsStart = -1;
+        int settingsEnd = -1;
+        while (settingsMatcher.find()) {
+            if (topLevel[settingsMatcher.start()]) {
+                settingsStart = settingsMatcher.start();
+                settingsEnd = settingsMatcher.end();
+            }
+        }
+        final Matcher comment = COMMENT.matcher(tail);
+        final int commentStart = findTopLevel(comment, topLevel, Math.max(settingsStart, 0)) ? comment.start() : -1;
+        if (settingsStart >= 0) {
+            final String before = tail.substring(0, settingsEnd);
             // The settings list runs up to a trailing table COMMENT, if any; it is rebuilt entry by entry so a
             // deduplication setting written anywhere in it is replaced without leaving a dangling comma.
-            final Matcher comment = COMMENT.matcher(after);
-            final int listEnd = comment.find() ? comment.start() : after.length();
+            final int listEnd = commentStart >= 0 ? commentStart : tail.length();
             final List<String> kept = new ArrayList<>();
-            for (final String entry : topLevelEntries(after.substring(0, listEnd))) {
+            for (final String entry : topLevelEntries(tail.substring(settingsEnd, listEnd))) {
                 if (!EXISTING_DEDUP.matcher(entry).lookingAt()) {
                     kept.add(entry);
                 }
             }
             return head + before + " " + NO_INSERT_DEDUPLICATION + (kept.isEmpty() ? "" : ", " + String.join(", ", kept))
-                    + after.substring(listEnd);
+                    + tail.substring(listEnd);
         }
-        final Matcher comment = COMMENT.matcher(tail);
-        if (comment.find()) {
-            return head + tail.substring(0, comment.start()) + " SETTINGS " + NO_INSERT_DEDUPLICATION
-                    + tail.substring(comment.start());
+        if (commentStart >= 0) {
+            return head + tail.substring(0, commentStart) + " SETTINGS " + NO_INSERT_DEDUPLICATION
+                    + tail.substring(commentStart);
         }
         return head + tail + "\nSETTINGS " + NO_INSERT_DEDUPLICATION;
     }
 
-    /** Advances {@code matcher} to its next match over {@code text} that is not inside a {@code '…'} literal. */
-    private static boolean findOutsideQuotes(Matcher matcher, String text) {
-        while (matcher.find()) {
-            if (!insideQuotes(text, matcher.start())) {
+    /** Advances {@code matcher} to its first match over {@code text} at the statement's top level; see {@link #topLevel}. */
+    private static boolean findTopLevel(Matcher matcher, String text) {
+        return findTopLevel(matcher, topLevel(text), 0);
+    }
+
+    private static boolean findTopLevel(Matcher matcher, boolean[] topLevel, int from) {
+        if (!matcher.find(from)) {
+            return false;
+        }
+        do {
+            if (topLevel[matcher.start()]) {
                 return true;
             }
-        }
+        } while (matcher.find());
         return false;
     }
 
-    private static boolean insideQuotes(String text, int index) {
-        boolean quoted = false;
-        for (int i = 0; i < index; i++) {
-            if (text.charAt(i) == '\'' && (i == 0 || text.charAt(i - 1) != '\\')) {
-                quoted = !quoted;
+    /**
+     * For each position of {@code text}, a comment-free statement, whether it is at the top level: outside every
+     * quoted literal or identifier and outside every parenthesis. The table's own clauses ({@code ENGINE},
+     * {@code SETTINGS}, its {@code COMMENT}) are; a column definition, a key tuple and a function argument are not.
+     */
+    private static boolean[] topLevel(String text) {
+        final boolean[] topLevel = new boolean[text.length() + 1];
+        char quote = 0;
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            final char c = text.charAt(i);
+            if (quote != 0) {
+                if (c == '\\' && i + 1 < text.length()) {
+                    i++;
+                } else if (c == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"' || c == '`') {
+                quote = c;
+            } else if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth = Math.max(0, depth - 1);
+            } else {
+                topLevel[i] = depth == 0;
             }
         }
-        return quoted;
+        return topLevel;
     }
 
     /** The comma-separated entries of a {@code SETTINGS} list, trimmed; commas inside quotes or parentheses do not split. */
@@ -237,9 +318,5 @@ public final class ReplicatedDdl {
             trimmed = trimmed.substring(0, trimmed.length() - 1).stripTrailing();
         }
         return trimmed;
-    }
-
-    private static String quote(String identifier) {
-        return "`" + identifier.replace("\\", "\\\\").replace("`", "\\`") + "`";
     }
 }

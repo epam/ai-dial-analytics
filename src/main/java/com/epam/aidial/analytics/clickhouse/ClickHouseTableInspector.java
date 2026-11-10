@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,6 +38,20 @@ public class ClickHouseTableInspector {
     /** Whether {@code table} exists in the current database. */
     public boolean exists(String table) {
         return engineFull(table).isPresent();
+    }
+
+    /** {@code table}'s columns in the current database, name to type as ClickHouse renders it, in table order. */
+    public Map<String, String> columnTypes(String table) {
+        final Map<String, String> types = new LinkedHashMap<>();
+        query("SELECT name, type FROM system.columns WHERE database = currentDatabase() AND table = {table:String} "
+                + "ORDER BY position", Map.of("table", table))
+                .forEach(row -> types.put(row.getString("name"), row.getString("type")));
+        return types;
+    }
+
+    /** Whether two ClickHouse type names are the same type as written, ignoring whitespace. */
+    public static boolean sameType(String a, String b) {
+        return a != null && b != null && a.replaceAll("\\s+", "").equals(b.replaceAll("\\s+", ""));
     }
 
     /** The engine of the current database: {@code Atomic}, {@code Replicated}, {@code Ordinary}, … */

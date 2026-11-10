@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.clickhouse.replication;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseFailures;
+import com.epam.aidial.analytics.clickhouse.ClickHouseIdentifiers;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseReplicasProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseRoutingProperties;
@@ -22,6 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -30,7 +32,7 @@ import java.util.function.Supplier;
  *
  * <ul>
  *   <li><b>Writes and anything unnamed:</b> the primary, by default — nothing here is consulted.</li>
- *   <li><b>A pipeline run:</b> its home, a rendezvous hash of the pipeline name over the active non-primary replicas
+ *   <li><b>A pipeline run:</b> its home, a rendezvous hash of the pipeline name over the healthy non-primary replicas
  *       (the primary when there is none), synchronized before the run's first data statement: the database's DDL
  *       log, then every table the run reads, in {@link SyncPlan} order. A sync that cannot complete refuses the run
  *       with {@code 503}. The syncs run on the writer credential, outside any statement budget.</li>
@@ -94,38 +96,65 @@ public class ReplicaRouter {
      * or does not yet know a table or column. {@code body} must not hand any row to the caller before it returns.
      */
     public <T> T query(Supplier<T> body) {
+        return queryWithin(spent -> body.get());
+    }
+
+    /**
+     * As {@link #query(Supplier)}, telling {@code body} how much of the request's time an earlier attempt already spent:
+     * {@link Duration#ZERO} on the first attempt, the time to the replica's failure on the re-run. A body under a
+     * wall-clock ceiling runs the re-run under what is left of it, so the request as a whole stays within the ceiling.
+     */
+    public <T> T queryWithin(Function<Duration, T> body) {
         final ReplicaTarget target = queryTarget();
+        final long started = System.nanoTime();
         try {
-            return ReplicaScope.on(target, body);
+            return ReplicaScope.on(target, () -> body.apply(Duration.ZERO));
         } catch (RuntimeException ex) {
             if (target.primary()) {
                 throw ex;
             }
-            final String reason;
-            if (ClickHouseFailures.isConnectFailure(ex)) {
-                target.unreachable();
-                reason = "unreachable";
-            } else if (ClickHouseFailures.isUnknownName(ex)) {
-                reason = "ddl_lag";
-            } else {
+            final boolean unreachable = ClickHouseFailures.isConnectFailure(ex);
+            if (!unreachable && !ClickHouseFailures.isUnknownName(ex)) {
                 throw ex;
             }
-            meters.queryFallback(reason);
-            log.info("User query re-run on the primary: replica '{}' {}", target.name(),
-                    reason.equals("unreachable") ? "could not be reached" : "has not applied a recent DDL yet");
-            return ReplicaScope.on(topology.primary(ReplicaTarget.Route.QUERY), body);
+            final Duration spent = Duration.ofNanos(System.nanoTime() - started);
+            final ReplicaTarget primary = topology.primary(ReplicaTarget.Route.QUERY);
+            if (unreachable) {
+                target.unreachable();
+                meters.queryFallback("unreachable");
+                log.info("User query re-run on the primary: replica '{}' could not be reached", target.name());
+                return ReplicaScope.on(primary, () -> body.apply(spent));
+            }
+            try {
+                final T answer = ReplicaScope.on(primary, () -> body.apply(spent));
+                meters.queryFallback("ddl_lag");
+                log.info("User query re-run on the primary: replica '{}' has not applied a recent DDL yet", target.name());
+                return answer;
+            } catch (RuntimeException again) {
+                if (ClickHouseFailures.isUnknownName(again)) {
+                    // Unknown on the primary too: the name is the query's own error, not a replica behind on DDL.
+                    log.debug("User query re-run on the primary reported the same unknown name: not DDL lag");
+                } else {
+                    meters.queryFallback("ddl_lag");
+                }
+                throw again;
+            }
         }
     }
 
     // ---- pipeline runs ------------------------------------------------------------------------------------------
 
-    /** The home of {@code pipeline}: a rendezvous hash over the active non-primary replicas, else the primary. */
+    /**
+     * The home of {@code pipeline}: a rendezvous hash over the healthy non-primary replicas, else the primary. A replica
+     * that is lagging (a fresh one still fetching, or one fallen behind) would have every run of its share of pipelines
+     * wait out the sync timeout and answer {@code 503}; the primary holds every committed part and syncs at once.
+     */
     ReplicaTarget home(String pipeline) {
         if (routing.pipelines() == ClickHouseRoutingProperties.Route.PRIMARY) {
             return topology.primary(ReplicaTarget.Route.PIPELINE);
         }
         return topology.candidates().stream()
-                .filter(replica -> !replica.primary())
+                .filter(replica -> !replica.primary() && replica.healthy())
                 .max(Comparator.comparingLong((Replica replica) -> weight(pipeline, replica.name()))
                         .thenComparing(Replica::name))
                 .map(replica -> topology.target(replica, ReplicaTarget.Route.PIPELINE))
@@ -189,8 +218,8 @@ public class ReplicaRouter {
     public void verifySyncGrants(String table) {
         final ReplicaTarget primary = topology.primary(ReplicaTarget.Route.PRIMARY);
         final String database = connection.sessionDatabase();
-        verifyGrant(primary, "SYSTEM SYNC DATABASE REPLICA " + quote(database), "SYSTEM SYNC DATABASE REPLICA", database);
-        verifyGrant(primary, "SYSTEM SYNC REPLICA " + quote(table) + " LIGHTWEIGHT", "SYSTEM SYNC REPLICA", database);
+        verifyGrant(primary, "SYSTEM SYNC DATABASE REPLICA " + ClickHouseIdentifiers.quote(database), "SYSTEM SYNC DATABASE REPLICA", database);
+        verifyGrant(primary, "SYSTEM SYNC REPLICA " + ClickHouseIdentifiers.quote(table) + " LIGHTWEIGHT", "SYSTEM SYNC REPLICA", database);
     }
 
     private void verifyGrant(ReplicaTarget primary, String statement, String grant, String database) {
@@ -210,7 +239,7 @@ public class ReplicaRouter {
 
     private void sync(ReplicaTarget home, SyncPlan plan) {
         final String database = connection.sessionDatabase();
-        timed(home, "_database", () -> issue(home, "SYSTEM SYNC DATABASE REPLICA " + quote(database)));
+        timed(home, "_database", () -> issue(home, "SYSTEM SYNC DATABASE REPLICA " + ClickHouseIdentifiers.quote(database)));
         // A table sync waits only for writes committed when it starts, and the window's safety lag is applied at the
         // probe right after the last one: a round that took too long would leave a write committed during it, and
         // not yet fetched, below the horizon. A later round starts later, so it is repeated until one is quick.
@@ -238,7 +267,7 @@ public class ReplicaRouter {
     }
 
     private void syncTable(ReplicaTarget target, String table) {
-        timed(target, table, () -> issue(target, "SYSTEM SYNC REPLICA " + quote(table) + " LIGHTWEIGHT"));
+        timed(target, table, () -> issue(target, "SYSTEM SYNC REPLICA " + ClickHouseIdentifiers.quote(table) + " LIGHTWEIGHT"));
     }
 
     private void timed(ReplicaTarget target, String table, Runnable sync) {
@@ -277,10 +306,6 @@ public class ReplicaRouter {
             }
             throw ex;
         }
-    }
-
-    private static String quote(String identifier) {
-        return "`" + identifier.replace("\\", "\\\\").replace("`", "\\`") + "`";
     }
 
     /** A table sync skipped because the table does not exist on the synchronized replica. */

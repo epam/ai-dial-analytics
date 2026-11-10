@@ -36,6 +36,10 @@ A scheduled run that fires during the phase SHALL be skipped. A cron-scheduled j
 data-sync, the aggregate tick) whose fire was skipped SHALL run once when the phase completes, because its next
 fire may be a day away; a fixed-delay job simply fires again.
 
+The components that start when the phase completes (the Flight SQL listener, each such catch-up run) SHALL each
+be started even when another fails to. A failure SHALL be logged at ERROR, and readiness SHALL then report the
+instance not ready, naming it. When the phase completed at startup, the first failure SHALL also fail startup.
+
 When the engine is not `Replicated`, the service SHALL abort startup having changed nothing in ClickHouse or in
 the catalog. The log SHALL:
 
@@ -179,6 +183,13 @@ Converting one table SHALL take these steps, issued on the primary:
 5. Check the counts again on the two exchanged tables.
 6. Drop the twin, which by then holds the original plain table.
 
+From before step 2 until both counts of step 5 are read, background merges SHALL be stopped on the table and
+its twin (`SYSTEM STOP MERGES`, on the primary), and restarted afterwards. Otherwise a merge that collapses rows,
+or a TTL delete, landing between two counts would read as a lost copy. Without the writer's `SYSTEM MERGES`
+grant the conversion SHALL log a WARN and compare with merges running. A mismatch is then handled as below; it is
+never accepted. A resumed conversion SHALL compare its counts with merges stopped too, and SHALL restart merges
+on the table it keeps.
+
 A replicated table in the session database whose definition lacks `replicated_deduplication_window = 0` SHALL
 instead receive `ALTER TABLE … MODIFY SETTING replicated_deduplication_window = 0,
 replicated_deduplication_window_for_async_inserts = 0`.
@@ -207,7 +218,11 @@ reason.
 
 Only one service instance SHALL convert at a time; the others wait for it. The same exclusion SHALL cover the
 ClickHouse migrations and the table check that follow, because the migration tool takes no lock of its own on
-ClickHouse. The conversion assumes that no service instance of a previous version is writing during it. The
+ClickHouse. The exclusion is a PostgreSQL session-level advisory lock, so it lasts only as long as its session. While
+the phase runs, the service SHALL keep that session busy by checking that the lock is still held at a fixed
+interval. Before each table's conversion, before the migrations and before the retention reconciliation, it SHALL
+confirm the lock is held. Once the lock is found lost, the phase SHALL fail before its next DDL rather than run
+beside another instance. The conversion assumes that no service instance of a previous version is writing during it. The
 upgrade documentation SHALL require a deploy that stops the previous version before the new one starts.
 
 #### Scenario: A deployment with plain tables in a Replicated database is converted
@@ -406,8 +421,10 @@ the rows only it held.
 ### Requirement: A pipeline run executes on its home replica once the replica has caught up
 
 Each pipeline SHALL have a **home replica**. The home is chosen by a stable, rendezvous-style hash of the
-pipeline's name over the active replicas other than the primary. When no such replica is active, the home is
-the primary. When `clickhouse.routing.pipelines` is `primary` (default `replicas`), the home is always the
+pipeline's name over the healthy active replicas other than the primary. Health is the user-query health below
+(`/replicas_status` at the latest discovery refresh). A lagging replica, such as one just added and still
+fetching, would otherwise have every run of its share of pipelines wait out the sync bound and answer `503`.
+When no such replica is healthy, the home is the primary. When `clickhouse.routing.pipelines` is `primary` (default `replicas`), the home is always the
 primary. Every service instance SHALL compute the same home from the same replica set. That set is the one
 ClickHouse reports active, less any replica this instance has excluded. Agreement keeps a target's writes on one
 replica in the steady state. Correctness does not depend on it: two runs of one pipeline on different replicas,
@@ -522,6 +539,13 @@ refused with `503 clickhouse_unavailable` like any other sync failure.
 - **THEN** the next page, served by the new home after its sync, continues from the cursor without skipping
   a row
 
+#### Scenario: A lagging replica is no pipeline's home
+
+- **GIVEN** replicas `chi-0` (primary), `chi-1` and `chi-2`, and `chi-2` reporting itself lagging
+- **WHEN** pipelines run
+- **THEN** every pipeline's home is `chi-1` until `chi-2` reports healthy again
+- **AND** with `chi-1` lagging too, every pipeline's home is `chi-0`
+
 #### Scenario: Pipelines can be pinned to the primary
 
 - **WHEN** `clickhouse.routing.pipelines` is `primary`
@@ -559,7 +583,10 @@ the caller, either of these happens:
   `NO_SUCH_COLUMN_IN_TABLE` 16). The catalog had already resolved it, so the replica has not yet applied a
   recent DDL.
 
-The answer on the primary is the response.
+The answer on the primary is the response. The re-run SHALL inherit what the failed attempt left of the request's
+wall-clock ceiling, as a total-count statement does, rather than being granted a fresh one. A name the primary
+also reports unknown is the query's own error, not DDL lag. Its error is the response, and it SHALL NOT be
+counted as a `ddl_lag` fallback.
 
 The statement's settings SHALL be the same whichever replica runs it, row-policy filters included. Schema
 discovery, translation and validation execute no ClickHouse statement and are unaffected.
@@ -591,6 +618,17 @@ discovery, translation and validation execute no ClickHouse statement and are un
 
 - **WHEN** a query projecting `request_body_full` executes on replica `chi-1`
 - **THEN** the statements that rebuild its rows' request bodies also execute on `chi-1`
+
+#### Scenario: A re-run on the primary stays within the request's ceiling
+
+- **GIVEN** a query whose replica fails after part of the wall-clock ceiling has elapsed
+- **WHEN** it is re-run on the primary
+- **THEN** the re-run executes under what is left of the ceiling
+
+#### Scenario: A user's unknown column is not DDL lag
+
+- **WHEN** an ad-hoc SQL query naming a column no replica knows is routed to `chi-2`
+- **THEN** it is re-run on the primary, its error is the response, and no `ddl_lag` fallback is counted
 
 #### Scenario: A replica behind on DDL does not fail a query
 
@@ -642,7 +680,14 @@ The service SHALL NOT compensate for a DDL that took effect on the primary. A fa
 that point SHALL NOT mark the table `FAILED`, and SHALL NOT drop the table, whether it is a timeout waiting for
 other replicas or an error reported by another replica.
 
-A DDL that the primary itself rejects SHALL keep its existing outcome.
+A DDL that the primary itself rejects SHALL keep its existing outcome. The service SHALL judge that the primary
+executed a DDL from the table's columns on the primary, by name and type, never by name alone: a `CREATE` took
+effect when the table exists with every declared column at its declared type; an `ALTER` took effect when every
+added column is present at the type it gave it, every renamed column is present under its new name only, and
+every dropped column is gone. A `CREATE` that finds the table created meanwhile by a concurrent call, with another
+schema, SHALL fail without dropping that table or marking the definition `FAILED`. An `ADD COLUMN` that ClickHouse
+rejected because a column of that name already existed with another type SHALL fail, and the catalog SHALL keep
+its previous schema.
 
 #### Scenario: A table is created while a replica is down
 

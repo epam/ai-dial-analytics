@@ -132,6 +132,9 @@ public final class ClickHouseFailures {
     /** {@code UNFINISHED}: a synchronous mutation or ALTER finished on the active replicas only. */
     private static final int UNFINISHED = 341;
 
+    /** {@code TABLE_ALREADY_EXISTS}: a {@code CREATE TABLE} found its name taken. */
+    private static final int TABLE_ALREADY_EXISTS = 57;
+
     private ClickHouseFailures() {
     }
 
@@ -222,25 +225,12 @@ public final class ClickHouseFailures {
      * means the replica has not applied a recent DDL yet.
      */
     public static boolean isUnknownName(Throwable ex) {
-        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
-            if (cause instanceof ServerException server) {
-                return switch (server.getCode()) {
-                    case UNKNOWN_TABLE, UNKNOWN_IDENTIFIER, NO_SUCH_COLUMN_IN_TABLE -> true;
-                    default -> false;
-                };
-            }
-        }
-        return false;
+        return hasServerCode(ex, UNKNOWN_TABLE, UNKNOWN_IDENTIFIER, NO_SUCH_COLUMN_IN_TABLE);
     }
 
     /** Whether {@code ex} carries {@code ACCESS_DENIED}: the credential lacks a grant the statement needs. */
     public static boolean isAccessDenied(Throwable ex) {
-        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
-            if (cause instanceof ServerException server && server.getCode() == ACCESS_DENIED) {
-                return true;
-            }
-        }
-        return false;
+        return hasServerCode(ex, ACCESS_DENIED);
     }
 
     /**
@@ -248,19 +238,28 @@ public final class ClickHouseFailures {
      * ({@code mutations_sync = 2}) finished on the active ones, and inactive replicas apply it when they recover.
      */
     public static boolean isUnfinished(Throwable ex) {
-        for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
-            if (cause instanceof ServerException server && server.getCode() == UNFINISHED) {
-                return true;
-            }
-        }
-        return false;
+        return hasServerCode(ex, UNFINISHED);
     }
 
     /** Whether {@code ex} carries {@code TIMEOUT_EXCEEDED}, the server's own wall-clock ceiling. */
     public static boolean isTimeout(Throwable ex) {
+        return hasServerCode(ex, TIMEOUT_EXCEEDED);
+    }
+
+    /** Whether {@code ex} carries {@code TABLE_ALREADY_EXISTS}: a {@code CREATE TABLE} found the name taken. */
+    public static boolean isTableAlreadyExists(Throwable ex) {
+        return hasServerCode(ex, TABLE_ALREADY_EXISTS);
+    }
+
+    /** Whether {@code ex}, or anything in its cause chain, is a {@link ServerException} carrying one of {@code codes}. */
+    public static boolean hasServerCode(Throwable ex, int... codes) {
         for (Throwable cause = ex; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
-            if (cause instanceof ServerException server && server.getCode() == TIMEOUT_EXCEEDED) {
-                return true;
+            if (cause instanceof ServerException server) {
+                for (final int code : codes) {
+                    if (server.getCode() == code) {
+                        return true;
+                    }
+                }
             }
         }
         return false;

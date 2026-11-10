@@ -97,6 +97,19 @@ class ReplicaRouterTest {
         }
     }
 
+    /** A lagging replica would have its runs wait out the sync timeout; it is no pipeline's home until it is healthy. */
+    @Test
+    void homesSkipUnhealthyReplicasAndFallBackToThePrimary() {
+        topology.seed("chi-0", List.of(replica("chi-0", true, true), replica("chi-1", false, true),
+                replica("chi-2", false, false)));
+        final ReplicaRouter router = router(ClickHouseRoutingProperties.defaults());
+        for (int i = 0; i < 30; i++) {
+            assertThat(router.home("p" + i).name()).isEqualTo("chi-1");
+        }
+        topology.seed("chi-0", List.of(replica("chi-0", true, true), replica("chi-1", false, false)));
+        assertThat(router.home("sessions_rollup").primary()).isTrue();
+    }
+
     @Test
     void pipelinesPinnedToThePrimaryStayThere() {
         topology.seed("chi-0", List.of(replica("chi-0", true, true), replica("chi-1", false, true)));
@@ -160,6 +173,49 @@ class ReplicaRouterTest {
         });
         assertThat(answer).isEqualTo("primary");
         assertThat(topology.candidates()).hasSize(3);
+    }
+
+    /** The re-run is told what the failed attempt spent, so it runs under what is left of the request's ceiling. */
+    @Test
+    void reRunOnThePrimaryIsToldWhatTheFailedAttemptSpent() {
+        topology.seed("chi-0", List.of(replica("chi-0", true, true), replica("chi-1", false, true),
+                replica("chi-2", false, true)));
+        final ReplicaRouter router = router(ClickHouseRoutingProperties.defaults());
+        final List<Duration> spent = new ArrayList<>();
+        router.queryWithin(attempt -> {
+            spent.add(attempt);
+            if (!ReplicaScope.current().orElseThrow().primary()) {
+                sleep(20);
+                throw new RuntimeException(new ConnectException("refused"));
+            }
+            return "primary";
+        });
+        assertThat(spent).hasSize(2);
+        assertThat(spent.getFirst()).isZero();
+        assertThat(spent.get(1)).isGreaterThanOrEqualTo(Duration.ofMillis(20));
+    }
+
+    /** A name unknown on the primary too is the query's own error: it is not counted as DDL lag. */
+    @Test
+    void nameUnknownOnThePrimaryTooIsNotCountedAsDdlLag() {
+        final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        final ReplicaMeters counting = new ReplicaMeters(registry);
+        topology.seed("chi-0", List.of(replica("chi-0", true, true), replica("chi-1", false, true),
+                replica("chi-2", false, true)));
+        final ReplicaRouter router = new ReplicaRouter(topology, ClickHouseRoutingProperties.defaults(),
+                ClickHouseReplicasProperties.defaults(), CONNECTION, counting);
+        assertThatThrownBy(() -> router.query(() -> {
+            throw new ClickHouseQueryException("rejected", new ServerException(47, "unknown", 404, "q"));
+        })).isInstanceOf(ClickHouseQueryException.class);
+        assertThat(registry.find(ReplicaMeters.QUERY_FALLBACK).counters()).allSatisfy(c -> assertThat(c.count()).isZero());
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test

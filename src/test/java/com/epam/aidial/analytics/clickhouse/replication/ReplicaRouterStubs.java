@@ -2,6 +2,8 @@ package com.epam.aidial.analytics.clickhouse.replication;
 
 import com.clickhouse.client.api.Client;
 
+import java.time.Duration;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -56,6 +58,8 @@ public final class ReplicaRouterStubs {
     public static ReplicaRouter inPlace() {
         final ReplicaRouter router = mock(ReplicaRouter.class);
         lenient().when(router.query(any())).thenAnswer(call -> ((Supplier<Object>) call.getArgument(0)).get());
+        lenient().when(router.queryWithin(any()))
+                .thenAnswer(call -> ((Function<Duration, Object>) call.getArgument(0)).apply(Duration.ZERO));
         lenient().when(router.openRun(anyString(), any()))
                 .thenAnswer(call -> ReplicaRouter.PipelineRun.unsynced(call.getArgument(0), PIPELINE));
         lenient().when(router.run(anyString(), any(), any())).thenAnswer(call -> {

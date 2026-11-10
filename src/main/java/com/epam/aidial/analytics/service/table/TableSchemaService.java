@@ -428,8 +428,7 @@ public class TableSchemaService {
                 // An ALTER the primary executed is applied, even when the statement then failed waiting for another
                 // replica or with an error another replica reported: that replica applies it from the database log,
                 // so the catalog follows the primary rather than staying behind it.
-                if (!alterTookEffect(name, drops, renames.stream().map(r -> r.to()).toList(),
-                        adds.stream().map(add -> add.column().sourceName()).toList())) {
+                if (!alterTookEffect(name, drops, renames, adds)) {
                     throw ex;
                 }
                 log.warn("The schema change of table '{}' took effect on the primary although the ALTER reported a "
@@ -449,18 +448,25 @@ public class TableSchemaService {
     }
 
     /**
-     * Whether an {@code ALTER} with column changes took effect on the primary: every added and renamed-to column is
-     * present and every dropped one is gone. False when it carries no column change, or when the columns cannot be read.
+     * Whether an {@code ALTER} with column changes took effect on the primary: every added column is present with the
+     * type the ALTER gave it, every rename's target is present and its source gone, and every dropped column is gone.
+     * A column that already existed under the added name with another type, which made ClickHouse reject the ALTER,
+     * therefore does not count. False when it carries no column change, or when the columns cannot be read.
      */
-    private boolean alterTookEffect(String table, List<String> dropped, List<String> renamedTo, List<String> added) {
-        if (dropped.isEmpty() && renamedTo.isEmpty() && added.isEmpty()) {
+    private boolean alterTookEffect(String table, List<String> dropped, List<ResolvedRename> renames, List<ResolvedAdd> added) {
+        if (dropped.isEmpty() && renames.isEmpty() && added.isEmpty()) {
             return false;
         }
         try {
-            final Set<String> live = new HashSet<>();
-            inspector.query("SELECT name FROM system.columns WHERE database = currentDatabase() AND table = {table:String}",
-                    Map.of("table", table)).forEach(row -> live.add(row.getString("name")));
-            return live.containsAll(added) && live.containsAll(renamedTo) && dropped.stream().noneMatch(live::contains);
+            final Map<String, String> live = inspector.columnTypes(table);
+            final Set<String> present = new HashSet<>();
+            added.forEach(add -> present.add(add.column().sourceName()));
+            renames.forEach(rename -> present.add(rename.to()));
+            return added.stream().allMatch(add -> ClickHouseTableInspector.sameType(live.get(add.column().sourceName()),
+                            add.ddlType()))
+                    && renames.stream().allMatch(rename -> live.containsKey(rename.to())
+                            && (present.contains(rename.fromSourceName()) || !live.containsKey(rename.fromSourceName())))
+                    && dropped.stream().noneMatch(drop -> live.containsKey(drop) && !present.contains(drop));
         } catch (RuntimeException unreadable) {
             return false;
         }

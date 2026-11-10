@@ -137,9 +137,10 @@ public class StructuredQueryExecutor {
         SqlLog.LOG.debug("Executing structured {} query: {}", model.entity(), sql);
         // One replica for the row, count and rebuild statements; all are read to the end before anything is returned,
         // so a re-run on the primary never follows a row already handed to the caller.
-        return replicas.query(() -> {
-            final long startedAt = System.nanoTime();
-            final List<Map<String, Object>> rows = materialize(sql, select, settings);
+        return replicas.queryWithin(spent -> {
+            // A re-run on the primary inherits what the failed attempt left of the request's ceiling.
+            final long startedAt = System.nanoTime() - spent.toNanos();
+            final List<Map<String, Object>> rows = materialize(sql, select, forAttempt(settings, spent));
             final Long totalCount = totalCount(model, query, settings, startedAt);
             // After the total, not before: the count is part of the read the caller asked for and fails it when it times
             // out, while a rebuild short of time only degrades its rows to partial — so the count gets the budget first.
@@ -259,8 +260,13 @@ public class StructuredQueryExecutor {
         // Translation refuses a computed field anywhere in a composite plan, since an enclosing block would read its
         // stand-in; the render guard in run() asserts it, rather than let a raw tuple reach the caller.
         final QuerySettings settings = rowPolicies.apply(FinalSettings.mergedOver(FinalSettings.userRead(partitionLocal), extra));
-        return replicas.query(() -> new QueryResultPage(outputColumns(select),
-                run(select, settings, "composite", ComputedFieldCompleter.Surface.QUERY, null), null));
+        return replicas.queryWithin(spent -> new QueryResultPage(outputColumns(select),
+                run(select, forAttempt(settings, spent), "composite", ComputedFieldCompleter.Surface.QUERY, null), null));
+    }
+
+    /** {@code settings} for one attempt of a user query: unchanged on the first, with what is left of the ceiling after. */
+    private static QuerySettings forAttempt(QuerySettings settings, Duration spent) {
+        return spent.isZero() ? settings : ClickHouseBudget.remainingTime(settings, spent);
     }
 
     /**

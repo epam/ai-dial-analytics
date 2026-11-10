@@ -107,6 +107,57 @@ class ReplicatedDdlTest {
                 + "replicated_deduplication_window = 0")).isFalse();
     }
 
+    /** A column or key named {@code settings} is not the SETTINGS clause; the clause is the trailing `name = value` list. */
+    @Test
+    void columnNamedSettingsIsNotTheClause() {
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (tenant String, settings String) ENGINE = MergeTree "
+                + "ORDER BY (tenant, settings)"))
+                .isEqualTo("CREATE TABLE t (tenant String, settings String) ENGINE = ReplicatedMergeTree "
+                        + "ORDER BY (tenant, settings)\nSETTINGS " + NO_DEDUP);
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (settings String) ENGINE = MergeTree ORDER BY settings "
+                + "SETTINGS index_granularity = 8192"))
+                .isEqualTo("CREATE TABLE t (settings String) ENGINE = ReplicatedMergeTree ORDER BY settings SETTINGS "
+                        + NO_DEDUP + ", index_granularity = 8192");
+    }
+
+    /** An {@code engine = …} inside a column definition is not the table's engine. */
+    @Test
+    void engineInsideColumnIsNotTheTableEngine() {
+        final String statement = "CREATE TABLE IF NOT EXISTS t (id UInt32, note String DEFAULT 'engine = Log', "
+                + "flag UInt8 COMMENT 'engine = Memory') ENGINE = MergeTree ORDER BY id";
+        assertThat(ReplicatedDdl.isCreateIfNotExists(statement)).isTrue();
+        assertThat(ReplicatedDdl.toReplicated(statement))
+                .isEqualTo("CREATE TABLE IF NOT EXISTS t (id UInt32, note String DEFAULT 'engine = Log', "
+                        + "flag UInt8 COMMENT 'engine = Memory') ENGINE = ReplicatedMergeTree ORDER BY id\nSETTINGS " + NO_DEDUP);
+    }
+
+    /** A column comment is not the table comment the SETTINGS clause goes before. */
+    @Test
+    void columnCommentIsNotTheTableComment() {
+        assertThat(ReplicatedDdl.toReplicated("CREATE TABLE t (id UInt32 COMMENT 'id') ENGINE = MergeTree ORDER BY id"))
+                .isEqualTo("CREATE TABLE t (id UInt32 COMMENT 'id') ENGINE = ReplicatedMergeTree ORDER BY id\nSETTINGS "
+                        + NO_DEDUP);
+    }
+
+    /** Literals keep their {@code ;}, {@code --} and {@code /*}; comments outside them go, block comments included. */
+    @Test
+    void scriptsSplitOutsideLiteralsAndComments() {
+        assertThat(ReplicatedDdl.statements("""
+                /* a leading block comment; with a semicolon */
+                CREATE TABLE IF NOT EXISTS t (id UInt32 COMMENT 'a; b -- c /* d') ENGINE = MergeTree ORDER BY id; -- trailing
+                -- a line comment; with a semicolon
+                ALTER TABLE t COMMENT COLUMN id 'it''s; fine';
+                ;
+                """))
+                .containsExactly(
+                        "CREATE TABLE IF NOT EXISTS t (id UInt32 COMMENT 'a; b -- c /* d') ENGINE = MergeTree ORDER BY id",
+                        "ALTER TABLE t COMMENT COLUMN id 'it''s; fine'");
+        assertThat(MigrationPreCreate.preCreates("/* header */ CREATE TABLE IF NOT EXISTS t (id UInt32) ENGINE = MergeTree "
+                + "ORDER BY id COMMENT 'x; y'"))
+                .containsExactly("CREATE TABLE IF NOT EXISTS t (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS "
+                        + NO_DEDUP + " COMMENT 'x; y'");
+    }
+
     /**
      * Every {@code CREATE TABLE} the shipped migrations declare transforms, so a fresh install pre-creates each one
      * replicated; a later migration that already declares a replicated engine transforms to itself plus nothing new.
@@ -117,7 +168,7 @@ class ReplicatedDdlTest {
         for (final Resource resource : new PathMatchingResourcePatternResolver()
                 .getResources("classpath*:db/migration/clickhouse/*.sql")) {
             final String script = new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            for (final String statement : ReplicatedDdl.stripLineComments(script).split(";")) {
+            for (final String statement : ReplicatedDdl.statements(script)) {
                 if (ReplicatedDdl.createdTable(statement).isPresent()) {
                     assertThat(ReplicatedDdl.isCreateIfNotExists(statement))
                             .as("%s declares CREATE TABLE IF NOT EXISTS with a MergeTree-family engine", resource.getFilename())

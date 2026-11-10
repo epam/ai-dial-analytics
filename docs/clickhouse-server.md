@@ -334,7 +334,7 @@ aggregate `INSERT … SELECT` statements. Which grants it needs depends on which
 | Table catalog schema evolution (`PATCH …/schema`)         | `ALTER TABLE … ADD/DROP/RENAME COLUMN`                                                                                                                               | `ALTER`                                                   |
 | Table catalog delete (`DELETE /v1/tables/{name}`)         | `DROP TABLE`                                                                                                                                                         | `DROP TABLE`                                              |
 | Class-1 materialize and aggregate refresh                 | `INSERT … SELECT` reading the input source **and** every enrichment table the declaration references                                                                 | `INSERT`, `SELECT` on both                                |
-| Startup table conversion (plain tables in a `Replicated` database, migrations enabled) | `CREATE TABLE`, `ALTER TABLE … ATTACH PARTITION ALL FROM` / `MODIFY SETTING`, `EXCHANGE TABLES`, `DROP TABLE`, `SELECT count()` | `CREATE TABLE`, `INSERT`, `ALTER`, `SELECT`, `DROP TABLE` |
+| Startup table conversion (plain tables in a `Replicated` database, migrations enabled) | `CREATE TABLE`, `ALTER TABLE … ATTACH PARTITION ALL FROM` / `MODIFY SETTING`, `EXCHANGE TABLES`, `DROP TABLE`, `SELECT count()`, `SYSTEM STOP MERGES` / `START MERGES` | `CREATE TABLE`, `INSERT`, `ALTER`, `SELECT`, `DROP TABLE`, `SYSTEM MERGES` |
 | Replica discovery and syncs (pipeline runs, ingest cycles, relayout) | `SELECT … FROM system.clusters`, `SYSTEM SYNC DATABASE REPLICA`, `SYSTEM SYNC REPLICA … LIGHTWEIGHT` | `SELECT ON system.clusters`, `SYSTEM SYNC REPLICA`, `SYSTEM SYNC DATABASE REPLICA` |
 | Enrichment relayout (once per table, after startup)       | `CREATE TABLE`, `INSERT … SELECT`, `EXCHANGE TABLES`, `ALTER TABLE … DROP PARTITION` / `MODIFY TTL` / `MODIFY SETTING` / `RESET SETTING` / `ADD INDEX`, `DROP TABLE` | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`, `DROP TABLE` |
 
@@ -347,11 +347,15 @@ GRANT SELECT ON system.data_skipping_indices TO <writer>
 GRANT SELECT ON system.clusters TO <writer>
 GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>
 GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>
+GRANT SYSTEM MERGES ON <database>.* TO <writer>
 ```
 
 Without the two `SYSTEM SYNC` grants every pipeline run and every ingest cycle would be refused with `503`,
 because each first brings its replica up to date, so startup issues both once and fails naming the missing grant. Without `SELECT ON system.clusters` replica discovery
-fails, ADAS logs a WARN, and every statement runs on the primary.
+fails, ADAS logs a WARN, and every statement runs on the primary. `SYSTEM MERGES` is used only by the startup
+table conversion, which stops merges on a table and its replicated copy while it compares their row counts; without
+it the conversion logs a WARN and compares with merges running, so a merge that collapses rows between the two reads
+can make it give a table up and fail startup, which a restart retries.
 
 The `system.parts` and `system.data_skipping_indices` grants are not covered by `<database>.*` either: without them the relayout fails with
 `ACCESS_DENIED … SELECT ON system.parts` before its exchange and retries on every start, a lookup index is

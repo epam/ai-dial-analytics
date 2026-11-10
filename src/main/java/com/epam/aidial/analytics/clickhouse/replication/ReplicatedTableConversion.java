@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.clickhouse.replication;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.client.api.query.QuerySettings;
+import com.epam.aidial.analytics.clickhouse.ClickHouseIdentifiers;
 import com.epam.aidial.analytics.clickhouse.ClickHouseWriterClient;
 import com.epam.aidial.analytics.clickhouse.DdlSettings;
 import com.epam.aidial.analytics.clickhouse.ReplicatedDdl;
@@ -28,7 +29,8 @@ import java.util.Optional;
  *   <li>create a twin under {@link #PREFIX} from the table's {@code create_table_query}, replicated
  *       ({@link ReplicatedDdl#toReplicated}), with any {@code UUID} clause removed;</li>
  *   <li>{@code ATTACH PARTITION ALL FROM} the table — hardlinks, no data rewritten;</li>
- *   <li>compare physical row counts, without {@code FINAL}; a mismatch drops the twin and retries once;</li>
+ *   <li>compare physical row counts, without {@code FINAL} and with merges stopped on both tables; a mismatch drops
+ *       the twin and retries once;</li>
  *   <li>{@code EXCHANGE TABLES};</li>
  *   <li>compare the counts again, exchanging back on a mismatch;</li>
  *   <li>drop the twin, which then holds the old plain table.</li>
@@ -88,6 +90,14 @@ public class ReplicatedTableConversion {
      * @throws IllegalStateException when another registered replica may hold rows of a plain table; no DDL was issued
      */
     public void convert() {
+        convert(() -> { });
+    }
+
+    /**
+     * As {@link #convert()}, running {@code checkpoint} before the first DDL and before each table's: the storage-phase
+     * lock's {@link StoragePhaseLock#ensureHeld}, which stops the conversion once the lock is lost.
+     */
+    public void convert(Runnable checkpoint) {
         givenUp.clear();
         final Map<String, Table> tables = tables();
         final List<Table> plain = tables.values().stream()
@@ -96,18 +106,20 @@ public class ReplicatedTableConversion {
                 .filter(table -> !table.name().startsWith(PREFIX))
                 .toList();
         refuseDivergedCopies(plain);
+        checkpoint.run();
         resumeLeftovers(tables);
         for (final Table table : tables().values()) {
             if (table.name().startsWith(PREFIX)) {
                 continue;
             }
+            checkpoint.run();
             if (table.plain() && innerTable(table.name())) {
                 log.warn("Leaving materialized view storage table '{}' plain: views are not converted", table.name());
             } else if (table.plain()) {
                 convertWithRetry(table);
             } else if (table.replicated() && !ReplicatedDdl.disablesDeduplication(table.engineFull())) {
                 log.info("Switching insert deduplication off on replicated table '{}'", table.name());
-                ddl("ALTER TABLE " + quote(table.name()) + " MODIFY SETTING " + ReplicatedDdl.NO_INSERT_DEDUPLICATION);
+                ddl("ALTER TABLE " + ClickHouseIdentifiers.quote(table.name()) + " MODIFY SETTING " + ReplicatedDdl.NO_INSERT_DEDUPLICATION);
             }
         }
     }
@@ -149,7 +161,7 @@ public class ReplicatedTableConversion {
 
     private Optional<Long> countOn(Client client, String table) {
         try {
-            final List<GenericRecord> rows = client.queryAll("SELECT count() AS n FROM " + quote(table),
+            final List<GenericRecord> rows = client.queryAll("SELECT count() AS n FROM " + ClickHouseIdentifiers.quote(table),
                     new QuerySettings().serverSetting("final", "0"));
             return Optional.of(rows.isEmpty() ? 0L : rows.getFirst().getLong("n"));
         } catch (RuntimeException ex) {
@@ -174,26 +186,28 @@ public class ReplicatedTableConversion {
             if (original == null) {
                 log.warn("Conversion leftover '{}' has no table '{}' beside it; restoring it under its own name",
                         twin.name(), name);
-                ddl("RENAME TABLE " + quote(twin.name()) + " TO " + quote(name));
+                ddl("RENAME TABLE " + ClickHouseIdentifiers.quote(twin.name()) + " TO " + ClickHouseIdentifiers.quote(name));
             } else if (original.plain()) {
                 log.info("Removing the twin of an interrupted conversion of '{}' before its exchange", name);
-                ddl("DROP TABLE " + quote(twin.name()));
-            } else if (twin.plain() && count(name) >= count(twin.name())) {
+                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
+            } else if (twin.plain() && holdsAtLeast(name, twin.name())) {
                 // The table check refuses to serve while a twin exists, so the converted table has taken no writes
                 // since the exchange; at least as many rows as the old copy means nothing was lost.
                 log.info("Finishing an interrupted conversion of '{}' after its exchange", name);
-                ddl("DROP TABLE " + quote(twin.name()));
+                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
             } else if (twin.plain()) {
                 // Fewer rows (lost in the copy, or collapsed by a merge of the converted table): the old copy is
                 // restored and the table converts afresh below.
                 log.warn("An interrupted conversion of '{}' left fewer rows in the converted table; exchanging back", name);
-                ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin.name()));
-                ddl("DROP TABLE " + quote(twin.name()));
+                ddl("EXCHANGE TABLES " + ClickHouseIdentifiers.quote(name) + " AND " + ClickHouseIdentifiers.quote(twin.name()));
+                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
             } else {
                 log.warn("Conversion leftover '{}' is replicated beside a replicated '{}'; dropping the leftover",
                         twin.name(), name);
-                ddl("DROP TABLE " + quote(twin.name()));
+                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
             }
+            // An interrupted conversion may have left merges stopped on the table that stays (until a server restart).
+            startMerges(name);
         }
     }
 
@@ -214,49 +228,116 @@ public class ReplicatedTableConversion {
         givenUp.put(table.name(), "the converted copy's row count differed from the table's twice");
     }
 
-    /** One attempt; false when the pre-exchange counts differ, which leaves the original in service. */
+    /**
+     * One attempt; false when the pre-exchange counts differ, which leaves the original in service. Merges are stopped
+     * on the table and its twin from before the attach until both counts have been compared, so a merge collapsing
+     * rows or a TTL deleting them cannot move one count between the two reads.
+     */
     private boolean convertOnce(Table table) {
         final String name = table.name();
         final String twin = PREFIX + name;
         final long started = System.nanoTime();
         log.info("Converting plain table '{}' ({}) to its replicated form", name, table.engine());
-        ddl("DROP TABLE IF EXISTS " + quote(twin));
+        ddl("DROP TABLE IF EXISTS " + ClickHouseIdentifiers.quote(twin));
+        final long converted;
         try {
             ddl(ReplicatedDdl.toReplicated(ReplicatedDdl.renamed(table.createTableQuery(), connection.sessionDatabase(), twin)));
-            ddl("ALTER TABLE " + quote(twin) + " ATTACH PARTITION ALL FROM " + quote(name));
-            final long before = count(name);
-            if (count(twin) != before) {
-                ddl("DROP TABLE " + quote(twin));
-                return false;
-            }
         } catch (RuntimeException ex) {
-            // Before the exchange the original still serves: remove the twin so nothing is left over.
             dropQuietly(twin);
             throw ex;
         }
-        ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin));
-        final long converted = count(name);
-        final long original = count(twin);
-        if (converted < original) {
-            // Rows went missing in the copy. The old copy is restored, and the converted one is kept beside it rather
-            // than dropped: anything written to it since the exchange is still there, and the table check refuses to
-            // serve while it exists, so an operator can reconcile it (or the next start removes it).
-            log.error("Converting '{}': the converted table holds fewer rows than the old copy after the exchange ({} "
-                    + "against {}); exchanging back and keeping the converted copy as '{}'", name, converted, original, twin);
-            ddl("EXCHANGE TABLES " + quote(name) + " AND " + quote(twin));
-            throw new IllegalStateException("the converted table held fewer rows than the old copy after the exchange ("
-                    + converted + " against " + original + "); was a previous version still writing?");
+        final boolean stopped = stopMerges(name, twin);
+        try {
+            try {
+                ddl("ALTER TABLE " + ClickHouseIdentifiers.quote(twin) + " ATTACH PARTITION ALL FROM " + ClickHouseIdentifiers.quote(name));
+                final long before = count(name);
+                if (count(twin) != before) {
+                    ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin));
+                    return false;
+                }
+            } catch (RuntimeException ex) {
+                // Before the exchange the original still serves: remove the twin so nothing is left over.
+                dropQuietly(twin);
+                throw ex;
+            }
+            ddl("EXCHANGE TABLES " + ClickHouseIdentifiers.quote(name) + " AND " + ClickHouseIdentifiers.quote(twin));
+            converted = count(name);
+            final long original = count(twin);
+            if (converted < original) {
+                // Rows went missing in the copy. The old copy is restored, and the converted one is kept beside it
+                // rather than dropped: anything written to it since the exchange is still there, and the table check
+                // refuses to serve while it exists, so an operator can reconcile it (or the next start removes it).
+                log.error("Converting '{}': the converted table holds fewer rows than the old copy after the exchange ({} "
+                        + "against {}); exchanging back and keeping the converted copy as '{}'", name, converted, original,
+                        twin);
+                ddl("EXCHANGE TABLES " + ClickHouseIdentifiers.quote(name) + " AND " + ClickHouseIdentifiers.quote(twin));
+                throw new IllegalStateException("the converted table held fewer rows than the old copy after the exchange ("
+                        + converted + " against " + original + "); was a previous version still writing?");
+            }
+            if (converted > original) {
+                // Something wrote to the converted table after the exchange (a previous version still running): it
+                // holds every row of the old copy and the new writes, so it is kept, as a resumed conversion would.
+                log.warn("Converting '{}': the converted table took {} write(s) after the exchange; was a previous "
+                        + "version still writing? Keeping the converted table", name, converted - original);
+            }
+        } finally {
+            if (stopped) {
+                startMerges(name, twin);
+            }
         }
-        if (converted > original) {
-            // Something wrote to the converted table after the exchange (a previous version still running): it holds
-            // every row of the old copy and the new writes, so it is kept, as a resumed conversion would keep it.
-            log.warn("Converting '{}': the converted table took {} write(s) after the exchange; was a previous version "
-                    + "still writing? Keeping the converted table", name, converted - original);
-        }
-        ddl("DROP TABLE " + quote(twin));
+        ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin));
         log.info("Converted '{}' to its replicated form: {} rows in {} ms", name, converted,
                 (System.nanoTime() - started) / 1_000_000);
         return true;
+    }
+
+    /** Whether {@code converted} holds at least the rows of {@code original}, compared with merges stopped on both. */
+    private boolean holdsAtLeast(String converted, String original) {
+        final boolean stopped = stopMerges(converted, original);
+        try {
+            return count(converted) >= count(original);
+        } finally {
+            if (stopped) {
+                startMerges(converted, original);
+            }
+        }
+    }
+
+    /**
+     * Stops background merges, TTL deletes included, on {@code tables} on the primary, so their row counts hold still.
+     * Best effort: without the writer's {@code SYSTEM MERGES} grant the counts are compared with merges running, and a
+     * merge that collapses rows between the two reads shows as a mismatch, which is retried or refuses startup, never
+     * accepted. {@code SYSTEM STOP MERGES} is local to the server and lasts until {@link #startMerges} or its restart.
+     *
+     * @return whether merges were stopped on every table
+     */
+    private boolean stopMerges(String... tables) {
+        int done = 0;
+        try {
+            for (final String table : tables) {
+                ddl("SYSTEM STOP MERGES " + ClickHouseIdentifiers.quote(table));
+                done++;
+            }
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Could not stop merges for the conversion's row-count comparison ({}); comparing with merges running. "
+                    + "Grant the writer SYSTEM MERGES ON <database>.* (see docs/clickhouse-server.md)", ex.getMessage());
+            for (int i = 0; i < done; i++) {
+                startMerges(tables[i]);
+            }
+            return false;
+        }
+    }
+
+    /** Restarts merges on {@code tables}; a table that is gone by now has nothing to restart, so failures only log. */
+    private void startMerges(String... tables) {
+        for (final String table : tables) {
+            try {
+                ddl("SYSTEM START MERGES " + ClickHouseIdentifiers.quote(table));
+            } catch (RuntimeException ex) {
+                log.debug("Could not restart merges on '{}': {}", table, ex.getMessage());
+            }
+        }
     }
 
     /** A materialized view's implicit storage table ({@code .inner.<view>} / {@code .inner_id.<uuid>}). */
@@ -275,14 +356,14 @@ public class ReplicatedTableConversion {
     }
 
     private long count(String table) {
-        final List<GenericRecord> rows = writer.primaryClient().queryAll("SELECT count() AS n FROM " + quote(table),
+        final List<GenericRecord> rows = writer.primaryClient().queryAll("SELECT count() AS n FROM " + ClickHouseIdentifiers.quote(table),
                 new QuerySettings().serverSetting("final", "0"));
         return rows.isEmpty() ? 0L : rows.getFirst().getLong("n");
     }
 
     private void dropQuietly(String table) {
         try {
-            ddl("DROP TABLE IF EXISTS " + quote(table));
+            ddl("DROP TABLE IF EXISTS " + ClickHouseIdentifiers.quote(table));
         } catch (RuntimeException ex) {
             log.warn("Could not remove conversion twin '{}'; the next start removes it: {}", table, ex.getMessage());
         }
@@ -290,9 +371,5 @@ public class ReplicatedTableConversion {
 
     private void ddl(String statement) {
         writer.primaryClient().queryAll(statement, DdlSettings.apply(new QuerySettings(), ddl.taskTimeout()));
-    }
-
-    private static String quote(String identifier) {
-        return "`" + identifier.replace("\\", "\\\\").replace("`", "\\`") + "`";
     }
 }

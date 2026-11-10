@@ -2032,9 +2032,11 @@ materialize as ClickHouse `Array(<element>)`. A `type=timestamp` column SHALL ma
 the read path converts the zoneless value the driver surfaces to epoch milliseconds at UTC, and a time
 bucket materialized into such a column would otherwise re-bucket on read in the server's zone rather than
 the one it was computed in. If the `CREATE TABLE` reports a failure but the table did not exist before
-it and exists on the primary afterwards, the primary executed it: the definition SHALL be set to
+it and exists on the primary afterwards with every declared column at its declared type, the primary executed it: the definition SHALL be set to
 `status=ACTIVE` and no `DROP` issued, because the other replicas apply it from the database log (see
-[clickhouse-replication](../clickhouse-replication/spec.md)). Otherwise, if the `CREATE TABLE` fails or
+[clickhouse-replication](../clickhouse-replication/spec.md)). If it reports that the table already exists
+when it did not before, with another schema, a concurrent call created it: the error SHALL be returned with no
+`DROP` and no status change. Otherwise, if the `CREATE TABLE` fails or
 its outcome is ambiguous (e.g. a timeout under which ClickHouse may still create the table), the system
 SHALL issue a best-effort `DROP TABLE IF EXISTS`, set the definition to `status=FAILED`, and return an
 error using the `ErrorView` contract without leaking ClickHouse internals; a `FAILED` table MAY be

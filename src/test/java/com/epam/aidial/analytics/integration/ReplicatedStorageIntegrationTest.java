@@ -123,6 +123,10 @@ class ReplicatedStorageIntegrationTest extends AbstractClickHouseIntegrationTest
         assertThat(queryScalar("SELECT count() AS c FROM " + PLAIN + " SETTINGS final = 0", "c")).isEqualTo("1000");
         assertThat(queryScalar("SELECT count() AS c FROM system.tables WHERE database = currentDatabase() AND name = '"
                 + TWIN + "'", "c")).isEqualTo("0");
+        // Merges, stopped while the counts were compared, run again: an OPTIMIZE is refused while they are stopped.
+        execute("INSERT INTO " + PLAIN + " SELECT number, today(), 'again' FROM numbers(10)");
+        execute("OPTIMIZE TABLE " + PLAIN + " FINAL");
+        assertThat(queryScalar("SELECT count() AS c FROM " + PLAIN + " SETTINGS final = 0", "c")).isEqualTo("1000");
     }
 
     /** Stopped after the attach, before the exchange: the original serves, and the next start converts afresh. */
@@ -195,9 +199,8 @@ class ReplicatedStorageIntegrationTest extends AbstractClickHouseIntegrationTest
         final List<String> compared = new ArrayList<>();
         for (final Resource resource : new PathMatchingResourcePatternResolver()
                 .getResources("classpath*:db/migration/clickhouse/*.sql")) {
-            final String script = ReplicatedDdl.stripLineComments(
-                    new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
-            for (final String statement : script.split(";")) {
+            final String script = new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            for (final String statement : ReplicatedDdl.statements(script)) {
                 if (!ReplicatedDdl.isCreateIfNotExists(statement)) {
                     continue;
                 }
