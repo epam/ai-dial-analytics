@@ -86,28 +86,28 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
 
 ## Pull-request rules (recurring review findings)
 
-Distilled from the GitHub review history. Each rule was raised on several PRs; check them before
-pushing or opening a PR.
+Check these before pushing or opening a PR.
 
-- **PR description uses `.github/pull_request_template.md`**: `Applicable issues` (link a GitHub issue,
-  creating one if needed), `Description of changes`, `Checklist` with the Apache 2.0 line. The
-  description becomes the squash commit, so the hygiene rules below apply to it too: no branch or
-  merge chatter, no task or design ids ("group 7", "D6"), no "Draft / not built yet / stacked on #N"
-  once that is no longer true. Refresh it after every material push.
+- **The PR title is the squash commit** (the repo squashes with the title only), so it is a
+  conventional-commit line (`feat:`, `fix:`, `docs:`, `!` for breaking) that follows the hygiene rules.
+- **The PR description uses `.github/pull_request_template.md`**: `Applicable issues` (link a GitHub
+  issue, or `n/a` for a small change), `Description of changes`, `Checklist` with the Apache 2.0 line.
+  The PR page is public, so the hygiene rules apply; GitHub `#N` links are fine there. Refresh it after
+  every material push: no stale "Draft", "not built yet" or "stacked on #N".
 - **Archive the OpenSpec change in the PR that ships it** (`/opsx:archive`), with every task ticked and
   any acceptance/verification step actually run. Never archive an unticked "Not yet run".
-- **Run `openspec validate <change> --strict` and `openspec validate --specs` before pushing.** The
-  validator reads only a requirement's first paragraph: it must contain `SHALL`/`MUST` (open with the
-  normative sentence, definitions after). New requirements go before `## Implementation notes`.
-- **Spec, docs and code must say the same thing.** Check order-of-checks, status values, error codes,
-  and reader docs (`docs/heavy-columns.md`, upgrade notes) against the shipped behaviour. Every test
-  that pins a behaviour gets a spec scenario.
-- **Scope and privacy by default.** A new key, cache, scope or copied column must name its tenant/user
-  boundary: blank or missing ids must not collapse into one shared scope, and identity columns must
-  not be copied next to sensitive payloads without a docs call-out. Caches shared between live and
-  backfill traffic are per-day or separate.
-- **Reject case variants and partial states explicitly** (by-name lookups, `validate-schema=false`,
-  migrations disabled) instead of letting them degrade silently.
+- **Run `openspec validate <change> --strict` and `openspec validate --specs` before pushing.** Every
+  requirement needs `SHALL`/`MUST`; lead with that sentence (older OpenSpec versions read only the first
+  paragraph). New requirements go inside `## Requirements`, before any later `##` section such as
+  `## Implementation notes`.
+- **Every observable behaviour a test pins has a spec scenario**, and reader docs
+  (`docs/heavy-columns.md`, upgrade notes) match it: order of checks, status values, error codes.
+- **Scope and privacy by default.** A new key, cache, scope or copied column names its tenant/user
+  boundary: blank or missing ids must not collapse into one shared scope, and identity columns are not
+  copied next to sensitive payloads without a docs call-out.
+- **Fail explicitly, never degrade silently.** By-name lookups handle letter-case variants the same way
+  everywhere, and code that depends on schema validation or migrations fails explicitly when they are
+  disabled.
 - **Deferred work becomes a GitHub issue**, not a sentence in the PR.
 
 ## Public-repo hygiene
