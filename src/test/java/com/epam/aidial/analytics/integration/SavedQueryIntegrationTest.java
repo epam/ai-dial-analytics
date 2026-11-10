@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.integration;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -29,6 +31,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
 
     private static final String BASE = "/v1/saved-queries";
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     private static final String STRUCTURED_BODY = """
             {
@@ -602,6 +607,73 @@ class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
                         """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("bad_request"));
+    }
+
+    @Test
+    void chartSeriesAreAnOrderedList() throws Exception {
+        final String id = create(chartBody("Multi series", "[\"requests\", \"errors\"]"));
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.chart.y_field", contains("requests", "errors")));
+        assertThat(read(listEntry("Multi series"), "chart.y_field")).isEqualTo(List.of("requests", "errors"));
+
+        mockMvc.perform(post(BASE).contentType("application/json").content(chartBody("Single series", "[\"requests\"]")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.chart.y_field", contains("requests")));
+        mockMvc.perform(post(BASE).contentType("application/json").content(chartBody("No series", "[]")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.chart.y_field", hasSize(0)));
+    }
+
+    @Test
+    void chartSeriesSentAsStringIsReadAsOneSeries() throws Exception {
+        mockMvc.perform(post(BASE).contentType("application/json").content(chartBody("Legacy series", "\"requests\"")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.chart.y_field", contains("requests")));
+    }
+
+    @Test
+    void chartSeriesKeepScalarAndNullElements() throws Exception {
+        final String response = mockMvc.perform(post(BASE).contentType("application/json")
+                        .content(chartBody("Scalar series", "[1, true, null]")))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        final List<Object> series = com.jayway.jsonpath.JsonPath.read(response, "$.chart.y_field");
+        assertThat(series).containsExactly("1", "true", null);
+    }
+
+    @Test
+    void rejectsChartSeriesThatAreNotScalars() throws Exception {
+        for (String series : List.of("{}", "[{}]", "[[]]")) {
+            mockMvc.perform(post(BASE).contentType("application/json").content(chartBody("Bad series", series)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value("bad_request"));
+        }
+    }
+
+    @Test
+    void chartStoredWithStringSeriesIsReturnedAsOneSeries() throws Exception {
+        // The shape every chart had before y_field became a list: no row is migrated, so each read path
+        // must normalize it — the live row and its revision snapshot alike.
+        final String id = create(chartBody("Stored legacy series", "[\"requests\"]"));
+        final String legacy = "{\"type\":\"line\",\"x_field\":\"project_id\",\"y_field\":\"requests\"}";
+        jdbc.update("UPDATE saved_query SET chart = ?::jsonb WHERE id = ?", legacy, id);
+        final Integer revision = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
+        jdbc.update("UPDATE saved_query_aud SET chart = ?::jsonb WHERE id = ? AND rev = ?", legacy, id, revision);
+
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.chart.y_field", contains("requests")));
+        mockMvc.perform(get(BASE + "/" + id + "/revision/" + revision))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.chart.y_field", contains("requests")));
+    }
+
+    private static String chartBody(String name, String series) {
+        return """
+                {"name":"%s","sql":"SELECT project_id FROM dial_usage_log","result_view":"chart",
+                 "chart":{"type":"line","x_field":"project_id","y_field":%s}}
+                """.formatted(name, series);
     }
 
     /** Creates a saved query and returns its server-assigned id. */
