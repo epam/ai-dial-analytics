@@ -330,7 +330,7 @@ class SavedQueryBodyValidatorTest {
         final SavedQueryBodyValidator tiny = newValidator(40);
         final SavedQueryRequestDto request = new SavedQueryRequestDto(
                 "Sum", null, null, null, null, "SELECT 1", MAPPER.valueToTree(relative("last_2d")), null,
-                new SavedQueryChart("bar", "a-fairly-long-x-axis-field-name", "y"),
+                new SavedQueryChart("bar", "a-fairly-long-x-axis-field-name", List.of("y")),
                 null, null, null, null, null, null, null, null);
         assertThatThrownBy(() -> tiny.validate(request))
                 .isInstanceOf(SavedQueryValidationException.class)

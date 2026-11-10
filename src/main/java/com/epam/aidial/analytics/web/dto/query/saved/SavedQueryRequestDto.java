@@ -78,7 +78,8 @@ public record SavedQueryRequestDto(
         @Schema(description = "How the client last rendered the result", example = "chart")
         @JsonProperty("result_view") SavedQueryResultView resultView,
 
-        @Schema(description = "Chart configuration; stored verbatim and never interpreted")
+        @Schema(description = "Chart configuration; stored as sent and never interpreted, except that a"
+                + " string y_field becomes a one-element array")
         SavedQueryChart chart,
 
         @Schema(hidden = true) String id,

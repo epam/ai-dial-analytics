@@ -13,6 +13,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **`CLICKHOUSE_HOST` must reach only the primary replica** (§4).
 - **Three new writer grants** (§1).
 - **Request bodies stored in delta form** (opt-in) need pipelines re-pointed before ingest switches (§6).
+- **Chart `y_field` is an array** in saved-query and dashboard responses (§7).
 
 ---
 
@@ -103,3 +104,20 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   release-0.23 build refuses a pipeline bound to `request_body_full`.
 - **New optional keys.** `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS`
   ([`configuration.md`](configuration.md#request-body-rebuild)).
+
+## 7. Multi-series charts
+
+A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
+columns, one per series (see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). Responses always carry the
+array, so a client that reads `y_field` as a string must move to the array; a one-element array is the old
+single-series chart. Requests may still send a string, and charts stored before the upgrade are returned as a
+one-element array without a migration.
+
+| Change | Effect | Action |
+|---|---|---|
+| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as below |
+
+- **Rollback.** A release-0.23 build cannot read a chart stored as an array: reading that saved query, the
+  scope list it appears in, its revision snapshot, or a dashboard holding such a widget fails. Before rolling back,
+  rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
+  `dashboard.widgets` (the nested `inline_query.chart`).
