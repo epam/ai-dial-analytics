@@ -175,7 +175,8 @@ the PostgreSQL catalog alone. A file placed in the wrong migration root silently
 
 Holds the table definitions, column mappings and per-table access lists that drive the structured
 query path. The JDBC URL is composed from the host/port/database parts below. Schema is provisioned
-by Boot's Flyway, scoped to `classpath:db/migration/postgres`.
+by Boot's Flyway, scoped to `classpath:db/migration/postgres`. For Cloud SQL with IAM database authentication and
+no password, see [`cloud-sql-access.md`](cloud-sql-access.md).
 
 | Variable                       | Property                               | Default     | Required | Description                                                                                                                           |
 |--------------------------------|----------------------------------------|-------------|----------|---------------------------------------------------------------------------------------------------------------------------------------|
@@ -184,7 +185,7 @@ by Boot's Flyway, scoped to `classpath:db/migration/postgres`.
 | `POSTGRES_DATABASE`            | `spring.datasource.url` (database)     | `testdb`    | Yes      | Catalog database name.                                                                                                                |
 | `POSTGRES_OPS`                 | `spring.datasource.url` (query string) | _(empty)_   | No       | JDBC URL query string appended after `?`, e.g. `sslmode=require&ApplicationName=adas`.                                                |
 | `POSTGRES_DATASOURCE_USERNAME` | `spring.datasource.username`           | `postgres`  | Yes      | Catalog user; needs read/write on the catalog tables, and DDL when migrations run.                                                    |
-| `POSTGRES_DATASOURCE_PASSWORD` | `spring.datasource.password`           | `postgres`  | Yes      | Catalog password. Supply from the deployment's secret store.                                                                          |
+| `POSTGRES_DATASOURCE_PASSWORD` | `spring.datasource.password`           | `postgres`  | Yes      | Catalog password. Supply from the deployment's secret store. Set empty with Cloud SQL IAM authentication.                             |
 | `POSTGRES_MIGRATIONS_ENABLED`  | `spring.flyway.enabled`                | `true`      | No       | Run the PostgreSQL migrations at startup. Set `false` when the schema is provisioned out of band. A migration failure aborts startup. |
 
 ### Blob source
@@ -727,6 +728,10 @@ compatibility signal flaps for the length of the roll, and Class-1 positions sta
   the body columns need, upgrade constraints, and the grants each credential needs.
 - [`aws-s3-access.md`](aws-s3-access.md) — running `data-sync` against an S3 bucket: endpoint and
   region, workload identity, and the IAM the bucket needs.
+- [`gcs-access.md`](gcs-access.md) — running `data-sync` against a Cloud Storage bucket: credential modes,
+  Workload Identity, and the IAM the bucket needs.
+- [`cloud-sql-access.md`](cloud-sql-access.md) — the PostgreSQL catalog on Cloud SQL with IAM database
+  authentication: connector parameters, IAM database user, and grants.
 - [`column-mapping.md`](column-mapping.md) — authoring a `data-sync` mapping file.
 - [`kubernetes-exposure.md`](kubernetes-exposure.md) — exposing ADAS from a cluster.
 - [`sql-reference.md`](sql-reference.md) — the SQL surface `execute-sql` and Flight SQL accept.

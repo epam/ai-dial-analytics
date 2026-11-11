@@ -208,6 +208,7 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 | ClickHouse server setup and grants | [docs/clickhouse-server.md](docs/clickhouse-server.md) |
 | AWS S3 access | [docs/aws-s3-access.md](docs/aws-s3-access.md) |
 | Google Cloud Storage access | [docs/gcs-access.md](docs/gcs-access.md) |
+| Cloud SQL catalog with IAM auth | [docs/cloud-sql-access.md](docs/cloud-sql-access.md) |
 | Column mapping for ingestion | [docs/column-mapping.md](docs/column-mapping.md) |
 | SQL reference | [docs/sql-reference.md](docs/sql-reference.md) |
 | Heavy and sensitive columns | [docs/heavy-columns.md](docs/heavy-columns.md) |

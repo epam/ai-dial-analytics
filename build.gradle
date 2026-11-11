@@ -54,6 +54,13 @@ dependencies {
     // baggage propagation (patched in 1.62.0) and quadratic CPU in W3C tracestate parsing
     // (CVE-2026-118259, patched in 1.67.0).
     implementation platform('io.opentelemetry:opentelemetry-bom:1.67.0')
+    // One gRPC release for every io.grpc module, enforced because it is lower than some modules request. Arrow
+    // Flight 18.3 (grpc-netty 1.71) calls io.grpc.internal.ReadableBuffer.readBytes(ByteBuffer), which gRPC 1.79
+    // removed: on a newer release every Flight call fails with NoSuchMethodError. The Cloud SQL connector's gax
+    // stack requests 1.83/1.84, and mixed io.grpc releases fail on internal APIs, so the whole family is held at
+    // 1.78, the newest release Arrow still links against. CloudSqlConnectorTest proves the connector runs on it,
+    // and the Flight integration tests prove Arrow does. Lift it together with an Arrow bump (19.x builds on 1.79).
+    implementation enforcedPlatform('io.grpc:grpc-bom:1.78.0')
 
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
@@ -150,6 +157,22 @@ dependencies {
     // PostgreSQL, so Boot's Flyway autoconfig fails with "Unsupported Database: PostgreSQL" without
     // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
+    // Cloud SQL Java Connector for the PostgreSQL catalog: a pgjdbc SocketFactory selected from the JDBC URL
+    // (socketFactory=com.google.cloud.sql.postgres.SocketFactory&cloudSqlInstance=...). It opens the TLS
+    // connection with an ephemeral certificate and, with enableIamAuth=true, signs in as the IAM principal of
+    // the pod's Application Default Credentials, so the catalog needs no password. Nothing references it from
+    // code; a plain PostgreSQL URL never loads it. Not BOM-managed; pinned.
+    //
+    // It brings a gRPC/gax stack (its Connector builds a gRPC data client unconditionally, so that stack cannot be
+    // excluded) whose io.grpc modules would otherwise resolve to three versions next to Arrow Flight's grpc-netty;
+    // the enforced grpc-bom platform at the top of this block holds them all on one release. Apache httpclient/httpcore 4 and
+    // google-http-client-apache-v2 are excluded for the reason given at google-auth-library-oauth2-http: the
+    // connector calls the Cloud SQL Admin API over NetHttpTransport, never the Apache transport.
+    runtimeOnly('com.google.cloud.sql:postgres-socket-factory:1.30.2') {
+        exclude group: 'org.apache.httpcomponents', module: 'httpclient'
+        exclude group: 'org.apache.httpcomponents', module: 'httpcore'
+        exclude group: 'com.google.http-client', module: 'google-http-client-apache-v2'
+    }
 
     // Provider-agnostic blob access (azureblob, aws-s3 or google-cloud-storage in deployments, filesystem in
     // tests). Uses EPAM's jclouds fork (2.7.3) so the azureblob provider supports Azure AD / managed identity.
