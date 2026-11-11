@@ -27,8 +27,8 @@ import java.util.stream.Stream;
  * <p>Read once at startup, in two batched lookups however many targets there are. Startup fails when a sensitive column is
  * one the ingest cannot do without: the deduplication key ({@code trace_id}, {@code core_span_id}, {@code request_time}),
  * or the table's grain key, identity, ordering-key, partition, version or TTL column. Leaving one of those out would drop
- * every row, collapse rows that do not belong together, or land rows in the epoch partition where retention drops them. A table the catalog does not define has nothing excluded, with a warning,
- * because its sensitivity cannot be known.
+ * every row, collapse rows that do not belong together, or land rows in the epoch partition where retention drops them.
+ * A table the catalog does not define has nothing excluded, with a warning, because its sensitivity cannot be known.
  */
 @Slf4j
 public final class SensitiveColumnExclusion {
