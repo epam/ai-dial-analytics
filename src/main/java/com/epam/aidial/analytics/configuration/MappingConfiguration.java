@@ -2,7 +2,6 @@ package com.epam.aidial.analytics.configuration;
 
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
-import com.epam.aidial.analytics.sync.mapping.ColumnMapping;
 import com.epam.aidial.analytics.sync.mapping.DeriverRegistry;
 import com.epam.aidial.analytics.sync.mapping.MappingConfig;
 import com.epam.aidial.analytics.sync.mapping.MappingEngine;
@@ -20,7 +19,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Loads the configured ingest targets into an immutable {@code List<SyncTarget>} bean at startup. Each
@@ -59,14 +57,11 @@ public class MappingConfiguration {
 
         List<SyncTarget> targets = new ArrayList<>(syncProperties.targets().size());
         for (SyncProperties.Target target : syncProperties.targets()) {
-            MappingConfig configured = loader.load(target.mappingFile());
-            Set<String> sensitive = excluded.getOrDefault(target.table(), Set.of());
-            Set<String> excludedColumns = configured.columns().stream().map(ColumnMapping::column)
-                    .filter(sensitive::contains).collect(Collectors.toSet());
-            MappingConfig mapping = SensitiveColumnExclusion.without(configured, excludedColumns);
+            MappingConfig mapping = SensitiveColumnExclusion.without(loader.load(target.mappingFile()),
+                    excluded.getOrDefault(target.table(), Set.of()));
             MappingEngine engine = new MappingEngine(mapping, transformRegistry, deriverRegistry,
                     syncProperties.inlineFilesPolicy(), target.table(), meterRegistry);
-            targets.add(new SyncTarget(target.table(), mapping, engine, excludedColumns));
+            targets.add(new SyncTarget(target.table(), mapping, engine));
         }
         return List.copyOf(targets);
     }

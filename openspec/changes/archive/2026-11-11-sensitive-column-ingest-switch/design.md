@@ -77,16 +77,19 @@ sensitive column is seeded. That is exactly the failure the switch exists to pre
 The switch must not be able to break the table, so startup fails if any of these columns is in the excluded set:
 
 - the dedup key `trace_id`, `core_span_id`, `request_time`;
-- the target table's `grain_key`, `identity_column` or `ordering_key` from `table_definition`.
+- the target table's `grain_key`, `identity_column`, `ordering_key`, `partition_column`, `version_column` or
+  `ttl_column` from `table_definition`.
 
 With the seeded catalog none of these is sensitive, so the guard is a safety net against a future migration.
-Failing loudly beats silently dropping every row (blank key) or collapsing all rows onto one `event_id`.
+Failing loudly beats silently dropping every row (blank key), collapsing all rows onto one `event_id`, or landing
+rows in the epoch partition where retention drops them.
 
-### Targets missing from the catalog are written as mapped
+### Targets missing from the catalog fail startup
 
-A custom target can name a table that is not in the catalog. Its sensitivity is unknown, so nothing is excluded
-and a warning is logged. *Rejected:* failing startup. That would make the switch unusable next to any
-out-of-catalog target, while the seeded targets are always catalogued.
+A custom target can name a table that is not in the catalog, for example a renamed payload table. Its sensitivity is
+unknown, so startup fails naming it, and the operator defines the table in the catalog first. *Rejected:* writing it
+as mapped with a warning. For a setting whose purpose is to keep content out, that degrades silently: bodies,
+claims and headers would still be stored, with one log line as the only sign.
 
 ### Property shape
 
@@ -104,7 +107,9 @@ out-of-catalog target, while the seeded targets are always catalogued.
   expected and stated in the spec. Re-ingesting a day under `true` restores values only for that day's rows.
 - [Delta chains across a toggle] Rows written under `delta` before the switch was turned off keep their cut
   bodies. New rows carry no path, so they never become parents or children. Rebuilt bodies of older rows are
-  unaffected. → Covered by the request-body-mode warning. No data loss beyond what the switch asks for.
+  unaffected, unless a parent is re-ingested while the switch is off: it is rewritten with no body and no path, so a
+  child stored from another blob can no longer be rebuilt, as for a parent re-ingested under `whole`. → The spec
+  states it next to the re-ingest rule, and the request-body-mode warning flags the mode as inert.
 - [Catalog drift from the physical names] Matching uses `column_mapping.source_name`, which is the ClickHouse
   column name and the mapping's `column`. A mapping column with no catalog row is not excluded. → For the
   seeded tables every sensitive column has a catalog row. Tests assert the seeded exclusion set.

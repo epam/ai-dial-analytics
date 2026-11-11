@@ -28,7 +28,8 @@ import java.util.stream.Stream;
  * one the ingest cannot do without: the deduplication key ({@code trace_id}, {@code core_span_id}, {@code request_time}),
  * or the table's grain key, identity, ordering-key, partition, version or TTL column. Leaving one of those out would drop
  * every row, collapse rows that do not belong together, or land rows in the epoch partition where retention drops them.
- * A table the catalog does not define has nothing excluded, with a warning, because its sensitivity cannot be known.
+ * Startup also fails for a target table the catalog does not define: its sensitivity cannot be known, and writing it
+ * whole would store exactly what the setting asks to keep out.
  */
 @Slf4j
 public final class SensitiveColumnExclusion {
@@ -40,10 +41,9 @@ public final class SensitiveColumnExclusion {
     }
 
     /**
-     * The sensitive physical columns of each of {@code tables}, in catalog order; a table with none, or with no catalog
-     * definition, maps to an empty set.
+     * The sensitive physical columns of each of {@code tables}, in catalog order; a table with none maps to an empty set.
      *
-     * @throws IllegalStateException when a sensitive column is one the ingest depends on
+     * @throws IllegalStateException when a table has no catalog definition, or a sensitive column is one the ingest depends on
      */
     public static Map<String, Set<String>> resolve(Collection<String> tables, ColumnMappingRepository columns,
                                                    TableDefinitionRepository definitions) {
@@ -61,10 +61,9 @@ public final class SensitiveColumnExclusion {
         for (String table : distinct) {
             TableDefinitionEntity definition = defined.get(table);
             if (definition == null) {
-                log.warn("sync.sensitive-columns-enabled=false: ingest target table {} has no catalog definition, so its "
-                        + "sensitivity is unknown and every mapped column is written", table);
-                excluded.put(table, Set.of());
-                continue;
+                throw new IllegalStateException("sync.sensitive-columns-enabled=false cannot tell which columns of ingest target "
+                        + "table '" + table + "' are sensitive: the catalog does not define it. Define the table in the catalog, "
+                        + "or point the target at a table it defines");
             }
             Set<String> sensitive = sensitiveByTable.getOrDefault(table, Set.of());
             Set<String> required = requiredColumns(definition);

@@ -137,12 +137,11 @@ class SensitiveColumnExclusionTest {
         }
     }
 
+    /** Writing an unknown table whole would store exactly what the switch is meant to keep out. */
     @Test
-    void tableWithoutCatalogDefinitionWarnsAndExcludesNothing() {
-        column("custom_sink", "secret", true);
-
-        assertThat(SensitiveColumnExclusion.resolve(List.of("custom_sink"), columns, definitions).get("custom_sink")).isEmpty();
-        assertThat(messages(Level.WARN)).anySatisfy(m -> assertThat(m).contains("custom_sink").contains("no catalog definition"));
+    void tableWithoutCatalogDefinitionFailsStartup() {
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD, "custom_sink"), columns, definitions))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("custom_sink").hasMessageContaining("does not define");
     }
 
     @Test

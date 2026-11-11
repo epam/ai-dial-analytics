@@ -3226,15 +3226,20 @@ Under `false`, startup SHALL fail, naming the target table and the column, when 
 Leaving one of these out would drop every row, collapse rows that do not belong together, or put rows in the epoch
 partition where retention drops them.
 
-Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it. A target whose
-table has no catalog definition SHALL have nothing excluded, and startup SHALL log a warning naming it, because
-its sensitivity cannot be known.
+Under `false`, startup SHALL also fail, naming the table, when a target's table has no catalog definition: its
+sensitivity cannot be known, and writing it as mapped would store exactly what the setting is meant to keep out.
+The operator defines the table in the catalog or points the target at a table the catalog defines.
+
+Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it.
 
 The setting SHALL apply only to rows written while it is in effect. It SHALL NOT change rows already stored, the
 catalog's `sensitive` flags, read-side masking, or the physical table schema. Switching it back to `true` SHALL
 make new rows carry the columns again. Rows written while it was `false` keep their defaults. A record
 re-ingested later is written under the setting in effect at that time, and the row it writes replaces the earlier
-one as any re-ingested row does (see "Primary-key deduplication").
+one as any re-ingested row does (see "Primary-key deduplication"). Under `delta` this includes a parent: a
+parent re-ingested under `false` is rewritten with no body and no path, so a delta child stored from another blob
+and not re-ingested with it names a path no row carries and can no longer be rebuilt, as for a parent re-ingested
+under `whole` (see "The request body storage mode is configurable").
 
 #### Scenario: The default writes sensitive columns
 
@@ -3275,11 +3280,11 @@ one as any re-ingested row does (see "Primary-key deduplication").
   the target table's grain key, `sensitive` on an ingest target's table
 - **THEN** startup fails, naming the table and the column
 
-#### Scenario: A target without a catalog definition is written as mapped
+#### Scenario: A target without a catalog definition fails startup
 
 - **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and a configured target names a table
   the catalog does not define
-- **THEN** that target's rows carry every mapped column, and startup logs a warning naming the table
+- **THEN** startup fails, naming the table
 
 #### Scenario: Rows stored before the switch are unchanged
 
@@ -3324,8 +3329,9 @@ setting has no effect.
 A target's mapping is taken here after sensitive-column exclusion (see "Sensitive columns can be excluded from
 ingest"). A target whose `request_body` is excluded SHALL therefore not qualify, and SHALL get no request-delta
 processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
-default, `request_cache_control` included. Under `whole-with-path` or `delta` with such a target, startup SHALL
-log a warning naming the target and saying the mode has no effect on it because its request body is excluded.
+default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while the
+switch is `false`, startup SHALL log one warning that the mode has no effect, naming the switch, in place of the
+`delta` warning above, whose advice to check the mappings would mislead.
 
 #### Scenario: The default stores request bodies whole
 

@@ -8,16 +8,16 @@
 ## 2. Exclusion resolution
 
 - [x] 2.1 Add a small resolver in `sync/mapping` (e.g. `SensitiveColumnExclusion`). Given the target tables, it batch-reads `column_mapping` through `ColumnMappingRepository` and the table definitions through `TableDefinitionRepository`, and returns per table the `source_name`s flagged `sensitive`
-- [x] 2.2 In the resolver, fail startup (an `IllegalStateException` naming table and column) when an excluded column is `trace_id`, `core_span_id`, `request_time`, or the table's `grain_key`, `identity_column` or `ordering_key` column
-- [x] 2.3 In the resolver, log a `WARN` for a target table with no catalog definition (nothing excluded), and an `INFO` per target listing its excluded columns
-- [x] 2.4 Unit-test the resolver: seeded-shape catalog → the six payload columns and `rate_analytics.comment`, nothing for `dial_usage_log`; a sensitive key or grain column fails; an uncatalogued table warns and excludes nothing
+- [x] 2.2 In the resolver, fail startup (an `IllegalStateException` naming table and column) when an excluded column is `trace_id`, `core_span_id`, `request_time`, or the table's `grain_key`, `identity_column`, `ordering_key`, `partition_column`, `version_column` or `ttl_column` column
+- [x] 2.3 In the resolver, fail startup for a target table with no catalog definition, and log an `INFO` per target listing its excluded columns
+- [x] 2.4 Unit-test the resolver: seeded-shape catalog → the six payload columns and `rate_analytics.comment`, nothing for `dial_usage_log`; a sensitive key or grain column fails; an uncatalogued table fails startup
 
 ## 3. Target compilation
 
 - [x] 3.1 In `MappingConfiguration.syncTargets`, when the switch is off, drop the excluded columns from each loaded `MappingConfig` (keeping its matcher) before building the `MappingEngine`; when it is on, never call the resolver or the repositories
 - [x] 3.2 Update the `MappingConfiguration` and `SyncTarget` Javadoc to describe the exclusion
-- [x] 3.3 In `RequestDeltaStages`, when the mode is not `whole` and a target's mapping lacks `request_body` because it was excluded, log a `WARN` naming the target and saying the mode has no effect on it because its request body is excluded; keep the existing "no target qualifies" warning
-- [x] 3.4 `RequestDeltaStagesTest`: a payload-shaped target without `request_body` under `delta` gets no stage and the warning is logged
+- [x] 3.3 In `RequestDeltaStages`, when the mode is not `whole`, the switch is `false` and no target qualifies, log one `WARN` that the mode has no effect, naming the switch, in place of the generic "no target qualifies" warning
+- [x] 3.4 `RequestDeltaStagesTest`: a payload-shaped target without `request_body` under `delta` gets no stage and only the switch warning is logged
 
 ## 4. Integration tests
 

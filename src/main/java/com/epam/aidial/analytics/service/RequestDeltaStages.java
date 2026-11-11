@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
  * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
  * {@code sync.sensitive-columns-enabled=false} has no body to rewrite and gets no stage, so its chain and cache-marker
- * columns keep their defaults; startup warns that the mode has no effect on it.
+ * columns keep their defaults; when that leaves no stage at all, the warning names the switch rather than the mappings.
  */
 @Component
 @Slf4j
@@ -42,9 +42,7 @@ public class RequestDeltaStages {
     /** Written paths remembered per payload table; a few hundred bytes each. */
     static final int PATH_CACHE_ENTRIES = 200_000;
 
-    private static final String REQUEST_BODY = "request_body";
-
-    private static final Set<String> REQUIRED_COLUMNS = Set.of(REQUEST_BODY, "project_id", "user_hash");
+    private static final Set<String> REQUIRED_COLUMNS = Set.of("request_body", "project_id", "user_hash");
 
     /** The columns the stage writes beyond the mapping: what a payload table gains in ClickHouse V16. */
     private static final Set<String> REQUIRED_TABLE_COLUMNS = Set.of(
@@ -63,14 +61,14 @@ public class RequestDeltaStages {
                     RequestDeltaEncoder encoder = new RequestDeltaEncoder(
                             mode, new ClickHouseParentLookup(writer, target.table()), PATH_CACHE_ENTRIES, registry, target.table());
                     byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
-                } else if (target.excludedColumns().contains(REQUEST_BODY)) {
-                    log.warn("sync.request-body-mode={} has no effect on target {}: its request body is excluded by "
-                            + "sync.sensitive-columns-enabled=false", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), target.table());
                 }
             }
-        }
-        if (mode == RequestBodyMode.DELTA && byTable.isEmpty()) {
-            log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
+            if (byTable.isEmpty() && !properties.sensitiveColumnsEnabled()) {
+                log.warn("sync.request-body-mode={} has no effect: with sync.sensitive-columns-enabled=false excluding the "
+                        + "sensitive columns, no ingest target's mapping maps all of {}", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), REQUIRED_COLUMNS);
+            } else if (byTable.isEmpty() && mode == RequestBodyMode.DELTA) {
+                log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
+            }
         }
         this.stages = Map.copyOf(byTable);
     }

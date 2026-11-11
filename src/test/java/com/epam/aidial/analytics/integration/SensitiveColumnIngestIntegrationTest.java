@@ -25,7 +25,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
-import org.springframework.core.io.ResourceLoader;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.OutputStream;
@@ -49,8 +48,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * intact, with every sensitive column at its ClickHouse default, request-delta columns included under {@code delta}.
  *
  * <p>The switch-off targets are built here by {@link MappingConfiguration} against the context's own catalog
- * repositories, rather than in a context of their own: a distinct property set costs another cached context, and with it
- * another JDBC pool on the shared PostgreSQL container.
+ * repositories, so the default and the switch-off ingest share one context. The bean the real startup builds under
+ * {@code false} is checked by {@link SensitiveColumnsDisabledStartupIntegrationTest}.
  */
 class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegrationTest {
 
@@ -81,6 +80,9 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
 
     @TempDir
     private Path baseDir;
+
+    /** The day the blob is dated and its rows are asserted on, taken once so a run crossing UTC midnight still agrees. */
+    private final LocalDate today = LocalDate.now(ZoneOffset.UTC);
 
     @Test
     void theDefaultWritesEverySensitiveColumn() throws Exception {
@@ -126,7 +128,7 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
     private void assertKeysAndJoinIntact(String project) {
         assertThat(payload(project, "concat(trace_id, '|', core_span_id, '|', user_hash, '|', toString(event_id))"))
                 .isEqualTo(project + "-chat|s1|user-1|" + usageLog(project, "toString(event_id)", project + "-chat"));
-        assertThat(payload(project, "toDate(request_time)")).isEqualTo(LocalDate.now(ZoneOffset.UTC).toString());
+        assertThat(payload(project, "toDate(request_time)")).isEqualTo(today.toString());
         assertThat(usageLog(project, "concat(deployment, '|', user_hash)", project + "-chat")).isEqualTo("gpt-4|user-1");
         assertThat(queryScalar("SELECT count() AS c FROM dial_usage_log AS u FINAL INNER JOIN dial_usage_log_payload AS p FINAL"
                 + " ON u.event_id = p.event_id WHERE u.project_id = '" + project + "'", "c")).isEqualTo("2");
@@ -141,7 +143,6 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
 
     /** Writes the two records under a fresh project id, polls them in through {@code targets}, and returns the project id. */
     private String ingest(List<SyncTarget> targets, RequestBodyMode mode) throws Exception {
-        LocalDate today = LocalDate.now(ZoneOffset.UTC);
         String project = "sensitive-it-" + System.nanoTime();
         String key = PATH_PREFIX + "/" + DateTimeFormatter.ofPattern("yyyy/MM/dd").format(today) + "/records-" + project + ".log.gz";
         writeBlob(baseDir.resolve(BUCKET).resolve(key), chatRecord(today, project) + "\n" + rateRecord(today, project) + "\n");

@@ -23,6 +23,8 @@ files is fragile and is not documented as a contract.
 - Startup fails if a column the ingest cannot do without (a deduplication-key, partition, ordering or
   grain column of the target's table) is flagged `sensitive`. Leaving it out would corrupt dedup or
   the join.
+- Startup also fails if a target names a table the catalog does not define: its sensitivity is unknown, and
+  writing it as mapped would store what the switch is meant to keep out.
 - Request-delta storage: when `request_body` is left out, no request-delta stage is built for that
   target. Its chain and cache-marker columns keep their defaults, so `request_cache_control` (sensitive)
   is never written. Startup logs a warning if `SYNC_REQUEST_BODY_MODE` is not `whole`.
