@@ -34,7 +34,20 @@ default.
   longer be rebuilt.
 - **Rollback.** A build older than 0.24 ignores the variable and writes sensitive columns again.
 
+## Sessions-source setting
+
+New endpoints `GET` and `PUT /v1/settings/sessions-source` store which source table holds session rows and which of
+its fields play the session roles (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). Reading
+needs the new privilege `SETTINGS_READ`, which every read-only bundle now carries; writing needs `SETTINGS_WRITE`,
+which only `FULL_ADMIN` carries. Flyway migration `V53` creates the backing table at startup.
+
+- **A `roles-mapping` that names raw privileges** rather than a bundle gains neither privilege. Add `SETTINGS_READ`
+  to the roles whose holders use the sessions view, or they get `403` on the read.
+- **Rollback.** A build older than 0.24 does not know `SETTINGS_READ` or `SETTINGS_WRITE` and fails startup on a
+  `roles-mapping` that names either. Remove them before rolling back. The new table is ignored and may be left in place.
+
 | Change | Effect | Action |
 |---|---|---|
 | Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | Readers of `request_body` see only a later turn's new messages | Only when you set `delta`: re-point pipelines and readers to `request_body_full`, as above |
 | Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column |
+| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; raw-privilege mappings do not | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; remove both names before a rollback |

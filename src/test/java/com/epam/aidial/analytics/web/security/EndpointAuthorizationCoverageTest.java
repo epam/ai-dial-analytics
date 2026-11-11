@@ -196,6 +196,6 @@ class EndpointAuthorizationCoverageTest {
         assertThat(PrivilegeScope.TABLE_SCOPED).hasSize(6);
         // TABLE_LIST is checked per table but never granted on one: every grant that shows a table confers it.
         assertThat(PrivilegeScope.GRANTABLE).hasSize(5).doesNotContain(Privilege.TABLE_LIST);
-        assertThat(Arrays.stream(Privilege.values()).count()).isEqualTo(16);
+        assertThat(Arrays.stream(Privilege.values()).count()).isEqualTo(18);
     }
 }

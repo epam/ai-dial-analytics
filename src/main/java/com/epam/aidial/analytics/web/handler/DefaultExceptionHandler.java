@@ -46,6 +46,8 @@ import com.epam.aidial.analytics.exception.SavedQueryValidationException;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
+import com.epam.aidial.analytics.exception.SettingNotFoundException;
+import com.epam.aidial.analytics.exception.SettingValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableConflictException;
@@ -297,6 +299,18 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(SystemTableException.class)
     public ErrorView handleSystemTable(HttpServletRequest req, SystemTableException ex) {
         return new ErrorView(req, HttpStatus.CONFLICT, "table_is_system", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    @ExceptionHandler(SettingNotFoundException.class)
+    public ErrorView handleSettingNotFound(HttpServletRequest req, SettingNotFoundException ex) {
+        return new ErrorView(req, HttpStatus.NOT_FOUND, "setting_not_found", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(SettingValidationException.class)
+    public ErrorView handleSettingValidation(HttpServletRequest req, SettingValidationException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "validation_error", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
