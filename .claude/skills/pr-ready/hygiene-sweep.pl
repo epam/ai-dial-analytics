@@ -8,13 +8,14 @@ use warnings;
 $SIG{__DIE__} = sub { print STDERR $_[0]; exit 2 };
 
 my @LINE = (
-    [env      => qr/(?<![\/\w])(?:[Dd]ev|UAT|[Pp]rod)\b(?!\/null)|DevOps/],
+    # Not after / . - or a word char: spares /dev/null, libssl-dev, --save-dev, go.dev, numpy.prod.
+    [env      => qr/(?<![\/\w.-])(?:[Dd]ev|DEV|UAT|[Pp]rod|PROD)(?![A-Za-z0-9])|DevOps/],
     [env      => qr/reference[- ]deployment|\bin production\b/i],
     [ticket   => qr/\bMR ?!\d+|(?<![\w\]!])!\d{2,}\b|\b(?!(?:UTF|ISO|SHA|RFC|UUID|HTTP|TLS|CVE|CWE|AES|RSA|HMAC|ECDSA|PBKDF)-)[A-Z]{2,}-\d{2,}\b/],
     [branch   => qr/\b(?:origin|upstream|github|gitlab)\/(?:development|main|master)\b|renumbered at merge/],
     [people   => qr/\bthe user (?:decided|asked|chose|wanted)\b/i],
-    # Dates in prose ("on 2026-10-07"), not fixture dates, which are fine when invented.
-    [date     => qr/\b(?:on|since|until|as of)\s+20\d\d-[01]\d-[0-3]\d(?:\b|T)|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/i],
+    # Unquoted dates; quoted ones are fixtures, `2026-11-03-name` is an archive folder.
+    [date     => qr/(?<!["'`\d-])20\d\d-[01]\d-[0-3]\d(?!-[a-z]|\d)|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/],
     [machine  => qr{/Users/\w|/home/\w|\b[A-Za-z]:\\Users\\|~/\.\w|\.rd/docker\.sock}],
     [untracked => qr/\.local\.md\b/],
 );
@@ -36,7 +37,8 @@ if ($arg eq '-') {
         '--src-prefix=a/', '--dst-prefix=b/', "$arg...HEAD") or die "git diff failed: $!\n";
 }
 
-my (%added, @order, $file, $ln);    # file => [[line, text], ...]
+my (%added, @order, $file, $ln, $left);    # file => [[line, text], ...]; $left = added lines due in the hunk
+$left = 0;
 while (my $row = <$in>) {
     chomp $row;
     $row =~ s/\r$//;
@@ -46,9 +48,14 @@ while (my $row = <$in>) {
         push @{ $added{$file} }, [$., $row];
         next;
     }
-    if ($row =~ m{^\+\+\+ (?:"?b/(.*?)"?\t?|/dev/null)$}) { $file = $1; next; }
-    if ($row =~ /^@@ -\S+ \+(\d+)/) { $ln = $1; next; }
-    next unless defined $file && $file ne $SELF && $row =~ s/^\+//;
+    if ($left == 0) {    # outside a hunk's added lines, so a "+++" line really is a header
+        if ($row =~ m{^\+\+\+ (?:"?b/(.*?)"?\t?|/dev/null)$}) { $file = $1; next; }
+        if ($row =~ /^@@ -\S+ \+(\d+)(?:,(\d+))?/) { ($ln, $left) = ($1, $2 // 1); }
+        next;
+    }
+    next unless $row =~ s/^\+//;
+    $left--;
+    next unless defined $file && $file ne $SELF;
     push @order, $file unless $added{$file};
     push @{ $added{$file} }, [$ln++, $row];
 }
