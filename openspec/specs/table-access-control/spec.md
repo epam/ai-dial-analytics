@@ -474,7 +474,8 @@ requiring `TABLE_GRANT`, because a policy discloses which provider roles exist a
 
 A caller without `TABLE_GRANT` SHALL receive `403 forbidden`. An unknown table SHALL be `404 not_found`,
 and so SHALL a `DELETE` naming a role that has no policy on the table. A body that does not bind to the
-request type — malformed JSON, or a member other than `filter` — SHALL be `400 bad_request`, as on every endpoint behind the strict request mapper. A
+request type — malformed JSON, or a member other than `filter` and `where` — SHALL be `400 bad_request`, as
+on every endpoint behind the strict request mapper. A
 body that binds but whose shape or meaning is invalid, and an invalid role, SHALL be `422 validation_error`
 naming the offending member. Every change SHALL be recorded in the audit trail as
 a change to the table definition, readable as `row_policies` on the table's revision snapshot by a caller
@@ -833,4 +834,60 @@ that a pipeline refuses a confined caller.
 - **WHEN** a caller's credential yields an empty or whitespace-only value for a caller value a confining
   policy references
 - **THEN** the value is unknown and the comparison matches no row
+
+### Requirement: A row policy may be written as a SQL condition
+
+`PUT /v1/tables/{name}/row-policies/{role}` SHALL accept `{"where": "<condition>"}` as an alternative to
+`{"filter": <filter node>}`. The condition is the text that would follow `WHERE` in a SQL statement over
+the table, in the SQL subset the ad-hoc SQL surface accepts (see
+[rest-sql-endpoint](../rest-sql-endpoint/spec.md)). Exactly one of `where` and `filter` SHALL be given: a
+body carrying both, or neither, SHALL be refused `422 validation_error`.
+
+The system SHALL translate the condition into a filter node and from there treat the policy exactly as one
+written as `filter`: the same validation against the table's own columns, the same refusals, the same size
+limit, the same storage and the same enforcement. The condition text SHALL NOT be stored, SHALL NOT be sent
+to the data store, and SHALL NOT be returned: the response and every later read of the policy carry the
+stored `filter`.
+
+The condition SHALL be resolved against every column the table stores, sensitive columns included,
+whatever the writing caller may itself see or read.
+
+A caller value SHALL be written in the condition as `caller.user_hash` or `caller.project`, exactly, and
+SHALL become the `param` of that name, subject to the placement rule of "Caller values in row policies". A
+string literal in the condition SHALL remain a literal whatever it spells, including the text of a caller
+value's name.
+
+A condition that does not parse, does not validate against the table, or uses a construct the SQL surface
+cannot express as a single filter SHALL be refused `422 validation_error` with the reason. A table that is
+not a queryable entity on its own, such as an enrichment, SHALL refuse `where` with `422 validation_error`;
+its policies are written as `filter`.
+
+#### Scenario: A condition is stored as its filter
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"where": "project_id IN ('X-PRJ-1', 'X-PRJ-2')"}` for
+  role `X`
+- **THEN** the response is `200` with a `filter` equal to the one the same policy written as `filter`
+  stores, and a caller carrying `X` sees only the rows of those two projects
+
+#### Scenario: A caller value in a condition
+
+- **WHEN** a policy is written as `{"where": "user_hash = caller.user_hash"}`
+- **THEN** the stored filter compares `user_hash` with the `param` `caller.user_hash`, and each caller
+  reads its own rows
+
+#### Scenario: A literal spelling a caller value stays a literal
+
+- **WHEN** a policy is written as `{"where": "user_hash = 'caller.user_hash'"}`
+- **THEN** the stored filter compares `user_hash` with the string `caller.user_hash`, and no caller's value
+  is substituted
+
+#### Scenario: Both forms at once are refused
+
+- **WHEN** a body carries both `where` and `filter`
+- **THEN** the request is refused `422 validation_error` and no policy is stored
+
+#### Scenario: A subquery in a condition is refused
+
+- **WHEN** a policy is written as `{"where": "project_id IN (SELECT project_id FROM other_table)"}`
+- **THEN** the request is refused `422 validation_error` and no policy is stored
 

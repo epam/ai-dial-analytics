@@ -1,7 +1,7 @@
 ## Context
 
 A row policy is stored as a filter tree and rendered to a ClickHouse predicate on every read; see
-[table-access-control](../../specs/table-access-control/spec.md). The SQL front end (`SqlQueryFrontEnd`)
+[table-access-control](../../../specs/table-access-control/spec.md). The SQL front end (`SqlQueryFrontEnd`)
 already turns a single-block `SELECT … WHERE …` over a queryable entity into a structured query whose
 `filter` is that same tree.
 
