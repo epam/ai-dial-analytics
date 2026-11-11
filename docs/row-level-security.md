@@ -23,6 +23,21 @@ over the table's own columns. Every reader carrying `team-x` now sees only `X-PR
 
 `GET /v1/tables/{name}/row-policies` lists a table's policies; `DELETE .../row-policies/{role}` removes one.
 
+### The same policy written as SQL
+
+Instead of `filter`, a policy can be given as `where`: the condition you would write after `WHERE`.
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/team-x" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"where": "project_id IN ('\''X-PRJ-1'\'')"}'
+```
+
+The text is an input format. It is translated to a `filter`, and that filter is what is stored, returned
+and enforced, so the response shows the tree and not your SQL. Everything a `filter` may not hold is
+refused in SQL too: subqueries, other tables, aggregates. A table that cannot be queried on its own, such
+as an enrichment, takes `filter` only.
+
 ## The rules, briefly
 
 - **A policy narrows; it never grants.** The role still needs a read path — a global `TABLE_READ`, a
@@ -63,9 +78,58 @@ well as any `WHERE project_id …` would. A predicate wrapping a column in a fun
 filtering a non-key column reads more of the table.
 
 A policy may use scalar functions and the relative time functions (`now`, `date_add`, `date_sub` — e.g.
-"the last 90 days"); it may not use `param`, aggregate or window functions, subqueries or enrichment
-fields. A column a policy filters on cannot be dropped or renamed, nor left out when a failed table's
-schema is posted again, until the policy is changed (`409 column_in_row_policy`).
+"the last 90 days"); it may not use aggregate or window functions, subqueries or enrichment fields, nor
+any `param` other than the two caller values below. A column a policy filters on cannot be dropped or renamed, nor left out or given another type when a
+failed table's schema is posted again, until the policy is changed (`409 column_in_row_policy`).
+
+## Own rows: comparing a column with the caller
+
+A policy may compare a `string` column with a value of the caller reading the table: `caller.user_hash`
+(the hash DIAL Core writes to `user_hash`; it needs the `logging-*` settings in
+[`configuration.md`](configuration.md)) or `caller.project` (the project of a project API key). One policy
+on one role then gives every caller its own rows:
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/user" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"filter": {"op": "eq", "args": [
+        {"type": "field", "name": "user_hash"},
+        {"type": "param", "name": "caller.user_hash"}]}}'
+```
+
+Written as SQL, the same policy is `{"where": "user_hash = caller.user_hash"}`.
+
+A caller value is allowed only as one side of `eq` or `ne` against a `string` column. A caller without the
+value matches no row, also under `ne` and `not`; an `or` with another branch still applies, so
+`user_hash = caller.user_hash OR project_id = caller.project` serves users and project keys alike. Roles
+that should read every row simply get no policy.
+
+## Everyone: the `*` grantee
+
+When users share no common role, name `*` instead of a role. It stands for every authenticated caller, in
+a table's read-side grant lists (`get`, `read`, `sensitive`; never `write` or `modify`) and as the subject
+of a row policy. Two calls give every user their own rows of a table and leave administrators unconfined:
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/*" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"filter": {"op": "eq", "args": [
+        {"type": "field", "name": "user_hash"},
+        {"type": "param", "name": "caller.user_hash"}]}}'
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"read": ["*"]}'
+```
+
+Store the policy first. A `read` grant to `*` with no `*` policy lets every caller read every row, and
+lifts the policies of every other role on the table, because every caller then carries a role that reads
+with no policy. The grant is accepted, and its response reports it under `ineffective_grants` with reason
+`lifts_row_policies`.
+
+The rules above apply to `*` as to any role. A caller sees the rows of the `*` policy plus those of the
+policies on its own roles, and a caller one of whose roles reads the table with no policy (an
+administrator's global read, or a `read` grant by name) sees every row. So a user meant to be confined
+must have no other unpolicied way to read the table.
 
 ## Seeing a policy applied
 
@@ -81,7 +145,9 @@ LIMIT 10;
 ```
 
 ADAS's own debug log names the confined tables (never the predicate), and the query span carries the
-`adas.row_policy.tables` attribute.
+`adas.row_policy.tables` attribute. When a policy references a caller value the caller does not have, the
+log names it and the span carries `adas.row_policy.unknown.<name>` (for example
+`adas.row_policy.unknown.caller.user_hash`), never the value itself.
 
 ## Before rolling back
 

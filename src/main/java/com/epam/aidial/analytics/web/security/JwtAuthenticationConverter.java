@@ -30,6 +30,7 @@ public class JwtAuthenticationConverter implements Converter<Jwt, AbstractAuthen
     private final String principalClaim;
     private final Set<String> emailClaims;
     private final boolean requireEmail;
+    private final UserHasher userHasher;
 
     @Override
     public AbstractAuthenticationToken convert(Jwt jwt) {
@@ -38,7 +39,8 @@ public class JwtAuthenticationConverter implements Converter<Jwt, AbstractAuthen
             throw new AuthenticationServiceException("Email claim is required");
         }
 
-        UserSecurityDetails details = new UserSecurityDetails(email);
+        String userHash = userHasher.loggingKey() == null ? null : userHasher.hash(jwt.getClaims().get(userHasher.loggingKey()));
+        UserSecurityDetails details = new UserSecurityDetails(email, userHash, null);
         String issuer = jwt.getIssuer().toString();
         Collection<GrantedAuthority> rawAuthorities = jwtGrantedAuthoritiesConverter.convert(jwt);
         Set<Privilege> privileges = userRolesResolver.resolve(rawAuthorities);

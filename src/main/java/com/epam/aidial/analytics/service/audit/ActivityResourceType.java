@@ -13,7 +13,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * since {@code V36} folded the enrichment control plane's {@code rule} registry into {@code pipeline} as
  * the {@code ENRICH} kind, so one resource type now names what used to need two. {@link #SavedQuery}
  * backs the saved query registry, and {@link #Dashboard} the dashboards; a dashboard's widgets are part of
- * its state, so a widget change is an {@link ActivityType#Update} of the dashboard.
+ * its state, so a widget change is an {@link ActivityType#Update} of the dashboard. {@link #Setting} backs the
+ * instance settings, one document per setting name.
  */
 public enum ActivityResourceType {
 
@@ -30,7 +31,10 @@ public enum ActivityResourceType {
     SavedQuery,
 
     /** A {@code dashboard} row, identified by its id. */
-    Dashboard;
+    Dashboard,
+
+    /** An {@code instance_setting} row, identified by the setting name. */
+    Setting;
 
     /**
      * Pins the wire spelling against ADAS's global {@code WRITE_ENUMS_TO_LOWERCASE} — see

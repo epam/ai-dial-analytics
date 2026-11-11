@@ -539,7 +539,7 @@ In `none` mode — the default — all endpoints are open and **every authorizat
 including sensitive-column masking and the unauthenticated Flight port. Deploy `none` only on a
 trusted, non-internet-exposed network segment.
 
-Provider role names are mapped onto **application privileges** — sixteen atomic values named
+Provider role names are mapped onto **application privileges** — eighteen atomic values named
 `<OBJECT>_<VERB>` — and the raw names are retained for per-table grant matching. A `roles-mapping` value
 may name a privilege directly or one of four **bundles** that expand to a privilege set; the two forms may
 be mixed in one list. A value that names neither **fails startup**.
@@ -547,9 +547,9 @@ be mixed in one list. A value that names neither **fails startup**.
 | Bundle | Declares |
 |---|---|
 | `FULL_ADMIN` | every privilege |
-| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
 
 `READ_ONLY_SENSITIVE_ANALYTIC` is what makes reading a `sensitive` column reachable without
 administrative authority. `TABLE_SENSITIVE` is a clearance, not a verb: it confers nothing alone and
@@ -626,6 +626,9 @@ comma-separated value; `roles-mapping` takes a JSON string.
 | `providers.<name>.principal-claim`    | `providers.azure.principal-claim`     | No               | Claim used as the principal name; falls back to `SECURITY_USER_CLAIM`.                                                                                                                                         |
 | `providers.<name>.roles-mapping`      | `providers.azure.roles-mapping`       | No               | JSON mapping of this provider's role names to privilege or bundle names, merged over `SECURITY_ROLES_MAPPING`.                                                                                                 |
 | `providers.<name>.aliases`            | `providers.azure.aliases`             | No               | Host aliases used to expand Azure v1/v2 issuer URLs from a tenant id in `issuer`. JWT providers.                                                                                                               |
+| `providers.<name>.logging-key`        | `providers.azure.logging-key`         | No               | Top-level claim the caller's user hash is derived from, as in DIAL Core's `loggingKey` for the same provider; unset, callers of this provider have no user hash.                                               |
+| `providers.<name>.logging-salt`       | `providers.azure.logging-salt`        | If `logging-key` | Salt of the user hash, equal to DIAL Core's `loggingSalt`. A credential. Not needed when `obfuscate-user-email` is `false`.                                                                                    |
+| `providers.<name>.obfuscate-user-email` | `providers.azure.obfuscate-user-email` | No             | `false` uses the claim value itself as the user hash, as DIAL Core's `obfuscateUserEmail` does; default `true`.                                                                                                |
 
 An opaque provider whose userinfo returns no role information — plain Google userinfo, for instance —
 yields no privilege, so such callers reach only what a per-table grant naming one of their raw provider
@@ -679,6 +682,9 @@ Inactive unless `SECURITY_MODE=oidc`, and that mode still requires at least one 
 | `API_KEY_CACHE_MAX_SIZE`     | `security.api-key.cache-max-size`     | `10000`   | No                   | Maximum cached introspection entries.                                                                                                |
 | `API_KEY_REQUEST_TIMEOUT_MS` | `security.api-key.request-timeout-ms` | `3000`    | No                   | Connect and read timeout for the Core introspection call.                                                                            |
 | `API_KEY_STARTUP_PROBE`      | `security.api-key.startup-probe`      | `true`    | No                   | Probe Core reachability at startup and fail fast if unreachable. Set `false` to skip.                                                |
+| `API_KEY_LOGGING_KEY`        | `security.api-key.logging-key`        | _(empty)_ | No                   | Claim the user hash of a per-user API key is derived from; leave unset when Core's providers use different salts.                    |
+| `API_KEY_LOGGING_SALT`       | `security.api-key.logging-salt`       | _(empty)_ | If `API_KEY_LOGGING_KEY` | Salt of that user hash. A credential. Not needed when `API_KEY_OBFUSCATE_USER_EMAIL` is `false`.                                 |
+| `API_KEY_OBFUSCATE_USER_EMAIL` | `security.api-key.obfuscate-user-email` | `true` | No                   | `false` uses the claim value itself as the user hash.                                                                                |
 
 ## Exposing endpoints from a cluster
 

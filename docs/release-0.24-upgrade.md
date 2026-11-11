@@ -42,6 +42,18 @@ one-element array without a migration.
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
 
+## The `*` grantee
+
+`*` in a table's `get`, `read` or `sensitive` grant list, or as the role of a row policy, now stands for every
+authenticated caller (see [`row-level-security.md`](row-level-security.md)). Earlier builds stored `*` as an
+ordinary role name that matched only a caller carrying a provider role spelled `*`.
+
+- **Before upgrading, look for a stored `*`.** A table that already names `*` in a read-side list becomes readable
+  by every authenticated caller, with its sensitive columns when the list is `sensitive`. Remove the entry
+  (`PUT /v1/tables/{name}/access`) unless that is what you want. After the upgrade, the startup log lists every
+  table that names `*` and where.
+- A `*` stored in `write` or `modify` grants nothing, and a later edit of that list is refused while it keeps it.
+
 ## Sensitive columns kept out of ingest, opt-in
 
 New `SYNC_SENSITIVE_COLUMNS_ENABLED` (see [`configuration.md`](configuration.md#data-sync-schedule)). Under `false`,
@@ -56,8 +68,22 @@ default.
   longer be rebuilt.
 - **Rollback.** A build older than 0.24 ignores the variable and writes sensitive columns again.
 
+## Sessions-source setting
+
+New endpoints `GET` and `PUT /v1/settings/sessions-source` store which source table holds session rows and which of
+its fields play the session roles (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). Reading
+needs the new privilege `SETTINGS_READ`, which every read-only bundle now carries; writing needs `SETTINGS_WRITE`,
+which only `FULL_ADMIN` carries. Flyway migration `V53` creates the backing table at startup.
+
+- **A `roles-mapping` that names raw privileges** rather than a bundle gains neither privilege. Add `SETTINGS_READ`
+  to the roles whose holders use the sessions view, or they get `403` on the read.
+- **Rollback.** A build older than 0.24 does not know `SETTINGS_READ` or `SETTINGS_WRITE` and fails startup on a
+  `roles-mapping` that names either. Remove them before rolling back. The new table is ignored and may be left in place.
+
 | Change | Effect | Action |
 |---|---|---|
+| `*` means every authenticated caller in read-side grant lists and row policies | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after |
 | Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | Readers of `request_body` see only a later turn's new messages | Only when you set `delta`: re-point pipelines and readers to `request_body_full`, as above |
 | Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column |
+| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; raw-privilege mappings do not | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; remove both names before a rollback |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |

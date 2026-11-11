@@ -10,7 +10,6 @@ data store on every user read. Both are matched against the caller's provider ro
 `TABLE_GRANT`-gated APIs and evaluated at request time, complementing the method-level authorization
 defined by [authentication](../authentication/spec.md) and governing the per-table endpoints of
 [table-management](../table-management/spec.md).
-
 ## Requirements
 ### Requirement: Grant evaluation is inert in none mode
 
@@ -71,11 +70,57 @@ corresponding privilege globally is authorized. Role names are raw provider role
 names used as identity-provider `roles-mapping` keys), matched against the caller's provider roles;
 a bundle or privilege name SHALL NOT be a valid grantee.
 
+The grantee `*` SHALL stand for **every authenticated caller**, whatever its provider roles and including a
+caller that carries none: a list naming `*` grants its privilege to all of them. `*` SHALL be accepted in
+the read-side lists (`get`, `read`, `sensitive`) and refused with HTTP 422 in `write` and `modify`; a `*`
+already stored in `write` or `modify` (written while `*` was an ordinary grantee name) SHALL confer
+nothing, so evaluation fails closed without a data migration, and SHALL NOT make a replacement that omits
+that list fail. It SHALL
+behave as a provider role every such caller carries, in grant evaluation, in permission reporting, in
+row-policy evaluation, in the sensitive-grant invariant and in the ineffective-grant report alike. The
+system identity that background work runs under SHALL NOT carry it. A
+mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege. At
+startup the system SHALL log every table that names `*` in a grant list or as a row-policy role, and where,
+so a `*` stored while it was an ordinary grantee name is visible to the operator.
+
 Grant lists on a `system` table SHALL be restricted by **key**, not refused wholesale: the read-side
 keys (`get`, `read`, `sensitive`) SHALL be storable on a `system` table like any other,
 while `write` and `modify` SHALL remain empty, because a `system` table is materialized and fed out
 of band and every modifying operation on it is refused regardless of any list. Deleting a table SHALL
 remove its grant lists.
+
+#### Scenario: A read grant for everyone
+
+- **GIVEN** a table whose `read` list is `["*"]`
+- **WHEN** an authenticated caller none of whose provider roles is named in any list reads the table
+- **THEN** the read is authorized, and the table's reported permissions show `read: true` for it
+
+#### Scenario: A read grant for everyone on a table with role policies is reported
+
+- **GIVEN** a table with a row policy for role `X` and none for `*`
+- **WHEN** a grant replacement adds `*` to `read`
+- **THEN** it is accepted, `ineffective_grants` carries an entry for `*` with reason `lifts_row_policies`,
+  and a caller carrying `X` reads every row
+- **AND** once a row policy is stored for `*`, the same replacement reports nothing and that caller reads
+  the rows of either policy
+
+#### Scenario: Everyone cannot be granted a write
+
+- **WHEN** a grant replacement names `*` in `write` or `modify`
+- **THEN** it is refused with HTTP 422 and the stored lists are unchanged
+
+#### Scenario: A stored everyone write grant confers nothing
+
+- **GIVEN** a table whose stored `write` list is `["*"]`
+- **WHEN** an authenticated caller none of whose provider roles is named in any list writes to the table
+- **THEN** the write is refused, and the table's reported permissions show `write: false` for it
+
+#### Scenario: A stored everyone write grant does not block other edits
+
+- **GIVEN** a table whose stored `write` list is `["*"]`
+- **WHEN** a grant replacement sends only `read`
+- **THEN** it is accepted and the stored `write` list is kept
+- **AND** a replacement that sends `write` naming `*` is still refused with HTTP 422
 
 #### Scenario: Grant lists persist per table
 
@@ -147,13 +192,16 @@ an operator can see immediately when a grant has no effect.
 corresponding privilege globally, each `read` grant on an enrichment table whose source the same
 role cannot read, and each `sensitive` grant to a role that holds none of `TABLE_GET`, `TABLE_READ`
 or `TABLE_MODIFY` on the table, globally or by any list. All three are grants that change nothing
-(see `structured-query` for the second).
+(see `structured-query` for the second). It SHALL report in the same array, with reason
+`lifts_row_policies`, a `read` grant to `*` on a table that stores row policies and none for `*`: every
+caller then carries a role that reads with no policy, so by the evaluation rule those policies confine no
+one. The grant SHALL still be accepted.
 
 The response SHALL carry the five lists at the **top level**, exactly where `GET` carries them, so the
 two share one shape and a client reading `write` keeps working. It SHALL additionally carry
 `permissions` (the five effective flags) and `ineffective_grants`, an array whose entries carry the
-`role`, the grant `key`, a stable `reason` code — `already_global`, `enrichment_read_inert` or
-`sensitive_without_verb` — and a human-readable `message`. Both members are additive; nothing moves.
+`role`, the grant `key`, a stable `reason` code — `already_global`, `enrichment_read_inert`,
+`sensitive_without_verb` or `lifts_row_policies` — and a human-readable `message`. Both members are additive; nothing moves.
 
 A `PUT` against a `system` table SHALL be accepted for the read-side keys. It SHALL be refused with
 `409` and machine code `table_is_system` only when it carries a **non-empty** `write` or `modify`
@@ -375,7 +423,8 @@ all SHALL remain decided by its global privileges and the table's grant lists, u
 role that has no read path to the table SHALL confer nothing.
 
 A role name SHALL follow the grantee rules of the grant lists: a raw provider role name, trimmed,
-non-blank, and not a bundle or privilege name. Row policies SHALL be storable on `system` tables, which
+non-blank, and not a bundle or privilege name. The grantee `*` SHALL be a valid policy subject, with the
+meaning it has in a grant list: its policy is one every authenticated caller carries. Row policies SHALL be storable on `system` tables, which
 carry the shared data a policy most often narrows. Deleting a table SHALL remove its row policies.
 
 The filter SHALL be validated against the table's **own** stored columns — every one of them, sensitive
@@ -383,7 +432,7 @@ columns included, independent of what the writing caller may see — and SHALL b
 
 - references a column the table does not store, including a dotted enrichment field (a policy narrows
   the table it is stored on; an enrichment is narrowed by a policy of its own);
-- uses a `param` expression;
+- uses a `param` expression other than a caller value (see "Caller values in row policies");
 - calls a function outside the function catalog's scalar group, or one the catalog declares as calling a
   service outside the data store;
 - fails any validation the structured query surface would apply to the same filter; or
@@ -408,8 +457,8 @@ back is a filter the query surface accepts.
 
 #### Scenario: A policy filter may not take a parameter or aggregate
 
-- **WHEN** a policy's filter contains a `param` expression, an aggregate function, or a window
-  expression
+- **WHEN** a policy's filter contains a `param` expression that is not a caller value, an aggregate
+  function, or a window expression
 - **THEN** the request is refused `422 validation_error`, and nothing is stored
 
 #### Scenario: A policy without a filter is refused
@@ -447,7 +496,8 @@ requiring `TABLE_GRANT`, because a policy discloses which provider roles exist a
 
 A caller without `TABLE_GRANT` SHALL receive `403 forbidden`. An unknown table SHALL be `404 not_found`,
 and so SHALL a `DELETE` naming a role that has no policy on the table. A body that does not bind to the
-request type — malformed JSON, or a member other than `filter` — SHALL be `400 bad_request`, as on every endpoint behind the strict request mapper. A
+request type — malformed JSON, or a member other than `filter` and `where` — SHALL be `400 bad_request`, as
+on every endpoint behind the strict request mapper. A
 body that binds but whose shape or meaning is invalid, and an invalid role, SHALL be `422 validation_error`
 naming the offending member. Every change SHALL be recorded in the audit trail as
 a change to the table definition, readable as `row_policies` on the table's revision snapshot by a caller
@@ -501,6 +551,12 @@ carries some, and counting them would make a policy on a widely-held role meanin
 the global condition keeps a role name mapped differently by two providers from being credited with a read
 the caller's own provider does not give it.
 
+`*` SHALL take part in this rule as a role every authenticated caller carries. A table whose `read` list
+names `*` and that stores a policy for `*` therefore gives every caller the rows of that policy, plus the
+rows of the policies on its other roles; and a caller one of whose own roles may read the table with no
+policy SHALL still see every row, by the second case. A caller meant to be confined by the `*` policy
+SHALL therefore have no other read path to the table without a policy.
+
 A policy SHALL apply to its **role** whatever path that role reads the table by: a role holding
 `TABLE_READ` globally, through a bundle or a privilege mapping, SHALL be confined by its own policy exactly
 as a role reading through a per-table `read` grant. Confining a broadly-entitled role therefore takes a
@@ -523,6 +579,19 @@ with the enrichment's columns reading as absent values, as for a source row that
 - **WHEN** a caller carrying `X` queries `dial_usage_log` through the structured query surface, the SQL
   surface, a CSV export or Flight SQL
 - **THEN** every response contains only rows of `X-PRJ-1`, and a count reports their number alone
+
+#### Scenario: One policy for everyone, every row for an unpolicied reader
+
+- **GIVEN** a table whose `read` list is `["*"]`, a policy for `*` of `user_hash = caller.user_hash`, and
+  provider role `A` mapped to a global read with no policy on the table
+- **WHEN** a caller carrying no role named on the table, and a caller carrying `A`, each query the table
+- **THEN** the first sees only the rows whose `user_hash` is its own, and the second sees every row
+
+#### Scenario: A role policy adds to the policy for everyone
+
+- **GIVEN** the same table, and a policy for role `X` admitting project `X-PRJ-1`
+- **WHEN** a caller carrying `X` queries the table
+- **THEN** it sees its own rows and the rows of `X-PRJ-1`
 
 #### Scenario: Two roles' policies are combined
 
@@ -676,7 +745,6 @@ be too late.
   `PUT`
 - **THEN** the request is refused `422 validation_error`
 
-
 ### Requirement: Catalog import writes no grants
 
 A catalog import SHALL write no grant list on any table: a created table starts with empty `access` lists and a `system` table's
@@ -688,3 +756,165 @@ Grants are each environment's own policy, so granting access on an imported tabl
 
 - **WHEN** a table that has grants on the source environment is exported and imported
 - **THEN** the target's table has five empty grant lists, and the target's `dial_usage_log` grant lists are unchanged
+
+### Requirement: Caller values in row policies
+
+A row policy filter MAY reference a **caller value**: a `param` expression whose `name` is exactly
+`caller.user_hash` or `caller.project`. The set is closed and the names are matched case-sensitively; a
+`param` with any other name, including one that differs only in case, SHALL be refused
+`422 validation_error`. No other content of the caller's credential SHALL be reachable from a policy.
+
+A caller value is a string whose content is not known when the policy is stored. It SHALL appear only as
+a direct operand of an `eq` or `ne` comparison whose other operand is a field of the table's `string` type.
+Anywhere else — a function argument, a `case` branch, an array item, a comparison with a field of another
+type or with anything that is not a field — the policy SHALL be refused `422 validation_error`. The
+comparison MAY sit under any logical operator, `not` included. A stored filter SHALL be returned with the `param` expression intact, never with a
+resolved value. The 16 KiB limit SHALL be checked with each caller value taken at its maximum length of
+512 bytes, so a policy that was accepted cannot exceed the limit on a read.
+
+The reserved names SHALL have this meaning only inside a row policy. A `param` in a query SHALL be refused
+as before, whatever its name, and SHALL NOT receive the caller's value.
+
+How each value is derived from the caller's credential is specified in
+[authentication](../authentication/spec.md), "Caller values derived from the credential".
+
+#### Scenario: An own-rows policy is stored
+
+- **WHEN** a caller holding `TABLE_GRANT` stores for role `user` on `dial_usage_log` the policy
+  `{"filter": {"op": "eq", "args": [{"type": "field", "name": "user_hash"}, {"type": "param", "name": "caller.user_hash"}]}}`
+- **THEN** the policy is stored, and reading it back returns the `param` expression unchanged
+
+#### Scenario: A name outside the closed set is refused
+
+- **WHEN** a policy's filter contains `{"type": "param", "name": "caller.email"}` or
+  `{"type": "param", "name": "Caller.User_Hash"}`
+- **THEN** the request is refused `422 validation_error`, and nothing is stored
+
+#### Scenario: A caller value is compared with a non-string column
+
+- **WHEN** a policy's filter compares `caller.project` with a numeric, enum or object column
+- **THEN** the request is refused `422 validation_error`, and nothing is stored
+
+#### Scenario: A caller value outside a direct comparison is refused
+
+- **WHEN** a policy's filter uses a caller value as a function argument, e.g.
+  `coalesce(caller.user_hash, '') = user_hash`, inside a `case` expression, as an item of an `in` list,
+  or compares it with a literal
+- **THEN** the request is refused `422 validation_error`, and nothing is stored
+
+### Requirement: Caller values resolve per read and an absent one is unknown
+
+On every read that carries a caller's row filters, each caller value in a confining policy SHALL be
+replaced by the caller's own value, inlined as an escaped string literal. A caller value SHALL be
+resolved from the identity of the request being served and SHALL NOT be cached across callers.
+
+A caller value SHALL be **unknown** when the caller's credential yields none, when it is blank, or when it
+is longer than 512 bytes. A comparison with an unknown caller value SHALL evaluate as SQL `NULL` does in a
+predicate: it SHALL match no row, its negation SHALL match no row, and a disjunction SHALL still match
+through another branch that is true. An unknown value SHALL NOT be rendered as an empty string or
+any other constant, because rows written for callers without that identity store an empty value.
+
+A filter's shape remains its author's responsibility where the value is known: `NOT (user_hash =
+caller.user_hash)` selects every other caller's rows.
+
+Everything else about evaluation is unchanged: which policies confine a caller, that a role reading the
+table with no policy lifts the confinement, that several confining policies are combined with `OR`, and
+that a pipeline refuses a confined caller.
+
+#### Scenario: A user reads only its own rows
+
+- **WHEN** role `user` carries the policy `user_hash = caller.user_hash` on `dial_usage_log`, and a caller
+  holding only that role, whose user hash is `aaaa…01`, reads the table
+- **THEN** the read returns only rows whose `user_hash` is `aaaa…01`, including the enrichment columns
+  joined to those rows
+
+#### Scenario: A role without a policy still reads every row
+
+- **WHEN** the same caller also holds a role that may read the table and has no policy there
+- **THEN** the read returns every row
+
+#### Scenario: One policy serves user and project callers
+
+- **WHEN** a role carries `user_hash = caller.user_hash OR project_id = caller.project`, and it is held by
+  a user whose hash is known and who has no project, and by a project key of project `P1` with no user
+- **THEN** the user reads the rows with its own hash, and the project key reads the rows of `P1`
+
+#### Scenario: A caller with no value reads nothing
+
+- **WHEN** role `user` carries `user_hash = caller.user_hash` and a caller holding only that role has no
+  user hash
+- **THEN** the read succeeds and returns no rows, including rows whose `user_hash` is empty
+
+#### Scenario: Negation of an unknown value matches nothing
+
+- **WHEN** a role carries `NOT (user_hash = caller.user_hash)` or `user_hash != caller.user_hash`, and a
+  caller holding only that role has no user hash
+- **THEN** the read returns no rows
+
+#### Scenario: A blank value is unknown
+
+- **WHEN** a caller's credential yields an empty or whitespace-only value for a caller value a confining
+  policy references
+- **THEN** the value is unknown and the comparison matches no row
+
+### Requirement: A row policy may be written as a SQL condition
+
+`PUT /v1/tables/{name}/row-policies/{role}` SHALL accept `{"where": "<condition>"}` as an alternative to
+`{"filter": <filter node>}`. The condition is the text that would follow `WHERE` in a SQL statement over
+the table, in the SQL subset the ad-hoc SQL surface accepts (see
+[rest-sql-endpoint](../rest-sql-endpoint/spec.md)). Exactly one of `where` and `filter` SHALL be given: a
+body carrying both, or neither, SHALL be refused `422 validation_error`.
+
+The system SHALL translate the condition into a filter node and from there treat the policy exactly as one
+written as `filter`: the same validation against the table's own columns, the same refusals, the same size
+limit, the same storage and the same enforcement. The condition text SHALL NOT be stored, SHALL NOT be sent
+to the data store, and SHALL NOT be returned: the response and every later read of the policy carry the
+stored `filter`.
+
+The condition SHALL be resolved against every column the table stores, sensitive columns included,
+whatever the writing caller may itself see or read.
+
+A caller value SHALL be written in the condition as `caller.user_hash` or `caller.project`, exactly, and
+SHALL become the `param` of that name, subject to the placement rule of "Caller values in row policies". A
+string literal in the condition SHALL remain a literal whatever it spells, including the text of a caller
+value's name.
+
+A condition that does not parse, does not validate against the table, or uses a construct the SQL surface
+cannot express as a single filter SHALL be refused `422 validation_error` with the reason. A condition that
+holds a subquery or a sequence value, names an enrichment's column by its dotted name, or closes itself to add another clause,
+SHALL be refused on its text, before any name in
+it is resolved, with one message whatever it names: the refusal SHALL NOT tell whether a table or column
+outside the policy's own table exists. A table that is
+not a queryable entity on its own, such as an enrichment, SHALL refuse `where` with `422 validation_error`;
+its policies are written as `filter`.
+
+#### Scenario: A condition is stored as its filter
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"where": "project_id IN ('X-PRJ-1', 'X-PRJ-2')"}` for
+  role `X`
+- **THEN** the response is `200` with a `filter` equal to the one the same policy written as `filter`
+  stores, and a caller carrying `X` sees only the rows of those two projects
+
+#### Scenario: A caller value in a condition
+
+- **WHEN** a policy is written as `{"where": "user_hash = caller.user_hash"}`
+- **THEN** the stored filter compares `user_hash` with the `param` `caller.user_hash`, and each caller
+  reads its own rows
+
+#### Scenario: A literal spelling a caller value stays a literal
+
+- **WHEN** a policy is written as `{"where": "user_hash = 'caller.user_hash'"}`
+- **THEN** the stored filter compares `user_hash` with the string `caller.user_hash`, and no caller's value
+  is substituted
+
+#### Scenario: Both forms at once are refused
+
+- **WHEN** a body carries both `where` and `filter`
+- **THEN** the request is refused `422 validation_error` and no policy is stored
+
+#### Scenario: A subquery in a condition is refused
+
+- **WHEN** a policy is written as `{"where": "project_id IN (SELECT project_id FROM other_table)"}`
+- **THEN** the request is refused `422 validation_error` and no policy is stored
+- **AND** the message is the same whether or not `other_table` exists
+

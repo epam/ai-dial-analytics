@@ -60,6 +60,10 @@ import org.springframework.test.web.servlet.MockMvc;
         "providers.readonly.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
         "providers.readonly.role-claims=roles",
         "providers.readonly.roles-mapping={\"viewer\":[\"READ_ONLY_ADMIN\"]}",
+        // The row-policy caller value `caller.user_hash` of a readonly-issuer token is its `email` claim as
+        // is, so a test states the value it compares with instead of a digest. Inert for every other test.
+        "providers.readonly.logging-key=email",
+        "providers.readonly.obfuscate-user-email=false",
 })
 @AutoConfigureMockMvc
 @Import(TestSecurityConfig.class)

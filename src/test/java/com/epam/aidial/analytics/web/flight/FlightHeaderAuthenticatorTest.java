@@ -1,8 +1,11 @@
 package com.epam.aidial.analytics.web.flight;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.UserSecurityDetails;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthorityResolver;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyCache;
+import com.epam.aidial.analytics.web.security.apikey.ApiKeyProperties;
 import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
 import com.epam.aidial.analytics.web.security.apikey.IntrospectionResult;
 import org.apache.arrow.flight.CallHeaders;
@@ -29,14 +32,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Flight auth adapter coverage (spec: Flight authentication mirrors service security mode):
  * missing/invalid credentials → UNAUTHENTICATED, valid api-key with a mapped role → accepted,
- * introspection outage → UNAVAILABLE, bearer precedence over api-key, and a caller with nothing to match
- * → UNAUTHORIZED.
+ * introspection outage → UNAVAILABLE, bearer precedence over api-key, and a caller with no role and no
+ * privilege still admitted, because it carries {@code *}.
  *
  * <p>Also the {@code Basic} credential form: the {@code api-key} sentinel username (case-insensitive),
  * a wrong username rejected before any introspection, the marked bearer value the handshake answers
@@ -49,7 +53,10 @@ class FlightHeaderAuthenticatorTest {
     private final JwtAuthenticationProvider jwtProvider = mock(JwtAuthenticationProvider.class);
     private final OpaqueTokenAuthenticationProvider opaqueProvider = mock(OpaqueTokenAuthenticationProvider.class);
     private final CoreApiKeyIntrospector introspector = mock(CoreApiKeyIntrospector.class);
-    private final ApiKeyAuthorityResolver authorityResolver = mock(ApiKeyAuthorityResolver.class);
+    // A real resolver, so the token is built by the builder shared with the HTTP filter; only the role
+    // mapping it consults is stubbed per test.
+    private final ApiKeyAuthorityResolver authorityResolver = spy(new ApiKeyAuthorityResolver(
+            new ApiKeyProperties(new JsonMapperConfiguration().jsonMapper(), "")));
     private final ApiKeyCache cache = passThroughCache();
     private final FlightHeaderAuthenticator authenticator = new FlightHeaderAuthenticator(
             jwtProvider,
@@ -132,16 +139,14 @@ class FlightHeaderAuthenticatorTest {
     }
 
     @Test
-    void apiKeyWithNoPrivilegeAndNoProviderRoleIsUnauthorized() {
-        // Nothing to match, globally or by grant, so this caller can never reach a table. Rejected rather
-        // than served an empty catalog on every call.
+    void apiKeyWithNoPrivilegeAndNoProviderRoleIsAdmitted() {
+        // Every authenticated caller carries '*', so a table granting '*' reaches this one too, exactly as
+        // it does over HTTP. The per-RPC filter decides what it sees.
         when(introspector.introspect("k")).thenReturn(
                 new IntrospectionResult("proj", null, List.of(), true));
         when(authorityResolver.resolve(List.of(), true)).thenReturn(java.util.EnumSet.noneOf(Privilege.class));
 
-        assertThatThrownBy(() -> authenticator.authenticate(headers("api-key", "k")))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+        assertThat(authenticator.authenticate(headers("api-key", "k")).getPeerIdentity()).isEqualTo("proj");
     }
 
     @Test
@@ -208,14 +213,13 @@ class FlightHeaderAuthenticatorTest {
     }
 
     @Test
-    void basicWithNoPrivilegeAndNoProviderRoleUnauthorized() {
+    void basicWithNoPrivilegeAndNoProviderRoleIsAdmitted() {
         when(introspector.introspect("k")).thenReturn(
                 new IntrospectionResult("proj", null, List.of(), true));
         when(authorityResolver.resolve(List.of(), true)).thenReturn(java.util.EnumSet.noneOf(Privilege.class));
 
-        assertThatThrownBy(() -> authenticator.authenticate(headers("authorization", basic("api-key", "k"))))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+        assertThat(authenticator.authenticate(headers("authorization", basic("api-key", "k"))).getPeerIdentity())
+                .isEqualTo("proj");
     }
 
     @Test
@@ -373,6 +377,10 @@ class FlightHeaderAuthenticatorTest {
                 .as("the shared token builder carries the raw provider roles on this path too, so a "
                         + "per-table grant naming one of them matches over Flight exactly as over HTTP")
                 .containsExactlyInAnyOrder("PRIVILEGE_TABLE_READ", "PROVIDER_ROLE_admin");
+        assertThat(authentication.getDetails())
+                .as("and the caller values a row policy compares with: the two surfaces share one cache entry "
+                        + "per key, so a project missing here would be missing over HTTP too")
+                .isEqualTo(new UserSecurityDetails(null, null, "proj"));
     }
 
     /** Stubs Core to resolve {@code key} to the project principal {@code proj} holding TABLE_READ. */
