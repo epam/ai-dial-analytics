@@ -23,6 +23,21 @@ over the table's own columns. Every reader carrying `team-x` now sees only `X-PR
 
 `GET /v1/tables/{name}/row-policies` lists a table's policies; `DELETE .../row-policies/{role}` removes one.
 
+### The same policy written as SQL
+
+Instead of `filter`, a policy can be given as `where`: the condition you would write after `WHERE`.
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/team-x" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"where": "project_id IN ('\''X-PRJ-1'\'')"}'
+```
+
+The text is an input format. It is translated to a `filter`, and that filter is what is stored, returned
+and enforced, so the response shows the tree and not your SQL. Everything a `filter` may not hold is
+refused in SQL too: subqueries, other tables, aggregates. A table that cannot be queried on its own, such
+as an enrichment, takes `filter` only.
+
 ## The rules, briefly
 
 - **A policy narrows; it never grants.** The role still needs a read path — a global `TABLE_READ`, a
@@ -81,6 +96,8 @@ curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/user" \
         {"type": "field", "name": "user_hash"},
         {"type": "param", "name": "caller.user_hash"}]}}'
 ```
+
+Written as SQL, the same policy is `{"where": "user_hash = caller.user_hash"}`.
 
 A caller value is allowed only as one side of `eq` or `ne` against a `string` column. A caller without the
 value matches no row, also under `ne` and `not`; an `or` with another branch still applies, so

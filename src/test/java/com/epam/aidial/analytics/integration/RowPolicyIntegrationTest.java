@@ -458,6 +458,76 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         sql(callerToken("é".repeat(257), "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
     }
 
+    // --- a policy written as a SQL condition ---------------------------------------------------------------
+
+    @Test
+    void policyWrittenAsSqlConditionIsStoredAsItsFilter() throws Exception {
+        putPolicy("team-x", "{\"where\":\"project IN ('P1', 'P2')\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.filter").exists())
+                // The text is an input format: what is stored and returned is the filter.
+                .andExpect(jsonPath("$.where").doesNotExist());
+        sql(token("team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(3));
+        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
+                .andExpect(jsonPath("$.policies['team-x'].filter").exists())
+                .andExpect(jsonPath("$.policies['team-x'].where").doesNotExist());
+
+        putPolicy("team-x", "{\"where\":\"project = caller.user_hash\"}")
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"type\":\"param\"")))
+                .andExpect(content().string(containsString("\"name\":\"caller.user_hash\"")));
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken(null, "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(0));
+
+        putPolicy("team-x", "{\"where\":\"project = caller.user_hash OR n > 3\"}").andExpect(status().isOk());
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+        sql(callerToken(null, "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(1));
+
+        // A literal stays a literal whatever it spells: nobody's value is substituted.
+        putPolicy("team-x", "{\"where\":\"project = 'caller.user_hash'\"}")
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.not(containsString("param"))))
+                .andExpect(content().string(containsString("\"value\":\"caller.user_hash\"")));
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(0));
+    }
+
+    @Test
+    void sqlConditionOutsideThePolicyScopeIsRefused() throws Exception {
+        final List<String> refused = List.of(
+                // One form or the other.
+                "{\"where\":\"project = 'P1'\",\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                        + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"P1\"}]}}",
+                "{\"where\":\" \"}",
+                "{\"where\":\"project = \"}",
+                "{\"where\":\"nope = 'P1'\"}",
+                // Another table is out of a policy's reach in SQL as it is in the filter grammar.
+                "{\"where\":\"project IN (SELECT project FROM " + ROLLUP + ")\"}",
+                // A condition only: no clause smuggled in after it, with or without balanced parentheses.
+                "{\"where\":\"project = 'P1' LIMIT 1\"}",
+                "{\"where\":\"project = 'P1') GROUP BY (project\"}",
+                "{\"where\":\"project = 'P1') ORDER BY (n\"}",
+                // The placement rule of a caller value holds in SQL too.
+                "{\"where\":\"coalesce(caller.user_hash, '') = project\"}",
+                "{\"where\":\"n = caller.user_hash\"}",
+                "{\"where\":\"project IN (caller.user_hash, 'P1')\"}",
+                "{\"where\":\"project = caller.email\"}");
+        for (final String body : refused) {
+            putPolicy("team-x", body)
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("validation_error"));
+        }
+        asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+
+        // An enrichment is never a statement's FROM, so its policies are written as a filter.
+        asAdmin(put(BASE + "/dial_usage_log_payload/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"where\":\"trace_id = 'x'\"}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(containsString("enrichment")));
+        asAdmin(put(BASE + "/no_such_table/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"where\":\"a = 1\"}"))
+                .andExpect(status().isNotFound());
+    }
+
     @Test
     void queryParameterNamedLikeCallerValueIsNotBoundToTheCaller() throws Exception {
         // The reserved names mean the caller only inside a row policy. A query has no parameters at all, and
