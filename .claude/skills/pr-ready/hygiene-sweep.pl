@@ -8,14 +8,14 @@ use warnings;
 $SIG{__DIE__} = sub { print STDERR $_[0]; exit 2 };
 
 my @LINE = (
-    # Not after / . - or a word char: spares /dev/null, libssl-dev, --save-dev, go.dev, numpy.prod.
-    [env      => qr/(?<![\/\w.-])(?:[Dd]ev|DEV|UAT|[Pp]rod|PROD)(?![A-Za-z0-9])|DevOps/],
+    # Catches pre-prod, dial-adas-dev, adas.dev.example.com; $SPARE removes the known harmless tokens first.
+    [env      => qr/(?<![\/\w])(?:[Dd]ev|DEV|UAT|[Pp]rod|PROD)(?![A-Za-z0-9])|DevOps/],
     [env      => qr/reference[- ]deployment|\bin production\b/i],
     [ticket   => qr/\bMR ?!\d+|(?<![\w\]!])!\d{2,}\b|\b(?!(?:UTF|ISO|SHA|RFC|UUID|HTTP|TLS|CVE|CWE|AES|RSA|HMAC|ECDSA|PBKDF)-)[A-Z]{2,}-\d{2,}\b/],
     [branch   => qr/\b(?:origin|upstream|github|gitlab)\/(?:development|main|master)\b|renumbered at merge/],
     [people   => qr/\bthe user (?:decided|asked|chose|wanted)\b/i],
     # Unquoted dates; quoted ones are fixtures, `2026-11-03-name` is an archive folder.
-    [date     => qr/(?<!["'`\d-])20\d\d-[01]\d-[0-3]\d(?!-[a-z]|\d)|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/],
+    [date     => qr/(?<!["'`\d-])20\d\d-[01]\d-[0-3]\d(?!-[a-z]|\d)|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/i],
     [machine  => qr{/Users/\w|/home/\w|\b[A-Za-z]:\\Users\\|~/\.\w|\.rd/docker\.sock}],
     [untracked => qr/\.local\.md\b/],
 );
@@ -25,6 +25,8 @@ my @WRAP = (
     [people => qr/\bthe\s+user\s+(?:decided|asked|chose|wanted)\b/i],
     [branch => qr/renumbered\s+at\s+merge/],
 );
+# Missing a real name is worse than a hit to dismiss, so package names like libssl-dev are not spared.
+my $SPARE = qr/\/dev\/null|--save-dev\b|(?<![\w.-])(?:go|web)\.dev(?![\w.-])|\.prod\(/;
 my $SELF = '.claude/skills/pr-ready/hygiene-sweep.pl';
 
 my $arg = shift // die "usage: perl hygiene-sweep.pl <base>|-\n";
@@ -66,8 +68,9 @@ my $hits = 0;
 for my $f (@order) {
     my @rows = @{ $added{$f} };
     for my $r (@rows) {
+        (my $spared = $r->[1]) =~ s/$SPARE/ /g;
         for my $p (@LINE) {
-            if ($r->[1] =~ $p->[1]) { print "$f:$r->[0]: [$p->[0]] $r->[1]\n"; $hits++; }
+            if (($p->[0] eq 'env' ? $spared : $r->[1]) =~ $p->[1]) { print "$f:$r->[0]: [$p->[0]] $r->[1]\n"; $hits++; }
         }
     }
     # Join consecutive added lines; report only matches that cross a line break.
