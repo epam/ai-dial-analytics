@@ -194,6 +194,6 @@ switch is `false`, startup SHALL log one warning that the mode has no effect, na
 
 - **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and `SYNC_REQUEST_BODY_MODE=delta`, and
   ingests a chat request
-- **THEN** startup logs a warning naming the payload target, and the payload row carries a `NULL` `request_body`
-  and `request_cache_control`, an all-zero `request_hash` and `request_parent_hash`, and an empty
-  `request_ancestor_hashes`
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns-enabled`, and the
+  payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
+  `request_parent_hash`, and an empty `request_ancestor_hashes`

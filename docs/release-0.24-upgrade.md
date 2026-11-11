@@ -33,7 +33,22 @@ one-element array without a migration.
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
 
+## Sensitive columns kept out of ingest, opt-in
+
+New `SYNC_SENSITIVE_COLUMNS_ENABLED` (see [`configuration.md`](configuration.md#data-sync-schedule)). Under `false`,
+ingest stops writing the columns the catalog flags `sensitive` on each target table, and new rows hold their
+ClickHouse defaults there (see [`data-sync`](../openspec/specs/data-sync/spec.md)). Nothing changes under `true`, the
+default.
+
+- **Under `false`, startup fails** when a target table has no catalog definition, or when a column it would leave
+  out is a deduplication-key, grain, identity, ordering-key, partition, version or TTL column.
+- Rows already stored keep their values, and switching back to `true` restores the columns on new rows only. Under
+  `SYNC_REQUEST_BODY_MODE=delta`, a parent re-ingested under `false` loses its body, so its delta children can no
+  longer be rebuilt.
+- **Rollback.** A build older than 0.24 ignores the variable and writes sensitive columns again.
+
 | Change | Effect | Action |
 |---|---|---|
 | Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | Readers of `request_body` see only a later turn's new messages | Only when you set `delta`: re-point pipelines and readers to `request_body_full`, as above |
+| Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
