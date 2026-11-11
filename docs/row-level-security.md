@@ -64,8 +64,8 @@ filtering a non-key column reads more of the table.
 
 A policy may use scalar functions and the relative time functions (`now`, `date_add`, `date_sub` — e.g.
 "the last 90 days"); it may not use aggregate or window functions, subqueries or enrichment fields, nor
-any `param` other than the two caller values below. A column a policy filters on cannot be dropped or renamed, nor left out when a failed table's
-schema is posted again, until the policy is changed (`409 column_in_row_policy`).
+any `param` other than the two caller values below. A column a policy filters on cannot be dropped or renamed, nor left out or given another type when a
+failed table's schema is posted again, until the policy is changed (`409 column_in_row_policy`).
 
 ## Own rows: comparing a column with the caller
 

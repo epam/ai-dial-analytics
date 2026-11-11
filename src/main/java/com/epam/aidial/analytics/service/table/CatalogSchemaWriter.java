@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -98,21 +99,23 @@ public class CatalogSchemaWriter {
             return;
         }
         // The grain key carries no declared type here, hence the null.
-        final Map<String, QueryFieldType> kept = new HashMap<>();
+        // A column's type here is the pair (type, element type).
+        final Map<String, List<QueryFieldType>> kept = new HashMap<>();
         if (draft.columns() != null) {
-            draft.columns().forEach(col -> kept.put(col.name(), col.type()));
+            draft.columns().forEach(col -> kept.put(col.name(), Arrays.asList(col.type(), col.elementType())));
         }
         if (definition.getType() == TableType.ENRICHMENT && draft.grainKey() != null) {
             kept.put(draft.grainKey(), null);
         }
-        final Map<String, QueryFieldType> stored = new HashMap<>();
-        columns.findByTableNameOrderByOrdinal(definition.getName()).forEach(col -> stored.put(col.getName(), col.getType()));
+        final Map<String, List<QueryFieldType>> stored = new HashMap<>();
+        columns.findByTableNameOrderByOrdinal(definition.getName())
+                .forEach(col -> stored.put(col.getName(), Arrays.asList(col.getType(), col.getElementType())));
         final Map<String, Set<String>> missing = new TreeMap<>();
         policyColumns.forEach((column, roles) -> {
             // A policy was validated against the column's type (a caller value compares only with a string),
             // so a retyped column is as lost to it as a dropped one.
             final boolean retyped = kept.get(column) != null && stored.get(column) != null
-                    && kept.get(column) != stored.get(column);
+                    && !kept.get(column).equals(stored.get(column));
             if (!roles.isEmpty() && (!kept.containsKey(column) || retyped)) {
                 missing.put(column, roles);
             }

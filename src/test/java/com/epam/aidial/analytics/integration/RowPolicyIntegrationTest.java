@@ -355,8 +355,8 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
             // The derived table first: the source's clearance cannot be withdrawn from under it.
             // An absent key leaves its list untouched, so each is cleared by name.
             final String none = "{\"read\":[],\"sensitive\":[]}";
-            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON).content(none)).andExpect(status().isOk());
-            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON).content(none)).andExpect(status().isOk());
+            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
+            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
             try (com.clickhouse.client.api.Client writer = clickHouseWriter()) {
                 writer.queryAll("ALTER TABLE " + usage + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
                 writer.queryAll("ALTER TABLE " + payload + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");

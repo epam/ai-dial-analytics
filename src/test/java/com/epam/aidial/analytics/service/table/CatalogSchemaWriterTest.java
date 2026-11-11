@@ -185,6 +185,9 @@ class CatalogSchemaWriterTest {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
         given(rowPolicies.referencedColumns(def)).willReturn(Map.of("project_id", Set.of("team-x")));
+        // Re-declared with the type it already has, which is not a retype.
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "project_id", QueryFieldType.STRING)));
 
         writer.persistSchema("widget_metrics", new DefineSchemaInput(
                 List.of(col("widget_id", QueryFieldType.STRING), col("project_id", QueryFieldType.STRING)),
