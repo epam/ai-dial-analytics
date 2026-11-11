@@ -451,7 +451,9 @@ public class TableSchemaService {
      * Whether an {@code ALTER} with column changes took effect on the primary: every added column is present with the
      * type the ALTER gave it, every rename's target is present and its source gone, and every dropped column is gone.
      * A column that already existed under the added name with another type, which made ClickHouse reject the ALTER,
-     * therefore does not count. False when it carries no column change, or when the columns cannot be read.
+     * therefore does not count. False when it carries no column change, or when the columns cannot be read, and also
+     * when a dropped name is added or renamed to again: the live columns look the same whether that ALTER applied or
+     * not, so the failure is reported rather than guessed past.
      */
     private boolean alterTookEffect(String table, List<String> dropped, List<ResolvedRename> renames, List<ResolvedAdd> added) {
         if (dropped.isEmpty() && renames.isEmpty() && added.isEmpty()) {
@@ -462,11 +464,14 @@ public class TableSchemaService {
             final Set<String> present = new HashSet<>();
             added.forEach(add -> present.add(add.column().sourceName()));
             renames.forEach(rename -> present.add(rename.to()));
+            if (dropped.stream().anyMatch(present::contains)) {
+                return false;
+            }
             return added.stream().allMatch(add -> ClickHouseTableInspector.sameType(live.get(add.column().sourceName()),
                             add.ddlType()))
                     && renames.stream().allMatch(rename -> live.containsKey(rename.to())
                             && (present.contains(rename.fromSourceName()) || !live.containsKey(rename.fromSourceName())))
-                    && dropped.stream().noneMatch(drop -> live.containsKey(drop) && !present.contains(drop));
+                    && dropped.stream().noneMatch(live::containsKey);
         } catch (RuntimeException unreadable) {
             return false;
         }

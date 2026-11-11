@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.clickhouse.replication;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.client.api.query.QuerySettings;
+import com.epam.aidial.analytics.clickhouse.ClickHouseFailures;
 import com.epam.aidial.analytics.clickhouse.ClickHouseIdentifiers;
 import com.epam.aidial.analytics.clickhouse.ClickHouseWriterClient;
 import com.epam.aidial.analytics.clickhouse.DdlSettings;
@@ -49,6 +50,7 @@ public class ReplicatedTableConversion {
 
     /** The reserved prefix of a conversion twin; distinct from the relayout's {@code _relayout_}. */
     public static final String PREFIX = "_adas_replicate_";
+    private static final int RESTART_ATTEMPTS = 3;
 
     private static final String TABLES = "SELECT name, engine, engine_full, create_table_query FROM system.tables "
             + "WHERE database = {db:String} AND NOT is_temporary ORDER BY name";
@@ -207,7 +209,7 @@ public class ReplicatedTableConversion {
                 ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
             }
             // An interrupted conversion may have left merges stopped on the table that stays (until a server restart).
-            startMerges(name);
+            restartMerges(name);
         }
     }
 
@@ -220,7 +222,7 @@ public class ReplicatedTableConversion {
                 log.warn("Converting '{}': the twin's row count differs from the table's (attempt {} of 2)", table.name(),
                         attempt);
             } catch (RuntimeException ex) {
-                log.error("Converting '{}' failed; it stays plain: {}", table.name(), ex.getMessage(), ex);
+                log.error("Converting '{}' failed: {}", table.name(), ex.getMessage(), ex);
                 givenUp.put(table.name(), "the conversion failed: " + ex.getMessage());
                 return;
             }
@@ -231,7 +233,8 @@ public class ReplicatedTableConversion {
     /**
      * One attempt; false when the pre-exchange counts differ, which leaves the original in service. Merges are stopped
      * on the table and its twin from before the attach until both counts have been compared, so a merge collapsing
-     * rows or a TTL deleting them cannot move one count between the two reads.
+     * rows or a TTL deleting them cannot move one count between the two reads. When merges cannot be restarted on the
+     * table that stays, the attempt fails before the twin is dropped, so the next start restarts them on resume.
      */
     private boolean convertOnce(Table table) {
         final String name = table.name();
@@ -247,6 +250,7 @@ public class ReplicatedTableConversion {
             throw ex;
         }
         final boolean stopped = stopMerges(name, twin);
+        boolean restarted = true;
         try {
             try {
                 ddl("ALTER TABLE " + ClickHouseIdentifiers.quote(twin) + " ATTACH PARTITION ALL FROM " + ClickHouseIdentifiers.quote(name));
@@ -282,8 +286,14 @@ public class ReplicatedTableConversion {
             }
         } finally {
             if (stopped) {
-                startMerges(name, twin);
+                restarted = restartMerges(name);
+                startMerges(twin);
             }
+        }
+        if (!restarted) {
+            // The twin stays, so the table check keeps refusing to serve and the next start's resume restarts merges.
+            throw new IllegalStateException("merges could not be restarted on the converted table; its old copy is kept as '"
+                    + twin + "' so the next start restarts them");
         }
         ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin));
         log.info("Converted '{}' to its replicated form: {} rows in {} ms", name, converted,
@@ -329,7 +339,36 @@ public class ReplicatedTableConversion {
         }
     }
 
-    /** Restarts merges on {@code tables}; a table that is gone by now has nothing to restart, so failures only log. */
+    /**
+     * Restarts merges on a table that stays in service, retrying: merges left stopped last until a server restart, and
+     * parts then pile up until inserts are refused. An access-denied failure counts as done, since without the
+     * {@code SYSTEM MERGES} grant nothing was stopped.
+     *
+     * @return false, after an ERROR, when every attempt failed
+     */
+    private boolean restartMerges(String table) {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= RESTART_ATTEMPTS; attempt++) {
+            try {
+                ddl("SYSTEM START MERGES " + ClickHouseIdentifiers.quote(table));
+                return true;
+            } catch (RuntimeException ex) {
+                if (ClickHouseFailures.isAccessDenied(ex)) {
+                    return true;
+                }
+                last = ex;
+            }
+        }
+        log.error("Could not restart merges on '{}' after {} attempts; parts accumulate until inserts are refused. Run "
+                + "SYSTEM START MERGES {} on the primary: {}", table, RESTART_ATTEMPTS, ClickHouseIdentifiers.quote(table),
+                last.getMessage(), last);
+        return false;
+    }
+
+    /**
+     * Restarts merges on {@code tables} about to be dropped, or checked again by a caller that restarts the kept one
+     * with {@link #restartMerges}; best effort, so failures only log.
+     */
     private void startMerges(String... tables) {
         for (final String table : tables) {
             try {

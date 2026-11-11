@@ -188,7 +188,9 @@ its twin (`SYSTEM STOP MERGES`, on the primary), and restarted afterwards. Other
 or a TTL delete, landing between two counts would read as a lost copy. Without the writer's `SYSTEM MERGES`
 grant the conversion SHALL log a WARN and compare with merges running. A mismatch is then handled as below; it is
 never accepted. A resumed conversion SHALL compare its counts with merges stopped too, and SHALL restart merges
-on the table it keeps.
+on the table it keeps. A failed restart on the table that stays in service SHALL be retried and, when it still
+fails, logged at ERROR; a conversion that cannot restart them SHALL fail before dropping its twin, so the next
+start restarts them on resume.
 
 A replicated table in the session database whose definition lacks `replicated_deduplication_window = 0` SHALL
 instead receive `ALTER TABLE … MODIFY SETTING replicated_deduplication_window = 0,
@@ -684,7 +686,8 @@ A DDL that the primary itself rejects SHALL keep its existing outcome. The servi
 executed a DDL from the table's columns on the primary, by name and type, never by name alone: a `CREATE` took
 effect when the table exists with every declared column at its declared type; an `ALTER` took effect when every
 added column is present at the type it gave it, every renamed column is present under its new name only, and
-every dropped column is gone. A `CREATE` that finds the table created meanwhile by a concurrent call, with another
+every dropped column is gone. A patch that drops a column and adds or renames another to the same name cannot be
+judged from the columns, so its failure SHALL be reported. A `CREATE` that finds the table created meanwhile by a concurrent call, with another
 schema, SHALL fail without dropping that table or marking the definition `FAILED`. An `ADD COLUMN` that ClickHouse
 rejected because a column of that name already existed with another type SHALL fail, and the catalog SHALL keep
 its previous schema.
