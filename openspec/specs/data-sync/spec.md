@@ -3466,7 +3466,9 @@ the row's own cache markers, SHALL yield a JSON document equal to the received b
 message the row inherits SHALL be put in the shape the row sent it in: a bare text block where the row's record
 lists it, the plain string otherwise, whichever of the two the row that stores the message sent. A row that
 carries no such record was stored before shapes were recorded, when only equal shapes linked, and SHALL inherit
-its messages as stored. Ingest SHALL store everything a rebuild needs,
+its messages as stored. That is the shape it sent unless a row stored since, on the same UTC day, carries one of
+its ancestors' paths with a message in the other shape and is the row the rebuild finds; such a row's rebuild MAY
+then differ from the request in that shape, and only there. Ingest SHALL store everything a rebuild needs,
 and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
 request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
@@ -3713,7 +3715,7 @@ newest message on each turn, so the same earlier message would otherwise hash di
 - **WHEN** turn 1 carries `cache_control` on its last user message, and turn 2 repeats that message
   without it and adds two messages carrying `cache_control` on the newest
 - **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages without markers, and
-  its `request_cache_control` records the one marker on its newest message
+  its `request_cache_control` records the one marker on its newest message, beside its text-block entry
 
 #### Scenario: Markers are not inherited
 

@@ -97,6 +97,8 @@ class RequestDeltaEncoderTest {
         assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(b.get("request_ancestor_hashes")).isEqualTo(List.of());
         assertThat(messages(b)).hasSize(4);
+        // A root records no inherited text blocks: the entry written while b still had a parent is gone.
+        assertThat(b.get("request_cache_control")).isNull();
         assertThat(c.get("request_parent_hash")).isEqualTo(b.get("request_hash"));
         assertThat(c.get("request_ancestor_hashes")).isEqualTo(List.of(b.get("request_hash")));
         assertRebuilds(b);

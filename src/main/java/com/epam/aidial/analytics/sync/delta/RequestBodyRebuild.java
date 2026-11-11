@@ -203,7 +203,8 @@ public final class RequestBodyRebuild {
      * Puts each inherited message ({@code from} to {@code to}) into the shape the row sent it in: the bare text block
      * where the row's entry lists it, the plain string otherwise. The row that stores a message may have sent the
      * other shape, since the two hash alike. A row with no entry was stored before shapes were recorded, when only
-     * equal shapes linked, so its messages are right as stored.
+     * equal shapes linked, so its messages are taken as stored (the spec names the one case where that is not the sent
+     * shape).
      */
     private static void restoreSentShapes(List<JsonNode> history, int from, int to, JsonNode entries) {
         JsonNode listed = null;
