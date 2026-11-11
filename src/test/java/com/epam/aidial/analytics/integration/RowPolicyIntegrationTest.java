@@ -590,6 +590,10 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 // FINAL after an alias parses only once the front end has rewritten it.
                 "project IN (SELECT project FROM " + ROLLUP + " AS o FINAL)",
                 "project IN (SELECT project FROM no_such_table AS o FINAL)",
+                // A sequence value names a table as well.
+                "n = NEXT VALUE FOR " + ROLLUP,
+                "n = NEXT VALUE FOR no_such_table",
+                "n = CURRENT VALUE FOR no_such_table",
                 // A dotted name is a column of an enrichment, existing or not.
                 "\\\"no_such_enrichment.col\\\" = 'x'",
                 "project = 'P1') WINDOW w AS (ORDER BY n",

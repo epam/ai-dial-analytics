@@ -52,7 +52,7 @@ public class WildcardGranteeReport implements ApplicationRunner {
                 }
             } catch (IllegalStateException unreadable) {
                 // A report must not stop the service from starting; reads of that table say what is wrong.
-                log.warn("Row policies of table '{}' are not readable", table.getName());
+                log.warn("Row policies of table '{}' are not readable", table.getName(), unreadable);
             }
             if (!places.isEmpty()) {
                 found.add(table.getName() + " " + places);

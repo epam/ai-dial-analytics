@@ -41,7 +41,9 @@ public final class SqlConditionStatement {
             select.getWhere().accept(new SqlBasicVisitor<Void>() {
                 @Override
                 public Void visit(SqlCall call) {
-                    if (SqlKind.QUERY.contains(call.getKind())) {
+                    // A sequence value names a table too: the validator resolves it against the whole catalog.
+                    if (SqlKind.QUERY.contains(call.getKind()) || call.getKind() == SqlKind.NEXT_VALUE
+                            || call.getKind() == SqlKind.CURRENT_VALUE) {
                         throw new NestedQuery();
                     }
                     return super.visit(call);
