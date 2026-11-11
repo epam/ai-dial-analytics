@@ -30,6 +30,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
 import com.epam.aidial.analytics.service.pipeline.QualifiedColumnTokens;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
+import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
@@ -742,6 +743,7 @@ public class EnrichSpecValidator {
             throw new PipelineValidationException("a sql transform cannot use the group trigger: a group-grain "
                     + "deterministic pipeline is an aggregation, not a Class-1 enrichment");
         }
+        ComputedFields.requireNotComputed("trigger.group_by", declaration.triggerGroupBy());
         requireGroupByResolvesToGrain(declaration, entity, grainKey, source);
         referenced.add(declaration.triggerGroupBy());
         // Entitlement-checked like every other reference: the group key is copied into the target as its
@@ -816,6 +818,7 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException(unknownField(
                         "member_select.order_by column", order.getColumn(), source, entity));
             }
+            ComputedFields.requireNotComputed("member_select.order_by", order.getColumn());
             orderColumns.add(order.getColumn());
         }
         referenced.addAll(orderColumns);

@@ -3193,6 +3193,105 @@ that were mapped before the failing one are complete, and are written as usual.
 - **THEN** neither the usage-log row nor the payload row of that record is written, and the blob's failure is
   recorded with the reason `mapping_error`
 
+### Requirement: Sensitive columns can be excluded from ingest
+
+The service SHALL accept an ingest setting `sync.sensitive-columns-enabled` (`SYNC_SENSITIVE_COLUMNS_ENABLED`), a
+boolean with default `true`.
+
+- **Under `true`,** ingest SHALL behave exactly as it would without the setting, and the catalog SHALL NOT be read
+  for it.
+- **Under `false`,** each ingest target SHALL leave out of every row it writes each column its mapping declares
+  that the catalog flags `sensitive` on that target's table. The catalog is matched on the column's physical name,
+  `column_mapping.source_name`. A left-out column SHALL take its ClickHouse default on the stored row: `NULL` for a
+  `Nullable` column, `{}` for a `JSON` column, and the type's zero value otherwise. The service SHALL NOT read,
+  transform, rewrite or count that column's source value for the row. Every other mapped column, the row itself and
+  the target's emit predicate SHALL be unaffected. A record SHALL still produce a row in every target it produced
+  one in before, so the all-or-none rule (see "A record is written for all of its targets or for none") and the
+  grain join between `dial_usage_log` and `dial_usage_log_payload` hold.
+
+The excluded set SHALL be resolved once per target at startup, from the catalog as it stands after the catalog
+migrations have run. A column flagged `sensitive` by a later migration is therefore excluded without a code or
+mapping change once the service restarts. With the seeded catalog this excludes `jwt_claims`, `request_tags`,
+`request_body`, `response_body`, `assembled_response` and `request_cache_control` from `dial_usage_log_payload`,
+and `comment` from `rate_analytics`. `dial_usage_log` has no sensitive column and is written as before.
+
+Under `false`, startup SHALL fail, naming the target table and the column, when a column the catalog flags
+`sensitive` is one the ingest cannot do without for that target:
+
+- the deduplication-key columns `trace_id`, `core_span_id` and `request_time` (see "Records without a
+  deduplication key are dropped");
+- the table's grain key, identity column, ordering-key columns, partition column, version column or TTL column as
+  the catalog's table definition records them.
+
+Leaving one of these out would drop every row, collapse rows that do not belong together, or put rows in the epoch
+partition where retention drops them.
+
+Under `false`, startup SHALL also fail, naming the table, when a target's table has no catalog definition: its
+sensitivity cannot be known, and writing it as mapped would store exactly what the setting is meant to keep out.
+The operator defines the table in the catalog or points the target at a table the catalog defines.
+
+Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it.
+
+The setting SHALL apply only to rows written while it is in effect. It SHALL NOT change rows already stored, the
+catalog's `sensitive` flags, read-side masking, or the physical table schema. Switching it back to `true` SHALL
+make new rows carry the columns again. Rows written while it was `false` keep their defaults. A record
+re-ingested later is written under the setting in effect at that time, and the row it writes replaces the earlier
+one as any re-ingested row does (see "Primary-key deduplication"). Under `delta` this includes a parent: a
+parent re-ingested under `false` is rewritten with no body and no path, so a delta child stored from another blob
+and not re-ingested with it names a path no row carries and can no longer be rebuilt, as for a parent re-ingested
+under `whole` (see "The request body storage mode is configurable").
+
+#### Scenario: The default writes sensitive columns
+
+- **WHEN** the service starts without `SYNC_SENSITIVE_COLUMNS_ENABLED` and ingests a chat completion record
+  carrying claims, headers, a request body and a response body
+- **THEN** the `dial_usage_log_payload` row carries `jwt_claims`, `request_tags`, `request_body`, `response_body`
+  and `assembled_response` as captured today
+
+#### Scenario: Disabled leaves the payload content columns at their defaults
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests the same record
+- **THEN** the `dial_usage_log_payload` row exists with the same `event_id`, `request_time`, `trace_id`,
+  `core_span_id`, `project_id` and `user_hash` it would otherwise carry, `request_body`, `response_body`,
+  `assembled_response` and `request_cache_control` are `NULL`, and `jwt_claims` and `request_tags` are `{}`
+
+#### Scenario: Disabled keeps the usage-log row whole
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a record
+- **THEN** its `dial_usage_log` row carries every column it would carry under `true`, and a query joining the
+  payload table on `event_id` still finds the payload row
+
+#### Scenario: Disabled leaves the rating comment at its default
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a `/rate` record with a
+  comment
+- **THEN** the `rate_analytics` row is written with its `rate`, `rate_raw` and `event_id`, and `comment` is `NULL`
+
+#### Scenario: The excluded set follows the catalog flag
+
+- **WHEN** a catalog migration flags a further mapped column of an ingest target `sensitive` and the service
+  restarts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`
+- **THEN** that column is left out of the target's new rows, and the startup log lists it among the target's
+  excluded columns
+
+#### Scenario: A sensitive key column fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and the catalog flags `trace_id`, or
+  the target table's grain key, `sensitive` on an ingest target's table
+- **THEN** startup fails, naming the table and the column
+
+#### Scenario: A target without a catalog definition fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and a configured target names a table
+  the catalog does not define
+- **THEN** startup fails, naming the table
+
+#### Scenario: Rows stored before the switch are unchanged
+
+- **WHEN** rows were ingested under `true` and the service restarts under `false`
+- **THEN** the rows already stored still carry their sensitive values, and only rows written after the restart
+  carry the defaults
+
 ### Requirement: The request body storage mode is configurable
 
 The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUEST_BODY_MODE`), set to
@@ -3226,6 +3325,13 @@ validation off is an ordinary setting, not a sign that no table exists. A target
 have its bodies stored as mapped, with a warning. A check that fails SHALL fail that flush before any body is cut,
 like any other ClickHouse error. Under `delta` with no target qualifying, startup SHALL log a warning that the
 setting has no effect.
+
+A target's mapping is taken here after sensitive-column exclusion (see "Sensitive columns can be excluded from
+ingest"). A target whose `request_body` is excluded SHALL therefore not qualify, and SHALL get no request-delta
+processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
+default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while the
+switch is `false`, startup SHALL log one warning that the mode has no effect, naming the switch, in place of the
+`delta` warning above, whose advice to check the mappings would mislead.
 
 #### Scenario: The default stores request bodies whole
 
@@ -3274,6 +3380,14 @@ setting has no effect.
 - **WHEN** request A was stored under `whole-with-path`, the service switches to `delta`, and A's follow-up B is
   ingested
 - **THEN** B's parent is A's path, and B rebuilds through A's whole body
+
+#### Scenario: An excluded request body gets no request-delta processing
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and `SYNC_REQUEST_BODY_MODE=delta`, and
+  ingests a chat request
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns-enabled`, and the
+  payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
+  `request_parent_hash`, and an empty `request_ancestor_hashes`
 
 ### Requirement: A chat request body is stored as its new history and a parent link
 
@@ -3340,8 +3454,9 @@ message array (under the key the classification above chose: the first of `messa
 value is an array), then, for a row with a parent, each system key that its chain's root carries, in the order listed
 above, valued with its history element (`h1..hs`), and the root's `tools` member when the root has one, and finally
 the row's own cache markers, SHALL yield a JSON document equal to the received body
-(same members and values; key order and whitespace are not preserved). This change SHALL store everything a rebuild needs; it SHALL NOT
-itself expose a rebuilt body.
+(same members and values; key order and whitespace are not preserved). Ingest SHALL store everything a rebuild needs,
+and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
+request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
 #### Scenario: A follow-up turn stores only its new messages
 
@@ -3598,6 +3713,178 @@ content column.
 - **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`
 - **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, and it is not
   linked to any parent
+
+### Requirement: A rebuilt request body is readable beside the stored one
+
+The payload enrichment SHALL expose two read-only fields computed on read, beside `request_body`, under the qualified
+names `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild`. They SHALL NOT be
+stored: no column, ingest stage or migration is added for them, and ingest SHALL be unchanged by them.
+
+- **`request_body_full`** (`string`, nullable) SHALL hold the row's request body as the request carried it, rebuilt
+  by the rebuild equivalence of "A chat request body is stored as its new history and a parent link": the history its
+  `request_parent_hash` chain supplies followed by its own message array elements, put back under the key the
+  classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
+  at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
+  members and values; key order and whitespace are not preserved — written as compact JSON.
+- **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
+  `request_body_full` holds:
+  - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
+  - `stored`, with `request_body_full` equal to the stored `request_body` byte for byte, for a row whose
+    `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` — a body stored whole under either
+    mode, a root without markers, a body that is not a chat request, a row ingested before delta storage;
+  - `rebuilt`, with the rebuilt body, for a row with a parent whose chain reaches a root, or a root carrying cache
+    markers;
+  - `resolvable`, only when `request_body_rebuild` is read without `request_body_full`, for a row that would otherwise
+    be checked for `rebuilt`: its chain was found, but no body was read (see below);
+  - `partial`, with `request_body_full` equal to the stored `request_body` byte for byte, for a rebuild that cannot
+    be completed (see below).
+
+A rebuild SHALL NOT turn a stored body into `NULL` and SHALL NOT fail the read: every failure below SHALL return the
+stored body marked `partial`. `request_body` SHALL keep returning exactly what is stored, whatever either field
+returns.
+
+**The chain is read partition-locally, in two phases.** Every row a rebuild reads SHALL lie in the requested row's
+own UTC-day partition, which is where its chain lives (see "A parent never crosses a UTC day or a user scope"); a
+rebuild SHALL NOT read any other partition. The first phase SHALL resolve each requested row's chain from the
+chain columns alone — no body — looking paths up in batches, seeded from the requested row's
+`request_ancestor_hashes` and, where a found row's parent is still missing, from that missing path and the found
+row's own `request_ancestor_hashes`, round after round until every chain reaches a root, a round finds nothing new,
+or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history. The
+second phase SHALL read the bodies of the rows the chains name, by their `event_id`, and only those. Both phases
+SHALL read deduplicated — the latest version per `event_id`, deduplicated inside each partition. The walk SHALL use
+the parent link of the very row whose body it reads; when a row read in the second phase no longer carries the path
+or parent the first phase found (it was re-ingested between the two reads), its chain SHALL be resolved again within
+the remaining rounds or returned `partial`.
+
+A rebuild SHALL return `partial` when: a path on the chain is carried by no row of the partition (the parent was
+never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form or
+inline-file setting change); a bound below is reached before the chain is complete; a rebuild statement fails or the
+read's budget runs out while the rebuild is in progress; or a body on the chain does not have the shape the rebuild
+expects (for example, a stored root that is not a chat request).
+
+**Bounds.** Two settings SHALL bound the work one read spends on rebuilds:
+`query.request-body-rebuild.max-rounds` (`QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`, default `8`), the number of
+first-phase lookup rounds, and `query.request-body-rebuild.max-ancestors`
+(`QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS`, default `20000`), the number of distinct ancestor rows one read may
+resolve. Each SHALL be at least `1`, or startup SHALL fail naming the setting. A row whose chain is incomplete when
+either is reached SHALL be returned `partial`; rows whose chains completed SHALL be returned `rebuilt`. The rebuild
+statements SHALL run under the same resource settings as the read that asked for them, sharing what is left of its
+wall-clock ceiling rather than being granted a new one, and SHALL run after the read's own statements (its row query
+and, when requested, its total count), so a rebuild never takes the time those need. A rebuild statement SHALL NOT be
+issued once less than one second of that ceiling is left; the rows it would have served SHALL be returned `partial`
+with reason `failed`. A failed or skipped statement SHALL make `partial` only the rows of the UTC day it served; the
+rows of other days SHALL keep resolving.
+
+**Access.** The fields SHALL be `sensitive` when `request_body` or `request_cache_control` is, since the rebuilt body
+returns the values of both, and SHALL therefore be visible to a caller only when it may see every sensitive column
+among the two. The ancestors a rebuild reads SHALL be read under the same governance as the requested row and
+SHALL never be returned as rows of their own. Because a chain stays inside one project, user and UTC day and a
+rebuilt body equals what the requested row's own request carried, a rebuild SHALL disclose nothing the same row
+would not disclose had it been stored whole. Restricting the ancestors a rebuild reads by deployment or model
+inside a project is not part of this requirement.
+
+**Observability.** Every completed value SHALL be counted on `query.request.rebuild.rows`, tagged `outcome`
+(`stored`, `rebuilt`, `resolvable`, `partial`) and `surface` (`query` for the query surfaces, `pipeline` for the pipeline data
+plane), and every `partial` value additionally on `query.request.rebuild.partial`, tagged `reason`: `missing`,
+`limit`, `failed` or `invalid`. A read that returns any `partial` value SHALL log one WARN line naming the counts per
+reason and the number of rounds, and never a body or a hash. A read whose rows are all `stored` SHALL issue no
+rebuild statement. A read projecting `request_body_rebuild` without `request_body_full` SHALL run the first phase
+only and read no body, reporting `resolvable` for every chain that phase completes, a root carrying cache markers
+included; projected together, the two fields SHALL always agree, and `resolvable` SHALL NOT be reported. `resolvable`
+states that the chain was found, not that its bodies rebuild: a body or marker of the wrong shape (reason `invalid`)
+is detected only by a read that also projects `request_body_full`, which may return `partial` for a row the
+status-only read reported `resolvable`. `rebuilt` SHALL mean only that the body was rebuilt. Every rebuild statement SHALL carry a query id of its own, never the triggering statement's: on the
+query surfaces `adas-query-rebuild-{uuid}`, on a pipeline read the id the enrichment-runtime capability prescribes, and
+on an untagged pipeline read `adas-pipeline-rebuild-{uuid}`; each SHALL be logged on the statement logger like the
+service's other statements, its bound paths and event ids counted rather than printed.
+
+#### Scenario: A follow-up turn reads back whole
+
+- **WHEN** turns A, B and C of one conversation were stored under `delta` and a query projects
+  `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild` for C
+- **THEN** the row carries C's body as it was sent — its whole message array, A's system prompt and A's `tools`
+  included — and `request_body_rebuild` is `rebuilt`
+- **AND** `dial_usage_log_payload.request_body` of the same row still holds only C's new messages
+
+#### Scenario: A body stored whole is returned unchanged
+
+- **WHEN** a row whose `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` is read with
+  `request_body_full`
+- **THEN** `request_body_full` equals the stored `request_body` byte for byte, `request_body_rebuild` is `stored`, and
+  no rebuild statement is issued for it
+
+#### Scenario: A root with cache markers gets its markers back
+
+- **WHEN** a chat request that is a root carried `cache_control` on its last message and is read with
+  `request_body_full`
+- **THEN** the rebuilt body carries that marker where it was sent, `request_body_rebuild` is `rebuilt`, and no
+  ancestor is read
+
+#### Scenario: A missing ancestor returns the stored delta marked partial
+
+- **WHEN** a row's chain names a path that no row of its partition carries
+- **THEN** `request_body_full` equals the stored `request_body`, `request_body_rebuild` is `partial`,
+  `query.request.rebuild.partial{reason=missing}` is incremented, and the read succeeds
+
+#### Scenario: A chain deeper than the ancestor hint is followed
+
+- **WHEN** a row's chain has 300 ancestors, so its `request_ancestor_hashes` holds only the nearest 128
+- **THEN** later rounds resolve the rest from the found rows' own hints, and the row is `rebuilt`
+
+#### Scenario: A bound makes the row partial, not the read fail
+
+- **WHEN** `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS=1` and a row's chain is longer than its hint covers
+- **THEN** that row is returned `partial` with its stored body, `query.request.rebuild.partial{reason=limit}` is
+  incremented, and the other rows of the read are unaffected
+
+#### Scenario: A failing rebuild statement degrades to partial
+
+- **WHEN** a rebuild statement fails after the read's own statement succeeded
+- **THEN** every row whose rebuild needed it is returned `partial` with its stored body, the reason is `failed`, and
+  the response is still `200`
+
+#### Scenario: A spent budget stops the rebuild, not the read
+
+- **WHEN** a read's own statements leave less than one second of its wall-clock ceiling and its rows need a rebuild
+- **THEN** no rebuild statement is issued, those rows are returned `partial` with their stored bodies and reason
+  `failed`, and the read, its total count included, succeeds
+
+#### Scenario: A parent re-ingested between the two phases is not mixed
+
+- **WHEN** an ancestor's event is re-ingested between the two phases and its surviving row links to a different
+  parent
+- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's exact
+  body, or returns `partial` with the stored body — never a body assembled from two versions of one event
+
+#### Scenario: The rebuild never leaves the row's day
+
+- **WHEN** a page of rows from 2026-03-02 and 2026-03-03 is read with `request_body_full`
+- **THEN** every rebuild statement is restricted to those two partitions, and each row's ancestors are looked up in
+  its own day only
+
+#### Scenario: An invalid bound fails startup
+
+- **WHEN** the service starts with `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS=0`
+- **THEN** startup fails, naming the setting
+
+#### Scenario: A row without a payload row reads null
+
+- **WHEN** a `dial_usage_log` row whose payload row has expired is read with both fields
+- **THEN** both fields are `NULL`
+
+### Requirement: Pipelines binding the stored body are re-pointed before delta storage is enabled
+
+`request_body` SHALL keep its meaning on every surface, so enabling `SYNC_REQUEST_BODY_MODE=delta` changes what
+every existing reader of `dial_usage_log_payload.request_body` receives for a later chat turn. The release notes for
+the request-delta storage SHALL tell operators to re-point every pipeline whose `transform.inputs` binds
+`dial_usage_log_payload.request_body`, and every saved query or other consumer that needs a turn's whole request, to
+`dial_usage_log_payload.request_body_full` before enabling `delta`. ADAS SHALL NOT rewrite a stored pipeline or
+saved query to do so.
+
+#### Scenario: The upgrade notes name the replacement field
+
+- **WHEN** an operator reads the release notes' row for request-delta storage
+- **THEN** it names `dial_usage_log_payload.request_body_full` as the field to bind before enabling `delta`
 
 ### Requirement: A value that fails to coerce to its column's kind is counted and falls back like an absent one
 

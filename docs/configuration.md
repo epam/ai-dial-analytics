@@ -245,6 +245,13 @@ neither.
 |-----------------------|---------------------|---------|----------|----------------------------------------------------------------------------------------------------------------------|
 | `FORCE_FINAL_QUERIES` | `query.force-final` | `true`  | No       | Migration switch: `true` reads every user-facing query `FINAL` whatever it says; `false` honours the query's `FINAL`. |
 
+### Request body rebuild
+
+| Variable                                   | Property                                   | Default | Required | Description                                                                                                                             |
+|--------------------------------------------|--------------------------------------------|---------|----------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`    | `query.request-body-rebuild.max-rounds`    | `8`     | No       | Chain-lookup rounds one read may run for `request_body_full` / `request_body_rebuild`; past it rows read `partial`. At least `1`.       |
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` | `query.request-body-rebuild.max-ancestors` | `20000` | No       | Distinct ancestor rows one read of `request_body_full` / `request_body_rebuild` may resolve; past it rows read `partial`. At least `1`. |
+
 ### Saved queries
 
 | Variable                       | Property                       | Default | Required | Description                                                                                                                        |
@@ -454,6 +461,7 @@ nothing.
 | `SYNC_INLINE_FILES_DROP_TRUNCATED` | `sync.inline-files-drop-truncated` | `true`                                          | No             | Cut a payload body DIAL Core truncated at 4 MiB back to before the inline file the cut landed in. |
 | `SYNC_INLINE_FILES_MAX_SIZE`    | `sync.inline-files-max-size`    | unset (no limit)                                | No             | Remove inline files whose stored base64 is longer than this (`256KB`, `1MB`; a bare number is bytes); `0` removes all. Negative fails startup. |
 | `SYNC_REQUEST_BODY_MODE`        | `sync.request-body-mode`        | `whole`                                         | No             | `whole`, `whole-with-path` (whole, plus a hidden path a `delta` row can link to; roll back to it from `delta`) or `delta` (a chat request's `request_body` cut to its new messages, without the system keys and tools shared with its parent). Others fail startup. |
+| `SYNC_SENSITIVE_COLUMNS_ENABLED` | `sync.sensitive-columns-enabled` | `true`                                          | No             | `false` stops ingest writing the columns the catalog flags `sensitive` (payload bodies, claims, headers, rating comment); new rows hold `NULL` / `{}` there. |
 | `SYNC_TABLE`                    | `sync.targets[0].table`         | `dial_usage_log`                                | No             | First ingest target's table — the usage log; its retention is `SYNC_USAGE_LOG_TTL_DAYS`.                                                                                         |
 | `SYNC_MAPPING_FILE`             | `sync.targets[0].mapping-file`  | `classpath:mapping/dial-usage-log.yaml`         | No             | First target's mapping file — the match-all mapping.                                                                                                                             |
 | `SYNC_PAYLOAD_TABLE`            | `sync.targets[1].table`         | `dial_usage_log_payload`                        | No             | Second ingest target's table — the payload enrichment holding the five verbatim-content columns; its retention is `SYNC_PAYLOAD_TTL_DAYS`.                                       |

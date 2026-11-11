@@ -126,6 +126,7 @@ sync:
   inline-files-drop-truncated: ${SYNC_INLINE_FILES_DROP_TRUNCATED:true}
   inline-files-max-size: ${SYNC_INLINE_FILES_MAX_SIZE:}
   request-body-mode: ${SYNC_REQUEST_BODY_MODE:whole}
+  sensitive-columns-enabled: ${SYNC_SENSITIVE_COLUMNS_ENABLED:true}
   payload:
     ttl-days: ${SYNC_PAYLOAD_TTL_DAYS:}
     table: ${SYNC_PAYLOAD_TABLE:dial_usage_log_payload}
@@ -218,6 +219,9 @@ query:
     timeout: ${QUERY_BUDGET_TIMEOUT:20s}
     max-memory: ${QUERY_BUDGET_MAX_MEMORY:2GB}
     spill-threshold: ${QUERY_BUDGET_SPILL_THRESHOLD:1GB}
+  request-body-rebuild:
+    max-rounds: ${QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS:8}
+    max-ancestors: ${QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS:20000}
 
 pipeline:
   budget:

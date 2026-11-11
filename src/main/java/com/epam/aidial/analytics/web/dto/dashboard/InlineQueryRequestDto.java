@@ -25,5 +25,6 @@ public record InlineQueryRequestDto(
         @Schema(description = "table (default) or chart")
         @JsonProperty("result_view") InlineResultView resultView,
 
-        @Schema(description = "Chart configuration in the saved-query model; stored verbatim")
+        @Schema(description = "Chart configuration in the saved-query model; stored as sent, except that a string"
+                + " y_field becomes a one-element array")
         SavedQueryChart chart) {}

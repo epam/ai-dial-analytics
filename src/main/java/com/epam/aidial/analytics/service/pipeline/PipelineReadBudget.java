@@ -66,7 +66,8 @@ public final class PipelineReadBudget {
      * left of its one ceiling ({@link ClickHouseBudget#remaining}) rather than a fresh one per statement.
      *
      * <p>Each run mints a fresh query id from {@code tag} (see {@link StatementTag}), so a re-probe is its own
-     * row in {@code system.query_log} rather than a second statement under the first one's id.
+     * row in {@code system.query_log} rather than a second statement under the first one's id. The request-body rebuild
+     * statements a computed field costs get ids of their own from the same tag, under stage {@code <stage>-rebuild}.
      *
      * @param what the read being run, in the runner's own vocabulary, for the refusal message
      */
@@ -80,7 +81,7 @@ public final class PipelineReadBudget {
         final QuerySettings settings = settings(budget);
         tag.applyTo(settings);
         try {
-            return executor.executeScan(select, settings, model);
+            return executor.executeScan(select, settings, model, tag);
         } catch (RuntimeException ex) {
             throw translate(ex, what, budget, READ_REMEDY);
         }

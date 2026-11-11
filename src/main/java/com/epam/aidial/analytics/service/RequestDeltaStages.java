@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -30,7 +31,9 @@ import java.util.stream.Collectors;
  * startup, so its path cache outlives a run and the poller, the scheduled sync and a backfill all see each other's
  * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path, so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
- * startup logs a warning: the setting would otherwise do nothing, silently.
+ * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
+ * {@code sync.sensitive-columns-enabled=false} has no body to rewrite and gets no stage, so its chain and cache-marker
+ * columns keep their defaults; when that leaves no stage at all, the warning names the switch rather than the mappings.
  */
 @Component
 @Slf4j
@@ -60,9 +63,12 @@ public class RequestDeltaStages {
                     byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
                 }
             }
-        }
-        if (mode == RequestBodyMode.DELTA && byTable.isEmpty()) {
-            log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
+            if (byTable.isEmpty() && !properties.sensitiveColumnsEnabled()) {
+                log.warn("sync.request-body-mode={} has no effect: with sync.sensitive-columns-enabled=false excluding the "
+                        + "sensitive columns, no ingest target's mapping maps all of {}", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), REQUIRED_COLUMNS);
+            } else if (byTable.isEmpty() && mode == RequestBodyMode.DELTA) {
+                log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
+            }
         }
         this.stages = Map.copyOf(byTable);
     }
