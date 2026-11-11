@@ -1,7 +1,7 @@
-# ADAS 0.24.0 — upgrade notes
+# ADAS 0.24 — upgrade notes
 
-What an environment has to do to move from **0.23.0** to **0.24.0**. An environment on an earlier build first
-follows [`release-0.23.0-upgrade.md`](release-0.23.0-upgrade.md).
+What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
+follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
 ## Request bodies rebuilt on read
 
@@ -16,7 +16,7 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   `request_body_full` returns the rebuilt request, and under `whole` and `whole-with-path` it returns the stored body
   marked `stored`, so re-pointing first is safe. ADAS does not rewrite pipelines.
 - **Rollback.** Re-point such pipelines back to `request_body` and switch ingest to `whole-with-path` first: a build
-  older than 0.24.0 refuses a pipeline bound to `request_body_full`.
+  older than 0.24 refuses a pipeline bound to `request_body_full`.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 
@@ -28,7 +28,7 @@ array, so a client that reads `y_field` as a string must move to the array; a on
 single-series chart. Requests may still send a string, and charts stored before the upgrade are returned as a
 one-element array without a migration.
 
-- **Rollback.** A build older than 0.24.0 cannot read a chart stored as an array: reading that saved query, the
+- **Rollback.** A build older than 0.24 cannot read a chart stored as an array: reading that saved query, the
   scope list it appears in, its revision snapshot, or a dashboard holding such a widget fails. Before rolling back,
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
