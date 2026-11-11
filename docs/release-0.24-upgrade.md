@@ -25,7 +25,7 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   which costs storage only. A later turn's `request_cache_control` is no longer `NULL` when the turn carried no marker:
   it holds a `{"text_blocks":[…]}` entry, usually empty, naming the earlier messages the turn sent as one text block.
   A reader that parses the column skips that entry. A later turn stored before the upgrade has no entry and rebuilds
-  its earlier messages as they are stored; Postgres `V53` updates the column's seeded description.
+  its earlier messages as they are stored; Postgres `V54` updates the column's seeded description.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 
