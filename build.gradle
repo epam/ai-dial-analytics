@@ -151,8 +151,8 @@ dependencies {
     // this. BOM-managed (Spring Boot 4 -> Flyway 11.x), kept in lockstep with flyway-core.
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
 
-    // Provider-agnostic blob access (azureblob in deployments, filesystem in tests). Uses EPAM's jclouds
-    // fork (2.7.3) so the azureblob provider supports Azure AD / managed identity.
+    // Provider-agnostic blob access (azureblob, aws-s3 or google-cloud-storage in deployments, filesystem in
+    // tests). Uses EPAM's jclouds fork (2.7.3) so the azureblob provider supports Azure AD / managed identity.
     // Not BOM-managed, so pinned explicitly.
     implementation 'org.apache.jclouds:jclouds-allblobstore:2.7.3'
     // Routes jclouds' internal logging through SLF4J (kept at upstream 2.7.0).
@@ -172,6 +172,20 @@ dependencies {
     // implementations were found" — that is the tripwire to watch on any future bump.
     implementation('software.amazon.awssdk:sts:2.46.8') {
         exclude group: 'software.amazon.awssdk', module: 'netty-nio-client'
+    }
+    // Keyless access for the google-cloud-storage blob provider: Application Default Credentials (GKE
+    // Workload Identity, or the file GOOGLE_APPLICATION_CREDENTIALS names) resolved to an OAuth access token
+    // that jclouds sends as a bearer credential. jclouds' own OAuth API only signs a JWT from a key pair, so
+    // the ambient-credential lookup needs Google's library. Its transport is google-http-client over
+    // HttpURLConnection — no Netty. Not BOM-managed; pinned.
+    //
+    // Apache httpclient/httpcore 4 are excluded: google-http-client declares them only for its deprecated
+    // ApacheHttpTransport, while google-auth's default transport factory builds NetHttpTransport, so they would
+    // be a dead, CVE-bearing client line. opencensus-api and grpc-context stay — HttpRequest calls OpenCensus
+    // directly, so dropping them fails the first token refresh with NoClassDefFoundError.
+    implementation('com.google.auth:google-auth-library-oauth2-http:1.55.0') {
+        exclude group: 'org.apache.httpcomponents', module: 'httpclient'
+        exclude group: 'org.apache.httpcomponents', module: 'httpcore'
     }
 
     implementation 'org.mapstruct:mapstruct:1.6.3'
