@@ -270,6 +270,15 @@ context: |
     that reads `security.mode` directly: the reason this exists is that nine independent derivations in
     four semantics once let `SECURITY_MODE=OIDC` enforce over HTTP while leaving the Flight port
     unauthenticated and the sensitive-column filter failing open.
+  - **Scope and privacy by default.** A new cache key, scope or copied column states which tenant/user
+    it belongs to; a blank or missing id is rejected, never folded into a shared scope. Don't copy
+    identity columns (user id, key id, …) into tables holding sensitive payloads unless the owning
+    spec says so.
+  - **Disabled checks fail the dependent operation, not startup.** `SYNC_VALIDATE_SCHEMA=false` and
+    the migration switches are supported modes. Code that relies on the schema they would verify fails
+    that operation with an `ErrorView` code (or refuses the write) and never writes incomplete data.
+  - **One case rule per name lookup.** A by-name check compares field and column names with the same
+    case sensitivity everywhere it runs.
 
   ## Public-repo hygiene
 
