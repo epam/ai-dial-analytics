@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The privilege implication DAG, stated once as five direct edges and closed transitively on demand.
+ * The privilege implication DAG, stated once as six direct edges and closed transitively on demand.
  *
  * <p>An edge is admitted on one of two grounds. The first is <b>disclosure-monotonicity</b>: the implied
  * privilege reveals a strict subset of what the granting privilege already reveals. The second covers a
@@ -27,6 +27,9 @@ import java.util.Set;
  *   the activity feed included, decides visibility from scope, visibility and owner alone, never from a
  *   write privilege: a {@code personal} saved query and a {@code private} dashboard are visible to their
  *   owner only, whatever the caller holds.</li>
+ *   <li>{@code SETTINGS_WRITE → SETTINGS_READ} — on the second ground. A setting is replaced whole, and the
+ *   settings read is gated by {@code SETTINGS_READ} alone; a setting has no owner or visibility, so the edge
+ *   discloses exactly what {@code SETTINGS_READ} does.</li>
  * </ul>
  *
  * <p>and no others. <b>{@code TABLE_SENSITIVE} has no edge in either direction</b>: it is a clearance that
@@ -61,6 +64,7 @@ public final class PrivilegeImplications {
         direct.put(Privilege.TABLE_MODIFY, EnumSet.of(Privilege.TABLE_GET));
         direct.put(Privilege.SAVED_QUERY_WRITE, EnumSet.of(Privilege.SAVED_QUERY_READ));
         direct.put(Privilege.SAVED_QUERY_PUBLISH, EnumSet.of(Privilege.SAVED_QUERY_READ));
+        direct.put(Privilege.SETTINGS_WRITE, EnumSet.of(Privilege.SETTINGS_READ));
         DIRECT = Map.copyOf(direct);
     }
 
