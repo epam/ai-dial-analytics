@@ -44,7 +44,7 @@ public class InstanceSettingEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
-    /** The writer's email, else its principal; null in {@code none} mode. */
+    /** The writer's principal name; null in {@code none} mode. */
     @Column(name = "updated_by")
     private String updatedBy;
 }
