@@ -107,7 +107,7 @@ public class RowPolicyConditions {
         return filter;
     }
 
-    /** {@code condition} with each caller value outside a quoted section replaced by its marker literal. */
+    /** {@code condition} with each caller value outside a quoted section or a comment replaced by its marker literal. */
     static String markCallerValues(String condition, String marker) {
         final StringBuilder out = new StringBuilder(condition.length() + 64);
         char quote = 0;
@@ -117,6 +117,21 @@ public class RowPolicyConditions {
                 quote = c == quote ? 0 : quote;
             } else if (c == '\'' || c == '"' || c == '`') {
                 quote = c;
+            } else if (condition.startsWith("--", i) || condition.startsWith("//", i) || condition.startsWith("/*", i)) {
+                // A comment is copied as it is: a quote inside one opens nothing.
+                int end;
+                if (condition.charAt(i + 1) == '*') {
+                    final int close = condition.indexOf("*/", i + 2);
+                    end = close < 0 ? condition.length() : close + 2;
+                } else {
+                    end = i;
+                    while (end < condition.length() && condition.charAt(end) != '\n' && condition.charAt(end) != '\r') {
+                        end++;
+                    }
+                }
+                out.append(condition, i, end);
+                i = end - 1;
+                continue;
             } else {
                 final String name = callerValueAt(condition, i);
                 if (name != null) {
