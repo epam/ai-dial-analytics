@@ -1,6 +1,9 @@
 package com.epam.aidial.analytics.web.controller.table;
 
+import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicy;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyConditions;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.dto.table.rowpolicy.RowPoliciesDto;
 import com.epam.aidial.analytics.web.dto.table.rowpolicy.RowPolicyDto;
@@ -38,6 +41,7 @@ import java.util.Map;
 public class TableRowPolicyController {
 
     private final RowPolicyService service;
+    private final RowPolicyConditions conditions;
 
     @GetMapping
     @RequiresPrivilege(Privilege.TABLE_GRANT)
@@ -57,12 +61,17 @@ public class TableRowPolicyController {
                     + "role's reads of the table to the rows it matches, whatever path the role reads the table "
                     + "by — including a global read privilege. A caller is not confined when another of its roles "
                     + "may read the table and has no policy on it. Validated against the table's own columns "
-                    + "(422 otherwise).")
+                    + "(422 otherwise). The policy may instead be given as `where`, the SQL condition that would "
+                    + "follow WHERE; it is translated to a `filter`, which is what is stored and returned.")
     public RowPolicyDto put(
             @Parameter(description = "Table name") @PathVariable String name,
             @Parameter(description = "Raw provider role name") @PathVariable String role,
             @RequestBody RowPolicyDto request) {
-        return RowPolicyDto.of(service.put(name, role, new RowPolicy(request.filter())));
+        if (request.where() != null && request.filter() != null) {
+            throw new TableValidationException("a row policy takes 'filter' or 'where', not both");
+        }
+        final FilterNode filter = request.where() == null ? request.filter() : conditions.toFilter(name, request.where());
+        return RowPolicyDto.of(service.put(name, role, new RowPolicy(filter)));
     }
 
     @DeleteMapping("/{role}")

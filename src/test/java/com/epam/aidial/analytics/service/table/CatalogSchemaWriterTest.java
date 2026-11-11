@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -22,6 +23,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -163,6 +166,42 @@ class CatalogSchemaWriterTest {
     }
 
     @Test
+    void persistSchemaJudgesStoredPoliciesAgainstTheColumnsItWrote() {
+        // A kept column may be retyped: the stored policies decide, after the write and its flush, and a
+        // refusal propagates so the transaction rolls the write back.
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.FAILED);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(rowPolicies.referencedColumns(def)).willReturn(Map.of("project_id", Set.of("team-x")));
+        willThrow(new ColumnInRowPolicyException("does not fit the row policy of role 'team-x'"))
+                .given(rowPolicies).requireStillValid(def);
+
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(col("widget_id", QueryFieldType.STRING), col("project_id", QueryFieldType.LONG)),
+                List.of("widget_id"), null, null, null, null, null)))
+                .isInstanceOf(ColumnInRowPolicyException.class)
+                .hasMessageContaining("team-x");
+        final InOrder order = inOrder(columns, rowPolicies);
+        order.verify(columns).saveAll(any());
+        order.verify(columns).flush();
+        order.verify(rowPolicies).requireStillValid(def);
+    }
+
+    @Test
+    void persistSchemaReportsAnInvalidColumnBeforeTheRowPolicyGuard() {
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+
+        // An element type on a scalar column is invalid whether or not a policy filters on it.
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(new ColumnInput("project_id", "project_id", QueryFieldType.STRING, QueryFieldType.LONG, null, null, null,
+                        null, null, false, false)),
+                List.of("project_id"), null, null, null, null, null)))
+                .isInstanceOf(TableValidationException.class);
+        verifyNoInteractions(rowPolicies);
+    }
+
+    @Test
     void persistSchemaAcceptsKeptRowPolicyColumn() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
@@ -173,6 +212,7 @@ class CatalogSchemaWriterTest {
                 List.of("widget_id"), null, null, null, null, null));
 
         verify(columns).saveAll(any());
+        verify(rowPolicies).requireStillValid(def);
     }
 
     @Test
