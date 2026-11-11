@@ -587,6 +587,11 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 "project IN (SELECT project FROM " + ROLLUP + ")",
                 "project IN (SELECT project FROM no_such_table)",
                 "EXISTS (SELECT 1 FROM no_such_table)",
+                // FINAL after an alias parses only once the front end has rewritten it.
+                "project IN (SELECT project FROM " + ROLLUP + " AS o FINAL)",
+                "project IN (SELECT project FROM no_such_table AS o FINAL)",
+                // A dotted name is a column of an enrichment, existing or not.
+                "\\\"no_such_enrichment.col\\\" = 'x'",
                 "project = 'P1') WINDOW w AS (ORDER BY n",
                 "project = 'P1') ORDER BY (n")) {
             putPolicy("team-x", "{\"where\":\"" + condition + "\"}")

@@ -881,7 +881,8 @@ value's name.
 
 A condition that does not parse, does not validate against the table, or uses a construct the SQL surface
 cannot express as a single filter SHALL be refused `422 validation_error` with the reason. A condition that
-holds a subquery, or closes itself to add another clause, SHALL be refused on its text, before any name in
+holds a subquery, names an enrichment's column by its dotted name, or closes itself to add another clause,
+SHALL be refused on its text, before any name in
 it is resolved, with one message whatever it names: the refusal SHALL NOT tell whether a table or column
 outside the policy's own table exists. A table that is
 not a queryable entity on its own, such as an enrichment, SHALL refuse `where` with `422 validation_error`;

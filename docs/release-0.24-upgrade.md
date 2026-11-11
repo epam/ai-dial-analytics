@@ -43,7 +43,7 @@ ordinary role name that matched only a caller carrying a provider role spelled `
   by every authenticated caller, with its sensitive columns when the list is `sensitive`. Remove the entry
   (`PUT /v1/tables/{name}/access`) unless that is what you want. After the upgrade, the startup log lists every
   table that names `*` and where.
-- A `*` stored in `write` or `modify` grants nothing and is refused on the next edit of that list.
+- A `*` stored in `write` or `modify` grants nothing, and a later edit of that list is refused while it keeps it.
 
 ## Sensitive columns kept out of ingest, opt-in
 

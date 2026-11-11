@@ -46,8 +46,13 @@ public class WildcardGranteeReport implements ApplicationRunner {
                     places.add(PrivilegeScope.grantKey(privilege));
                 }
             }
-            if (codec.read(table.getRowPolicies()).containsKey(SecurityClaimsExtractor.ANYONE)) {
-                places.add("row policy");
+            try {
+                if (codec.read(table.getRowPolicies()).containsKey(SecurityClaimsExtractor.ANYONE)) {
+                    places.add("row policy");
+                }
+            } catch (IllegalStateException unreadable) {
+                // A report must not stop the service from starting; reads of that table say what is wrong.
+                log.warn("Row policies of table '{}' are not readable", table.getName());
             }
             if (!places.isEmpty()) {
                 found.add(table.getName() + " " + places);
