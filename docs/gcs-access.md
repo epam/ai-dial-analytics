@@ -92,8 +92,9 @@ retries:
 - a metadata server that refuses
 - a key the token endpoint rejects
 
-A grant **revoked mid-run** does not look like a credential error. The cached token stays valid, so it
-arrives as a `403` per cycle until the token expires.
+A grant **revoked mid-run** does not look like a credential error. Cloud Storage checks IAM on every
+request, so the token in hand keeps refreshing and the revocation arrives as a `403` every cycle until the grant
+is restored.
 
 ## IAM
 

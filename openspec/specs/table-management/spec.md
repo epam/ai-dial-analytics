@@ -1640,9 +1640,9 @@ or a missing `roles/cloudsql.client` or `roles/cloudsql.instanceUser`) fails sta
 
 - **WHEN** the catalog URL is `jdbc:postgresql://<host>:<port>/<database>?cloudSqlInstance=<project>:<region>:<instance>&enableIamAuth=true&socketFactory=com.google.cloud.sql.postgres.SocketFactory`,
   the username is an IAM database user and the password is empty
-- **THEN** the connection is opened by the connector, which obtains a token for the credential's principal with
-  the `sqlservice.login` scope and calls the Cloud SQL Admin API for `<project>`/`<instance>` with it,
-  regardless of `<host>` and `<port>`
+- **THEN** the connection is opened by the connector, which calls the Cloud SQL Admin API for
+  `<project>`/`<instance>` with the credential's token and sends a second token for the same principal, carrying
+  the `sqlservice.login` scope, in its ephemeral-certificate request, regardless of `<host>` and `<port>`
 
 #### Scenario: A refused Cloud SQL connection is an ordinary SQL failure
 

@@ -557,7 +557,7 @@ This is how a misconfiguration becomes visible. On GCP the metadata server answe
 Workload Identity is in effect. A pod scheduled where it is not enabled therefore gets the **node's**
 service account, not the bound one. If that account can read the bucket, ingest succeeds under an
 identity nobody granted for this purpose. Naming the principal at first resolution lets an operator see
-the substitution without a new property or an extra API call.
+the substitution without a new property.
 
 The service SHALL NOT log an access token, a refresh token, a private key, or the contents of a credentials
 file, whether resolution succeeds, renews or fails.

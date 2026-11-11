@@ -22,6 +22,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -85,6 +86,22 @@ class BlobClientGcsTest {
         assertThat(lists.get(1).query()).contains("pageToken=page-2");
     }
 
+    /**
+     * A renewed token reaches the next request: jclouds consults the credential supplier per request rather than
+     * memoizing the first value, so a keyless token refreshed after its hour is what the bucket sees.
+     */
+    @Test
+    void keylessRenewedTokenReachesNextRequest() {
+        AtomicInteger issued = new AtomicInteger();
+        blobClient = keylessClient(() -> new Credentials("", KEYLESS_TOKEN + "-" + issued.incrementAndGet()));
+
+        blobClient.list("logs/2026/06/18/");
+        blobClient.list("logs/2026/06/18/");
+
+        List<String> authorizations = requests.stream().map(Request::authorization).distinct().toList();
+        assertThat(authorizations).hasSizeGreaterThan(1).allSatisfy(a -> assertThat(a).startsWith("Bearer " + KEYLESS_TOKEN + "-"));
+    }
+
     @Test
     void keylessReadStreamsObjectWithSlashesInKey() throws IOException {
         blobClient = keylessClient();
@@ -122,13 +139,17 @@ class BlobClientGcsTest {
     }
 
     private BlobClient keylessClient() {
+        Credentials token = new Credentials("", KEYLESS_TOKEN);
+        return keylessClient(() -> token);
+    }
+
+    private BlobClient keylessClient(CredentialProvider provider) {
         BlobProperties properties = new BlobProperties(
                 "google-cloud-storage", null, null, BUCKET, "http://127.0.0.1:" + server.getAddress().getPort(), Map.of());
         return new BlobClient(properties, TestBlobSpans.noop()) {
             @Override
             CredentialProvider credentialProvider(String identity, String credential) {
-                Credentials token = new Credentials("", KEYLESS_TOKEN);
-                return () -> token;
+                return provider;
             }
         };
     }
