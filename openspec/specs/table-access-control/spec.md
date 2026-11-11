@@ -74,7 +74,8 @@ The grantee `*` SHALL stand for **every authenticated caller**, whatever its pro
 caller that carries none: a list naming `*` grants its privilege to all of them. `*` SHALL be accepted in
 the read-side lists (`get`, `read`, `sensitive`) and refused with HTTP 422 in `write` and `modify`; a `*`
 already stored in `write` or `modify` (written while `*` was an ordinary grantee name) SHALL confer
-nothing, so evaluation fails closed without a data migration. It SHALL
+nothing, so evaluation fails closed without a data migration, and SHALL NOT make a replacement that omits
+that list fail. It SHALL
 behave as a provider role every such caller carries, in grant evaluation, in permission reporting, in
 row-policy evaluation, in the sensitive-grant invariant and in the ineffective-grant report alike. The
 system identity that background work runs under SHALL NOT carry it. A
@@ -102,6 +103,13 @@ remove its grant lists.
 - **GIVEN** a table whose stored `write` list is `["*"]`
 - **WHEN** an authenticated caller none of whose provider roles is named in any list writes to the table
 - **THEN** the write is refused, and the table's reported permissions show `write: false` for it
+
+#### Scenario: A stored everyone write grant does not block other edits
+
+- **GIVEN** a table whose stored `write` list is `["*"]`
+- **WHEN** a grant replacement sends only `read`
+- **THEN** it is accepted and the stored `write` list is kept
+- **AND** a replacement that sends `write` naming `*` is still refused with HTTP 422
 
 #### Scenario: Grant lists persist per table
 
