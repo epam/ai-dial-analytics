@@ -258,6 +258,10 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         sql(callerToken("P1') OR 1 OR ('", "team-x"), COUNT)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.rows[0].c").value(0));
+        // So is one that tries to escape the quote instead of closing it.
+        sql(callerToken("P1\\') OR 1 OR (\\'", "team-x"), COUNT)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(0));
     }
 
     @Test
@@ -377,7 +381,13 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"fn\",\"name\":\"coalesce\",\"args\":[" + caller + ","
                         + literal + "]}]}",
                 "{\"op\":\"in\",\"args\":[" + field + ",{\"type\":\"array\",\"items\":[" + caller + "]}]}",
-                "{\"op\":\"eq\",\"args\":[" + caller + "," + literal + "]}");
+                "{\"op\":\"eq\",\"args\":[" + caller + "," + literal + "]}",
+                // A case branch is one more way to a constant.
+                "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"case\",\"when\":[{\"when\":{\"op\":\"eq\",\"args\":["
+                        + field + "," + literal + "]},\"then\":" + caller + "}],\"else\":" + literal + "}]}",
+                // Twenty comparisons are small as stored and too long once each carries a worst-case value.
+                "{\"op\":\"or\",\"args\":[" + String.join(",", java.util.Collections.nCopies(20, callerIs("eq", "caller.user_hash")))
+                        + "]}");
         for (final String filter : refused) {
             putPolicy("team-x", "{\"filter\":" + filter + "}")
                     .andExpect(status().isUnprocessableContent())
@@ -385,6 +395,40 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         }
 
         asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+    }
+
+    @Test
+    void callerValueAgainstAnEnumColumnIsRefused() throws Exception {
+        final String table = "rls_enum_probe";
+        try {
+            asAdmin(post(BASE).contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"name\":\"" + table + "\",\"type\":\"source\"}")).andExpect(status().isCreated());
+            asAdmin(post(BASE + "/" + table + "/schema").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"columns\":[{\"source_name\":\"id\",\"name\":\"id\",\"type\":\"string\"},"
+                            + "{\"source_name\":\"kind\",\"name\":\"kind\",\"type\":\"enum\",\"enum_values\":[\"a\",\"b\"]}],"
+                            + "\"ordering_key\":[\"id\"]}"))
+                    .andExpect(status().isOk());
+
+            asAdmin(put(BASE + "/" + table + "/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"kind\"},"
+                            + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}"))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("validation_error"));
+        } finally {
+            asAdmin(delete(BASE + "/" + table));
+        }
+    }
+
+    @Test
+    void overLongCallerValueIsUnknown() throws Exception {
+        // Under `ne` the two outcomes differ: a known value that matches no row reads every row, an unknown
+        // one reads none.
+        putPolicy("team-x", "{\"filter\":" + callerIs("ne", "caller.user_hash") + "}").andExpect(status().isOk());
+
+        sql(callerToken("x".repeat(512), "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(4));
+        sql(callerToken("x".repeat(513), "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+        // The bound is in bytes: 257 two-byte characters are 514 bytes.
+        sql(callerToken("é".repeat(257), "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
     }
 
     @Test

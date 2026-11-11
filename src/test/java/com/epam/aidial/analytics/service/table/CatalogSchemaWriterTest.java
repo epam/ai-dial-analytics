@@ -163,6 +163,24 @@ class CatalogSchemaWriterTest {
     }
 
     @Test
+    void persistSchemaRefusesRetypingRowPolicyColumn() {
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.FAILED);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(rowPolicies.referencedColumns(def)).willReturn(Map.of("project_id", Set.of("team-x")));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "project_id", QueryFieldType.STRING)));
+
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(col("widget_id", QueryFieldType.STRING), col("project_id", QueryFieldType.LONG)),
+                List.of("widget_id"), null, null, null, null, null)))
+                .isInstanceOf(ColumnInRowPolicyException.class)
+                .hasMessageContaining("project_id")
+                .hasMessageContaining("team-x");
+        verify(columns, never()).deleteByTableName(any());
+    }
+
+    @Test
     void persistSchemaAcceptsKeptRowPolicyColumn() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));

@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -57,6 +58,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "security.api-key.enabled=true",
         "security.api-key.startup-probe=false",
         "security.api-key.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"]}",
+        "security.api-key.logging-key=email",
+        "security.api-key.obfuscate-user-email=false",
 })
 @AutoConfigureMockMvc
 @Import(TestSecurityConfig.class)
@@ -177,6 +180,43 @@ class ApiKeyAuthIntegrationTest {
     void jwtRootedKeyResolvesViaDefaultsMapping() throws Exception {
         mockMvc.perform(get(BASE).header("Api-Key", JWT_ROOTED_KEY))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void oneRowPolicyServesProjectKeysAndPerUserKeys() throws Exception {
+        // A project key has a project and no user hash, a per-user key the reverse; the unknown side of the
+        // OR matches nothing and the other side confines each key to its own rows.
+        final String field = "{\"type\":\"field\",\"name\":\"owner\"}";
+        final String filter = "{\"filter\":{\"op\":\"or\",\"args\":["
+                + "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"param\",\"name\":\"caller.project\"}]},"
+                + "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}]}}";
+        mockMvc.perform(post(BASE).header("Api-Key", ADMIN_KEY).contentType(MediaType.APPLICATION_JSON).content(createBody()))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post(BASE + "/" + PROBE_TABLE + "/schema").header("Api-Key", ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"columns\":[{\"source_name\":\"owner\",\"name\":\"owner\",\"type\":\"string\"},"
+                                + "{\"source_name\":\"n\",\"name\":\"n\",\"type\":\"long\"}],\"ordering_key\":[\"n\"]}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(post(BASE + "/" + PROBE_TABLE + "/rows").header("Api-Key", ADMIN_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rows\":[{\"owner\":\"acme\",\"n\":1},{\"owner\":\"u1@test\",\"n\":2},"
+                                + "{\"owner\":\"u1@test\",\"n\":3},{\"owner\":\"other\",\"n\":4}]}"))
+                .andExpect(status().isOk());
+        for (final String role : List.of("admin", "viewer")) {
+            mockMvc.perform(put(BASE + "/" + PROBE_TABLE + "/row-policies/" + role).header("Api-Key", ADMIN_KEY)
+                            .contentType(MediaType.APPLICATION_JSON).content(filter))
+                    .andExpect(status().isOk());
+        }
+
+        final String count = "{\"sql\":\"SELECT count(*) AS c FROM " + PROBE_TABLE + "\"}";
+        mockMvc.perform(post("/v1/queries/execute-sql").header("Api-Key", VIEWER_KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(count))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(1));
+        mockMvc.perform(post("/v1/queries/execute-sql").header("Api-Key", JWT_ROOTED_KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(count))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(2));
     }
 
     @Test

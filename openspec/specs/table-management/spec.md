@@ -3174,8 +3174,9 @@ enforced. Removing or rewriting those policies first SHALL make the operation po
 The same refusal SHALL apply to `POST /v1/tables/{name}/schema` on a table that is not yet materialized
 (`PENDING` or `FAILED`), which replaces the whole column set: a table whose CREATE failed keeps its
 columns and can already carry policies, so a re-defined schema that no longer exposes a column a policy
-references SHALL be refused `409 column_in_row_policy`, naming the columns and roles, before any column
-is replaced or any DDL is issued.
+references, or declares it with another type, SHALL be refused `409 column_in_row_policy`, naming the
+columns and roles, before any column is replaced or any DDL is issued. A policy is validated against the
+column's type when it is stored, so a retyped column is treated like a dropped one.
 
 A column referenced by no policy SHALL remain droppable and renamable under the existing rules.
 

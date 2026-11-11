@@ -1,9 +1,11 @@
 package com.epam.aidial.analytics.web.flight;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.UserSecurityDetails;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthorityResolver;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyCache;
+import com.epam.aidial.analytics.web.security.apikey.ApiKeyProperties;
 import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
 import com.epam.aidial.analytics.web.security.apikey.IntrospectionResult;
 import org.apache.arrow.flight.CallHeaders;
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,7 +53,10 @@ class FlightHeaderAuthenticatorTest {
     private final JwtAuthenticationProvider jwtProvider = mock(JwtAuthenticationProvider.class);
     private final OpaqueTokenAuthenticationProvider opaqueProvider = mock(OpaqueTokenAuthenticationProvider.class);
     private final CoreApiKeyIntrospector introspector = mock(CoreApiKeyIntrospector.class);
-    private final ApiKeyAuthorityResolver authorityResolver = mock(ApiKeyAuthorityResolver.class);
+    // A real resolver, so the token is built by the builder shared with the HTTP filter; only the role
+    // mapping it consults is stubbed per test.
+    private final ApiKeyAuthorityResolver authorityResolver = spy(new ApiKeyAuthorityResolver(
+            new ApiKeyProperties(new JsonMapperConfiguration().jsonMapper(), "")));
     private final ApiKeyCache cache = passThroughCache();
     private final FlightHeaderAuthenticator authenticator = new FlightHeaderAuthenticator(
             jwtProvider,
@@ -58,12 +64,6 @@ class FlightHeaderAuthenticatorTest {
             providerOf(introspector),
             providerOf(cache),
             providerOf(authorityResolver));
-
-    {
-        // The token is built by the resolver's own builder, shared with the HTTP filter; only the role
-        // mapping it consults is stubbed per test.
-        when(authorityResolver.authenticate(any())).thenCallRealMethod();
-    }
 
     @SuppressWarnings("unchecked")
     private static <T> ObjectProvider<T> providerOf(T instance) {

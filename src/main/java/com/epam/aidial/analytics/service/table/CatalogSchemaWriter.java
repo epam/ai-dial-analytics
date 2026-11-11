@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
+import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -96,22 +97,29 @@ public class CatalogSchemaWriter {
         if (policyColumns.isEmpty()) {
             return;
         }
-        final Set<String> kept = new HashSet<>();
+        // The grain key carries no declared type here, hence the null.
+        final Map<String, QueryFieldType> kept = new HashMap<>();
         if (draft.columns() != null) {
-            draft.columns().forEach(col -> kept.add(col.name()));
+            draft.columns().forEach(col -> kept.put(col.name(), col.type()));
         }
         if (definition.getType() == TableType.ENRICHMENT && draft.grainKey() != null) {
-            kept.add(draft.grainKey());
+            kept.put(draft.grainKey(), null);
         }
+        final Map<String, QueryFieldType> stored = new HashMap<>();
+        columns.findByTableNameOrderByOrdinal(definition.getName()).forEach(col -> stored.put(col.getName(), col.getType()));
         final Map<String, Set<String>> missing = new TreeMap<>();
         policyColumns.forEach((column, roles) -> {
-            if (!roles.isEmpty() && !kept.contains(column)) {
+            // A policy was validated against the column's type (a caller value compares only with a string),
+            // so a retyped column is as lost to it as a dropped one.
+            final boolean retyped = kept.get(column) != null && stored.get(column) != null
+                    && kept.get(column) != stored.get(column);
+            if (!roles.isEmpty() && (!kept.containsKey(column) || retyped)) {
                 missing.put(column, roles);
             }
         });
         if (!missing.isEmpty()) {
-            throw new ColumnInRowPolicyException("the schema of table '" + definition.getName() + "' cannot drop "
-                    + "column(s) " + missing.keySet() + ": the row policies of role(s) "
+            throw new ColumnInRowPolicyException("the schema of table '" + definition.getName() + "' cannot drop or "
+                    + "retype column(s) " + missing.keySet() + ": the row policies of role(s) "
                     + missing.values().stream().flatMap(Set::stream).collect(Collectors.toCollection(TreeSet::new))
                     + " filter on them; change or remove those policies first");
         }
