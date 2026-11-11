@@ -8,12 +8,13 @@ use warnings;
 $SIG{__DIE__} = sub { print STDERR $_[0]; exit 2 };
 
 my @LINE = (
-    [env      => qr/(?<![\/\w.-])(?:dev|UAT|prod)\b(?![\/.-])|DevOps/],
+    [env      => qr/(?<![\/\w])(?:[Dd]ev|UAT|[Pp]rod)\b(?!\/null)|DevOps/],
     [env      => qr/reference[- ]deployment|\bin production\b/i],
-    [ticket   => qr/\bMR ?!\d+|(?<![\w\]!])!\d{2,}\b|\b(?!(?:UTF|ISO|SHA|RFC|UUID|HTTP|TLS|CVE)-)[A-Z]{2,}-\d{2,}\b/],
+    [ticket   => qr/\bMR ?!\d+|(?<![\w\]!])!\d{2,}\b|\b(?!(?:UTF|ISO|SHA|RFC|UUID|HTTP|TLS|CVE|CWE|AES|RSA|HMAC|ECDSA|PBKDF)-)[A-Z]{2,}-\d{2,}\b/],
     [branch   => qr/\b(?:origin|upstream|github|gitlab)\/(?:development|main|master)\b|renumbered at merge/],
     [people   => qr/\bthe user (?:decided|asked|chose|wanted)\b/i],
-    [date     => qr/\b20\d\d-[01]\d-[0-3]\d\b(?!-[a-z])|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/],
+    # Dates in prose ("on 2026-10-07"), not fixture dates, which are fine when invented.
+    [date     => qr/\b(?:on|since|until|as of)\s+20\d\d-[01]\d-[0-3]\d(?:\b|T)|\b\d{1,2}:\d{2}(?::\d{2})? ?(?:UTC|CET|CEST|EET|EEST)\b/i],
     [machine  => qr{/Users/\w|/home/\w|\b[A-Za-z]:\\Users\\|~/\.\w|\.rd/docker\.sock}],
     [untracked => qr/\.local\.md\b/],
 );
@@ -30,7 +31,9 @@ my $in;
 if ($arg eq '-') {
     $in = \*STDIN;
 } else {
-    open($in, '-|', 'git', 'diff', '-U0', '--no-color', "$arg...HEAD") or die "git diff failed: $!\n";
+    # Pin the output format against user config (noprefix, external diff tools, quoted names).
+    open($in, '-|', 'git', '-c', 'core.quotePath=false', 'diff', '-U0', '--no-color', '--no-ext-diff',
+        '--src-prefix=a/', '--dst-prefix=b/', "$arg...HEAD") or die "git diff failed: $!\n";
 }
 
 my (%added, @order, $file, $ln);    # file => [[line, text], ...]
@@ -43,13 +46,14 @@ while (my $row = <$in>) {
         push @{ $added{$file} }, [$., $row];
         next;
     }
-    if ($row =~ m{^\+\+\+ (?:b/(.*)|/dev/null)$}) { $file = $1; next; }
+    if ($row =~ m{^\+\+\+ (?:"?b/(.*?)"?\t?|/dev/null)$}) { $file = $1; next; }
     if ($row =~ /^@@ -\S+ \+(\d+)/) { $ln = $1; next; }
     next unless defined $file && $file ne $SELF && $row =~ s/^\+//;
     push @order, $file unless $added{$file};
     push @{ $added{$file} }, [$ln++, $row];
 }
 close($in) or $arg eq '-' or die "git diff $arg...HEAD failed (fetch the base first?)\n";
+die "empty input: nothing to sweep (did the command feeding stdin fail?)\n" if $arg eq '-' && !@order;
 
 my $hits = 0;
 for my $f (@order) {

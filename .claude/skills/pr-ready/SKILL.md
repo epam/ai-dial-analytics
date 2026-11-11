@@ -21,15 +21,18 @@ when build inputs changed (`src/`, `build.gradle`, `settings.gradle`, `gradle/`,
    on the OpenSpec version, a missing `SHALL`/`MUST` is an error or only a warning. The keyword must be
    in the requirement's body text; `SHALL` in the `### Requirement:` heading alone does not count.
 
-2. **OpenSpec change archived.** n/a as in step 1. Archive the change in this PR (`/opsx:archive`).
-   Every task in `tasks.md` is ticked first, and a verification task is ticked only once it has
-   actually been run. Then run `openspec validate --specs --strict`. A `### Requirement:` after a later
-   `##` section such as `## Implementation notes` is an error even without `--strict`; move it back
-   inside `## Requirements`.
+2. **OpenSpec change archived, specs valid.** Archive any change from step 1 in this PR
+   (`/opsx:archive`). Every task in `tasks.md` is ticked first, and a verification task is ticked only
+   once it has actually been run. Then, whenever the branch touches anything under `openspec/`
+   (archived changes and direct spec edits included; n/a otherwise), run
+   `openspec validate --specs --strict`. A `### Requirement:` after a later `##` section such as
+   `## Implementation notes` is an error even without `--strict`; move it back inside
+   `## Requirements`.
 
 3. **Hygiene sweep of added lines.** `perl .claude/skills/pr-ready/hygiene-sweep.pl <base>`. It
    prints `file:line: [rule] text` for each hit, including phrases wrapped across lines and comment
-   prefixes. Exit 0 is clean, 1 means hits to judge, 2 is an error (never read it as clean). Judge
+   prefixes. Exit 0 is clean, 1 means hits to judge, 2 is an error such as an unknown base or empty
+   stdin (never read it as clean). Judge
    each hit: text that quotes a forbidden word as a rule or an example is fine, anything else gets
    rewritten. The script catches patterns, not people's names or real-data figures, so read the
    added prose for those too.

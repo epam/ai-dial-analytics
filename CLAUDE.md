@@ -89,10 +89,10 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
   (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
-- Scope every new cache key, scope or copied column to its tenant/user, and never fold a blank id into
-  a shared scope; with schema validation or migrations off, the dependent operation fails with an
-  `ErrorView` code, not startup and not a partial write; one case rule per name lookup (full text in
-  `config.yaml`, "Operational invariants").
+- New cache keys, scopes and copied columns belong to a stated tenant/user, and a blank id is
+  rejected. With schema validation or migrations off, the operation that needs them fails with an
+  `ErrorView` code, never startup or a partial write. One case rule per name lookup. Full text:
+  `config.yaml`, "Operational invariants".
 
 ## Public-repo hygiene
 
@@ -132,7 +132,7 @@ project's own neutral engineering record, not as one company's operations log.
   belong in that spec or the change's `design.md`, which can still be corrected later. A stale
   multi-paragraph header can't be.
 - **Verify with PCRE.** For a branch, run `.claude/skills/pr-ready/hygiene-sweep.pl`, which holds the
-  full pattern list. `git grep -E` on macOS ignores `\b`, so a sweep built on it silently misses
+  pattern list (names and real-data figures still need a read). `git grep -E` on macOS ignores `\b`, so a sweep built on it silently misses
   hits. Use `git grep -nP`, for example:
   `git grep -nIP '\b(dev|UAT|prod)\b|reference[- ]deployment|in production|DevOps|MR ?!\d+|\.local\.md'`.
   A line-based grep misses phrases wrapped across lines, so add a multiline pass, for example:
