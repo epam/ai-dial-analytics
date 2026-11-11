@@ -541,7 +541,7 @@ In `none` mode — the default — all endpoints are open and **every authorizat
 including sensitive-column masking and the unauthenticated Flight port. Deploy `none` only on a
 trusted, non-internet-exposed network segment.
 
-Provider role names are mapped onto **application privileges** — sixteen atomic values named
+Provider role names are mapped onto **application privileges** — eighteen atomic values named
 `<OBJECT>_<VERB>` — and the raw names are retained for per-table grant matching. A `roles-mapping` value
 may name a privilege directly or one of four **bundles** that expand to a privilege set; the two forms may
 be mixed in one list. A value that names neither **fails startup**.
@@ -549,9 +549,9 @@ be mixed in one list. A value that names neither **fails startup**.
 | Bundle | Declares |
 |---|---|
 | `FULL_ADMIN` | every privilege |
-| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
 
 `READ_ONLY_SENSITIVE_ANALYTIC` is what makes reading a `sensitive` column reachable without
 administrative authority. `TABLE_SENSITIVE` is a clearance, not a verb: it confers nothing alone and

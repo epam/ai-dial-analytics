@@ -2,8 +2,8 @@ package com.epam.aidial.analytics.web.security;
 
 /**
  * The unit of authorization: one atomic application privilege, named {@code <OBJECT>_<VERB>} over the
- * object classes {@code TABLE}, {@code REGISTRY}, {@code AUDIT}, {@code SAVED_QUERY} and
- * {@code DATA_SYNC}. A gate names the privilege it needs; a {@code roles-mapping} entry names the
+ * object classes {@code TABLE}, {@code REGISTRY}, {@code AUDIT}, {@code SAVED_QUERY}, {@code DATA_SYNC} and
+ * {@code SETTINGS}. A gate names the privilege it needs; a {@code roles-mapping} entry names the
  * privileges a provider role confers, directly or through a {@link RoleBundle}.
  *
  * <p>Six of these are <em>table-scoped</em>: they may be held globally, over every table, or granted on a
@@ -76,6 +76,12 @@ public enum Privilege {
      * Create, replace and delete {@code common} saved queries and {@code public} dashboards, and change a
      * dashboard's visibility — curate shared definitions. Implies {@link #SAVED_QUERY_READ}.
      */
-    SAVED_QUERY_PUBLISH;
+    SAVED_QUERY_PUBLISH,
+
+    /** Read the instance settings. Global-only. */
+    SETTINGS_READ,
+
+    /** Replace the instance settings, each written whole. Global-only. Implies {@link #SETTINGS_READ}. */
+    SETTINGS_WRITE;
 
 }

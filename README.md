@@ -151,6 +151,7 @@ All functional endpoints live under `/v1`. Errors share one JSON shape:
 | Pipelines | `/v1/pipelines` | [aggregate-pipeline](openspec/specs/aggregate-pipeline/spec.md), [pipeline-registry](openspec/specs/pipeline-registry/spec.md) |
 | Saved queries | `/v1/saved-queries` | [saved-queries](openspec/specs/saved-queries/spec.md) |
 | Dashboards | `/v1/dashboards` | [dashboards](openspec/specs/dashboards/spec.md) |
+| Settings | `/v1/settings` | [instance-settings](openspec/specs/instance-settings/spec.md) |
 | Audit trail | `/v1/activities` | [audit-trail](openspec/specs/audit-trail/spec.md) |
 | Data sync | `POST /v1/data-sync/backfill` | [data-sync-backfill](openspec/specs/data-sync-backfill/spec.md) |
 | OTLP sinks | `/v1/otel/sinks`, `/v1/otel/sink/{name}` | [otel-sink](openspec/specs/otel-sink/spec.md), [Claude Code example](docs/claude-code-telemetry.md) |
