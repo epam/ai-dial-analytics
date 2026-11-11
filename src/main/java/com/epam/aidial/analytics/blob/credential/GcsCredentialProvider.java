@@ -24,7 +24,8 @@ import java.util.List;
  * <p><strong>Keyless mode</strong> resolves Google Application Default Credentials: the file named by
  * {@code GOOGLE_APPLICATION_CREDENTIALS} when set (a service-account key or a workload-identity-federation
  * configuration), otherwise the environment's metadata server — on GKE with Workload Identity, the pod's
- * bound service account. The credential is scoped to Cloud Storage read-only and its access token reaches
+ * bound service account. The credential is always asked for the Cloud Storage read-only scope (types that
+ * cannot take a scope, such as a gcloud user credential, ignore it) and its access token reaches
  * jclouds as the credential half, which the {@code bearerTokenCredentials} OAuth type sends as
  * {@code Authorization: Bearer}. jclouds consults the supplier per request; refresh happens in
  * {@link GoogleCredentials#refreshIfExpired()} on the calling thread, ahead of expiry and serialized inside
@@ -114,8 +115,10 @@ public class GcsCredentialProvider implements CredentialProvider, AutoCloseable 
             current = resolved;
             if (current == null) {
                 try {
-                    GoogleCredentials loaded = source.load();
-                    current = loaded.createScopedRequired() ? loaded.createScoped(List.of(READ_ONLY_SCOPE)) : loaded;
+                    // Scoped unconditionally, not behind createScopedRequired(): the metadata-server and
+                    // external-account types report false there yet do honour a requested scope, and the base
+                    // implementation returns the credential unchanged for types that cannot take one.
+                    current = source.load().createScoped(List.of(READ_ONLY_SCOPE));
                     current.refreshIfExpired();
                 } catch (IOException ex) {
                     throw new UncheckedIOException("Cannot resolve Google Application Default Credentials for the "

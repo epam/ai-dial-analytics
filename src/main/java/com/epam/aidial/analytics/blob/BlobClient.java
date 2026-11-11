@@ -34,8 +34,8 @@ import java.util.Properties;
 /**
  * The only component that knows about jclouds / the blob backend. Builds a {@link BlobStoreContext}
  * from configuration (provider {@code azureblob}, {@code aws-s3} or {@code google-cloud-storage} for real
- * storage, {@code filesystem} in tests) and exposes prefix listing and per-blob streaming. The provider abstraction keeps the rest of the
- * service free of any cloud-specific API.
+ * storage, {@code filesystem} in tests) and exposes prefix listing and per-blob streaming. The provider
+ * abstraction keeps the rest of the service free of any cloud-specific API.
  *
  * <p>The context is created lazily on first use so the service still boots when the blob store is
  * unreachable; the failure then surfaces per sync run.

@@ -172,13 +172,10 @@ class GcsCredentialProviderTest {
 
     @Test
     void scopeRequestedIsReadOnly() {
+        // Like ComputeEngineCredentials and ExternalAccountCredentials, this reports createScopedRequired() false
+        // yet accepts a scope, so the read-only scope must be requested regardless of that flag.
         AtomicReference<Collection<String>> requested = new AtomicReference<>();
         GoogleCredentials unscoped = new CountingCredentials("unused") {
-            @Override
-            public boolean createScopedRequired() {
-                return true;
-            }
-
             @Override
             public GoogleCredentials createScoped(Collection<String> scopes) {
                 requested.set(scopes);
