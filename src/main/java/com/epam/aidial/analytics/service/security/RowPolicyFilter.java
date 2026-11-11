@@ -51,6 +51,11 @@ import java.util.stream.Collectors;
  * because the role-name lookup ({@link ProviderRolePrivileges}) is a union across every configured mapping, and
  * enforcement must not credit a role with a read the caller's own provider does not give it.
  *
+ * <p>The wildcard {@link SecurityClaimsExtractor#ANYONE} is a role like any other here, one every real caller
+ * carries: a {@code read} grant naming it lets anyone read the table, a policy stored for it confines those
+ * who read through that grant alone, and a caller whose own role reads the table with no policy is still
+ * unconfined by the second case.
+ *
  * <p>A policy never grants a read — whether the table is readable at all is still decided by the grant
  * evaluator — and a policy on a role takes that role out of the second case, so a broadly-entitled role is
  * confined by giving it a policy of its own.

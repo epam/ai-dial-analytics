@@ -13,6 +13,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -24,6 +25,9 @@ import java.util.stream.Collectors;
  */
 @Service
 public class SecurityClaimsExtractor {
+
+    /** The grantee that stands for every authenticated caller, whatever its provider roles. */
+    public static final String ANYONE = "*";
 
     private static final AuthenticationTrustResolver TRUST_RESOLVER = new AuthenticationTrustResolverImpl();
 
@@ -94,10 +98,16 @@ public class SecurityClaimsExtractor {
      * role mapping), or an empty set when unauthenticated. Used for per-table access evaluation.
      */
     public Set<String> getProviderRoles() {
-        return authorities()
+        final Set<String> roles = authorities()
                 .filter(ProviderRoleAuthority::isProviderRole)
                 .map(ProviderRoleAuthority::strip)
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(HashSet::new));
+        // Every real caller also carries the wildcard, which a read-side grant list or a row policy may name.
+        // The system identity does not, so a policy for everyone never confines background work.
+        if (isAuthenticated() && !SystemIdentity.isSystem(currentAuthentication())) {
+            roles.add(ANYONE);
+        }
+        return roles;
     }
 
     private java.util.stream.Stream<String> authorities() {

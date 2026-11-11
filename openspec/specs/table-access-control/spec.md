@@ -70,11 +70,29 @@ corresponding privilege globally is authorized. Role names are raw provider role
 names used as identity-provider `roles-mapping` keys), matched against the caller's provider roles;
 a bundle or privilege name SHALL NOT be a valid grantee.
 
+The grantee `*` SHALL stand for **every authenticated caller**, whatever its provider roles and including a
+caller that carries none: a list naming `*` grants its privilege to all of them. `*` SHALL be accepted in
+the read-side lists (`get`, `read`, `sensitive`) and refused with HTTP 422 in `write` and `modify`. It SHALL
+behave as a provider role every such caller carries, in grant evaluation, in permission reporting and in
+row-policy evaluation alike. The system identity that background work runs under SHALL NOT carry it. A
+mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege.
+
 Grant lists on a `system` table SHALL be restricted by **key**, not refused wholesale: the read-side
 keys (`get`, `read`, `sensitive`) SHALL be storable on a `system` table like any other,
 while `write` and `modify` SHALL remain empty, because a `system` table is materialized and fed out
 of band and every modifying operation on it is refused regardless of any list. Deleting a table SHALL
 remove its grant lists.
+
+#### Scenario: A read grant for everyone
+
+- **GIVEN** a table whose `read` list is `["*"]`
+- **WHEN** an authenticated caller none of whose provider roles is named in any list reads the table
+- **THEN** the read is authorized, and the table's reported permissions show `read: true` for it
+
+#### Scenario: Everyone cannot be granted a write
+
+- **WHEN** a grant replacement names `*` in `write` or `modify`
+- **THEN** it is refused with HTTP 422 and the stored lists are unchanged
 
 #### Scenario: Grant lists persist per table
 
@@ -374,7 +392,8 @@ all SHALL remain decided by its global privileges and the table's grant lists, u
 role that has no read path to the table SHALL confer nothing.
 
 A role name SHALL follow the grantee rules of the grant lists: a raw provider role name, trimmed,
-non-blank, and not a bundle or privilege name. Row policies SHALL be storable on `system` tables, which
+non-blank, and not a bundle or privilege name. The grantee `*` SHALL be a valid policy subject, with the
+meaning it has in a grant list: its policy is one every authenticated caller carries. Row policies SHALL be storable on `system` tables, which
 carry the shared data a policy most often narrows. Deleting a table SHALL remove its row policies.
 
 The filter SHALL be validated against the table's **own** stored columns — every one of them, sensitive
@@ -500,6 +519,12 @@ carries some, and counting them would make a policy on a widely-held role meanin
 the global condition keeps a role name mapped differently by two providers from being credited with a read
 the caller's own provider does not give it.
 
+`*` SHALL take part in this rule as a role every authenticated caller carries. A table whose `read` list
+names `*` and that stores a policy for `*` therefore gives every caller the rows of that policy, plus the
+rows of the policies on its other roles; and a caller one of whose own roles may read the table with no
+policy SHALL still see every row, by the second case. A caller meant to be confined by the `*` policy
+SHALL therefore have no other read path to the table without a policy.
+
 A policy SHALL apply to its **role** whatever path that role reads the table by: a role holding
 `TABLE_READ` globally, through a bundle or a privilege mapping, SHALL be confined by its own policy exactly
 as a role reading through a per-table `read` grant. Confining a broadly-entitled role therefore takes a
@@ -522,6 +547,19 @@ with the enrichment's columns reading as absent values, as for a source row that
 - **WHEN** a caller carrying `X` queries `dial_usage_log` through the structured query surface, the SQL
   surface, a CSV export or Flight SQL
 - **THEN** every response contains only rows of `X-PRJ-1`, and a count reports their number alone
+
+#### Scenario: One policy for everyone, every row for an unpolicied reader
+
+- **GIVEN** a table whose `read` list is `["*"]`, a policy for `*` of `user_hash = caller.user_hash`, and
+  provider role `A` mapped to a global read with no policy on the table
+- **WHEN** a caller carrying no role named on the table, and a caller carrying `A`, each query the table
+- **THEN** the first sees only the rows whose `user_hash` is its own, and the second sees every row
+
+#### Scenario: A role policy adds to the policy for everyone
+
+- **GIVEN** the same table, and a policy for role `X` admitting project `X-PRJ-1`
+- **WHEN** a caller carrying `X` queries the table
+- **THEN** it sees its own rows and the rows of `X-PRJ-1`
 
 #### Scenario: Two roles' policies are combined
 

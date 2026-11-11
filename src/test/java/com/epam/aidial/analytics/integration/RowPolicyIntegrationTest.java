@@ -301,6 +301,33 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     @Test
+    void wildcardGrantAndPolicyGiveEveryCallerItsOwnRows() throws Exception {
+        // One unit for everyone: `*` may read, confined to its own rows. No role is granted the read by name.
+        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content("{\"read\":[\"*\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.read[0]").value("*"));
+        putPolicy("*", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}").andExpect(status().isOk());
+
+        // A caller whose only role has nothing to do with the table, and one with no role at all.
+        sql(callerToken("P1", "team-z"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken("P2"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(1));
+        mockMvc.perform(get(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(callerToken("P2"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions.read").value(true))
+                .andExpect(jsonPath("$.permissions.rows_restricted").value(true));
+        // A role that reads the table on its own, with no policy, still reads every row.
+        sql(callerToken("P1", "viewer"), COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
+        // A policy on a role adds its rows to the wildcard's.
+        putPolicy("team-x", projectIn("P3")).andExpect(status().isOk());
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+
+        // Everyone may be let in to read, never to write.
+        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content("{\"write\":[\"*\"]}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
+    }
+
+    @Test
     void ownRowsPolicyOnTheUsageLogCoversItsPayloadEnrichment() throws Exception {
         // The payload table has no user column and needs none: it is only ever joined from the usage log, so
         // the usage log's policy decides which payload rows a caller can reach.

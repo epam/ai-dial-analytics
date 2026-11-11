@@ -75,6 +75,11 @@ public class SystemIdentity {
     private static final Authentication SYSTEM = new UsernamePasswordAuthenticationToken(
             SYSTEM_PRINCIPAL, null, CallerAuthorities.build(SYSTEM_PRIVILEGES, List.of()));
 
+    /** Whether {@code authentication} is the system principal itself, not a caller that happens to share its name. */
+    static boolean isSystem(Authentication authentication) {
+        return authentication == SYSTEM;
+    }
+
     /** Runs {@code work} as the system principal, restoring the caller's context afterwards. */
     public void runAsSystem(Runnable work) {
         final SecurityContext previous = SecurityContextHolder.getContext();

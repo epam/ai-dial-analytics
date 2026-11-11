@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.table;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
 import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
@@ -106,6 +107,11 @@ public class TableAccessService {
                 throw new SystemTableException("table '" + tableName + "' is system-owned; its '"
                         + PrivilegeScope.grantKey(privilege) + "' list must be empty because every modifying "
                         + "operation on it is refused regardless of any grant");
+            }
+            if (PrivilegeScope.isModifying(privilege) && effective.contains(SecurityClaimsExtractor.ANYONE)) {
+                throw new TableValidationException("'" + SecurityClaimsExtractor.ANYONE + "' stands for every "
+                        + "authenticated caller and may be named only in a read-side list (get, read, sensitive), "
+                        + "not in '" + PrivilegeScope.grantKey(privilege) + "'");
             }
             merged.setRolesFor(privilege, effective);
         }

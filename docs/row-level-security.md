@@ -87,6 +87,28 @@ value matches no row, also under `ne` and `not`; an `or` with another branch sti
 `user_hash = caller.user_hash OR project_id = caller.project` serves users and project keys alike. Roles
 that should read every row simply get no policy.
 
+## Everyone: the `*` grantee
+
+When users share no common role, name `*` instead of a role. It stands for every authenticated caller, in
+a table's read-side grant lists (`get`, `read`, `sensitive`; never `write` or `modify`) and as the subject
+of a row policy. Two calls give every user their own rows of a table and leave administrators unconfined:
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"read": ["*"]}'
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/*" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"filter": {"op": "eq", "args": [
+        {"type": "field", "name": "user_hash"},
+        {"type": "param", "name": "caller.user_hash"}]}}'
+```
+
+The rules above apply to `*` as to any role. A caller sees the rows of the `*` policy plus those of the
+policies on its own roles, and a caller one of whose roles reads the table with no policy (an
+administrator's global read, or a `read` grant by name) sees every row. So a user meant to be confined
+must have no other unpolicied way to read the table.
+
 ## Seeing a policy applied
 
 ADAS enforces policies by sending ClickHouse the `additional_table_filters` setting with each read. To see
