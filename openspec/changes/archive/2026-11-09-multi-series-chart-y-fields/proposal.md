@@ -39,7 +39,7 @@ None.
   `inline_query.chart`; the OpenAPI schema of `chart.y_field` becomes `array<string>`.
 - Specs: `saved-queries` (added chart requirement) and `dashboards` (modified "Widget model" and "Inline query").
 - Code: the chart record in `service.query.saved.model`; tests that build or assert on charts.
-- Docs: the breaking change and its rollback condition go into `docs/release-0.24.0-upgrade.md`.
+- Docs: the breaking change and its rollback condition go into `docs/release-0.24-upgrade.md`.
 - No schema migration, no config key, no new dependency. Audit snapshots are stored as they were written,
   but the revision endpoint reads them through the same tolerant chart model, so an old snapshot's string
   `y_field` is returned as a one-element array.

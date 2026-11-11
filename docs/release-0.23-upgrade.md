@@ -1,6 +1,6 @@
-# ADAS 0.23.0 — upgrade notes
+# ADAS 0.23 — upgrade notes
 
-What an environment has to do to move from **release-0.3** to **0.23.0**. An environment still on an
+What an environment has to do to move from **release-0.3** to **0.23**. An environment still on an
 earlier build first follows [`release-0.3-upgrade.md`](release-0.3-upgrade.md).
 
 Three things make this release more than a redeploy:
@@ -16,11 +16,11 @@ Three things make this release more than a redeploy:
 There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build writes aligned tables with no
 `request_time`, so its rows land in the 1970 partition, which the inherited TTL drops at the next merge.
 
-## Why 0.23.0 and not 0.4
+## Why 0.23 and not 0.4
 
-0.23.0 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of ADAS and
+0.23 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of ADAS and
 the Enrichment Runner as open source on GitHub, and both now use the same version numbers as the other DIAL Admin
-services, which are also at 0.23.0. The release contains what was planned as 0.4. The earlier upgrade notes keep
+services, which are also at 0.23. The release contains what was planned as 0.4. The earlier upgrade notes keep
 their old numbers.
 
 **The image registry has changed.** Images are now published from the public repositories to a different registry.
@@ -38,7 +38,7 @@ points at the new location. The images themselves are built the same way.
 - **Database engine and grants.** The database must be `Atomic` or `Replicated` (verified on `Replicated` with ClickHouse
   26.3), otherwise the table is left `layout: unsupported`. The writer account needs the full grant in
   [`clickhouse-server.md`](clickhouse-server.md) — the relayout creates, exchanges and drops tables.
-- **New system-table grants.** 0.23.0 reads `system.parts` and `system.data_skipping_indices` on the writer
+- **New system-table grants.** 0.23 reads `system.parts` and `system.data_skipping_indices` on the writer
   account, which `<database>.*` does not cover. Grant them before the deploy:
 
   ```sql
@@ -106,7 +106,7 @@ points at the new location. The images themselves are built the same way.
   stays stopped. Do it immediately before that deploy: the runner still deployed drops a disabled pipeline from its
   cache, and the pipeline's dead-letter items lose their stored labels while it stays disabled. See [pipeline-registry](../openspec/specs/pipeline-registry/spec.md), "A pipeline has exactly one
   run control".
-- **Evaluator archive (optional).** 0.23.0 drops the read-only evaluator archive and the rule history left
+- **Evaluator archive (optional).** 0.23 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
   stood before the evaluator fold (0.2.2) and of the pre-fold rule revisions. To keep them, dump the four
   tables first:
@@ -118,7 +118,7 @@ points at the new location. The images themselves are built the same way.
 
 ## 2. Deploy order — ADAS and the Enrichment Runner ship as a pair
 
-The runner must be its 0.23.0 build. ADAS now requires **`Adas-Contract-Version: 4`** on the four runner-only
+The runner must be its 0.23 build. ADAS now requires **`Adas-Contract-Version: 4`** on the four runner-only
 endpoints (`scan`, `group-rows`, `materialize`, `rows`), and each side refuses the other's old version. The
 contract change: for a per-row LLM pipeline over an aligned enrichment (§3), the scan returns `__partition_v`,
 which the runner echoes back on every write-back row.
@@ -127,7 +127,7 @@ Follow the usual pair order ([`configuration.md`](configuration.md#release-and-d
 
 1. **Scale the runner to 0** and wait for the pod to be gone.
 2. **Deploy ADAS.**
-3. **Deploy the matching runner build** (0.23.0).
+3. **Deploy the matching runner build** (0.23).
 4. **Scale the runner back to 1.** Its readiness stays DOWN until the first pipeline sync succeeds, so a Ready
    pod confirms the pair matches.
 
@@ -182,7 +182,7 @@ then read only the days the value occurs on instead of all of history.
 
 ## 3b. Ingest failures are recorded and retried
 
-Before 0.23.0 a blob that failed to ingest could go missing from analytics, and only a log line and an aggregate counter
+Before 0.23 a blob that failed to ingest could go missing from analytics, and only a log line and an aggregate counter
 showed it. On the daily reconciliation run and on a backfill, one unreadable or unmappable blob stopped the rest of its
 day, and a deterministic failure stopped every re-run at the same blob. On the poller, a failed blob was retried only
 while it stayed inside the overlap window.
@@ -274,7 +274,7 @@ About 15 minutes after the deploy (the 10-minute delay, then the relayout):
   it failed, and after a fix `POST /v1/data-sync/failures/retry` requeues it.
 - **Logs:** no `Retry sweep could not read the failure ledger` ERROR from `IngestRetrySweep`.
 
-**Recover blobs an earlier failure left behind (recommended, once).** Before 0.23.0, a blob that failed on the
+**Recover blobs an earlier failure left behind (recommended, once).** Before 0.23, a blob that failed on the
 reconciliation run stopped the rest of its day, so the blobs after it may never have been ingested. Run one default
 backfill (no `includeIngested`) over the weeks since the 0.3 deploy: it skips every blob the ingest ledger already
 records, so it ingests only what is missing, and records any blob that still fails in the failure ledger. Do not reach
@@ -291,7 +291,7 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
 | A blob that fails to ingest no longer stops its day | The day's other blobs are ingested; the day is still in `failedDates`, and `failedBlobs` counts the blob | Watch `GET /v1/data-sync/failures` and requeue after a fix (§3b) |
 | An unreadable `long` / `double` / `bool` producer value is no longer read as `0` / `false` | `NULL` in a nullable column where earlier rows had `0`; `12.7` in a `long` column is refused, not truncated; `sync.values.coercion.failures` rises | None for the shipped mappings; fix the producer or the mapping `kind` if the counter rises (§3c) |
 | Row write to an aligned enrichment without `request_time` (`POST /v1/tables/{name}/rows`) — a new table, or an existing one once the relayout aligned it | `422 validation_error` | Send the source row's `request_time` (§3) |
-| Per-row LLM write-back to an aligned enrichment without `__partition_v` | `422 validation_error` | Runner 0.23.0 echoes it (§2) |
+| Per-row LLM write-back to an aligned enrichment without `__partition_v` | `422 validation_error` | Runner 0.23 echoes it (§2) |
 | Registering a pipeline onto an aligned enrichment that reads a table other than the enrichment's source, or has a group trigger | `422 pipeline_validation_failed` | Read the enrichment's own source with a row trigger |
 | Importing a bundle whose identity-keyed enrichment declares a `request_time` that is nullable or not a `timestamp` | `422 validation_error` | Rename the column, or make it a non-nullable `timestamp` |
 | API description in `oidc` mode needs a credential | `401` on `/v3/api-docs` and the Swagger UI | Send a credential, or set `DISABLE_SWAGGER_AUTHORIZATION=true` (§1) |
@@ -327,9 +327,9 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
   repeated conversation history is not stored again. See [`heavy-columns.md`](heavy-columns.md#request-bodies-in-delta-form).
   Under `whole` nothing changes for readers and no body is parsed. `whole-with-path` stores bodies whole too, and
   stamps each chat request with the hidden path a `delta` row links to. **Once `delta` has been on, re-ingest those
-  days only under `whole-with-path` or `delta` on 0.23.0:** a build older than 0.23.0, or `whole`, writes rows without the
+  days only under `whole-with-path` or `delta` on 0.23:** a build older than 0.23, or `whole`, writes rows without the
   path, and the later turns that link to them can no longer be rebuilt. Roll back from `delta` to `whole-with-path`
-  for that reason, and set `delta` only once no pre-0.23.0 pod is left ingesting.
+  for that reason, and set `delta` only once no pre-0.23 pod is left ingesting.
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
 - `SYNC_PAYLOAD_TTL_DAYS` (default unset) — the payload table's retention in days, `-1` for none, applied at
