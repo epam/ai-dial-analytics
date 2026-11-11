@@ -5,13 +5,11 @@ import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
-import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -89,44 +87,40 @@ public class CatalogSchemaWriter {
         } else {
             persistSourceSchema(definition, draft);
         }
+        // A kept column may have changed type: the stored policies are validated again, against the columns
+        // just written, and a refusal rolls this transaction back.
+        columns.flush();
+        rowPolicies.requireStillValid(definition);
     }
 
     /**
      * Refuses a re-defined schema that no longer exposes a column a row policy on the table filters on, with
      * {@code 409 column_in_row_policy} naming the columns and the roles — the same guard a schema PATCH applies
      * to a drop or rename. A not-yet-materialized table can already carry policies (its columns were committed
-     * before a failed CREATE), and a policy over a missing column would fail every read by its role.
+     * before a failed CREATE), and a policy over a missing column would fail every read by its role. A changed
+     * type is judged after the write, by {@link RowPolicyService#requireStillValid}.
      */
     private void requireRowPolicyColumnsKept(TableDefinitionEntity definition, DefineSchemaInput draft) {
         final Map<String, Set<String>> policyColumns = rowPolicies.referencedColumns(definition);
         if (policyColumns.isEmpty()) {
             return;
         }
-        // The grain key carries no declared type here, hence the null.
-        // A column's type here is the pair (type, element type).
-        final Map<String, List<QueryFieldType>> kept = new HashMap<>();
+        final Set<String> kept = new HashSet<>();
         if (draft.columns() != null) {
-            draft.columns().forEach(col -> kept.put(col.name(), Arrays.asList(col.type(), col.elementType())));
+            draft.columns().forEach(col -> kept.add(col.name()));
         }
         if (definition.getType() == TableType.ENRICHMENT && draft.grainKey() != null) {
-            kept.put(draft.grainKey(), null);
+            kept.add(draft.grainKey());
         }
-        final Map<String, List<QueryFieldType>> stored = new HashMap<>();
-        columns.findByTableNameOrderByOrdinal(definition.getName())
-                .forEach(col -> stored.put(col.getName(), Arrays.asList(col.getType(), col.getElementType())));
         final Map<String, Set<String>> missing = new TreeMap<>();
         policyColumns.forEach((column, roles) -> {
-            // A policy was validated against the column's type (a caller value compares only with a string),
-            // so a retyped column is as lost to it as a dropped one.
-            final boolean retyped = kept.get(column) != null && stored.get(column) != null
-                    && !kept.get(column).equals(stored.get(column));
-            if (!roles.isEmpty() && (!kept.containsKey(column) || retyped)) {
+            if (!roles.isEmpty() && !kept.contains(column)) {
                 missing.put(column, roles);
             }
         });
         if (!missing.isEmpty()) {
-            throw new ColumnInRowPolicyException("the schema of table '" + definition.getName() + "' cannot drop or "
-                    + "retype column(s) " + missing.keySet() + ": the row policies of role(s) "
+            throw new ColumnInRowPolicyException("the schema of table '" + definition.getName() + "' cannot drop "
+                    + "column(s) " + missing.keySet() + ": the row policies of role(s) "
                     + missing.values().stream().flatMap(Set::stream).collect(Collectors.toCollection(TreeSet::new))
                     + " filter on them; change or remove those policies first");
         }

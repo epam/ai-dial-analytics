@@ -3174,9 +3174,15 @@ enforced. Removing or rewriting those policies first SHALL make the operation po
 The same refusal SHALL apply to `POST /v1/tables/{name}/schema` on a table that is not yet materialized
 (`PENDING` or `FAILED`), which replaces the whole column set: a table whose CREATE failed keeps its
 columns and can already carry policies, so a re-defined schema that no longer exposes a column a policy
-references, or declares it with another type or element type, SHALL be refused `409 column_in_row_policy`, naming the
-columns and roles, before any column is replaced or any DDL is issued. A policy is validated against the
-column's type when it is stored, so a retyped column is treated like a dropped one.
+references SHALL be refused `409 column_in_row_policy`, naming the columns and roles, before any column is
+replaced or any DDL is issued.
+
+A re-defined schema that keeps a policy column but changes its type SHALL be judged by the stored policies:
+each is validated against the new columns exactly as it would be when stored, and the schema SHALL be
+refused `409 column_in_row_policy`, naming the role and the reason, when one no longer validates — a caller
+value compared with a column that is no longer a `string`, an enum value the column no longer declares.
+The stored columns SHALL then be left unchanged and no DDL issued. A type change every stored policy still
+validates against SHALL be accepted.
 
 A column referenced by no policy SHALL remain droppable and renamable under the existing rules.
 
@@ -3199,6 +3205,15 @@ A column referenced by no policy SHALL remain droppable and renamable under the 
 - **WHEN** a caller posts the table's schema again without `c`
 - **THEN** the request is refused `409 column_in_row_policy` naming `c` and `X`, the stored columns are
   unchanged, and no `CREATE` is issued
+
+#### Scenario: Re-defining a failed table's schema with a policy column retyped
+
+- **GIVEN** a `FAILED` table with `string` column `c`, `long` column `n`, a policy for role `X` comparing
+  `c` with `caller.user_hash`, and a policy for role `Y` filtering `n > 1`
+- **WHEN** a caller posts the table's schema again with `c` declared `long`
+- **THEN** the request is refused `409 column_in_row_policy` naming `X`, and the stored columns are unchanged
+- **AND** a schema that instead changes a type in a way both stored policies still validate against is
+  accepted
 
 ### Requirement: An eligible row-grain enrichment is laid out aligned with its source
 

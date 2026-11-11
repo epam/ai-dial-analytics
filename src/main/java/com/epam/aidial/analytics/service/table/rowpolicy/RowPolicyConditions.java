@@ -12,6 +12,7 @@ import com.epam.aidial.analytics.service.query.model.LogicalNode;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.sql.SqlConditionStatement;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
 import com.epam.aidial.analytics.service.security.SystemIdentity;
@@ -50,6 +51,9 @@ public class RowPolicyConditions {
     private static final List<String> CALLER_VALUES =
             List.of(RowPolicyPredicates.CALLER_USER_HASH, RowPolicyPredicates.CALLER_PROJECT);
 
+    private static final String SINGLE_CONDITION =
+            "'where' must be a single condition over the table's own columns, with no subquery and no other clause";
+
     private final TableDefinitionRepository definitions;
     private final SqlQueryFrontEnd sql;
     private final SystemIdentity systemIdentity;
@@ -75,6 +79,11 @@ public class RowPolicyConditions {
         // The parentheses keep the text one condition: a trailing clause inside them does not parse. The
         // closing one is on its own line, so a line comment ending the text cannot swallow it.
         final String statement = "SELECT * FROM \"" + table + "\" WHERE (" + markCallerValues(condition, marker) + "\n)";
+        // Refused on the parsed text, before any name is resolved: the answer must not tell whether a table or
+        // column the writer cannot see exists.
+        if (!SqlConditionStatement.isConditionOnly(statement)) {
+            throw new TableValidationException(SINGLE_CONDITION);
+        }
         final AtomicReference<SqlTranslation> translated = new AtomicReference<>();
         try {
             systemIdentity.runAsSystem(() -> translated.set(sql.translate(statement, Privilege.TABLE_GET)));
@@ -88,7 +97,7 @@ public class RowPolicyConditions {
         // Balanced parentheses can still close the condition and open a clause; a policy is a condition only.
         if (query.filter() == null || query.having() != null || query.distinct() || query.page() != null
                 || !isEmpty(query.groupBy()) || !isEmpty(query.sort())) {
-            throw new TableValidationException("'where' must be a single condition, with no other clause");
+            throw new TableValidationException(SINGLE_CONDITION);
         }
         final FilterNode filter = unmark(query.filter(), marker);
         if (jsonMapper.writeValueAsString(filter).contains(marker)) {

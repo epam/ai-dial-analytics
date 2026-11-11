@@ -8,10 +8,12 @@ import com.epam.aidial.analytics.service.table.TableAccessService.AccessReplacem
 import com.epam.aidial.analytics.service.table.TableAccessService.IneffectiveReason;
 import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.ProviderRolePrivileges;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.List;
 import java.util.Map;
@@ -47,7 +49,8 @@ class TableAccessServiceTest {
     private final SensitiveGrantInvariant sensitiveGrants =
             new SensitiveGrantInvariant(definitions, columns, pipelines, pipelineReads, providerRolePrivileges);
     private final TableAccessService service =
-            new TableAccessService(definitions, callerPermissions, providerRolePrivileges, sensitiveGrants);
+            new TableAccessService(definitions, callerPermissions, providerRolePrivileges, sensitiveGrants,
+                    new RowPolicyCodec(JsonMapper.builder().build()));
 
     private static TableDefinitionEntity table(String name) {
         final TableDefinitionEntity def = new TableDefinitionEntity();

@@ -111,15 +111,20 @@ a table's read-side grant lists (`get`, `read`, `sensitive`; never `write` or `m
 of a row policy. Two calls give every user their own rows of a table and leave administrators unconfined:
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"read": ["*"]}'
 curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/*" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"filter": {"op": "eq", "args": [
         {"type": "field", "name": "user_hash"},
         {"type": "param", "name": "caller.user_hash"}]}}'
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"read": ["*"]}'
 ```
+
+Store the policy first. A `read` grant to `*` with no `*` policy lets every caller read every row, and
+lifts the policies of every other role on the table, because every caller then carries a role that reads
+with no policy. The grant is accepted, and its response reports it under `ineffective_grants` with reason
+`lifts_row_policies`.
 
 The rules above apply to `*` as to any role. A caller sees the rows of the `*` policy plus those of the
 policies on its own roles, and a caller one of whose roles reads the table with no policy (an

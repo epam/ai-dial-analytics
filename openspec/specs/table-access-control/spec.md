@@ -79,7 +79,9 @@ that list fail. It SHALL
 behave as a provider role every such caller carries, in grant evaluation, in permission reporting, in
 row-policy evaluation, in the sensitive-grant invariant and in the ineffective-grant report alike. The
 system identity that background work runs under SHALL NOT carry it. A
-mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege.
+mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege. At
+startup the system SHALL log every table that names `*` in a grant list or as a row-policy role, and where,
+so a `*` stored while it was an ordinary grantee name is visible to the operator.
 
 Grant lists on a `system` table SHALL be restricted by **key**, not refused wholesale: the read-side
 keys (`get`, `read`, `sensitive`) SHALL be storable on a `system` table like any other,
@@ -92,6 +94,15 @@ remove its grant lists.
 - **GIVEN** a table whose `read` list is `["*"]`
 - **WHEN** an authenticated caller none of whose provider roles is named in any list reads the table
 - **THEN** the read is authorized, and the table's reported permissions show `read: true` for it
+
+#### Scenario: A read grant for everyone on a table with role policies is reported
+
+- **GIVEN** a table with a row policy for role `X` and none for `*`
+- **WHEN** a grant replacement adds `*` to `read`
+- **THEN** it is accepted, `ineffective_grants` carries an entry for `*` with reason `lifts_row_policies`,
+  and a caller carrying `X` reads every row
+- **AND** once a row policy is stored for `*`, the same replacement reports nothing and that caller reads
+  the rows of either policy
 
 #### Scenario: Everyone cannot be granted a write
 
@@ -181,13 +192,16 @@ an operator can see immediately when a grant has no effect.
 corresponding privilege globally, each `read` grant on an enrichment table whose source the same
 role cannot read, and each `sensitive` grant to a role that holds none of `TABLE_GET`, `TABLE_READ`
 or `TABLE_MODIFY` on the table, globally or by any list. All three are grants that change nothing
-(see `structured-query` for the second).
+(see `structured-query` for the second). It SHALL report in the same array, with reason
+`lifts_row_policies`, a `read` grant to `*` on a table that stores row policies and none for `*`: every
+caller then carries a role that reads with no policy, so by the evaluation rule those policies confine no
+one. The grant SHALL still be accepted.
 
 The response SHALL carry the five lists at the **top level**, exactly where `GET` carries them, so the
 two share one shape and a client reading `write` keeps working. It SHALL additionally carry
 `permissions` (the five effective flags) and `ineffective_grants`, an array whose entries carry the
-`role`, the grant `key`, a stable `reason` code — `already_global`, `enrichment_read_inert` or
-`sensitive_without_verb` — and a human-readable `message`. Both members are additive; nothing moves.
+`role`, the grant `key`, a stable `reason` code — `already_global`, `enrichment_read_inert`,
+`sensitive_without_verb` or `lifts_row_policies` — and a human-readable `message`. Both members are additive; nothing moves.
 
 A `PUT` against a `system` table SHALL be accepted for the read-side keys. It SHALL be refused with
 `409` and machine code `table_is_system` only when it carries a **non-empty** `write` or `modify`
@@ -866,7 +880,10 @@ string literal in the condition SHALL remain a literal whatever it spells, inclu
 value's name.
 
 A condition that does not parse, does not validate against the table, or uses a construct the SQL surface
-cannot express as a single filter SHALL be refused `422 validation_error` with the reason. A table that is
+cannot express as a single filter SHALL be refused `422 validation_error` with the reason. A condition that
+holds a subquery, or closes itself to add another clause, SHALL be refused on its text, before any name in
+it is resolved, with one message whatever it names: the refusal SHALL NOT tell whether a table or column
+outside the policy's own table exists. A table that is
 not a queryable entity on its own, such as an enrichment, SHALL refuse `where` with `422 validation_error`;
 its policies are written as `filter`.
 
@@ -898,4 +915,5 @@ its policies are written as `filter`.
 
 - **WHEN** a policy is written as `{"where": "project_id IN (SELECT project_id FROM other_table)"}`
 - **THEN** the request is refused `422 validation_error` and no policy is stored
+- **AND** the message is the same whether or not `other_table` exists
 

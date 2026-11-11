@@ -33,7 +33,20 @@ one-element array without a migration.
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
 
+## The `*` grantee
+
+`*` in a table's `get`, `read` or `sensitive` grant list, or as the role of a row policy, now stands for every
+authenticated caller (see [`row-level-security.md`](row-level-security.md)). Earlier builds stored `*` as an
+ordinary role name that matched only a caller carrying a provider role spelled `*`.
+
+- **Before upgrading, look for a stored `*`.** A table that already names `*` in a read-side list becomes readable
+  by every authenticated caller, with its sensitive columns when the list is `sensitive`. Remove the entry
+  (`PUT /v1/tables/{name}/access`) unless that is what you want. After the upgrade, the startup log lists every
+  table that names `*` and where.
+- A `*` stored in `write` or `modify` grants nothing and is refused on the next edit of that list.
+
 | Change | Effect | Action |
 |---|---|---|
+| `*` means every authenticated caller in read-side grant lists and row policies | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after |
 | Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | Readers of `request_body` see only a later turn's new messages | Only when you set `delta`: re-point pipelines and readers to `request_body_full`, as above |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |

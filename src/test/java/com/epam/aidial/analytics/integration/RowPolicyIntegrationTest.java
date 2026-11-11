@@ -1,9 +1,17 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
+import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
+import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
+import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
@@ -11,6 +19,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
@@ -42,6 +51,13 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String ROLLUP = "rls_rollup";
     private static final String PIPELINE = "rls-rollup";
     private static final String COUNT = "SELECT count(*) AS c FROM " + PROBE;
+
+    @Autowired
+    private TableDefinitionRepository definitions;
+    @Autowired
+    private ColumnMappingRepository columns;
+    @Autowired
+    private RowPolicyService rowPolicies;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -328,6 +344,52 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     @Test
+    void wildcardReadWithNoPolicyOfItsOwnLiftsRolePoliciesAndIsReported() throws Exception {
+        putPolicy("team-x", projectIn("P1")).andExpect(status().isOk());
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(2));
+
+        // Every caller carries `*`, which now reads with no policy: by the rule, that lifts team-x's
+        // confinement. The grant is accepted and says so.
+        final String everyone = "{\"read\":[\"team-x\",\"team-y\",\"*\"]}";
+        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content(everyone))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants", hasSize(1)))
+                .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"));
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
+
+        // With a policy of its own, `*` confines again and the grant is no longer reported.
+        putPolicy("*", projectIn("P2")).andExpect(status().isOk());
+        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content(everyone))
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+    }
+
+    @Test
+    void storedPolicyIsJudgedAgainstTheSchemaItIsLeftWith() throws Exception {
+        putPolicy("team-x", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}").andExpect(status().isOk());
+        putPolicy("team-y", "{\"where\":\"n > 1\"}").andExpect(status().isOk());
+        final TableDefinitionEntity definition = definitions.findById(PROBE).orElseThrow();
+        rowPolicies.requireStillValid(definition);
+
+        // A caller value compares only with a string, so this policy does not survive the retype; the other,
+        // over a column left alone, is not what gets named.
+        final ColumnMappingEntity project = columns.findByTableNameOrderByOrdinal(PROBE).stream()
+                .filter(column -> "project".equals(column.getName())).findFirst().orElseThrow();
+        project.setType(QueryFieldType.LONG);
+        columns.save(project);
+        try {
+            assertThatThrownBy(() -> rowPolicies.requireStillValid(definition))
+                    .isInstanceOf(ColumnInRowPolicyException.class)
+                    .hasMessageContaining("team-x")
+                    .hasMessageNotContaining("team-y");
+        } finally {
+            project.setType(QueryFieldType.STRING);
+            columns.save(project);
+        }
+    }
+
+    @Test
     void ownRowsPolicyOnTheUsageLogCoversItsPayloadEnrichment() throws Exception {
         // The payload table has no user column and needs none: it is only ever joined from the usage log, so
         // the usage log's policy decides which payload rows a caller can reach.
@@ -518,6 +580,18 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
             putPolicy("team-x", body)
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.error").value("validation_error"));
+        }
+        // A subquery and a clause are refused on the text alone, before any name is resolved, so the answer
+        // does not tell whether a table the writer cannot see exists.
+        for (final String condition : List.of(
+                "project IN (SELECT project FROM " + ROLLUP + ")",
+                "project IN (SELECT project FROM no_such_table)",
+                "EXISTS (SELECT 1 FROM no_such_table)",
+                "project = 'P1') WINDOW w AS (ORDER BY n",
+                "project = 'P1') ORDER BY (n")) {
+            putPolicy("team-x", "{\"where\":\"" + condition + "\"}")
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.message").value(containsString("no subquery and no other clause")));
         }
         asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
 
