@@ -44,7 +44,8 @@ class SessionsSourceValidatorTest {
                 field("n_long", QueryFieldType.LONG, false),
                 field("tags", QueryFieldType.ARRAY, false),
                 field("insights.title", QueryFieldType.STRING, false),
-                field("insights.body_full", QueryFieldType.STRING, true)))));
+                field("insights.body_full", QueryFieldType.STRING, true),
+                new QuerySchemaFieldDto("insights.body", QueryFieldType.STRING, null, null, "insights.body", null, null, null, true, false)))));
     }
 
     @Test
@@ -98,13 +99,15 @@ class SessionsSourceValidatorTest {
     }
 
     @Test
-    void unknownArrayAndProjectionOnlyFieldsAreRefused() {
+    void unknownArraySensitiveAndProjectionOnlyFieldsAreRefused() {
         assertThatThrownBy(() -> validator.validate(withRole("project", "nope")))
                 .hasMessage("roles.project names unknown field 'nope'");
         assertThatThrownBy(() -> validator.validate(withRole("project", "tags")))
                 .hasMessageContaining("roles.project names array field 'tags'");
         assertThatThrownBy(() -> validator.validate(withRole("title", "insights.body_full")))
                 .hasMessageContaining("roles.title names projection-only field 'insights.body_full'");
+        assertThatThrownBy(() -> validator.validate(withRole("title", "insights.body")))
+                .hasMessageContaining("roles.title names sensitive field 'insights.body'");
     }
 
     private static SessionsSourceSetting withRole(String role, String field) {

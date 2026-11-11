@@ -41,10 +41,10 @@ class SessionsSourceSettingIntegrationTest extends AbstractClickHouseIntegration
     private static final MediaType JSON = MediaType.APPLICATION_JSON;
     private static final AtomicInteger NAMES = new AtomicInteger();
 
-    /** dial_usage_log fields: project_id string, request_time timestamp, total_price decimal, total_tokens long. */
+    /** dial_usage_log fields: project_id and deployment string, request_time timestamp, total_price decimal, total_tokens long. */
     private static final String VALID = """
             {"base_table":"dial_usage_log","roles":{"session_id":"project_id","time":"request_time",
-             "project":"project_id","title":"dial_usage_log_payload.request_body","cost":"total_price","turns":"total_tokens"}}""";
+             "project":"project_id","title":"deployment","cost":"total_price","turns":"total_tokens"}}""";
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -76,7 +76,7 @@ class SessionsSourceSettingIntegrationTest extends AbstractClickHouseIntegration
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.base_table").value("dial_usage_log"))
                 .andExpect(jsonPath("$.roles.session_id").value("project_id"))
-                .andExpect(jsonPath("$.roles.title").value("dial_usage_log_payload.request_body"))
+                .andExpect(jsonPath("$.roles.title").value("deployment"))
                 .andExpect(jsonPath("$.roles.cost").value("total_price"))
                 .andExpect(jsonPath("$.updated_at").isNotEmpty())
                 .andExpect(jsonPath("$.updated_by").isEmpty())
@@ -129,6 +129,7 @@ class SessionsSourceSettingIntegrationTest extends AbstractClickHouseIntegration
                 "roles.time names field 'project_id' of type string; accepted: timestamp");
         expectInvalid(roles("\"project\":\"execution_path\""), "roles.project names array field");
         expectInvalid(roles("\"title\":\"dial_usage_log_payload.request_body_full\""), "roles.title names projection-only field");
+        expectInvalid(roles("\"title\":\"dial_usage_log_payload.request_body\""), "roles.title names sensitive field");
         expectInvalid(roles("\"session_id\":\"event_id\""), "roles.session_id names field 'event_id' of type uuid");
         expectInvalid(roles("\"turns\":\"total_price\""), "roles.turns names field 'total_price' of type decimal; accepted: integer, long");
     }

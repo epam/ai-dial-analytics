@@ -24,6 +24,9 @@ import java.util.stream.Collectors;
  * model holds only {@code ACTIVE} sources the caller may get, with enrichments it may not get and sensitive
  * columns it has no clearance for already absent; "not a source", "hidden" and "does not exist" therefore take
  * one path and produce one message, and nothing here can tell a hidden field from an absent one.
+ *
+ * <p>A sensitive field the writer <i>can</i> see is still refused: the setting is read by every analyst, most of
+ * whom hold no {@code TABLE_SENSITIVE}, and the field would be absent from their model.
  */
 @Component
 @RequiredArgsConstructor
@@ -83,6 +86,8 @@ public class SessionsSourceValidator {
             problems.add(member + " names array field '" + fieldName + "'; an array field cannot be bound to a role");
         } else if (field.projectionOnly()) {
             problems.add(member + " names projection-only field '" + fieldName + "'; it cannot be filtered, sorted or grouped");
+        } else if (field.sensitive()) {
+            problems.add(member + " names sensitive field '" + fieldName + "'; a sensitive field cannot be bound to a role");
         } else if (!role.accepted().contains(field.type())) {
             problems.add(member + " names field '" + fieldName + "' of type " + field.type().code()
                     + "; accepted: " + role.accepted().stream().map(QueryFieldType::code).sorted().collect(Collectors.joining(", ")));

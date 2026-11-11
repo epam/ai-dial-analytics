@@ -31,7 +31,6 @@ public class SessionsSourceSettingService {
     private final SecurityClaimsExtractor claims;
     private final JsonMapper jsonMapper;
     private final TransactionTemplate transactions;
-    private final TransactionTemplate readTransactions;
     private final boolean securityEnabled;
 
     public SessionsSourceSettingService(
@@ -46,22 +45,20 @@ public class SessionsSourceSettingService {
         this.claims = claims;
         this.jsonMapper = jsonMapper;
         this.transactions = new TransactionTemplate(transactionManager);
-        this.readTransactions = new TransactionTemplate(transactionManager);
-        this.readTransactions.setReadOnly(true);
         this.securityEnabled = securityMode.isEnforced();
     }
 
     /** The stored setting; {@link SettingNotFoundException} when it has never been written. */
     public StoredSessionsSourceSetting get() {
-        return readTransactions.execute(status -> repository.findById(NAME)
+        return repository.findById(NAME)
                 .map(this::toStored)
-                .orElseThrow(() -> new SettingNotFoundException("The sessions-source setting is not configured")));
+                .orElseThrow(() -> new SettingNotFoundException("The sessions-source setting is not configured"));
     }
 
     /** Validates and stores {@code setting} whole, returning it as stored. */
     public StoredSessionsSourceSetting replace(SessionsSourceSetting setting) {
         final String value = write(setting);
-        final String author = currentAuthor();
+        final String author = securityEnabled ? claims.getAuthor() : null;
         try {
             return transactions.execute(status -> store(setting, value, author));
         } catch (DataIntegrityViolationException firstInsertLost) {
@@ -70,7 +67,8 @@ public class SessionsSourceSettingService {
     }
 
     private StoredSessionsSourceSetting store(SessionsSourceSetting setting, String value, String author) {
-        // Validated inside the transaction, so the catalog read and the write see one snapshot.
+        // Validation is not atomic with the write: a column dropped in between is still stored, which the
+        // not-revalidated-on-read rule already allows.
         validator.validate(setting);
         final InstanceSettingEntity entity = repository.findById(NAME).orElseGet(() -> {
             final InstanceSettingEntity created = new InstanceSettingEntity();
@@ -82,14 +80,6 @@ public class SessionsSourceSettingService {
         entity.setUpdatedAt(Instant.now().truncatedTo(ChronoUnit.MICROS));
         entity.setUpdatedBy(author);
         return toStored(repository.saveAndFlush(entity));
-    }
-
-    private String currentAuthor() {
-        if (!securityEnabled) {
-            return null;
-        }
-        final String email = claims.getEmail();
-        return email != null && !email.isBlank() ? email : claims.getAuthor();
     }
 
     private StoredSessionsSourceSetting toStored(InstanceSettingEntity entity) {

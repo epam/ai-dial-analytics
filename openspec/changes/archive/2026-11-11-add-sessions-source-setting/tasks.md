@@ -14,7 +14,7 @@
 ## 3. Validation and service
 
 - [x] 3.1 Implement `SessionsSourceValidator`: resolve `base_table` through `CatalogQueryService.findModel(base_table, Privilege.TABLE_GET)` under the caller's authorities; check required roles, field existence by flat name, role-to-`QueryFieldType` fit, the array rule and the projection-only rule; collect a message naming `base_table` / `roles.<role>` (type mismatch names the field type and the accepted types); never distinguish hidden from absent
-- [x] 3.2 Implement `SessionsSourceSettingService`: `get()` returning the stored setting or throwing `SettingNotFoundException`; `replace(body)` validating, stamping `updated_at` and `updated_by` (email, else principal name, `null` in `none` mode, via `SecurityClaimsExtractor`) and upserting in one transaction, retrying once as an update on a first-write primary-key race
+- [x] 3.2 Implement `SessionsSourceSettingService`: `get()` returning the stored setting or throwing `SettingNotFoundException`; `replace(body)` validating, stamping `updated_at` and `updated_by` (principal name, `null` in `none` mode, via `SecurityClaimsExtractor`) and upserting in one transaction, retrying once as an update on a first-write primary-key race
 - [x] 3.3 Add `SettingNotFoundException` (`404 setting_not_found`) and `SettingValidationException` (`422 validation_error`) with handlers in `DefaultExceptionHandler`
 
 ## 4. Web layer
@@ -27,7 +27,7 @@
 
 - [x] 5.1 Unit tests for `SessionsSourceValidator`: each role's accepted and refused types, missing/null required roles, unknown field, enrichment qualified name, array field, projection-only field, non-source / unknown `base_table`
 - [x] 5.2 Integration test (`AbstractClickHouseIntegrationTest`, owns its data): `404` before first write; valid `PUT` then `GET` round trip with `updated_at`/`updated_by`; replace drops roles not resent; `422` leaves the stored value unchanged; `400` for `updated_by` and unknown members; stored value survives a column drop and a re-`PUT` of it is refused `422`
-- [x] 5.3 OIDC auth integration test (`AbstractOidcAuthIntegrationTest`): `READ_ONLY_ANALYTIC` reads `200` and writes `403 forbidden`; `FULL_ADMIN` writes `200`; a raw `TABLE_READ` mapping reads `403`; a writer lacking `TABLE_SENSITIVE` binding a sensitive column gets the same `422` as an absent field
+- [x] 5.3 OIDC auth integration test (`AbstractOidcAuthIntegrationTest`): `READ_ONLY_ANALYTIC` reads `200` and writes `403 forbidden`; `FULL_ADMIN` writes `200`; a raw `TABLE_READ` mapping reads `403`; a writer lacking `TABLE_SENSITIVE` binding a sensitive column gets the same `422` as an absent field, and `FULL_ADMIN` binding it is refused `422` as sensitive
 - [x] 5.4 Audit integration test: first `PUT` records `Create` for `Setting`/`sessions-source` with no parent, a later one records `Update`, a refused `PUT` and a `GET` record nothing, and the feed filters on `resourceType eq Setting`
 
 ## 6. Docs and specs

@@ -1,6 +1,6 @@
 ## Why
 
-The sessions view of the analytics frontend needs to know which catalog table holds session-level data
+A sessions view of an analytics client needs to know which catalog table holds session-level data
 and which of its fields play the session roles (id, time, project, title, cost, turns). Today the client
 hard-codes that answer in a mock, which cannot follow an operator's catalog. The choice is one value per
 ADAS instance, authored by an administrator and read by every analyst, so it belongs in the service,

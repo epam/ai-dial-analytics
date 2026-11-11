@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -104,7 +105,7 @@ class SessionsSourceSettingAuthIntegrationTest {
 
         mockMvc.perform(authored(put(URL), token("admin")).content(VALID))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.updated_by").value("admin@test"));
+                .andExpect(jsonPath("$.updated_by").value("admin"));
     }
 
     @Test
@@ -119,7 +120,7 @@ class SessionsSourceSettingAuthIntegrationTest {
         mockMvc.perform(authored(put(URL), token("settingswriter")).content(VALID)).andExpect(status().isOk());
         mockMvc.perform(authored(get(URL), token("settingswriter")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.updated_by").value("settingswriter@test"));
+                .andExpect(jsonPath("$.updated_by").value("settingswriter"));
     }
 
     @Test
@@ -134,8 +135,11 @@ class SessionsSourceSettingAuthIntegrationTest {
                 .andReturn().getResponse().getContentAsString();
         assertThat(hidden.replace("request_body", "no_such")).isEqualTo(absent);
 
-        // The full administrator holds the clearance, so the same binding validates.
-        mockMvc.perform(authored(put(URL), token("admin")).content(SENSITIVE)).andExpect(status().isOk());
+        // The full administrator sees the column, but a sensitive field is refused for every writer: readers
+        // without the clearance could not use it.
+        mockMvc.perform(authored(put(URL), token("admin")).content(SENSITIVE))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(containsString("roles.title names sensitive field")));
     }
 
     @Test

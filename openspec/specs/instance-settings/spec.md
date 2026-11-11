@@ -20,8 +20,9 @@ body), `updated_at` (the server time of the last successful write) and `updated_
 it). The set of setting names SHALL be closed and defined by the service; the only setting name SHALL be
 `sessions-source`. A setting that has never been written SHALL be **absent**, not stored with a default.
 
-`updated_by` SHALL be the writing caller's email when its token carries one, otherwise its principal name.
-Under `security.mode=none` it SHALL be `null`. Neither `updated_at` nor `updated_by` SHALL be accepted from
+`updated_by` SHALL be the writing caller's principal name, as dashboards and saved queries record their
+author; it SHALL NOT be the caller's email, which the audit feed shows only to `AUDIT_READ` holders, while
+the setting is read by every `SETTINGS_READ` holder. Under `security.mode=none` it SHALL be `null`. Neither `updated_at` nor `updated_by` SHALL be accepted from
 a request body.
 
 #### Scenario: A never-written setting is absent
@@ -31,9 +32,9 @@ a request body.
 
 #### Scenario: A write stamps time and author
 
-- **WHEN** a caller whose token carries the email `analyst@example.com` writes the setting
-- **THEN** the response and every subsequent read carry `updated_by` `"analyst@example.com"` and an ISO-8601
-  `updated_at` equal to the time of that write
+- **WHEN** a caller with principal `admin` whose token carries the email `admin@example.com` writes the setting
+- **THEN** the response and every subsequent read carry `updated_by` `"admin"`, not the email, and an
+  ISO-8601 `updated_at` equal to the time of that write
 
 #### Scenario: Unauthenticated mode stores no author
 
@@ -102,7 +103,9 @@ value unchanged, when:
 - `roles`, `roles.session_id` or `roles.time` is missing or `null`;
 - a bound role names a field absent from `base_table`'s flat schema;
 - a bound field's type is not accepted for its role;
-- a bound field is `array`-typed, or is a projection-only (computed) field.
+- a bound field is `array`-typed, or is a projection-only (computed) field;
+- a bound field is sensitive, even when the writer holds `TABLE_SENSITIVE` and so sees it: the setting is
+  read by every analyst, and a caller without that clearance has no such field to query.
 
 Validation SHALL use the entity's flat schema **as the writing caller may see it** at `TABLE_GET` — the bar
 of `GET /v1/queries/entities/schema/{name}` — so a table the caller may not get, an enrichment it may not
@@ -148,6 +151,24 @@ The system SHALL NOT check that `base_table` shares a session identifier with `d
 
 - **WHEN** `roles.project` names an `array` field whose element type is `string`
 - **THEN** the response is `422` with error code `validation_error` naming `roles.project`
+
+#### Scenario: A projection-only field is refused
+
+- **WHEN** `roles.title` names a projection-only (computed) field
+- **THEN** the response is `422` with error code `validation_error` naming `roles.title` as projection-only
+
+#### Scenario: A uuid field is not a session identifier
+
+- **WHEN** `roles.session_id` names a `uuid` field
+- **THEN** the response is `422` with error code `validation_error` naming `roles.session_id`, the field's
+  type `uuid`, and the accepted type `string`
+
+#### Scenario: A sensitive field is refused even for a cleared writer
+
+- **WHEN** a writer holding `TABLE_SENSITIVE` on `base_table` binds `roles.title` to one of its sensitive
+  columns
+- **THEN** the response is `422` with error code `validation_error` naming `roles.title` as sensitive, and
+  nothing is stored
 
 #### Scenario: A required role is missing
 

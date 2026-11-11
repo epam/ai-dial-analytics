@@ -1,6 +1,6 @@
 ## Context
 
-The frontend's sessions view needs one instance-wide answer: which catalog entity holds session rows and
+A sessions view needs one instance-wide answer: which catalog entity holds session rows and
 which of its flat fields play the session roles. ADAS already owns the vocabulary the answer is written in:
 the entity catalog and the flat schema under `/v1/queries/entities` (see `query-schema-discovery`), built at
 the single read chokepoint `CatalogQueryService.buildModel`/`findModel(entity, bar)`. What is missing is a
@@ -14,7 +14,7 @@ value, an administrator writes it, everyone with analytics access reads it.
 
 **Goals:**
 
-- `GET`/`PUT /v1/settings/sessions-source` with the body the frontend already codes against.
+- `GET`/`PUT /v1/settings/sessions-source` with a fixed, documented body.
 - Validation at write time against the same flat schema a client would query, so a stored value is one the
   writer could have queried when it was written.
 - Read open to every analytics bundle, write to administrators only, expressed in the privilege model
@@ -48,7 +48,7 @@ constraint so a stray row cannot appear outside the service.
 - *Alternative: a dedicated `sessions_source_setting` table with typed columns.* Rejected: it buys column
   types the service does not need (the body is validated against the catalog, not the database) and every
   future setting would need its own table and mirror.
-- *Alternative: configuration property (`application.yml`).* Rejected: the frontend needs it writable at
+- *Alternative: configuration property (`application.yml`).* Rejected: it must be writable at
   runtime by an administrator, and the value refers to catalog entities that are themselves runtime state.
 - *Alternative: not auditing.* Rejected: the setting changes what every analyst sees, and the catalog's
   convention is that every administered document is attributable. Auditing costs one mirror table and one
@@ -56,7 +56,7 @@ constraint so a stray row cannot appear outside the service.
 
 ### Concurrency: last writer wins, single-row upsert
 
-`PUT` is whole-document create-or-replace. There is no `generation` token: the frontend contract has none, and
+`PUT` is whole-document create-or-replace. There is no `generation` token: the body has none, and
 the only writers are administrators editing a single small form. The write runs in one transaction that
 loads-or-creates the row by primary key and saves it; a concurrent first write that loses the insert race
 surfaces as a primary-key violation, which the service retries once as an update rather than mapping to a
@@ -73,12 +73,15 @@ under the writing caller's authorities — the same chokepoint and bar as `GET /
 the `sensitive` filter, so "not a source", "not visible" and "does not exist" collapse to one `422` naming
 `base_table`, and a hidden field is indistinguishable from an absent one. Each bound role is then looked up by
 flat name in the model and checked against the role's accepted `QueryFieldType` set. `ARRAY` is excluded by
-the type table already; the explicit array rule in the spec is kept as its own message because the frontend
-asked for it by name. Projection-only (computed) fields are refused because the sessions view filters, sorts
-or groups on every role, and a projection-only field supports none of those.
+the type table already; the explicit array rule in the spec is kept as its own message because "array"
+explains the refusal better than a type list does. Projection-only (computed) fields are refused because the
+sessions view filters, sorts or groups on every role, and a projection-only field supports none of those.
+Sensitive fields are refused even for a writer cleared to see them: the setting is read by every analyst, and
+a reader without `TABLE_SENSITIVE` has no such field in its model, so the query built from the setting would
+fail as an unknown field.
 
-Strict type sets are taken verbatim from the frontend contract: `enum` and `uuid` fields are refused for the
-`string` roles even though both read as strings on every query surface. Widening the sets later is additive.
+Strict type sets are deliberate: `enum` and `uuid` fields are refused for the `string` roles even though both
+read as strings on every query surface. Widening the sets later is additive.
 
 - *Alternative: validate against the unfiltered catalog.* Rejected: the writer could then probe for sensitive
   columns or unreadable enrichments by watching which binding validates. Under `FULL_ADMIN` the two views are
@@ -109,7 +112,7 @@ both: neither is a read of a table the caller named.
 `GET` returns the stored body as written, to every `SETTINGS_READ` holder, regardless of table grants. The
 disclosure is a table name and up to six field names that an administrator chose to publish to analysts; this
 is the same kind of trade-off the audit feed states for table names. Filtering per caller would make the
-frontend unable to tell "not configured" from "configured, but you cannot see it", and the data behind the
+client unable to tell "not configured" from "configured, but you cannot see it", and the data behind the
 names stays behind `TABLE_READ`.
 
 ### Error codes
@@ -121,7 +124,7 @@ deliberately omits `updated_at`/`updated_by`, so they are unknown members on inp
 
 ## Risks / Trade-offs
 
-- [The stored value goes stale after a column drop or table deletion] → The frontend surfaces the query error
+- [The stored value goes stale after a column drop or table deletion] → A client surfaces the query error
   and an administrator re-saves; the spec states the non-revalidation so it is not discovered as a bug. A
   later change may add a computed validity flag to `GET`.
 - [Raw-privilege `roles-mapping`s lose nothing but gain nothing, so analysts on them get `403` on read] →
@@ -142,6 +145,6 @@ deliberately omits `updated_at`/`updated_by`, so they are unknown members on inp
 
 ## Open Questions
 
-- Should `string` roles also accept `enum` and `uuid` fields? The design follows the frontend contract
-  (`string` only); widening is additive if the frontend wants it.
+- Should `string` roles also accept `enum` and `uuid` fields? The design keeps them
+  `string` only; widening is additive if a client needs it.
 - Should `GET` later report whether the stored value still validates against the current catalog?

@@ -18,7 +18,7 @@ public record SessionsSourceSettingDto(
         @Schema(description = "Time of the last write, ISO-8601", example = "2026-01-01T00:00:00Z")
         @JsonProperty("updated_at") Instant updatedAt,
 
-        @Schema(description = "Email, else principal, of the last writer; null when security is disabled",
-                example = "admin@example.com", nullable = true)
+        @Schema(description = "Principal of the last writer; null when security is disabled",
+                example = "admin", nullable = true)
         @JsonProperty("updated_by") String updatedBy) {
 }
