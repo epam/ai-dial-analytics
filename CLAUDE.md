@@ -62,13 +62,13 @@ CLI: `openspec list`, `openspec show <change>`, `openspec validate <change>`.
 When you change behavior, contracts, or invariants, update the relevant
 `openspec/specs/<capability>/` spec in the same change — it isn't optional polish. Before
 reporting a change complete, confirm the spec matches the shipped behavior (or state explicitly
-that no spec update was needed). Every observable behavior a test pins has a spec scenario, and
-`docs/*.md` agree with the spec on it: order of checks, status values, error codes.
+that no spec update was needed). Every externally observable contract a test pins (status and error
+codes, status values, order of checks) has a spec scenario, and `docs/*.md` agree with the spec on it.
 
 ### Pull requests
 
 Before `gh pr create`, or before pushing to an open PR, run the `pr-ready` skill
-(`.claude/skills/pr-ready/SKILL.md`).
+(`.claude/skills/pr-ready/SKILL.md`); a push runs its lighter tier.
 
 ## Conventions quick reference
 
@@ -89,13 +89,10 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
   (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
-- **Scope and privacy by default.** A new key, cache, scope or copied column names its tenant/user
-  boundary: blank or missing ids must not collapse into one shared scope, and identity columns are not
-  copied next to sensitive payloads unless the owning `openspec/specs/<capability>/spec.md` states it.
-- **Fail explicitly, never degrade silently.** Code that depends on schema validation or migrations
-  fails with a clear error when they are disabled, instead of writing incomplete data.
-- **One case rule per name lookup.** A by-name check compares field and column names with the same
-  case sensitivity everywhere it runs.
+- Scope every new cache key, scope or copied column to its tenant/user, and never fold a blank id into
+  a shared scope; with schema validation or migrations off, the dependent operation fails with an
+  `ErrorView` code, not startup and not a partial write; one case rule per name lookup (full text in
+  `config.yaml`, "Operational invariants").
 
 ## Public-repo hygiene
 
@@ -134,7 +131,8 @@ project's own neutral engineering record, not as one company's operations log.
   `openspec/specs/<capability>/spec.md`. Rationale, cost, rejected alternatives and operator ordering
   belong in that spec or the change's `design.md`, which can still be corrected later. A stale
   multi-paragraph header can't be.
-- **Verify with PCRE.** `git grep -E` on macOS ignores `\b`, so a sweep built on it silently misses
+- **Verify with PCRE.** For a branch, run `.claude/skills/pr-ready/hygiene-sweep.pl`, which holds the
+  full pattern list. `git grep -E` on macOS ignores `\b`, so a sweep built on it silently misses
   hits. Use `git grep -nP`, for example:
   `git grep -nIP '\b(dev|UAT|prod)\b|reference[- ]deployment|in production|DevOps|MR ?!\d+|\.local\.md'`.
   A line-based grep misses phrases wrapped across lines, so add a multiline pass, for example:
