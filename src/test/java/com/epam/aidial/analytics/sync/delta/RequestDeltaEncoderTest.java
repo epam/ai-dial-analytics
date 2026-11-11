@@ -3,7 +3,6 @@ package com.epam.aidial.analytics.sync.delta;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.node.ObjectNode;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -259,7 +258,7 @@ class RequestDeltaEncoderTest {
         assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
         assertThat(messages(t2)).hasSize(2);
         assertThat((String) t2.get("request_body")).doesNotContain("cache_control");
-        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}}]");
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}},{\"text_blocks\":[0]}]");
         // Each rebuild carries its own markers only: t2's first message comes back without the marker t1 had.
         assertRebuilds(t1);
         assertRebuilds(t2);
@@ -268,8 +267,7 @@ class RequestDeltaEncoderTest {
     /**
      * Four consecutive requests shaped like a coding agent's ({@code fixtures/request-delta/coding-agent-turns.json}):
      * the client sends the message carrying the newest cache marker as a one-text-block array and, once the marker has
-     * moved on, as the plain string. The rebuilt bodies are compared up to that shape;
-     * {@link #inheritedMessageRebuildsInTheShapeItsRowStored} pins which shape comes back.
+     * moved on, as the plain string. Each turn rebuilds to exactly the request it was sent as.
      */
     @Test
     void messageSentAsTextBlockThenAsPlainStringStaysOnTheChain() {
@@ -283,14 +281,14 @@ class RequestDeltaEncoderTest {
         for (int i = 1; i < rows.size(); i++) {
             assertThat(rows.get(i).get("request_parent_hash")).as("turn %d", i).isEqualTo(rows.get(i - 1).get("request_hash"));
             assertThat(messages(rows.get(i))).as("turn %d", i).hasSize(2);
-            JsonNode rebuilt = Rebuild.body(table.row("e" + i), table.rows());
-            assertThat(textBlocksAsStrings(rebuilt)).as("turn %d", i).isEqualTo(textBlocksAsStrings(turns.get(i)));
+            assertThat(Rebuild.canonical(Rebuild.body(table.row("e" + i), table.rows()))).as("turn %d", i)
+                    .isEqualTo(Rebuild.canonical(turns.get(i)));
         }
     }
 
-    /** The inherited message comes back in the shape the row that stored it sent: here the block, not the string. */
+    /** The inherited message comes back in the shape this row sent, the string, though the row storing it sent the block. */
     @Test
-    void inheritedMessageRebuildsInTheShapeItsRowStored() {
+    void inheritedMessageRebuildsInTheShapeItsOwnRowSent() {
         String block = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"";
         Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + block + ",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"));
         String added = "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]";
@@ -301,7 +299,23 @@ class RequestDeltaEncoderTest {
 
         assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
         assertThat(messages(t2)).hasSize(2);
-        assertThat(Rebuild.canonical(Rebuild.body(table.row("e2"), table.rows()))).isEqualTo(Rebuild.canonical(chat("[" + block + "}]}" + added)));
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"text_blocks\":[]}]");
+        assertRebuilds(t2);
+    }
+
+    /** An unmarked block over a parent's plain string: only the row's record can say the block was sent. */
+    @Test
+    void messageSentAsPlainStringThenAsUnmarkedTextBlockRebuildsAsSent() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"}]},"
+                + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"text_blocks\":[0]}]");
+        assertRebuilds(t2);
     }
 
     /** The other direction: the parent stored the plain string, and the child marks that message, so sends it as a block. */
@@ -898,19 +912,6 @@ class RequestDeltaEncoderTest {
     /** The message array a row's stored body holds. */
     private static JsonNode messages(Map<String, Object> row) {
         return Rebuild.MAPPER.readTree((String) row.get("request_body")).get("messages");
-    }
-
-    /** A body in canonical form with each message's lone bare text block written as the plain string. */
-    private static String textBlocksAsStrings(JsonNode body) {
-        JsonNode copy = body.deepCopy();
-        for (JsonNode message : copy.get("messages")) {
-            JsonNode content = message.get("content");
-            if (content.isArray() && content.size() == 1 && content.get(0).size() == 2
-                    && "text".equals(content.get(0).path("type").asString("")) && content.get(0).path("text").isString()) {
-                ((ObjectNode) message).set("content", content.get(0).get("text"));
-            }
-        }
-        return Rebuild.canonical(copy);
     }
 
     private static String msg(String role, String content) {

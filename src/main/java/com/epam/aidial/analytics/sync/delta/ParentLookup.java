@@ -14,7 +14,7 @@ public interface ParentLookup {
 
     /**
      * Returns, for each of {@code paths} stored on one of {@code days}, the {@code request_ancestor_hashes} of one row
-     * carrying it. Any row is as good as another: every row carrying a path rebuilds to the same history, up to the shape of a bare text block.
+     * carrying it. Any row is as good as another: every row carrying a path rebuilds to the same history.
      *
      * @param days  the UTC days ({@code yyyy-MM-dd}) the candidates were hashed under
      * @param paths the candidate paths

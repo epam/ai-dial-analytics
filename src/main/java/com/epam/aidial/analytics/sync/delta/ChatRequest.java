@@ -25,7 +25,8 @@ import java.util.TreeMap;
  * clients move that marker to the newest message on each turn: left in, the same earlier message would canonicalize
  * differently on every turn and no turn would find its parent. For the same reason a message whose content is one
  * bare text block is hashed as if its content were the plain string: the marked message travels as a block and
- * the same message, unmarked on the next turn, as the string. The stored body keeps the shape it was sent in. A system
+ * the same message, unmarked on the next turn, as the string. The stored body keeps the shape it was sent in, and a
+ * row with a parent records which inherited messages it sent as such a block ({@link #textBlocks}). A system
  * element is hashed under its key name ({@link #hashedHistory()}), so requests sharing a prefix share their system
  * keys too, names included.
  *
@@ -52,6 +53,9 @@ public final class ChatRequest {
 
     /** The message member whose one-text-block form and plain-string form are one message to the prefix hashes. */
     static final String CONTENT = "content";
+
+    /** The member of the {@code request_cache_control} entry that lists the inherited messages sent as a bare text block. */
+    static final String TEXT_BLOCKS = "text_blocks";
 
     private final List<String> canonicalHistory;
     /** {@link #canonicalHistory} with each message as the prefix hashes read it; the same strings where they agree. */
@@ -157,7 +161,7 @@ public final class ChatRequest {
      * string; any other message as it is. A client sends the message holding the newest cache marker as such a block
      * and, once the marker has moved on, as the string, so the two shapes must hash alike.
      */
-    private static JsonNode textBlockAsString(JsonNode message) {
+    static JsonNode textBlockAsString(JsonNode message) {
         if (message.get(CONTENT) instanceof ArrayNode content && content.size() == 1
                 && content.get(0) instanceof ObjectNode block && block.size() == 2
                 && block.get("text") instanceof StringNode text
@@ -186,6 +190,20 @@ public final class ChatRequest {
             hashed.set(i, canonical(JsonNodeFactory.instance.stringNode(systemKeys.get(i))) + ":" + canonicalHistory.get(i));
         }
         return hashed;
+    }
+
+    /**
+     * The indices, below {@code upTo}, of the message elements sent as a bare text block: the ones a parent may have
+     * stored as the plain string, so the row records them for its rebuild.
+     */
+    List<Integer> textBlocks(int upTo) {
+        List<Integer> blocks = new ArrayList<>();
+        for (int i = systemCount; i < Math.min(upTo, hashedElements.size()); i++) {
+            if (!hashedElements.get(i).equals(canonicalHistory.get(i))) {
+                blocks.add(i);
+            }
+        }
+        return blocks;
     }
 
     /** How many history elements come from top-level system keys; they open the history. */

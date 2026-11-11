@@ -113,7 +113,7 @@ The catalog migrations seed four:
 | `dial_usage_log_payload.request_body` | LLM request body, unbounded per row; verbatim except under `SYNC_REQUEST_BODY_MODE=delta` |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
-| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
+| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, and which inherited messages a later turn sent as one text block, under `SYNC_REQUEST_BODY_MODE=delta` |
 
 Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header
@@ -157,9 +157,7 @@ that starts a new chain, on a new UTC day for example, stores its history again.
 
 A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`. It
 reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, after the statement runs, to the request
-as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept, and an
-earlier message may come back as `"content":"…"` where the turn sent the one text block `[{"type":"text","text":"…"}]`,
-or the other way round), with
+as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
 `dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
 byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
 request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two

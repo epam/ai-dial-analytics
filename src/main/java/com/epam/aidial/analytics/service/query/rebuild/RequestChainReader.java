@@ -28,7 +28,7 @@ import java.util.function.Supplier;
  * <ul>
  *   <li>{@link #links} resolves paths from the small chain columns alone — no body — through the
  *       {@code idx_request_hash} skip index. {@code LIMIT 1 BY request_hash} is sound because every row carrying a
- *       path yields the same history, up to the shape of a bare text block.
+ *       path yields the same history.
  *   <li>{@link #bodies} reads the bodies of the rows a walk visited by their {@code event_id}, the table's sort key, so
  *       the read prunes to the granules holding them.
  * </ul>

@@ -21,7 +21,7 @@ import java.util.UUID;
  * {@code toYYYYMMDD(request_time)}. Within a partition the {@code idx_request_hash} skip index (ClickHouse
  * {@code V16}) keeps the read off most granules, since the table is sorted by {@code event_id}, not by path. Values are
  * bound server-side as query parameters, each list as one comma-separated string, so a chunk's size never changes the
- * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history up to the shape of a bare text block, so any copy will do. Each query
+ * statement. No {@code FINAL}: every row carrying a path rebuilds to the same history, so any copy will do. Each query
  * runs under {@code max_execution_time}. The bound is per query, not per lookup: a flush asks about at most
  * {@code RequestDeltaEncoder.MAX_TABLE_CANDIDATES} paths in chunks of {@value QueryParameterChunks#SIZE}, so its lookup can take up to
  * about 17 times {@link #TIMEOUT_SECONDS}. A query that times out ends the lookup, and its requests are stored as chain

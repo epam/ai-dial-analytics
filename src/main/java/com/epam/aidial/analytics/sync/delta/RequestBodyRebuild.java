@@ -8,8 +8,10 @@ import tools.jackson.databind.node.ObjectNode;
 import tools.jackson.databind.node.StringNode;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -93,9 +95,6 @@ public final class RequestBodyRebuild {
 
     private static final String CACHE_CONTROL = "cache_control";
 
-    /** Where a marker sits on a message sent as one text block. */
-    private static final String ONLY_BLOCK = "/" + ChatRequest.CONTENT + "/0";
-
     private RequestBodyRebuild() {
     }
 
@@ -160,10 +159,13 @@ public final class RequestBodyRebuild {
         for (int i = chain.size() - 2; i >= 0; i--) {
             appendMessages(history, (ObjectNode) MAPPER.readTree(chain.get(i).body()));
         }
+        final int inherited = chain.isEmpty() ? 0 : history.size();
         if (!chain.isEmpty()) {
             appendMessages(history, body);
         }
-        restoreMarkers(history, markers);
+        final JsonNode entries = markers == null ? MAPPER.createArrayNode() : MAPPER.readTree(markers);
+        restoreSentShapes(history, root.systemCount(), inherited, entries);
+        restoreMarkers(history, entries);
 
         // A row with a parent left out its system keys and tools; its chain's root stores the same ones.
         final ObjectNode keys = chain.isEmpty() ? body : (ObjectNode) MAPPER.readTree(rootText);
@@ -197,22 +199,45 @@ public final class RequestBodyRebuild {
         throw new IllegalArgumentException("a stored delta body carries no message array");
     }
 
-    private static void restoreMarkers(List<JsonNode> history, String markers) {
-        if (markers == null) {
+    /**
+     * Puts each inherited message ({@code from} to {@code to}) into the shape the row sent it in: the bare text block
+     * where the row's entry lists it, the plain string otherwise. The row that stores a message may have sent the
+     * other shape, since the two hash alike. A row with no entry was stored before shapes were recorded, when only
+     * equal shapes linked, so its messages are right as stored.
+     */
+    private static void restoreSentShapes(List<JsonNode> history, int from, int to, JsonNode entries) {
+        JsonNode listed = null;
+        for (JsonNode entry : entries) {
+            listed = entry.has(ChatRequest.TEXT_BLOCKS) ? entry.get(ChatRequest.TEXT_BLOCKS) : listed;
+        }
+        if (listed == null) {
             return;
         }
-        for (JsonNode marker : MAPPER.readTree(markers)) {
+        final Set<Integer> blocks = new HashSet<>();
+        listed.forEach(index -> blocks.add(index.asInt()));
+        for (int i = from; i < to; i++) {
+            if (!(history.get(i) instanceof ObjectNode message)) {
+                continue;
+            }
+            if (!blocks.contains(i)) {
+                history.set(i, ChatRequest.textBlockAsString(message));
+            } else if (message.get(ChatRequest.CONTENT) instanceof StringNode text) {
+                message.putArray(ChatRequest.CONTENT).addObject().put("type", "text").set("text", text);
+            }
+        }
+    }
+
+    private static void restoreMarkers(List<JsonNode> history, JsonNode entries) {
+        for (JsonNode marker : entries) {
+            if (marker.has(ChatRequest.TEXT_BLOCKS)) {
+                continue;
+            }
             final int element = marker.get("i").asInt();
             final String at = marker.get("at").asString();
             if (element < 0 || element >= history.size()) {
                 throw new IllegalArgumentException("a cache marker points outside the history");
             }
-            JsonNode target = at.isEmpty() ? history.get(element) : history.get(element).at(at);
-            if (ONLY_BLOCK.equals(at) && history.get(element) instanceof ObjectNode message
-                    && message.get(ChatRequest.CONTENT) instanceof StringNode text) {
-                // The row sent this message as one marked text block; the row that stored it sent the plain string.
-                target = message.putArray(ChatRequest.CONTENT).addObject().put("type", "text").set("text", text);
-            }
+            final JsonNode target = at.isEmpty() ? history.get(element) : history.get(element).at(at);
             if (!(target instanceof ObjectNode object)) {
                 throw new IllegalArgumentException("a cache marker points at no object");
             }

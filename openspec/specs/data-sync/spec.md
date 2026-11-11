@@ -3442,8 +3442,11 @@ a row with an all-zero parent — a root, or a row stored whole — supplies its
 normalized and canonicalized as above.
 Rows carrying the same path MAY differ in parent and stored body (a re-ingested event can link differently, and an
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
-history, a bare text block and its plain string counting as one message, so following `request_parent_hash` through whichever row is found always terminates — each parent is
-strictly shallower — and always yields the row's canonical history up to that shape. While a row exists, a row carrying
+history, so following `request_parent_hash` through whichever row is found always terminates — each parent is
+strictly shallower — and always yields the row's exact canonical history, once each inherited message is put in
+the shape the row sent it in: a bare text block and its plain string are one message to the hashes, so the row
+that stores a message MAY have sent the other shape, and "the same history" in this capability means equal up to
+that shape, which the rebuilt row's own record settles (see "Cache markers are kept per event"). While a row exists, a row carrying
 its parent's path SHALL exist: a path depends only on the stored history and tools, so replacing a row under the
 `ReplacingMergeTree` keeps it whichever mode wrote the copy, and parent and child share a daily partition, so
 they expire together — up to the part granularity of the TTL: with `ttl_only_drop_parts`, a day still split
@@ -3459,12 +3462,11 @@ message array (under the key the classification above chose: the first of `messa
 value is an array), then, for a row with a parent, each system key that its chain's root carries, in the order listed
 above, valued with its history element (`h1..hs`), and the root's `tools` member when the root has one, and finally
 the row's own cache markers, SHALL yield a JSON document equal to the received body
-(same members and values; key order and whitespace are not preserved), with one exception: a message the row
-inherits comes back in the shape the row that stored it sent, so where one of the two sent a bare text block and the
-other the plain string, the rebuilt message MAY carry either, and two reads of one row MAY differ in it when rows carrying the
-same path stored different shapes. A marker of the row that names the only block of a
-message stored as a plain string SHALL be restored onto that message as a bare text block, which is the shape the
-row sent. Ingest SHALL store everything a rebuild needs,
+(same members and values; key order and whitespace are not preserved). Before the markers are restored, each
+message the row inherits SHALL be put in the shape the row sent it in: a bare text block where the row's record
+lists it, the plain string otherwise, whichever of the two the row that stores the message sent. A row that
+carries no such record was stored before shapes were recorded, when only equal shapes linked, and SHALL inherit
+its messages as stored. Ingest SHALL store everything a rebuild needs,
 and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
 request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
@@ -3522,14 +3524,16 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 
 - **WHEN** turn 1 ends with a user message whose `content` is `[{"type":"text","text":"u1"}]` carrying a
   `cache_control` marker, and turn 2 repeats that message as `"content":"u1"` and adds two messages
-- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages, and its rebuild
-  equals the request it was sent as except that the inherited message carries `u1` as the one text block
+- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages, its
+  `request_cache_control` lists no inherited text block, and its rebuild equals the request it was sent as, with
+  `"content":"u1"`
 
 #### Scenario: A message sent as a plain string and then as a marked text block rebuilds as sent
 
 - **WHEN** turn 1 holds a user message `"content":"u1"`, and turn 2 repeats it as
   `[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]` and adds two messages
-- **THEN** turn 2's parent is turn 1, and its rebuild equals the request it was sent as, marker included
+- **THEN** turn 2's parent is turn 1, its `request_cache_control` lists that message as a text block, and its
+  rebuild equals the request it was sent as, marker included
 
 #### Scenario: Content that is not one bare text block is another message
 
@@ -3540,16 +3544,16 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 #### Scenario: The history rebuilds exactly
 
 - **WHEN** a chain root A and its descendants B and C are stored, and C is rebuilt by following
-  `request_parent_hash` from C through stored rows to the root and concatenating their history elements root first
-- **THEN** the result equals C's normalized, canonical history element for element, a bare text block and its plain string
-  counting as equal
+  `request_parent_hash` from C through stored rows to the root, concatenating their history elements root first
+  and putting each inherited message in the shape C recorded
+- **THEN** the result equals C's normalized, canonical history element for element
 
 #### Scenario: A rebuild survives a parent re-linked by re-ingest
 
 - **WHEN** B was stored as a root, C was stored as B's child, and B is then re-ingested after A was stored,
   so the surviving B row is A's child with a shorter stored body
-- **THEN** rebuilding C by following `request_parent_hash` through the surviving rows still yields C's history,
-  up to the shape of a bare text block
+- **THEN** rebuilding C by following `request_parent_hash` through the surviving rows still yields C's exact
+  history
 
 ### Requirement: A request inherits its parent's tools
 
@@ -3602,8 +3606,7 @@ of different tenants never share a chain. One of the two is enough for a scope; 
 project and no user, chains within its project.
 
 A rebuild reads only rows whose path equals a prefix of the rebuilt row's own history, and takes from them only
-their history elements, system keys and `tools`, which the prefix hashes prove equal to the rebuilt request's own,
-up to the shape of a bare text block. A
+their history elements, system keys and `tools`, which the prefix hashes prove equal to the rebuilt request's own. A
 rebuilt body therefore never carries another request's content, though the rows read to assemble it hold their own
 top-level members (`model`, sampling parameters) and cache markers, which a rebuilding surface SHALL NOT return. A
 rebuild does need every row of the chain, and a chain MAY span rows that differ in anything outside the scope and the
@@ -3641,8 +3644,7 @@ SHALL NOT fail the flush. This costs storage, never correctness.
 - **THEN** both rows carry their bodies as received and an all-zero `request_hash`, and neither is a parent
 
 A re-ingested event MAY resolve a different parent than its earlier copy did (for example, its parent has
-been stored in the meantime). Both copies carry the same path and rebuild to the same history, up to the
-shape of a bare text block, so the
+been stored in the meantime). Both copies carry the same path and rebuild to the same history, so the
 `ReplacingMergeTree` collapse keeping either one is correct — for the event itself and for every row that
 names its path as parent (see "Rebuild equivalence").
 
@@ -3695,7 +3697,10 @@ names its path as parent (see "Rebuild equivalence").
 The service SHALL record, under `sync.request-body-mode=delta`, every `cache_control` member removed from a
 chat request's history in that row's `request_cache_control`, as a JSON array of entries, each giving the index
 of the history element, the location of the member inside that element, and its value verbatim.
-`request_cache_control` SHALL be `NULL` for a request that carried none. Markers SHALL belong only to
+A row with a parent SHALL carry one further entry, `{"text_blocks":[…]}`, listing the indices of the message
+elements it inherits that it sent as a bare text block, empty when it sent none: the row storing such a message
+MAY have sent it as the plain string, and the entry is what lets a rebuild return the shape this request sent.
+`request_cache_control` SHALL be `NULL` for a request with no parent that carried no marker. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
 markers into the assembled history and no others. `cache_control` members outside the history (for
 example on `tools`) SHALL stay where they are, in the stored body or in the stored `tools` a request inherits.
@@ -3715,10 +3720,16 @@ newest message on each turn, so the same earlier message would otherwise hash di
 - **WHEN** turn 2's markers are restored during a rebuild
 - **THEN** the assembled request carries turn 2's own markers only, not turn 1's
 
-#### Scenario: A request without markers stores null
+#### Scenario: A root without markers stores null
 
-- **WHEN** a chat request carrying no `cache_control` member is stored in delta form
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with no parent
 - **THEN** its `request_cache_control` is `NULL`
+
+#### Scenario: A row with a parent records the text blocks it inherits
+
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with a parent, and the
+  second of its three inherited history elements is a message it sent as a bare text block
+- **THEN** its `request_cache_control` is `[{"text_blocks":[1]}]`
 
 ### Requirement: A request body that is not a chat request is stored whole
 
@@ -3757,9 +3768,7 @@ stored: no column, ingest stage or migration is added for them, and ingest SHALL
   `request_parent_hash` chain supplies followed by its own message array elements, put back under the key the
   classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
   at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
-  members and values; key order and whitespace are not preserved, and an inherited message MAY differ in the shape of
-  a bare text block, as "A chat request body is stored as its new history and a parent link" allows — written as
-  compact JSON.
+  members and values; key order and whitespace are not preserved — written as compact JSON.
 - **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
   `request_body_full` holds:
   - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
@@ -3783,8 +3792,7 @@ rebuild SHALL NOT read any other partition. The first phase SHALL resolve each r
 chain columns alone — no body — looking paths up in batches, seeded from the requested row's
 `request_ancestor_hashes` and, where a found row's parent is still missing, from that missing path and the found
 row's own `request_ancestor_hashes`, round after round until every chain reaches a root, a round finds nothing new,
-or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history up to the shape of a
-bare text block. The
+or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history. The
 second phase SHALL read the bodies of the rows the chains name, by their `event_id`, and only those. Both phases
 SHALL read deduplicated — the latest version per `event_id`, deduplicated inside each partition. The walk SHALL use
 the parent link of the very row whose body it reads; when a row read in the second phase no longer carries the path
@@ -3814,7 +3822,7 @@ rows of other days SHALL keep resolving.
 returns the values of both, and SHALL therefore be visible to a caller only when it may see every sensitive column
 among the two. The ancestors a rebuild reads SHALL be read under the same governance as the requested row and
 SHALL never be returned as rows of their own. Because a chain stays inside one project, user and UTC day and a
-rebuilt body equals what the requested row's own request carried, up to the shape of a bare text block, a rebuild SHALL disclose nothing the same row
+rebuilt body equals what the requested row's own request carried, a rebuild SHALL disclose nothing the same row
 would not disclose had it been stored whole. Restricting the ancestors a rebuild reads by deployment or model
 inside a project is not part of this requirement.
 
@@ -3888,8 +3896,8 @@ service's other statements, its bound paths and event ids counted rather than pr
 
 - **WHEN** an ancestor's event is re-ingested between the two phases and its surviving row links to a different
   parent
-- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's
-  body, up to the shape of a bare text block, or returns `partial` with the stored body — never a body assembled from two versions of one event
+- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's exact
+  body, or returns `partial` with the stored body — never a body assembled from two versions of one event
 
 #### Scenario: The rebuild never leaves the row's day
 

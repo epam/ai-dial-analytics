@@ -22,7 +22,9 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   at the upgrade whose history holds one links its next turn to an earlier turn or starts a new chain, once. Re-ingest across the upgrade, or after a rollback, only by whole
   UTC days: such an event re-ingested alone takes the new path, and its children stored before can no longer be rebuilt.
   Instances on different builds during a rolling upgrade may miss each other's rows as parents for such requests,
-  which costs storage only.
+  which costs storage only. A later turn's `request_cache_control` is no longer `NULL` when the turn carried no marker:
+  it holds a `{"text_blocks":[…]}` entry, usually empty, naming the earlier messages the turn sent as one text block.
+  A reader that parses the column skips that entry.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 
