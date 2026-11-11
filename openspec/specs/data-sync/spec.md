@@ -3403,12 +3403,17 @@ insignificant whitespace.
 For a history `h1..hn`, ingest SHALL compute the **prefix hashes**
 `p0 = H(project_id, user_hash, UTC day of request_time, tools)` and `pk = H(p(k-1), e(hk))`. `H` is a 128-bit hash;
 `e(hk)` is the canonical JSON of `hk`, preceded for a system element by its key name (`"system":…`), so a system
-element never matches a message element or the same value under another system key. The two scope values are those
+element never matches a message element or the same value under another system key. A message element whose
+`content` is an array of exactly one object with exactly the members `type` = `"text"` and a string `text` — a
+**bare text block** — SHALL be hashed as if its `content` were that string: a client sends the message carrying
+the newest cache marker as such a block and, once the marker has moved on, the same message as the plain string, so
+the two shapes are one message to the hashes. Only `e(hk)` reads it that way; the stored body keeps the shape the
+request was sent in. The two scope values are those
 the record's `dial_usage_log` row carries, and `tools` is the canonical JSON of the request's top-level `tools`,
 hashed apart from every value when the request carries none, so `null`, `[]` and an absent `tools` never match. `pn`
 is the request's **path**. Because each prefix hash folds in every element before it, the scope and the tools, two
 requests SHALL have an equal `pk` only when their first `k` history elements are identical, system key names
-included, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
+included and a bare text block read as its string, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
 SHALL never yield an equal hash.
 
 The request's **parent** SHALL be a stored or same-flush chat request whose path equals the deepest `pk`
@@ -3454,7 +3459,11 @@ message array (under the key the classification above chose: the first of `messa
 value is an array), then, for a row with a parent, each system key that its chain's root carries, in the order listed
 above, valued with its history element (`h1..hs`), and the root's `tools` member when the root has one, and finally
 the row's own cache markers, SHALL yield a JSON document equal to the received body
-(same members and values; key order and whitespace are not preserved). Ingest SHALL store everything a rebuild needs,
+(same members and values; key order and whitespace are not preserved), with one exception: a message the row
+inherits comes back in the shape the row that stored it sent, so where one of the two sent a bare text block and the
+other the plain string, the rebuilt message MAY carry either. A marker of the row that names the only block of a
+message stored as a plain string SHALL be restored onto that message as a bare text block, which is the shape the
+row sent. Ingest SHALL store everything a rebuild needs,
 and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
 request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
@@ -3507,6 +3516,25 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 - **WHEN** a request body carries `system_instruction` and a `contents` array
 - **THEN** it is stored in delta form, with `system_instruction` as the first history element and the
   `contents` elements after it
+
+#### Scenario: A message sent as a text block and then as a plain string stays on the chain
+
+- **WHEN** turn 1 ends with a user message whose `content` is `[{"type":"text","text":"u1"}]` carrying a
+  `cache_control` marker, and turn 2 repeats that message as `"content":"u1"` and adds two messages
+- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages, and its rebuild
+  equals the request it was sent as except that the inherited message carries `u1` as the one text block
+
+#### Scenario: A message sent as a plain string and then as a marked text block rebuilds as sent
+
+- **WHEN** turn 1 holds a user message `"content":"u1"`, and turn 2 repeats it as
+  `[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]` and adds two messages
+- **THEN** turn 2's parent is turn 1, and its rebuild equals the request it was sent as, marker included
+
+#### Scenario: Content that is not one bare text block is another message
+
+- **WHEN** a stored request holds a user message `"content":"u1"`, and a request in the same scope opens with
+  that text as one of two blocks, as a text block carrying a further member, or as a block of another `type`
+- **THEN** the new request is a root
 
 #### Scenario: The history rebuilds exactly
 

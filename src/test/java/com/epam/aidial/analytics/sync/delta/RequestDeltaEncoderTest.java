@@ -264,6 +264,63 @@ class RequestDeltaEncoderTest {
         assertRebuilds(t2);
     }
 
+    /**
+     * Four consecutive requests of one coding-agent session, reduced to their structure
+     * ({@code fixtures/request-delta/coding-agent-turns.json}). The client sends the message carrying the newest cache
+     * marker as a one-text-block array and, once the marker has moved on, as the plain string.
+     */
+    @Test
+    void messageSentAsTextBlockThenAsPlainStringStaysOnTheChain() {
+        JsonNode turns = Rebuild.MAPPER.readTree(getClass().getResourceAsStream("/fixtures/request-delta/coding-agent-turns.json"));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (int i = 0; i < turns.size(); i++) {
+            rows.add(row("e" + i, "10:0" + i + ":00.000", turns.get(i).toString()));
+            flush(rows.get(i));
+        }
+
+        for (int i = 1; i < rows.size(); i++) {
+            assertThat(rows.get(i).get("request_parent_hash")).as("turn %d", i).isEqualTo(rows.get(i - 1).get("request_hash"));
+            assertThat(messages(rows.get(i))).as("turn %d", i).hasSize(2);
+            JsonNode rebuilt = Rebuild.body(table.row("e" + i), table.rows());
+            assertThat(textBlocksAsStrings(rebuilt)).as("turn %d", i).isEqualTo(textBlocksAsStrings(turns.get(i)));
+        }
+    }
+
+    /** The other direction: the parent stored the plain string, and the child marks that message, so sends it as a block. */
+    @Test
+    void messageSentAsPlainStringThenAsMarkedTextBlockRebuildsAsSent() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\","
+                + "\"cache_control\":{\"type\":\"ephemeral\"}}]}," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(messages(t2)).hasSize(2);
+        assertRebuilds(t2);
+    }
+
+    /** Only a lone text block with nothing but its text is the plain string: any other content is another message. */
+    @Test
+    void contentThatIsNotOneBareTextBlockIsNotThePlainString() {
+        flush(row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]")));
+        String rest = "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]";
+        Map<String, Object> twoBlocks = row("e2", "10:01:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"},{\"type\":\"text\",\"text\":\"x\"}]}" + rest));
+        Map<String, Object> extraMember = row("e3", "10:02:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\",\"citations\":[]}]}" + rest));
+        Map<String, Object> otherType = row("e4", "10:03:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u1\"}]}" + rest));
+
+        flush(twoBlocks);
+        flush(extraMember);
+        flush(otherType);
+
+        assertThat(List.of(twoBlocks, extraMember, otherType)).allSatisfy(row ->
+                assertThat(row.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString()));
+    }
+
     @Test
     void bodiesThatAreNotChatRequestsAreLeftWhole() {
         Map<String, Object> mcp = row("e1", "10:00:00.000", "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"id\":1}");
@@ -823,6 +880,19 @@ class RequestDeltaEncoderTest {
     /** The message array a row's stored body holds. */
     private static JsonNode messages(Map<String, Object> row) {
         return Rebuild.MAPPER.readTree((String) row.get("request_body")).get("messages");
+    }
+
+    /** A body in canonical form with each message's lone bare text block written as the plain string. */
+    private static String textBlocksAsStrings(JsonNode body) {
+        JsonNode copy = body.deepCopy();
+        for (JsonNode message : copy.get("messages")) {
+            JsonNode content = message.get("content");
+            if (content.isArray() && content.size() == 1 && content.get(0).size() == 2
+                    && "text".equals(content.get(0).path("type").asString("")) && content.get(0).path("text").isString()) {
+                ((tools.jackson.databind.node.ObjectNode) message).set("content", content.get(0).get("text"));
+            }
+        }
+        return Rebuild.canonical(copy);
     }
 
     private static String msg(String role, String content) {

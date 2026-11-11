@@ -157,7 +157,9 @@ that starts a new chain, on a new UTC day for example, stores its history again.
 
 A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`. It
 reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, after the statement runs, to the request
-as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
+as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept, and an
+earlier message may come back as `"content":"…"` where the turn sent the one text block `[{"type":"text","text":"…"}]`,
+or the other way round), with
 `dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
 byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
 request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two

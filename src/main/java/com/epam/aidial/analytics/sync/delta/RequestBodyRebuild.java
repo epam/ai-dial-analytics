@@ -5,6 +5,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.node.StringNode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -91,6 +92,9 @@ public final class RequestBodyRebuild {
     private static final JsonMapper MAPPER = JsonMapper.builder().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS).build();
 
     private static final String CACHE_CONTROL = "cache_control";
+
+    /** Where a marker sits on a message sent as one text block. */
+    private static final String ONLY_BLOCK = "/" + ChatRequest.CONTENT + "/0";
 
     private RequestBodyRebuild() {
     }
@@ -203,7 +207,12 @@ public final class RequestBodyRebuild {
             if (element < 0 || element >= history.size()) {
                 throw new IllegalArgumentException("a cache marker points outside the history");
             }
-            final JsonNode target = at.isEmpty() ? history.get(element) : history.get(element).at(at);
+            JsonNode target = at.isEmpty() ? history.get(element) : history.get(element).at(at);
+            if (ONLY_BLOCK.equals(at) && history.get(element) instanceof ObjectNode message
+                    && message.get(ChatRequest.CONTENT) instanceof StringNode text) {
+                // The row sent this message as one marked text block; the row that stored it sent the plain string.
+                target = message.putArray(ChatRequest.CONTENT).addObject().put("type", "text").set("text", text);
+            }
             if (!(target instanceof ObjectNode object)) {
                 throw new IllegalArgumentException("a cache marker points at no object");
             }
