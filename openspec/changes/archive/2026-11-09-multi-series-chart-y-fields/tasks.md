@@ -12,7 +12,7 @@
 
 ## 3. Docs
 
-- [x] 3.1 Add to `docs/release-0.24.0-upgrade.md` both a section and a row in its "Change | Effect | Action" summary table: `chart.y_field` is now an array (breaking response shape), a string is still accepted, and a rollback first needs the stored arrays rewritten to their first element in `saved_query.chart`, `dashboard.widgets` and `saved_query_aud.chart`
+- [x] 3.1 Add to `docs/release-0.24-upgrade.md` both a section and a row in its "Change | Effect | Action" summary table: `chart.y_field` is now an array (breaking response shape), a string is still accepted, and a rollback first needs the stored arrays rewritten to their first element in `saved_query.chart`, `dashboard.widgets` and `saved_query_aud.chart`
 
 ## 4. Verification
 

@@ -174,6 +174,20 @@ class SyncPropertiesTest {
                         .getFailure().hasStackTraceContaining("sync.request-body-mode").hasStackTraceContaining("compact"));
     }
 
+    @Test
+    void sensitiveColumnsAreEnabledByDefault() {
+        contextRunner.run(context ->
+                assertThat(context.getBean(SyncProperties.class).sensitiveColumnsEnabled()).isTrue());
+        assertThat(properties(10000, 134_217_728L).sensitiveColumnsEnabled()).isTrue();
+    }
+
+    @Test
+    void sensitiveColumnsCanBeDisabledFromTheEnvironment() {
+        contextRunner.withSystemProperties("SYNC_SENSITIVE_COLUMNS_ENABLED=false")
+                .run(context ->
+                        assertThat(context.getBean(SyncProperties.class).sensitiveColumnsEnabled()).isFalse());
+    }
+
     @EnableConfigurationProperties(SyncProperties.class)
     static class BindSyncProperties {
     }
@@ -189,7 +203,7 @@ class SyncPropertiesTest {
     private static SyncProperties properties(int batchSize, long maxBatchBytes, int maxLineBytes) {
         return new SyncProperties(
                 "0 0 1 * * *", 1, batchSize, maxBatchBytes, maxLineBytes, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null, null);
     }
 
     private static Set<ConstraintViolation<SyncProperties>> violationsFor(long maxBatchBytes) {
@@ -245,12 +259,12 @@ class SyncPropertiesTest {
     @Test
     void rejectsEmptyOrBlankTargets() {
         SyncProperties noTargets = new SyncProperties(
-                "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true, List.of(), null, null, null);
+                "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true, List.of(), null, null, null, null);
         assertThat(validator.validate(noTargets)).isNotEmpty();  // at least one target is required
 
         SyncProperties blankTable = new SyncProperties(
                 "0 0 1 * * *", 1, 10000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd", "'date='yyyy-MM-dd", true,
-                List.of(new SyncProperties.Target("", "classpath:mapping/dial-usage-log.yaml")), null, null, null);
+                List.of(new SyncProperties.Target("", "classpath:mapping/dial-usage-log.yaml")), null, null, null, null);
         assertThat(validator.validate(blankTable)).isNotEmpty();  // a target's table must be non-blank
     }
 }
