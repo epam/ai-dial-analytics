@@ -79,6 +79,10 @@ public class CatalogSchemaWriter {
     public void persistSchema(String name, DefineSchemaInput draft) {
         final TableDefinitionEntity definition = definitions.findById(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // Checked before the policy guard, so an invalid column gets its own error and not the guard's.
+        if (draft.columns() != null) {
+            draft.columns().forEach(TableColumnRules::requireValidUserColumn);
+        }
         requireRowPolicyColumnsKept(definition, draft);
         if (definition.getType() == TableType.ENRICHMENT) {
             persistEnrichmentSchema(definition, draft);

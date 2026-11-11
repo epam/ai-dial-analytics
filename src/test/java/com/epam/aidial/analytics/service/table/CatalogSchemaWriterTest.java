@@ -181,6 +181,40 @@ class CatalogSchemaWriterTest {
     }
 
     @Test
+    void persistSchemaRefusesChangingElementTypeOfRowPolicyColumn() {
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.FAILED);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(rowPolicies.referencedColumns(def)).willReturn(Map.of("tags", Set.of("team-x")));
+        final ColumnMappingEntity storedTags = column("widget_metrics", "tags", QueryFieldType.ARRAY);
+        storedTags.setElementType(QueryFieldType.STRING);
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(storedTags));
+
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(col("widget_id", QueryFieldType.STRING),
+                        new ColumnInput("tags", "tags", QueryFieldType.ARRAY, QueryFieldType.LONG, null, null, null, null, null,
+                                false, false)),
+                List.of("widget_id"), null, null, null, null, null)))
+                .isInstanceOf(ColumnInRowPolicyException.class)
+                .hasMessageContaining("tags");
+        verify(columns, never()).deleteByTableName(any());
+    }
+
+    @Test
+    void persistSchemaReportsAnInvalidColumnBeforeTheRowPolicyGuard() {
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+
+        // An element type on a scalar column is invalid whether or not a policy filters on it.
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(new ColumnInput("project_id", "project_id", QueryFieldType.STRING, QueryFieldType.LONG, null, null, null,
+                        null, null, false, false)),
+                List.of("project_id"), null, null, null, null, null)))
+                .isInstanceOf(TableValidationException.class);
+        verifyNoInteractions(rowPolicies);
+    }
+
+    @Test
     void persistSchemaAcceptsKeptRowPolicyColumn() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
