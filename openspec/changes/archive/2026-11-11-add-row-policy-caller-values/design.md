@@ -5,7 +5,7 @@ See `proposal.md` for the motivation. The pieces this design builds on:
 - A row policy is a filter tree stored per role on a table and rendered to a ClickHouse predicate on every
   read; the predicates travel in the `additional_table_filters` setting, which ClickHouse applies to every
   reference of the table in the statement. See
-  [table-access-control](../../specs/table-access-control/spec.md).
+  [table-access-control](../../../specs/table-access-control/spec.md).
 - A policy refuses every `param` today, because nothing could bind one. The refusal exists in the policy
   scope check and again in the expression translator and the SQL renderer.
 - `dial_usage_log` identifies the user only by `user_hash`, which is DIAL Core's `user.id` log field:
