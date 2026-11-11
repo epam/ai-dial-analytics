@@ -3548,8 +3548,8 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 
 - **WHEN** B was stored as a root, C was stored as B's child, and B is then re-ingested after A was stored,
   so the surviving B row is A's child with a shorter stored body
-- **THEN** rebuilding C by following `request_parent_hash` through the surviving rows still yields C's exact
-  history
+- **THEN** rebuilding C by following `request_parent_hash` through the surviving rows still yields C's history,
+  up to the shape of a bare text block
 
 ### Requirement: A request inherits its parent's tools
 
@@ -3602,7 +3602,8 @@ of different tenants never share a chain. One of the two is enough for a scope; 
 project and no user, chains within its project.
 
 A rebuild reads only rows whose path equals a prefix of the rebuilt row's own history, and takes from them only
-their history elements, system keys and `tools`, which the prefix hashes prove equal to the rebuilt request's own. A
+their history elements, system keys and `tools`, which the prefix hashes prove equal to the rebuilt request's own,
+up to the shape of a bare text block. A
 rebuilt body therefore never carries another request's content, though the rows read to assemble it hold their own
 top-level members (`model`, sampling parameters) and cache markers, which a rebuilding surface SHALL NOT return. A
 rebuild does need every row of the chain, and a chain MAY span rows that differ in anything outside the scope and the
@@ -3791,7 +3792,7 @@ or parent the first phase found (it was re-ingested between the two reads), its 
 the remaining rounds or returned `partial`.
 
 A rebuild SHALL return `partial` when: a path on the chain is carried by no row of the partition (the parent was
-never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form or
+never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form, element-hashing or
 inline-file setting change); a bound below is reached before the chain is complete; a rebuild statement fails or the
 read's budget runs out while the rebuild is in progress; or a body on the chain does not have the shape the rebuild
 expects (for example, a stored root that is not a chat request).
@@ -3813,7 +3814,7 @@ rows of other days SHALL keep resolving.
 returns the values of both, and SHALL therefore be visible to a caller only when it may see every sensitive column
 among the two. The ancestors a rebuild reads SHALL be read under the same governance as the requested row and
 SHALL never be returned as rows of their own. Because a chain stays inside one project, user and UTC day and a
-rebuilt body equals what the requested row's own request carried, a rebuild SHALL disclose nothing the same row
+rebuilt body equals what the requested row's own request carried, up to the shape of a bare text block, a rebuild SHALL disclose nothing the same row
 would not disclose had it been stored whole. Restricting the ancestors a rebuild reads by deployment or model
 inside a project is not part of this requirement.
 
@@ -3887,8 +3888,8 @@ service's other statements, its bound paths and event ids counted rather than pr
 
 - **WHEN** an ancestor's event is re-ingested between the two phases and its surviving row links to a different
   parent
-- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's exact
-  body, or returns `partial` with the stored body — never a body assembled from two versions of one event
+- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's
+  body, up to the shape of a bare text block, or returns `partial` with the stored body — never a body assembled from two versions of one event
 
 #### Scenario: The rebuild never leaves the row's day
 

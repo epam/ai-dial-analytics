@@ -42,7 +42,7 @@ Each file is a `transform` block reduced to the members `TemplatePlaceholderRule
 
 # Request-delta fixtures
 
-### `request-delta/coding-agent-turns.json` — four consecutive requests of one conversation
+## `request-delta/coding-agent-turns.json` — four consecutive requests of one conversation
 
 Read by `RequestDeltaEncoderTest`. **Synthetic, modelled on the shape of a coding-agent client's requests.** Every
 string is a `text-N` placeholder, equal strings sharing one placeholder, so what repeats from turn to turn still

@@ -35,7 +35,7 @@ import java.util.TreeMap;
  * surrogate escape, parsing turns it into a lone {@code char}, and written back raw it would reach ClickHouse as an
  * escape the server refuses, failing the insert on every retry, or as bytes that are not UTF-8. The canonical form is
  * what the prefix hashes cover, so it is only required to be stable within a release: a different form after an upgrade
- * makes the first request of each conversation a chain root, and breaks nothing.
+ * makes the first request of each conversation a chain root; re-ingest across it only by whole UTC days.
  */
 public final class ChatRequest {
 

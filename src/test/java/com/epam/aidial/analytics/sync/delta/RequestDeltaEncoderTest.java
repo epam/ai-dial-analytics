@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.sync.delta;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -299,6 +300,7 @@ class RequestDeltaEncoderTest {
         flush(t2);
 
         assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(messages(t2)).hasSize(2);
         assertThat(Rebuild.canonical(Rebuild.body(table.row("e2"), table.rows()))).isEqualTo(Rebuild.canonical(chat("[" + block + "}]}" + added)));
     }
 
@@ -905,7 +907,7 @@ class RequestDeltaEncoderTest {
             JsonNode content = message.get("content");
             if (content.isArray() && content.size() == 1 && content.get(0).size() == 2
                     && "text".equals(content.get(0).path("type").asString("")) && content.get(0).path("text").isString()) {
-                ((tools.jackson.databind.node.ObjectNode) message).set("content", content.get(0).get("text"));
+                ((ObjectNode) message).set("content", content.get(0).get("text"));
             }
         }
         return Rebuild.canonical(copy);
