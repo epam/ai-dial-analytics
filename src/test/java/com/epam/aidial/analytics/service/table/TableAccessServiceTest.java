@@ -109,6 +109,19 @@ class TableAccessServiceTest {
     }
 
     @Test
+    @DisplayName("a '*' already stored in 'write' does not block an edit of another list")
+    void storedWildcardInWriteDoesNotBlockOtherEdits() {
+        final TableDefinitionEntity def = table("t");
+        def.getAccess().setRolesFor(Privilege.TABLE_WRITE, List.of("*"));
+        existing(def);
+
+        assertThat(service.replaceAccess("t", Map.of(Privilege.TABLE_READ, List.of("viewer"))).access().getRead())
+                .containsExactly("viewer");
+        assertThatThrownBy(() -> service.replaceAccess("t", Map.of(Privilege.TABLE_WRITE, List.of("*"))))
+                .isInstanceOf(TableValidationException.class);
+    }
+
+    @Test
     @DisplayName("read-side keys are storable on a system table")
     void systemTableAcceptsReadGrants() {
         final TableDefinitionEntity def = table("sys");

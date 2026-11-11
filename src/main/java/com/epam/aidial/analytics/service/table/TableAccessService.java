@@ -108,7 +108,8 @@ public class TableAccessService {
                         + PrivilegeScope.grantKey(privilege) + "' list must be empty because every modifying "
                         + "operation on it is refused regardless of any grant");
             }
-            if (PrivilegeScope.isModifying(privilege) && effective.contains(SecurityClaimsExtractor.ANYONE)) {
+            // Only a list the request sends: a '*' stored earlier confers nothing and must not block other edits.
+            if (PrivilegeScope.isModifying(privilege) && normalized != null && normalized.contains(SecurityClaimsExtractor.ANYONE)) {
                 throw new TableValidationException("'" + SecurityClaimsExtractor.ANYONE + "' stands for every "
                         + "authenticated caller and may be named only in a read-side list (get, read, sensitive), "
                         + "not in '" + PrivilegeScope.grantKey(privilege) + "'");

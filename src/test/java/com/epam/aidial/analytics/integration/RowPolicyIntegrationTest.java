@@ -506,6 +506,9 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 "{\"where\":\"project = 'P1' LIMIT 1\"}",
                 "{\"where\":\"project = 'P1') GROUP BY (project\"}",
                 "{\"where\":\"project = 'P1') ORDER BY (n\"}",
+                // A line comment does not swallow the closing parenthesis and let a clause through.
+                "{\"where\":\"project = 'P1') OFFSET 5 ROWS --\"}",
+                "{\"where\":\"project = 'P1') LIMIT 1 --\"}",
                 // The placement rule of a caller value holds in SQL too.
                 "{\"where\":\"coalesce(caller.user_hash, '') = project\"}",
                 "{\"where\":\"n = caller.user_hash\"}",

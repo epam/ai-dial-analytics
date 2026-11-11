@@ -72,8 +72,9 @@ public class RowPolicyConditions {
             throw new TableValidationException("'where' must not be blank");
         }
         final String marker = UUID.randomUUID() + ":";
-        // The parentheses keep the text one condition: a trailing clause inside them does not parse.
-        final String statement = "SELECT * FROM \"" + table + "\" WHERE (" + markCallerValues(condition, marker) + ")";
+        // The parentheses keep the text one condition: a trailing clause inside them does not parse. The
+        // closing one is on its own line, so a line comment ending the text cannot swallow it.
+        final String statement = "SELECT * FROM \"" + table + "\" WHERE (" + markCallerValues(condition, marker) + "\n)";
         final AtomicReference<SqlTranslation> translated = new AtomicReference<>();
         try {
             systemIdentity.runAsSystem(() -> translated.set(sql.translate(statement, Privilege.TABLE_GET)));
@@ -85,7 +86,7 @@ public class RowPolicyConditions {
         }
         final StructuredQuery query = translated.get().query();
         // Balanced parentheses can still close the condition and open a clause; a policy is a condition only.
-        if (query.filter() == null || query.having() != null || query.distinct() || translated.get().explicitLimit()
+        if (query.filter() == null || query.having() != null || query.distinct() || query.page() != null
                 || !isEmpty(query.groupBy()) || !isEmpty(query.sort())) {
             throw new TableValidationException("'where' must be a single condition, with no other clause");
         }
