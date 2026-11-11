@@ -180,7 +180,8 @@ public class TableAccessService {
             return true;
         }
         return source != null
-                && TableCallerPermissions.isGranted(source.getAccess(), Privilege.TABLE_READ, Set.of(role));
+                && TableCallerPermissions.isGranted(source.getAccess(), Privilege.TABLE_READ,
+                        SecurityClaimsExtractor.carriedWith(role));
     }
 
     /**
@@ -194,7 +195,8 @@ public class TableAccessService {
                 return true;
             }
         }
-        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET, Set.of(role));
+        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET,
+                SecurityClaimsExtractor.carriedWith(role));
     }
 
     private TableDefinitionEntity require(String tableName) {

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table.grant;
 
 import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.PipelineInputDependents;
@@ -46,6 +47,10 @@ import java.util.Set;
  * and only to <em>refuse</em> — never to exempt, for the reason below. It is checked when grants or
  * schema change, not when the mapping does: remapping a role to global {@code TABLE_SENSITIVE} after its
  * derived {@code read} grant was stored is not re-examined, and is an operator's decision to make knowingly.
+ *
+ * <p><b>{@code *} is the role every caller carries.</b> On the source side a list naming it covers any
+ * role; on the derived side a {@code read} grant to it reaches every role the mapping clears globally, and
+ * each is held to the bar above.
  *
  * <p>While sensitive-column entitlement was a single global role, declaring the derived column
  * {@code sensitive} was a uniform barrier and nothing like this was needed. Per-table entitlement is what
@@ -151,6 +156,8 @@ import java.util.Set;
  */
 @Component
 public class SensitiveGrantInvariant {
+
+    private static final String ANYONE = SecurityClaimsExtractor.ANYONE;
 
     private final TableDefinitionRepository definitions;
     private final ColumnMappingRepository columns;
@@ -319,8 +326,8 @@ public class SensitiveGrantInvariant {
         for (final String role : derivedGrants.rolesFor(Privilege.TABLE_SENSITIVE)) {
             // The source side needs the clearance AND a read, because the clearance alone reads nothing: a
             // role cleared on the source but not granted its read never could see the values derived here.
-            if (sourceCleared.contains(role)
-                    && TableCallerPermissions.isGranted(sourceAccess, Privilege.TABLE_READ, Set.of(role))) {
+            if (sourceCleared.stream().anyMatch(SecurityClaimsExtractor.carriedWith(role)::contains)
+                    && readsSource(sourceAccess, role)) {
                 continue;
             }
             throw new SensitiveGrantWidensException("table '" + derived.getName()
@@ -330,17 +337,29 @@ public class SensitiveGrantInvariant {
                     + " derives from. Grant 'read' and 'sensitive' on '" + sourceName + "' as well, or remove"
                     + " the role from '" + derived.getName() + "'");
         }
-        for (final String role : derivedGrants.rolesFor(Privilege.TABLE_READ)) {
-            if (!providerRolePrivileges.holdsGlobally(role, Privilege.TABLE_SENSITIVE)
-                    || TableCallerPermissions.isGranted(sourceAccess, Privilege.TABLE_READ, Set.of(role))) {
-                continue;
+        for (final String grantee : derivedGrants.rolesFor(Privilege.TABLE_READ)) {
+            // '*' reaches every caller, so every role cleared globally reads through it.
+            final Set<String> reached = ANYONE.equals(grantee)
+                    ? providerRolePrivileges.rolesHoldingGlobally(Privilege.TABLE_SENSITIVE)
+                    : Set.of(grantee);
+            for (final String role : reached) {
+                if (!providerRolePrivileges.holdsGlobally(role, Privilege.TABLE_SENSITIVE)
+                        || readsSource(sourceAccess, role)) {
+                    continue;
+                }
+                throw new SensitiveGrantWidensException("table '" + derived.getName()
+                        + "' grants 'read' to '" + grantee + "', which reaches role '" + role + "'; that role holds"
+                        + " the sensitive clearance globally, so it would read '" + derived.getName() + "''s"
+                        + " sensitive column; the table it reads, '" + sourceName + "', does not grant it 'read'."
+                        + " Grant 'read' on '" + sourceName + "' as well, or remove '" + grantee + "' from '"
+                        + derived.getName() + "'");
             }
-            throw new SensitiveGrantWidensException("table '" + derived.getName()
-                    + "' grants 'read' to role '" + role + "', which holds the sensitive clearance globally, so"
-                    + " it would read '" + derived.getName() + "''s sensitive column; the table it reads, '"
-                    + sourceName + "', does not grant it 'read'. Grant 'read' on '" + sourceName + "' as well,"
-                    + " or remove the role from '" + derived.getName() + "'");
         }
+    }
+
+    /** Whether a caller carrying {@code role} reads {@code source} — by that role, or by the {@code *} every caller carries. */
+    private static boolean readsSource(TableAccess source, String role) {
+        return TableCallerPermissions.isGranted(source, Privilege.TABLE_READ, SecurityClaimsExtractor.carriedWith(role));
     }
 
     /** {@code pending} when the caller supplied one, else the stored lists; never null. */

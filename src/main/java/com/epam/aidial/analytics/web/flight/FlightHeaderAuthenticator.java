@@ -2,8 +2,6 @@ package com.epam.aidial.analytics.web.flight;
 
 import com.epam.aidial.analytics.web.security.ConditionalOnSecurityMode;
 import com.epam.aidial.analytics.web.security.Privilege;
-import com.epam.aidial.analytics.web.security.PrivilegeAuthority;
-import com.epam.aidial.analytics.web.security.ProviderRoleAuthority;
 import com.epam.aidial.analytics.web.security.SecurityMode;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthorityResolver;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyCache;
@@ -22,7 +20,6 @@ import org.springframework.security.authentication.AuthenticationServiceExceptio
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.server.resource.authentication.BearerTokenAuthenticationToken;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationProvider;
 import org.springframework.security.oauth2.server.resource.authentication.OpaqueTokenAuthenticationProvider;
@@ -44,8 +41,7 @@ import java.util.List;
  * order.
  *
  * <p>Authorization mirrors the HTTP surface: this gate requires only that the principal be
- * authenticated and hold <em>some</em> table read privilege — globally or by a grant — and the per-RPC
- * checks in {@code AdasFlightSqlProducer} then decide each call, with the metadata RPCs filtered by
+ * authenticated, and the per-RPC checks in {@code AdasFlightSqlProducer} then decide each call, with the metadata RPCs filtered by
  * {@link Privilege#TABLE_READ} exactly as HTTP discovery is. The gate used to require
  * {@code FULL_ADMIN} or {@code READ_ONLY_ADMIN}, which made a caller authorized entirely by per-table
  * grants — the BI-tool persona those grants exist for — unable to reach Flight at all.
@@ -204,32 +200,21 @@ public class FlightHeaderAuthenticator implements CallHeaderAuthenticator {
     }
 
     /**
-     * The HTTP {@code /v1/**} rule, mirrored: authentication, plus the one thing that can be decided
-     * without a catalog lookup — that the caller could be authorized for <em>something</em>.
+     * The HTTP {@code /v1/**} rule, mirrored: authentication and nothing more.
      *
      * <p>Everything else is decided per RPC, downstream, by the same filtered query model the HTTP surface
      * resolves through: the metadata RPCs list only tables the caller may read, and a statement over one it
      * may not resolves as an unknown entity. What this gate must not do is test for an application role, as
      * it used to: a caller authorized entirely by per-table grants — the BI-tool persona those grants exist
-     * for — holds no global privilege and would be turned away at the door.
-     *
-     * <p>A caller holding no privilege and carrying no provider role can never match anything, globally or
-     * by grant, so it is rejected here rather than served an empty catalog on every call.
+     * for — holds no global privilege and would be turned away at the door. Nor may it turn away a caller
+     * with no privilege and no provider role: every authenticated caller carries the {@code *} grantee, so a
+     * table granting {@code *} reaches it.
      */
     private static AuthResult authorized(ResolvedCall call) {
         final Authentication authentication = call.authentication();
         if (!authentication.isAuthenticated()) {
             throw CallStatus.UNAUTHENTICATED
                     .withDescription("invalid credentials")
-                    .toRuntimeException();
-        }
-        final boolean authorizable = authentication.getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority)
-                .anyMatch(a -> PrivilegeAuthority.isPrivilege(a) || ProviderRoleAuthority.isProviderRole(a));
-        if (!authorizable) {
-            throw CallStatus.UNAUTHORIZED
-                    .withDescription("principal holds no privilege and carries no provider role, so no table "
-                            + "is reachable")
                     .toRuntimeException();
         }
         final String identity = authentication.getName();

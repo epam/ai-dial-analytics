@@ -73,8 +73,9 @@ a bundle or privilege name SHALL NOT be a valid grantee.
 The grantee `*` SHALL stand for **every authenticated caller**, whatever its provider roles and including a
 caller that carries none: a list naming `*` grants its privilege to all of them. `*` SHALL be accepted in
 the read-side lists (`get`, `read`, `sensitive`) and refused with HTTP 422 in `write` and `modify`. It SHALL
-behave as a provider role every such caller carries, in grant evaluation, in permission reporting and in
-row-policy evaluation alike. The system identity that background work runs under SHALL NOT carry it. A
+behave as a provider role every such caller carries, in grant evaluation, in permission reporting, in
+row-policy evaluation, in the sensitive-grant invariant and in the ineffective-grant report alike. The
+system identity that background work runs under SHALL NOT carry it. A
 mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege.
 
 Grant lists on a `system` table SHALL be restricted by **key**, not refused wholesale: the read-side

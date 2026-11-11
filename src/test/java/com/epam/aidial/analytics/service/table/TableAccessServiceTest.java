@@ -286,6 +286,56 @@ class TableAccessServiceTest {
     }
 
     @Test
+    @DisplayName("a source granting '*' covers every named role on the derived table")
+    void wildcardOnTheSourceCoversNamedDerivedGrants() {
+        // Every caller carries '*', so a role named on the derived table reads and is cleared on the source.
+        final TableDefinitionEntity source = table("dial_usage_log");
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("*"));
+        source.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("*"));
+        final TableDefinitionEntity enrichment = sensitiveEnrichmentOf("dial_usage_log", source);
+        when(providerRolePrivileges.holdsGlobally("analysts", Privilege.TABLE_SENSITIVE)).thenReturn(true);
+
+        final AccessReplacement accepted = service.replaceAccess(enrichment.getName(), Map.of(
+                Privilege.TABLE_SENSITIVE, List.of("team-x"),
+                Privilege.TABLE_READ, List.of("analysts")));
+
+        assertThat(accepted.access().getSensitive()).containsExactly("team-x");
+        assertThat(accepted.access().getRead()).containsExactly("analysts");
+    }
+
+    @Test
+    @DisplayName("a derived read for '*' reaches every globally cleared role, so the source must let each read")
+    void wildcardReadOnTheDerivedTableReachesGloballyClearedRoles() {
+        final TableDefinitionEntity source = table("dial_usage_log");
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("analysts"));
+        final TableDefinitionEntity enrichment = sensitiveEnrichmentOf("dial_usage_log", source);
+        when(providerRolePrivileges.rolesHoldingGlobally(Privilege.TABLE_SENSITIVE)).thenReturn(java.util.Set.of("pii-bots"));
+        when(providerRolePrivileges.holdsGlobally("pii-bots", Privilege.TABLE_SENSITIVE)).thenReturn(true);
+
+        assertThatThrownBy(() -> service.replaceAccess(enrichment.getName(), Map.of(Privilege.TABLE_READ, List.of("*"))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.SensitiveGrantWidensException.class)
+                .hasMessageContaining("pii-bots");
+
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("*"));
+        assertThat(service.replaceAccess(enrichment.getName(), Map.of(Privilege.TABLE_READ, List.of("*")))
+                .access().getRead()).containsExactly("*");
+    }
+
+    /** An enrichment {@code usage_insights} of {@code sourceName}, carrying one sensitive column. */
+    private TableDefinitionEntity sensitiveEnrichmentOf(String sourceName, TableDefinitionEntity source) {
+        final TableDefinitionEntity enrichment = table("usage_insights");
+        enrichment.setType(TableType.ENRICHMENT);
+        enrichment.setSourceTable(sourceName);
+        existing(enrichment);
+        when(definitions.findById(sourceName)).thenReturn(Optional.of(source));
+        final ColumnMappingEntity sensitive = new ColumnMappingEntity();
+        sensitive.setTableName("usage_insights");
+        sensitive.setSensitive(true);
+        when(columns.findByTableNameOrderByOrdinal("usage_insights")).thenReturn(List.of(sensitive));
+        return enrichment;
+    }
+
+    @Test
     @DisplayName("a clearance for a role with no verb on the table is reported as changing nothing")
     void clearanceWithoutVerbIsReported() {
         final TableDefinitionEntity def = table("finance_costs");

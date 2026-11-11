@@ -39,8 +39,8 @@ import static org.mockito.Mockito.when;
 /**
  * Flight auth adapter coverage (spec: Flight authentication mirrors service security mode):
  * missing/invalid credentials → UNAUTHENTICATED, valid api-key with a mapped role → accepted,
- * introspection outage → UNAVAILABLE, bearer precedence over api-key, and a caller with nothing to match
- * → UNAUTHORIZED.
+ * introspection outage → UNAVAILABLE, bearer precedence over api-key, and a caller with no role and no
+ * privilege still admitted, because it carries {@code *}.
  *
  * <p>Also the {@code Basic} credential form: the {@code api-key} sentinel username (case-insensitive),
  * a wrong username rejected before any introspection, the marked bearer value the handshake answers
@@ -139,16 +139,14 @@ class FlightHeaderAuthenticatorTest {
     }
 
     @Test
-    void apiKeyWithNoPrivilegeAndNoProviderRoleIsUnauthorized() {
-        // Nothing to match, globally or by grant, so this caller can never reach a table. Rejected rather
-        // than served an empty catalog on every call.
+    void apiKeyWithNoPrivilegeAndNoProviderRoleIsAdmitted() {
+        // Every authenticated caller carries '*', so a table granting '*' reaches this one too, exactly as
+        // it does over HTTP. The per-RPC filter decides what it sees.
         when(introspector.introspect("k")).thenReturn(
                 new IntrospectionResult("proj", null, List.of(), true));
         when(authorityResolver.resolve(List.of(), true)).thenReturn(java.util.EnumSet.noneOf(Privilege.class));
 
-        assertThatThrownBy(() -> authenticator.authenticate(headers("api-key", "k")))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+        assertThat(authenticator.authenticate(headers("api-key", "k")).getPeerIdentity()).isEqualTo("proj");
     }
 
     @Test
@@ -215,14 +213,13 @@ class FlightHeaderAuthenticatorTest {
     }
 
     @Test
-    void basicWithNoPrivilegeAndNoProviderRoleUnauthorized() {
+    void basicWithNoPrivilegeAndNoProviderRoleIsAdmitted() {
         when(introspector.introspect("k")).thenReturn(
                 new IntrospectionResult("proj", null, List.of(), true));
         when(authorityResolver.resolve(List.of(), true)).thenReturn(java.util.EnumSet.noneOf(Privilege.class));
 
-        assertThatThrownBy(() -> authenticator.authenticate(headers("authorization", basic("api-key", "k"))))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+        assertThat(authenticator.authenticate(headers("authorization", basic("api-key", "k"))).getPeerIdentity())
+                .isEqualTo("proj");
     }
 
     @Test

@@ -110,6 +110,14 @@ public class SecurityClaimsExtractor {
         return roles;
     }
 
+    /**
+     * The provider roles a real caller carrying {@code role} holds at the least: that role and {@link #ANYONE}.
+     * Grant management reasons about a bare role name with it, so a list naming {@code *} covers the role.
+     */
+    public static Set<String> carriedWith(String role) {
+        return ANYONE.equals(role) ? Set.of(ANYONE) : Set.of(role, ANYONE);
+    }
+
     private java.util.stream.Stream<String> authorities() {
         Authentication authentication = currentAuthentication();
         if (authentication == null) {
