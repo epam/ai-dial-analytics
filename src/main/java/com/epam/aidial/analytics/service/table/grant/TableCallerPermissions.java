@@ -10,7 +10,6 @@ import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -86,8 +85,10 @@ public class TableCallerPermissions {
             if (!PrivilegeScope.isGrantable(conferring)) {
                 continue;
             }
-            final List<String> grantedRoles = access.rolesFor(conferring);
-            if (grantedRoles.stream().anyMatch(callerRoles::contains)) {
+            final boolean modifying = PrivilegeScope.isModifying(conferring);
+            // A '*' stored in a modifying list before the wildcard existed confers nothing: fail closed.
+            if (access.rolesFor(conferring).stream()
+                    .anyMatch(role -> callerRoles.contains(role) && !(modifying && SecurityClaimsExtractor.ANYONE.equals(role)))) {
                 return true;
             }
         }

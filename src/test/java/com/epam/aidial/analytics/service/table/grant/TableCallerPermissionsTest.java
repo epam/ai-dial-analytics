@@ -129,6 +129,20 @@ class TableCallerPermissionsTest {
     }
 
     @Test
+    @DisplayName("a '*' stored in write or modify confers nothing, while '*' in read still grants")
+    void storedWildcardInModifyingListConfersNothing() {
+        authenticateWith(EnumSet.noneOf(Privilege.class));
+        final TableDefinitionEntity def = table(Map.of(
+                Privilege.TABLE_WRITE, List.of(SecurityClaimsExtractor.ANYONE),
+                Privilege.TABLE_MODIFY, List.of(SecurityClaimsExtractor.ANYONE)));
+        assertThat(oidc.resolve(def)).isEqualTo(EffectivePermissions.uniform(false));
+        assertThat(TableCallerPermissions.isGranted(def.getAccess(), Privilege.TABLE_WRITE, Set.of(SecurityClaimsExtractor.ANYONE))).isFalse();
+
+        def.getAccess().setRolesFor(Privilege.TABLE_READ, List.of(SecurityClaimsExtractor.ANYONE));
+        assertThat(oidc.resolve(def)).isEqualTo(new EffectivePermissions(true, true, true, false, false, false));
+    }
+
+    @Test
     @DisplayName("null lists and a null access object report nothing")
     void nullAccessReportsNothing() {
         authenticateWith(EnumSet.noneOf(Privilege.class), "writer");
