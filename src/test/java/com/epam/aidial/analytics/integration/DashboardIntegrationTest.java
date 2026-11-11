@@ -35,6 +35,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
@@ -147,6 +148,31 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.widgets[0].inline_query.query.entity").value("dial_usage_log"))
                 .andExpect(jsonPath("$.widgets[0].inline_query.result_view").value("chart"))
                 .andExpect(jsonPath("$.widgets[0].inline_query.chart.x_field").value("project_id"));
+    }
+
+    @Test
+    void inlineChartCarriesSeveralSeriesAndReadsStoredStringAsOne() throws Exception {
+        final String widget = QUERY_WIDGET.replace("\"x_field\":\"project_id\"}",
+                "\"x_field\":\"project_id\",\"y_field\":[\"requests\",\"errors\"]}");
+        final String id = create(body("Multi series", "private", widget));
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.y_field", contains("requests", "errors")));
+
+        // A widget stored before y_field became a list holds a string; no row is migrated, the read normalizes it.
+        jdbc.update("UPDATE dashboard SET widgets = jsonb_set(widgets, '{0,inline_query,chart,y_field}', '\"requests\"')"
+                + " WHERE id = ?", id);
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.y_field", contains("requests")));
+    }
+
+    @Test
+    void rejectsInlineChartSeriesHoldingAnObject() throws Exception {
+        final String widget = QUERY_WIDGET.replace("\"x_field\":\"project_id\"}", "\"x_field\":\"project_id\",\"y_field\":[{}]}");
+        mockMvc.perform(json(post(BASE)).content(body("Bad series", "private", widget)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bad_request"));
     }
 
     @Test

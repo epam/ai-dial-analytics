@@ -114,7 +114,8 @@ and renders the widget.
 #### Scenario: A widget round-trips unchanged
 
 - **WHEN** a dashboard is created with a widget carrying every member
-- **THEN** reading it back returns that widget with every member unchanged
+- **THEN** reading it back returns that widget with every member unchanged, apart from the chart
+  normalization of the saved-query chart model (see **Inline query**)
 
 #### Scenario: Optional widget members are omitted when absent
 
@@ -290,7 +291,9 @@ time-intent rule defines.
 An `inline_query` SHALL be `{ name, query | sql, result_view?, chart? }`: a required non-blank `name` of at
 most 1000 characters, exactly one body — a structured `query` or a `sql` string, a blank `sql` counting as
 absent and being neither stored nor returned — an optional `result_view` (`table` or `chart`, defaulting to `table` as a saved query's does), and
-an optional `chart` in the saved-query chart model. An absent or blank `name` SHALL be `422
+an optional `chart` in the saved-query chart model (see [saved-queries](../saved-queries/spec.md), "Saved
+query chart configuration"), stored and returned as that model defines it, so a string `y_field` is
+returned as a one-element array. An absent or blank `name` SHALL be `422
 validation_error`.
 
 It SHALL carry no `time`, `tag`, `scope`, `source`, owner, `generation` or timestamp: the widget runs under
@@ -315,7 +318,15 @@ the saved query afterwards, and the service SHALL keep no link between them.
 
 - **WHEN** a caller creates a dashboard whose widget holds an inline `sql` body the caller may execute
 - **THEN** the response is `201` and the widget's `inline_query` is returned as sent, with `result_view`
-  filled in when it was absent
+  filled in when it was absent and the chart normalized per the saved-query chart model (a string `y_field`
+  returned as a one-element array)
+
+#### Scenario: An inline chart with several series round-trips
+
+- **WHEN** a caller creates a dashboard whose widget's `inline_query` carries a `chart` with `y_field`
+  `["requests", "errors"]`
+- **THEN** reading the dashboard back returns that chart with `y_field` `["requests", "errors"]`, in that
+  order
 
 #### Scenario: An untranslatable inline body is rejected
 
