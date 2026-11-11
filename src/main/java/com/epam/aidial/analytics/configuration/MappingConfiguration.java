@@ -61,9 +61,9 @@ public class MappingConfiguration {
         for (SyncProperties.Target target : syncProperties.targets()) {
             MappingConfig configured = loader.load(target.mappingFile());
             Set<String> sensitive = excluded.getOrDefault(target.table(), Set.of());
-            MappingConfig mapping = SensitiveColumnExclusion.without(configured, sensitive);
             Set<String> excludedColumns = configured.columns().stream().map(ColumnMapping::column)
                     .filter(sensitive::contains).collect(Collectors.toSet());
+            MappingConfig mapping = SensitiveColumnExclusion.without(configured, excludedColumns);
             MappingEngine engine = new MappingEngine(mapping, transformRegistry, deriverRegistry,
                     syncProperties.inlineFilesPolicy(), target.table(), meterRegistry);
             targets.add(new SyncTarget(target.table(), mapping, engine, excludedColumns));

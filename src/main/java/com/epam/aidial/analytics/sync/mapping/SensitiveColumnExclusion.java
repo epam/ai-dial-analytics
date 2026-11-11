@@ -12,9 +12,11 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Resolves, under {@code sync.sensitive-columns-enabled=false}, which columns each ingest target leaves out of its rows:
@@ -24,8 +26,8 @@ import java.util.stream.Collectors;
  *
  * <p>Read once at startup, in two batched lookups however many targets there are. Startup fails when a sensitive column is
  * one the ingest cannot do without: the deduplication key ({@code trace_id}, {@code core_span_id}, {@code request_time}),
- * or the table's grain key, identity column or ordering-key columns. Leaving one of those out would drop every row or
- * collapse rows that do not belong together. A table the catalog does not define has nothing excluded, with a warning,
+ * or the table's grain key, identity, ordering-key, partition, version or TTL column. Leaving one of those out would drop
+ * every row, collapse rows that do not belong together, or land rows in the epoch partition where retention drops them. A table the catalog does not define has nothing excluded, with a warning,
  * because its sensitivity cannot be known.
  */
 @Slf4j
@@ -70,7 +72,7 @@ public final class SensitiveColumnExclusion {
                 if (required.contains(column)) {
                     throw new IllegalStateException("sync.sensitive-columns-enabled=false cannot exclude column '" + column
                             + "' of ingest target table '" + table + "': the catalog flags it sensitive, but ingest needs it "
-                            + "as a deduplication-key, grain, identity or ordering-key column");
+                            + "as a deduplication-key, grain, identity, ordering-key, partition, version or TTL column");
                 }
             }
             log.info("sync.sensitive-columns-enabled=false: ingest target table {} excludes columns {}", table, sensitive);
@@ -92,12 +94,8 @@ public final class SensitiveColumnExclusion {
 
     private static Set<String> requiredColumns(TableDefinitionEntity definition) {
         Set<String> required = new LinkedHashSet<>(DEDUP_KEY_COLUMNS);
-        if (definition.getGrainKey() != null) {
-            required.add(definition.getGrainKey());
-        }
-        if (definition.getIdentityColumn() != null) {
-            required.add(definition.getIdentityColumn());
-        }
+        Stream.of(definition.getGrainKey(), definition.getIdentityColumn(), definition.getPartitionColumn(),
+                definition.getVersionColumn(), definition.getTtlColumn()).filter(Objects::nonNull).forEach(required::add);
         if (definition.getOrderingKey() != null) {
             required.addAll(definition.getOrderingKey());
         }

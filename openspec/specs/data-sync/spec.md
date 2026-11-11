@@ -3220,9 +3220,11 @@ Under `false`, startup SHALL fail, naming the target table and the column, when 
 
 - the deduplication-key columns `trace_id`, `core_span_id` and `request_time` (see "Records without a
   deduplication key are dropped");
-- the table's grain key, identity column or ordering-key columns as the catalog's table definition records them.
+- the table's grain key, identity column, ordering-key columns, partition column, version column or TTL column as
+  the catalog's table definition records them.
 
-Leaving one of these out would drop every row or collapse rows that do not belong together.
+Leaving one of these out would drop every row, collapse rows that do not belong together, or put rows in the epoch
+partition where retention drops them.
 
 Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it. A target whose
 table has no catalog definition SHALL have nothing excluded, and startup SHALL log a warning naming it, because

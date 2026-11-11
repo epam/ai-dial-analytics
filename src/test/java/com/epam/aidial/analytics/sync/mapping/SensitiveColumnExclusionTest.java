@@ -122,6 +122,22 @@ class SensitiveColumnExclusionTest {
     }
 
     @Test
+    void sensitivePartitionVersionOrTtlColumnFailsStartup() {
+        TableDefinitionEntity custom = definition("custom_sink", null, null, List.of("id"));
+        custom.setPartitionColumn("day");
+        custom.setVersionColumn("version");
+        custom.setTtlColumn("expires");
+        defined.add(custom);
+
+        for (String column : List.of("day", "version", "expires")) {
+            catalog.removeIf(c -> c.getTableName().equals("custom_sink"));
+            column("custom_sink", column, true);
+            assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of("custom_sink"), columns, definitions))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining(column).hasMessageContaining("custom_sink");
+        }
+    }
+
+    @Test
     void tableWithoutCatalogDefinitionWarnsAndExcludesNothing() {
         column("custom_sink", "secret", true);
 
