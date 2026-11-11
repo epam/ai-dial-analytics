@@ -29,4 +29,4 @@
 
 ## 5. Verification
 
-- [ ] 5.1 `./gradlew clean build` passes
+- [x] 5.1 `./gradlew clean build` passes
