@@ -265,9 +265,10 @@ class RequestDeltaEncoderTest {
     }
 
     /**
-     * Four consecutive requests of one coding-agent session, reduced to their structure
-     * ({@code fixtures/request-delta/coding-agent-turns.json}). The client sends the message carrying the newest cache
-     * marker as a one-text-block array and, once the marker has moved on, as the plain string.
+     * Four consecutive requests shaped like a coding agent's ({@code fixtures/request-delta/coding-agent-turns.json}):
+     * the client sends the message carrying the newest cache marker as a one-text-block array and, once the marker has
+     * moved on, as the plain string. The rebuilt bodies are compared up to that shape;
+     * {@link #inheritedMessageRebuildsInTheShapeItsRowStored} pins which shape comes back.
      */
     @Test
     void messageSentAsTextBlockThenAsPlainStringStaysOnTheChain() {
@@ -284,6 +285,21 @@ class RequestDeltaEncoderTest {
             JsonNode rebuilt = Rebuild.body(table.row("e" + i), table.rows());
             assertThat(textBlocksAsStrings(rebuilt)).as("turn %d", i).isEqualTo(textBlocksAsStrings(turns.get(i)));
         }
+    }
+
+    /** The inherited message comes back in the shape the row that stored it sent: here the block, not the string. */
+    @Test
+    void inheritedMessageRebuildsInTheShapeItsRowStored() {
+        String block = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"";
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + block + ",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"));
+        String added = "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]";
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + added));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(Rebuild.canonical(Rebuild.body(table.row("e2"), table.rows()))).isEqualTo(Rebuild.canonical(chat("[" + block + "}]}" + added)));
     }
 
     /** The other direction: the parent stored the plain string, and the child marks that message, so sends it as a block. */

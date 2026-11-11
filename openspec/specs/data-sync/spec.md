@@ -3442,15 +3442,15 @@ a row with an all-zero parent — a root, or a row stored whole — supplies its
 normalized and canonicalized as above.
 Rows carrying the same path MAY differ in parent and stored body (a re-ingested event can link differently, and an
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
-history, so following `request_parent_hash` through whichever row is found always terminates — each parent is
-strictly shallower — and always yields the row's exact canonical history. While a row exists, a row carrying
+history, a bare text block and its plain string counting as one message, so following `request_parent_hash` through whichever row is found always terminates — each parent is
+strictly shallower — and always yields the row's canonical history up to that shape. While a row exists, a row carrying
 its parent's path SHALL exist: a path depends only on the stored history and tools, so replacing a row under the
 `ReplacingMergeTree` keeps it whichever mode wrote the copy, and parent and child share a daily partition, so
 they expire together — up to the part granularity of the TTL: with `ttl_only_drop_parts`, a day still split
 across parts can lose an earlier part before a later one, so in the last day of a day's retention a child MAY
 name a parent already dropped, and its rebuild then fails as an expired row would. One more case breaks that, and it is an operator's to avoid: a path is computed from the
 history as ingest stores it, so re-ingesting an event after changing `sync.inline-files-drop-truncated` or `sync.inline-files-max-size`, or after a
-release that changes the canonical form, gives its new copy a different path. A child that is not re-ingested
+release that changes the canonical form or how an element is hashed, gives its new copy a different path. A child that is not re-ingested
 with it then names a path no row carries any more. Re-ingesting whole UTC days after such a change avoids it,
 since a parent and its children always share one.
 `request_ancestor_hashes` lets a rebuild read the whole chain in one query in the common case, and read further
@@ -3461,7 +3461,8 @@ above, valued with its history element (`h1..hs`), and the root's `tools` member
 the row's own cache markers, SHALL yield a JSON document equal to the received body
 (same members and values; key order and whitespace are not preserved), with one exception: a message the row
 inherits comes back in the shape the row that stored it sent, so where one of the two sent a bare text block and the
-other the plain string, the rebuilt message MAY carry either. A marker of the row that names the only block of a
+other the plain string, the rebuilt message MAY carry either, and two reads of one row MAY differ in it when rows carrying the
+same path stored different shapes. A marker of the row that names the only block of a
 message stored as a plain string SHALL be restored onto that message as a bare text block, which is the shape the
 row sent. Ingest SHALL store everything a rebuild needs,
 and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
@@ -3540,7 +3541,8 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 
 - **WHEN** a chain root A and its descendants B and C are stored, and C is rebuilt by following
   `request_parent_hash` from C through stored rows to the root and concatenating their history elements root first
-- **THEN** the result equals C's normalized, canonical history element for element
+- **THEN** the result equals C's normalized, canonical history element for element, a bare text block and its plain string
+  counting as equal
 
 #### Scenario: A rebuild survives a parent re-linked by re-ingest
 
@@ -3638,7 +3640,8 @@ SHALL NOT fail the flush. This costs storage, never correctness.
 - **THEN** both rows carry their bodies as received and an all-zero `request_hash`, and neither is a parent
 
 A re-ingested event MAY resolve a different parent than its earlier copy did (for example, its parent has
-been stored in the meantime). Both copies carry the same path and rebuild to the same history, so the
+been stored in the meantime). Both copies carry the same path and rebuild to the same history, up to the
+shape of a bare text block, so the
 `ReplacingMergeTree` collapse keeping either one is correct — for the event itself and for every row that
 names its path as parent (see "Rebuild equivalence").
 
@@ -3753,7 +3756,9 @@ stored: no column, ingest stage or migration is added for them, and ingest SHALL
   `request_parent_hash` chain supplies followed by its own message array elements, put back under the key the
   classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
   at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
-  members and values; key order and whitespace are not preserved — written as compact JSON.
+  members and values; key order and whitespace are not preserved, and an inherited message MAY differ in the shape of
+  a bare text block, as "A chat request body is stored as its new history and a parent link" allows — written as
+  compact JSON.
 - **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
   `request_body_full` holds:
   - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
@@ -3777,7 +3782,8 @@ rebuild SHALL NOT read any other partition. The first phase SHALL resolve each r
 chain columns alone — no body — looking paths up in batches, seeded from the requested row's
 `request_ancestor_hashes` and, where a found row's parent is still missing, from that missing path and the found
 row's own `request_ancestor_hashes`, round after round until every chain reaches a root, a round finds nothing new,
-or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history. The
+or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history up to the shape of a
+bare text block. The
 second phase SHALL read the bodies of the rows the chains name, by their `event_id`, and only those. Both phases
 SHALL read deduplicated — the latest version per `event_id`, deduplicated inside each partition. The walk SHALL use
 the parent link of the very row whose body it reads; when a row read in the second phase no longer carries the path

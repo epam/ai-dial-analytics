@@ -17,6 +17,11 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   marked `stored`, so re-pointing first is safe. ADAS does not rewrite pipelines.
 - **Rollback.** Re-point such pipelines back to `request_body` and switch ingest to `whole-with-path` first: a build
   older than 0.24 refuses a pipeline bound to `request_body_full`.
+- **An environment already on `delta` or `whole-with-path`:** a message sent as one text block now hashes like the
+  same message sent as a plain string, so such a message gets a different path than under 0.23. Conversations in
+  progress at the upgrade start a new chain once. Re-ingest across the upgrade, or after a rollback, only by whole
+  UTC days: an event re-ingested alone takes the new path, and its children stored before can no longer be rebuilt.
+  Instances on different builds during a rolling upgrade do not link to each other's rows, which costs storage only.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 

@@ -64,6 +64,18 @@ class RequestBodyRebuildTest {
         assertRebuilt(result, "{\"input\":[{\"content\":\"u1\",\"role\":\"user\"},{\"content\":\"u2\",\"role\":\"user\"}],\"instructions\":\"i\"}");
     }
 
+    /** A marker naming the only block of a message the root stored as a plain string puts the block back. */
+    @Test
+    void markerOnMessageStoredAsPlainStringRestoresTheTextBlock() {
+        root("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}]}");
+
+        RequestBodyRebuild.Result result = rebuild("{\"messages\":[{\"content\":\"u2\",\"role\":\"user\"}]}", ROOT,
+                "[{\"at\":\"/content/0\",\"i\":0,\"v\":{\"type\":\"ephemeral\"}}]");
+
+        assertRebuilt(result, "{\"messages\":[{\"content\":[{\"cache_control\":{\"type\":\"ephemeral\"},\"text\":\"u1\",\"type\":\"text\"}],"
+                + "\"role\":\"user\"},{\"content\":\"u2\",\"role\":\"user\"}]}");
+    }
+
     @Test
     void toolsAreInheritedFromTheRoot() {
         root("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}],\"tools\":[{\"name\":\"t\"}]}");
