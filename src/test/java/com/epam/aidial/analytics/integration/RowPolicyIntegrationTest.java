@@ -41,6 +41,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String PROBE = "rls_probe";
     private static final String ROLLUP = "rls_rollup";
     private static final String PIPELINE = "rls-rollup";
+    private static final String COUNT = "SELECT count(*) AS c FROM " + PROBE;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -235,6 +236,166 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    // --- caller values -----------------------------------------------------------------------------------
+
+    @Test
+    void callerValueConfinesEachCallerToItsOwnRows() throws Exception {
+        putPolicy("team-x", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.filter.args[1].type").value("param"))
+                .andExpect(jsonPath("$.filter.args[1].name").value("caller.user_hash"));
+        // Stored with the parameter, never with one caller's value.
+        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
+                .andExpect(jsonPath("$.policies['team-x'].filter.args[1].name").value("caller.user_hash"));
+
+        // One policy, two callers, two answers.
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken("P2", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(1));
+        sql(callerToken("nobody", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(0));
+        // The existing rule is untouched: a role that reads the table with no policy lifts the confinement.
+        sql(callerToken("P1", "team-x", "viewer"), COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
+        // A hostile value is a literal like any other.
+        sql(callerToken("P1') OR 1 OR ('", "team-x"), COUNT)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(0));
+    }
+
+    @Test
+    void callerWithoutValueReadsNothingAlsoUnderNegation() throws Exception {
+        // A row written for a caller with no identity stores an empty value. An unknown caller value must
+        // match neither it nor anything else, and must not be turned into a match by a negation.
+        asAdmin(post(BASE + "/" + PROBE + "/rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rows\":[{\"project\":\"\",\"n\":5}]}"))
+                .andExpect(status().isOk());
+        final String noValue = callerToken(null, "team-x");
+        final String blankValue = callerToken("  ", "team-x");
+
+        putPolicy("team-x", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}").andExpect(status().isOk());
+        sql(noValue, COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+        sql(blankValue, COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+
+        putPolicy("team-x", "{\"filter\":" + callerIs("ne", "caller.user_hash") + "}").andExpect(status().isOk());
+        sql(noValue, COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+        // With a known value the negation means what its author wrote: every other row.
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+
+        putPolicy("team-x", "{\"filter\":{\"op\":\"not\",\"args\":[" + callerIs("eq", "caller.user_hash") + "]}}")
+                .andExpect(status().isOk());
+        sql(noValue, COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+    }
+
+    @Test
+    void unknownValueLeavesTheOtherBranchOfAnOrWorking() throws Exception {
+        // A token caller has a user hash and no project; one policy still serves it through the other branch.
+        putPolicy("team-x", "{\"filter\":{\"op\":\"or\",\"args\":[" + callerIs("eq", "caller.project") + ","
+                + callerIs("eq", "caller.user_hash") + "]}}")
+                .andExpect(status().isOk());
+
+        sql(callerToken("P1", "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken(null, "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+    }
+
+    @Test
+    void ownRowsPolicyOnTheUsageLogCoversItsPayloadEnrichment() throws Exception {
+        // The payload table has no user column and needs none: it is only ever joined from the usage log, so
+        // the usage log's policy decides which payload rows a caller can reach.
+        final String usage = "dial_usage_log";
+        final String payload = "dial_usage_log_payload";
+        final String time = "'" + java.time.LocalDate.now(java.time.ZoneOffset.UTC) + " 00:00:00.000'";
+        final String[][] rows = {
+                {"00000000-0000-4000-8000-0000000000a1", "rls-hash-1", "body-1"},
+                {"00000000-0000-4000-8000-0000000000a2", "rls-hash-2", "body-2"}};
+        try (com.clickhouse.client.api.Client writer = clickHouseWriter()) {
+            for (final String[] row : rows) {
+                writer.queryAll("INSERT INTO " + usage + " (event_id, project_id, deployment, request_time, trace_id,"
+                        + " core_span_id, user_hash) VALUES (toUUID('" + row[0] + "'),'rls-p','d'," + time + ",'rls-own','"
+                        + row[0].substring(28) + "','" + row[1] + "')");
+                writer.queryAll("INSERT INTO " + payload + " (event_id, request_time, trace_id, core_span_id,"
+                        + " request_body) VALUES (toUUID('" + row[0] + "')," + time + ",'rls-own','" + row[0].substring(28)
+                        + "','" + row[2] + "')");
+            }
+            // The payload columns are sensitive, and a clearance on a table is bounded by the one it reads.
+            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
+            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
+            asAdmin(put(BASE + "/" + usage + "/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
+                            + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}"))
+                    .andExpect(status().isOk());
+
+            final String query = "{\"entity\":\"" + usage + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\","
+                    + "\"name\":\"user_hash\"}},{\"expr\":{\"type\":\"field\",\"name\":\"" + payload + ".request_body\"}}],"
+                    + "\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"trace_id\"},"
+                    + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"rls-own\"}]},"
+                    + "\"page\":{\"type\":\"offset\",\"limit\":100}}";
+            execute(callerToken("rls-hash-1", "team-x"), query)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.rows", hasSize(1)))
+                    .andExpect(jsonPath("$.rows[0].user_hash").value("rls-hash-1"))
+                    .andExpect(jsonPath("$.rows[0]['" + payload + ".request_body']").value("body-1"));
+            execute(callerToken("rls-hash-2", "team-x"), query)
+                    .andExpect(jsonPath("$.rows", hasSize(1)))
+                    .andExpect(jsonPath("$.rows[0]['" + payload + ".request_body']").value("body-2"));
+            execute(callerToken(null, "team-x"), query)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.rows", hasSize(0)));
+            sql(callerToken("rls-hash-1", "team-x"), "SELECT count(*) AS c FROM " + usage + " WHERE trace_id = 'rls-own'")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.rows[0].c").value(1));
+            // Unconfined, both rows are there to be confined from.
+            execute(adminToken(), query).andExpect(jsonPath("$.rows", hasSize(2)));
+        } finally {
+            asAdmin(delete(BASE + "/" + usage + "/row-policies/team-x"));
+            // The derived table first: the source's clearance cannot be withdrawn from under it.
+            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON).content("{}"));
+            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON).content("{}"));
+            try (com.clickhouse.client.api.Client writer = clickHouseWriter()) {
+                writer.queryAll("ALTER TABLE " + usage + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
+                writer.queryAll("ALTER TABLE " + payload + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
+            }
+        }
+    }
+
+    @Test
+    void callerValueOutsideItsOnePositionIsRefused() throws Exception {
+        final String field = "{\"type\":\"field\",\"name\":\"project\"}";
+        final String caller = "{\"type\":\"param\",\"name\":\"caller.user_hash\"}";
+        final String literal = "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"\"}";
+        final List<String> refused = List.of(
+                // The set is closed, and its names are exact.
+                callerIs("eq", "caller.email"),
+                callerIs("eq", "Caller.User_Hash"),
+                // Only a string field: against another type the rendering would depend on the caller's value.
+                "{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"n\"}," + caller + "]}",
+                // Only equality.
+                callerIs("ge", "caller.user_hash"),
+                // A function could turn an unknown value into the constant that hashless rows store.
+                "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"fn\",\"name\":\"coalesce\",\"args\":[" + caller + ","
+                        + literal + "]}]}",
+                "{\"op\":\"in\",\"args\":[" + field + ",{\"type\":\"array\",\"items\":[" + caller + "]}]}",
+                "{\"op\":\"eq\",\"args\":[" + caller + "," + literal + "]}");
+        for (final String filter : refused) {
+            putPolicy("team-x", "{\"filter\":" + filter + "}")
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("validation_error"));
+        }
+
+        asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+    }
+
+    @Test
+    void queryParameterNamedLikeCallerValueIsNotBoundToTheCaller() throws Exception {
+        // The reserved names mean the caller only inside a row policy. A query has no parameters at all, and
+        // one named like a caller value is refused like any other rather than filled in from the identity.
+        execute(callerToken("P1", "viewer"), "{\"entity\":\"" + PROBE + "\",\"mode\":\"row\",\"select\":[{\"expr\":"
+                + "{\"type\":\"field\",\"name\":\"n\"}}],\"filter\":" + callerIs("eq", "caller.user_hash") + ","
+                + "\"page\":{\"type\":\"offset\",\"limit\":100}}")
+                .andExpect(status().is4xxClientError())
+                .andExpect(jsonPath("$.message").value(containsString("param expressions are not supported")));
+    }
+
     // --- governance --------------------------------------------------------------------------------------
 
     @Test
@@ -324,6 +485,36 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         }
         return "{\"filter\":{\"op\":\"in\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
                 + "{\"type\":\"array\",\"items\":[" + items + "]}]}}";
+    }
+
+    /** A direct writer for fixtures in the two ingest tables, which no API inserts into. */
+    private static com.clickhouse.client.api.Client clickHouseWriter() {
+        final var container = ClickHouseContainerSupport.CLICKHOUSE;
+        return new com.clickhouse.client.api.Client.Builder()
+                .addEndpoint("http://" + container.getHost() + ":"
+                        + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
+                .setUsername(container.getUsername())
+                .setPassword(container.getPassword())
+                .setDefaultDatabase(container.getDatabaseName())
+                .build();
+    }
+
+    /** {@code project <op> <caller value>}: the one shape a caller value is admitted in. */
+    private static String callerIs(String op, String callerValue) {
+        return "{\"op\":\"" + op + "\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                + "{\"type\":\"param\",\"name\":\"" + callerValue + "\"}]}";
+    }
+
+    /**
+     * A readonly-issuer caller whose {@code caller.user_hash} is {@code value} — that issuer derives it from
+     * the {@code email} claim unobfuscated — or who has none when {@code value} is {@code null}.
+     */
+    private static String callerToken(String value, String... roles) {
+        final Map<String, Object> claims = new java.util.HashMap<>(Map.of("sub", "rls-caller", "roles", List.of(roles)));
+        if (value != null) {
+            claims.put("email", value);
+        }
+        return JwtTestTokens.token(READONLY_ISSUER, AUDIENCE, claims);
     }
 
     private static String adminToken() {

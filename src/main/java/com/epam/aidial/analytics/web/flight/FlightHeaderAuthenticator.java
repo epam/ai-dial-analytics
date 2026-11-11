@@ -1,17 +1,13 @@
 package com.epam.aidial.analytics.web.flight;
 
-import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.ConditionalOnSecurityMode;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.PrivilegeAuthority;
 import com.epam.aidial.analytics.web.security.ProviderRoleAuthority;
 import com.epam.aidial.analytics.web.security.SecurityMode;
-import com.epam.aidial.analytics.web.security.UserSecurityDetails;
-import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthenticationToken;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthorityResolver;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyCache;
 import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
-import com.epam.aidial.analytics.web.security.apikey.IntrospectionResult;
 import com.nimbusds.jwt.SignedJWT;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.arrow.flight.CallHeaders;
@@ -35,9 +31,7 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.util.Base64;
-import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Flight-side authentication for {@code security.mode=oidc}: a gRPC header adapter
@@ -197,19 +191,10 @@ public class FlightHeaderAuthenticator implements CallHeaderAuthenticator {
                     .toRuntimeException();
         }
         try {
-            return keyCache.getOrAuthenticate(apiKey, () -> {
-                final IntrospectionResult result = coreIntrospector.introspect(apiKey);
-                final Set<Privilege> privileges = resolver.resolve(result.rawRoles(), result.fromProjectKey());
-                // The same shared builder the three HTTP entry points use, so this path carries the caller's
-                // raw PROVIDER_ROLE_* authorities too. It did not, while sharing one ApiKeyCache entry with
-                // HTTP keyed by the credential — so whichever surface introspected a key first decided
-                // whether its per-table grants could match at all.
-                final Collection<GrantedAuthority> authorities =
-                        CallerAuthorities.build(privileges, result.rawRoles());
-                final ApiKeyAuthenticationToken token = new ApiKeyAuthenticationToken(result.principal(), authorities);
-                token.setDetails(new UserSecurityDetails(result.email()));
-                return token;
-            });
+            // The builder the HTTP filter uses. The two surfaces share one ApiKeyCache entry keyed by the
+            // credential, so a token built differently here would let whichever surface introspected a key
+            // first decide its provider roles, its project and its row-policy caller values on both.
+            return keyCache.getOrAuthenticate(apiKey, () -> resolver.authenticate(coreIntrospector.introspect(apiKey)));
         } catch (AuthenticationServiceException e) {
             throw unavailable(e);
         } catch (AuthenticationException e) {

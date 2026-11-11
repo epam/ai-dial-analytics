@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.web.flight;
 
 import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.UserSecurityDetails;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyAuthorityResolver;
 import com.epam.aidial.analytics.web.security.apikey.ApiKeyCache;
 import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
@@ -57,6 +58,12 @@ class FlightHeaderAuthenticatorTest {
             providerOf(introspector),
             providerOf(cache),
             providerOf(authorityResolver));
+
+    {
+        // The token is built by the resolver's own builder, shared with the HTTP filter; only the role
+        // mapping it consults is stubbed per test.
+        when(authorityResolver.authenticate(any())).thenCallRealMethod();
+    }
 
     @SuppressWarnings("unchecked")
     private static <T> ObjectProvider<T> providerOf(T instance) {
@@ -373,6 +380,10 @@ class FlightHeaderAuthenticatorTest {
                 .as("the shared token builder carries the raw provider roles on this path too, so a "
                         + "per-table grant naming one of them matches over Flight exactly as over HTTP")
                 .containsExactlyInAnyOrder("PRIVILEGE_TABLE_READ", "PROVIDER_ROLE_admin");
+        assertThat(authentication.getDetails())
+                .as("and the caller values a row policy compares with: the two surfaces share one cache entry "
+                        + "per key, so a project missing here would be missing over HTTP too")
+                .isEqualTo(new UserSecurityDetails(null, null, "proj"));
     }
 
     /** Stubs Core to resolve {@code key} to the project principal {@code proj} holding TABLE_READ. */

@@ -63,9 +63,29 @@ well as any `WHERE project_id …` would. A predicate wrapping a column in a fun
 filtering a non-key column reads more of the table.
 
 A policy may use scalar functions and the relative time functions (`now`, `date_add`, `date_sub` — e.g.
-"the last 90 days"); it may not use `param`, aggregate or window functions, subqueries or enrichment
-fields. A column a policy filters on cannot be dropped or renamed, nor left out when a failed table's
+"the last 90 days"); it may not use aggregate or window functions, subqueries or enrichment fields, nor
+any `param` other than the two caller values below. A column a policy filters on cannot be dropped or renamed, nor left out when a failed table's
 schema is posted again, until the policy is changed (`409 column_in_row_policy`).
+
+## Own rows: comparing a column with the caller
+
+A policy may compare a `string` column with a value of the caller reading the table: `caller.user_hash`
+(the hash DIAL Core writes to `user_hash`; it needs the `logging-*` settings in
+[`configuration.md`](configuration.md)) or `caller.project` (the project of a project API key). One policy
+on one role then gives every caller its own rows:
+
+```bash
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/user" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"filter": {"op": "eq", "args": [
+        {"type": "field", "name": "user_hash"},
+        {"type": "param", "name": "caller.user_hash"}]}}'
+```
+
+A caller value is allowed only as one side of `eq` or `ne` against a `string` column. A caller without the
+value matches no row, also under `ne` and `not`; an `or` with another branch still applies, so
+`user_hash = caller.user_hash OR project_id = caller.project` serves users and project keys alike. Roles
+that should read every row simply get no policy.
 
 ## Seeing a policy applied
 
@@ -81,7 +101,9 @@ LIMIT 10;
 ```
 
 ADAS's own debug log names the confined tables (never the predicate), and the query span carries the
-`adas.row_policy.tables` attribute.
+`adas.row_policy.tables` attribute. When a policy references a caller value the caller does not have, the
+log names it and the span carries `adas.row_policy.unknown.<name>` (for example
+`adas.row_policy.unknown.caller.user_hash`), never the value itself.
 
 ## Before rolling back
 

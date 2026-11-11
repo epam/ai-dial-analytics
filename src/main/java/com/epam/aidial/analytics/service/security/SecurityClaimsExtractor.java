@@ -51,11 +51,26 @@ public class SecurityClaimsExtractor {
 
     /** The caller's email if present on the authentication details, otherwise {@code null}. */
     public String getEmail() {
-        Authentication authentication = currentAuthentication();
-        if (authentication != null && authentication.getDetails() instanceof UserSecurityDetails(String email)) {
-            return email;
-        }
-        return null;
+        final UserSecurityDetails details = details();
+        return details != null ? details.email() : null;
+    }
+
+    /** The caller's user hash, comparable with a {@code user_hash} column, or {@code null} when it has none. */
+    public String getUserHash() {
+        final UserSecurityDetails details = details();
+        return details != null ? details.userHash() : null;
+    }
+
+    /** The project of the caller's project API key, or {@code null} for every other caller. */
+    public String getProject() {
+        final UserSecurityDetails details = details();
+        return details != null ? details.project() : null;
+    }
+
+    private static UserSecurityDetails details() {
+        final Authentication authentication = currentAuthentication();
+        return authentication != null && authentication.getDetails() instanceof UserSecurityDetails details
+                ? details : null;
     }
 
     /**

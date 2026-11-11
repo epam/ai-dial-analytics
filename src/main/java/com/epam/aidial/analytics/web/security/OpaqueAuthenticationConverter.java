@@ -29,6 +29,7 @@ public class OpaqueAuthenticationConverter implements OpaqueTokenAuthenticationC
     private final UserRolesResolver userRolesResolver;
     private final Set<String> emailClaims;
     private final boolean requireEmail;
+    private final UserHasher userHasher;
 
     @Override
     public Authentication convert(String introspectedToken, OAuth2AuthenticatedPrincipal authenticatedPrincipal) {
@@ -41,7 +42,9 @@ public class OpaqueAuthenticationConverter implements OpaqueTokenAuthenticationC
             throw new AuthenticationServiceException("Email claim is required");
         }
 
-        UserSecurityDetails details = new UserSecurityDetails(email);
+        String userHash = userHasher.loggingKey() == null
+                ? null : userHasher.hash(authenticatedPrincipal.getAttributes().get(userHasher.loggingKey()));
+        UserSecurityDetails details = new UserSecurityDetails(email, userHash, null);
 
         Collection<? extends GrantedAuthority> rawAuthorities = authenticatedPrincipal.getAuthorities();
         Set<Privilege> privileges = userRolesResolver.resolve(rawAuthorities);
