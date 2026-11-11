@@ -12,7 +12,9 @@ surface is added incrementally as spec-driven changes. The querying surface is t
 `POST /v1/queries/execute-sql` (capability `rest-sql-endpoint`, same governed pipeline), their CSV-download twins `execute-csv` /
 `execute-sql-csv` (capability `query-csv-export`, same pipeline, RFC 4180 body), and the
 translation-only pair `POST /v1/queries/translate` / `translate-sql` (capability
-`query-translation-endpoint`, DSL ↔ SQL without execution). Saved queries (`/v1/saved-queries`, capability
+`query-translation-endpoint`, DSL ↔ SQL without execution). Per-instance settings live under `/v1/settings`
+(capability `instance-settings`), starting with `GET`/`PUT /v1/settings/sessions-source`, which names the source
+table holding session rows and binds its fields to the session roles. Saved queries (`/v1/saved-queries`, capability
 `saved-queries`) and dashboards of query widgets (`/v1/dashboards`, capability `dashboards`) store authored
 intent the client runs through those endpoints; the `data-sync` path ingests DIAL
 usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic

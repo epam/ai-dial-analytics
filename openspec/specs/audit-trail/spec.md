@@ -239,13 +239,14 @@ ceased to exist.
 
 The system SHALL record one activity per changed entity, naming the entity that changed rather than
 a parent it belongs to. The resource types SHALL be `Table`, `TableColumn`, `Pipeline`, `SavedQuery`,
-and `Dashboard`, and the activity types `Create`, `Update`, and `Delete`. All SHALL be represented on the
-wire exactly as spelled here.
+`Dashboard` and `Setting`, and the activity types `Create`, `Update`, and `Delete`. All SHALL be
+represented on the wire exactly as spelled here.
 
 A resource id SHALL identify the entity uniquely within its resource type. Because a column is
 identified by its table together with its physical name, a `TableColumn` resource id SHALL be those
 two joined by a colon, and SHALL be treated as one opaque string. A `Pipeline` resource id SHALL be
-its name, and a `SavedQuery` or `Dashboard` resource id SHALL be its identifier.
+its name, a `SavedQuery` or `Dashboard` resource id SHALL be its identifier, and a `Setting` resource id SHALL be the
+setting name (for example `sessions-source`).
 
 The enrichment control plane's declarations were tracked under a resource type of their own, keyed by
 a UUID, before the two registries merged into one. Activities recorded then SHALL be readable in the
@@ -1033,3 +1034,42 @@ query's.
 - **WHEN** a dashboard of either visibility is deleted and any caller holding `AUDIT_READ` — its former
   owner or a holder of every privilege — requests the activity feed filtered to its resource id
 - **THEN** the feed is returned successfully with that activity absent from it
+
+### Requirement: Instance setting activities
+
+The system SHALL track every write of an instance setting (see `instance-settings`) as an audited resource
+of type `Setting`, whose resource id is the setting name. The first successful write of a setting SHALL
+record a `Create`, and each later successful write an `Update`, attributed to the writing identity like any
+other activity. A `Setting` activity SHALL have no parent: a setting belongs to no other audited entity.
+
+The preserved state SHALL be the setting's stored body together with its `updated_at` and `updated_by`. A
+refused write (`403`, `400` or `422`) and a read SHALL record nothing. A write whose body equals the stored
+value SHALL still record an `Update`, because it refreshes `updated_at` and `updated_by`, which are part of
+the preserved state.
+
+`Setting` activities SHALL appear in the feed, and be readable by activity id, for any caller holding
+`AUDIT_READ`, with no `Setting`-specific content narrowing: the setting's own read is the single global
+privilege `SETTINGS_READ`, and the trail discloses no more than the stored setting itself does. A
+point-in-time read of a setting is not part of this capability's surface: the trail preserves the state, but
+no snapshot endpoint for `Setting` is exposed.
+
+#### Scenario: The first write is a create
+
+- **WHEN** `PUT /v1/settings/sessions-source` succeeds on an instance where the setting was never stored
+- **THEN** a `Create` activity is recorded with resource type `Setting`, resource id `sessions-source`, no
+  parent, and the writing identity as its author
+
+#### Scenario: A replace is an update
+
+- **WHEN** a later `PUT /v1/settings/sessions-source` succeeds
+- **THEN** an `Update` activity is recorded for resource type `Setting` and resource id `sessions-source`
+
+#### Scenario: A refused write records nothing
+
+- **WHEN** `PUT /v1/settings/sessions-source` is refused with `422 validation_error`
+- **THEN** no activity is recorded
+
+#### Scenario: Filtering the feed by the setting resource type
+
+- **WHEN** a caller holding `AUDIT_READ` requests the feed filtering `resourceType` `eq` `Setting`
+- **THEN** only setting activities are returned

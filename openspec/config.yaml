@@ -133,7 +133,8 @@ context: |
 
   ## Auditing
 
-  `table_definition`, `column_mapping`, `pipeline` (both kinds) and `saved_query` are `@Audited`
+  `table_definition`, `column_mapping`, `pipeline` (both kinds), `saved_query`, `dashboard` and
+  `instance_setting` are `@Audited`
   (Hibernate Envers): every insert/update/delete writes a full-state snapshot plus a feed entry, inside
   the caller's transaction. Three consequences for anyone touching an audited write path. A removal that
   bypasses the persistence context (a database `ON DELETE CASCADE`, a `@Modifying` bulk delete) is
@@ -214,7 +215,7 @@ context: |
     `/v1/pipelines/{name}/rows` are the deliberate exception, carrying caller payloads by design.
   - **The PostgreSQL catalog decides what is queryable** and how columns are exposed. A ClickHouse
     table absent from the catalog will not appear under `/v1/queries` — that is not a discovery bug.
-  - **Authorization is a privilege, held globally or granted per table.** Sixteen `Privilege` values;
+  - **Authorization is a privilege, held globally or granted per table.** Eighteen `Privilege` values;
     six are table-scoped (`TABLE_LIST`/`GET`/`READ`/`SENSITIVE`/`WRITE`/`MODIFY`) and a caller's
     effective access is the union of what it holds globally and what a table's `access` lists grant its
     raw provider roles — five keys, since `TABLE_LIST` is global-or-implied and has none. The three read

@@ -479,11 +479,12 @@ SHALL be served from the cache without an additional Core call.
 ### Requirement: Application privileges and bundles
 
 The service SHALL define a closed set of **application privileges** as the unit of authorization,
-each named `<OBJECT>_<VERB>` over the object classes `TABLE`, `REGISTRY`, `AUDIT`, `SAVED_QUERY` and
-`DATA_SYNC`: `TABLE_LIST`, `TABLE_GET`, `TABLE_READ`, `TABLE_SENSITIVE`, `TABLE_WRITE`,
+each named `<OBJECT>_<VERB>` over the object classes `TABLE`, `REGISTRY`, `AUDIT`, `SAVED_QUERY`,
+`DATA_SYNC` and `SETTINGS`: `TABLE_LIST`, `TABLE_GET`, `TABLE_READ`, `TABLE_SENSITIVE`, `TABLE_WRITE`,
 `TABLE_MODIFY`, `TABLE_CREATE`, `TABLE_DELETE`, `TABLE_GRANT`, `REGISTRY_READ`, `REGISTRY_ADMIN`,
-`AUDIT_READ`, `DATA_SYNC_OPERATE`, `SAVED_QUERY_READ`, `SAVED_QUERY_WRITE` and
-`SAVED_QUERY_PUBLISH`. `TABLE_SENSITIVE` is the clearance (see **Sensitive column authorization**),
+`AUDIT_READ`, `DATA_SYNC_OPERATE`, `SAVED_QUERY_READ`, `SAVED_QUERY_WRITE`,
+`SAVED_QUERY_PUBLISH`, `SETTINGS_READ` and `SETTINGS_WRITE`. `SETTINGS_READ` reads and `SETTINGS_WRITE`
+replaces the instance settings (see `instance-settings`). `TABLE_SENSITIVE` is the clearance (see **Sensitive column authorization**),
 not a verb, and it replaces the former `TABLE_READ_SENSITIVE`. There SHALL be no
 `TABLE_READ_SENSITIVE` privilege.
 
@@ -500,9 +501,9 @@ The service SHALL additionally define **bundles** — reserved names that expand
 | Bundle | Privileges |
 |---|---|
 | `FULL_ADMIN` | every privilege |
-| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
 
 A bundle SHALL be expanded when configuration is parsed, and SHALL NOT be observable by any
 authorization check thereafter: no endpoint, filter or evaluator SHALL branch on a bundle name.
@@ -517,8 +518,11 @@ another caller's `personal` saved query anywhere, the saved-query revision endpo
 included (see `saved-queries` and `audit-trail`), and it never sees another caller's `private` dashboard. A third concerns mappings rather
 than bundles. A `roles-mapping` that names `SAVED_QUERY_WRITE` or `SAVED_QUERY_PUBLISH` without
 `SAVED_QUERY_READ` confers `SAVED_QUERY_READ` by implication, with the reach **The table read ladder and
-privilege implication** states. No other bundle's authority changes. Apart from those three, an unmodified
-`roles-mapping` changes nothing observable. Bundle names SHALL NOT be valid grantees in a table's access lists, which name raw
+privilege implication** states. No other bundle's authority changes. A fourth is additive: `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` and
+`READ_ONLY_SENSITIVE_ANALYTIC` gain `SETTINGS_READ`, and `FULL_ADMIN`, being every privilege, gains
+`SETTINGS_READ` and `SETTINGS_WRITE`. A `roles-mapping` that names raw privileges rather than a bundle gains
+neither, and must name `SETTINGS_READ` for its holders to read the settings. Apart from those four, an
+unmodified `roles-mapping` changes nothing observable. Bundle names SHALL NOT be valid grantees in a table's access lists, which name raw
 provider roles.
 
 Every `roles-mapping` (`security.defaults.roles-mapping`, `providers.<name>.roles-mapping`,
@@ -529,25 +533,30 @@ there SHALL be no alias for it.
 
 A bundle's declared set SHALL be **stored minimally and closed under implication** when it is
 expanded, so the table above lists what each bundle declares rather than everything it confers:
-`READ_ONLY_ANALYTIC` declares `TABLE_READ` and `SAVED_QUERY_WRITE`, and thereby also confers
-`TABLE_GET`, `TABLE_LIST` and `SAVED_QUERY_READ`. Storing the closure instead would duplicate the
+`READ_ONLY_ANALYTIC` declares `TABLE_READ`, `SAVED_QUERY_WRITE` and `SETTINGS_READ`, and thereby also
+confers `TABLE_GET`, `TABLE_LIST` and `SAVED_QUERY_READ`. Storing the closure instead would duplicate the
 implication edges in four places and let a bundle drift out of step with them.
 
 #### Scenario: A bundle expands to its privileges, closed under implication
 - **WHEN** a provider role is mapped to `READ_ONLY_ANALYTIC` and a caller presents a token carrying
   that role
-- **THEN** the caller holds `TABLE_READ` and `SAVED_QUERY_WRITE` as declared, plus `TABLE_GET`,
-  `TABLE_LIST` and `SAVED_QUERY_READ` by implication, and no other privilege
+- **THEN** the caller holds `TABLE_READ`, `SAVED_QUERY_WRITE` and `SETTINGS_READ` as declared, plus
+  `TABLE_GET`, `TABLE_LIST` and `SAVED_QUERY_READ` by implication, and no other privilege
 
 #### Scenario: The sensitive analytic bundle pairs the verb with the clearance
 - **WHEN** a provider role is mapped to `READ_ONLY_SENSITIVE_ANALYTIC`
-- **THEN** its holder holds `TABLE_READ` and `TABLE_SENSITIVE` globally, plus `TABLE_GET` and
-  `TABLE_LIST` by implication, and reads every table's sensitive values
+- **THEN** its holder holds `TABLE_READ`, `TABLE_SENSITIVE` and `SETTINGS_READ` globally, plus `TABLE_GET`
+  and `TABLE_LIST` by implication, and reads every table's sensitive values
 
 #### Scenario: A read of grant lists is the one thing READ_ONLY_ADMIN loses
 - **WHEN** a caller mapped to `READ_ONLY_ADMIN` reads `GET /v1/tables/{name}/access`
 - **THEN** the response is `403 forbidden`, while every catalog, registry, audit and saved-query read
   that bundle reached before still succeeds
+
+#### Scenario: Only the full administrator bundle writes settings
+- **WHEN** callers are mapped, one each, to `FULL_ADMIN`, `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` and
+  `READ_ONLY_SENSITIVE_ANALYTIC`
+- **THEN** every one of them holds `SETTINGS_READ`, and only the `FULL_ADMIN` caller holds `SETTINGS_WRITE`
 
 #### Scenario: Bundles and privileges mix in one mapping
 - **WHEN** a provider role is mapped to `["TABLE_GET", "SAVED_QUERY_READ"]` and another to
@@ -580,8 +589,8 @@ privilege authorizes **editing documents by whole-document replace**, which pres
 and **no read check consults the granting privilege**. Then, whatever else a caller holds, the granting
 privilege adds exactly the implied read to what it may see. It SHALL be transitive.
 The complete set of direct implications SHALL be: `TABLE_GET → TABLE_LIST`,
-`TABLE_READ → TABLE_GET`, `TABLE_MODIFY → TABLE_GET`, `SAVED_QUERY_WRITE → SAVED_QUERY_READ`, and
-`SAVED_QUERY_PUBLISH → SAVED_QUERY_READ`.
+`TABLE_READ → TABLE_GET`, `TABLE_MODIFY → TABLE_GET`, `SAVED_QUERY_WRITE → SAVED_QUERY_READ`,
+`SAVED_QUERY_PUBLISH → SAVED_QUERY_READ`, and `SETTINGS_WRITE → SETTINGS_READ`.
 `TABLE_WRITE` SHALL imply nothing: a caller holding only `TABLE_WRITE` on a table SHALL NOT be able
 to list it, read its schema, or read its rows. In particular the service SHALL NOT admit
 `TABLE_WRITE → TABLE_READ`.
@@ -605,6 +614,11 @@ The edges widen a `roles-mapping` that names `SAVED_QUERY_WRITE` or `SAVED_QUERY
 `SAVED_QUERY_READ` to that reach. No bundle's authority widens, since every bundle holding either write
 already held the read. `TABLE_WRITE` does not qualify on the same ground: a row insert appends and
 replaces nothing, so it edits no document.
+
+`SETTINGS_WRITE → SETTINGS_READ` is admitted on the same second ground. A setting is written by
+whole-document replace (see `instance-settings`), so an author has to read what it replaces, and the read
+check consults `SETTINGS_READ` alone. A setting is one instance-wide document with no owner or visibility,
+so the edge discloses exactly what `SETTINGS_READ` does on its own: every stored setting.
 
 `SAVED_QUERY_PUBLISH` SHALL NOT imply `SAVED_QUERY_WRITE`, nor the reverse, for the reason `TABLE_WRITE`
 implies nothing pointed the other way: the two name different scopes rather than two rungs of one, and a
@@ -641,6 +655,10 @@ grant list SHALL return exactly the grantees that were written to it.
 - **THEN** it may create, replace and delete `common` saved queries and read every `common` saved query
   and `public` dashboard, while a write at `personal` scope is refused `403 forbidden` because that
   requires `SAVED_QUERY_WRITE`
+
+#### Scenario: A settings write grant reads the settings
+- **WHEN** a caller holds only `SETTINGS_WRITE`
+- **THEN** it may read and replace the stored settings, and holds no other privilege
 
 #### Scenario: No privilege reads another caller's personal saved query
 - **WHEN** a caller holding every privilege reads another caller's `personal` saved query by id, at a
