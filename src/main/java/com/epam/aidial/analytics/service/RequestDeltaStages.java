@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
@@ -30,7 +31,9 @@ import java.util.stream.Collectors;
  * startup, so its path cache outlives a run and the poller, the scheduled sync and a backfill all see each other's
  * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path, so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
- * startup logs a warning: the setting would otherwise do nothing, silently.
+ * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
+ * {@code sync.sensitive-columns-enabled=false} has no body to rewrite and gets no stage, so its chain and cache-marker
+ * columns keep their defaults; startup warns that the mode has no effect on it.
  */
 @Component
 @Slf4j
@@ -39,7 +42,9 @@ public class RequestDeltaStages {
     /** Written paths remembered per payload table; a few hundred bytes each. */
     static final int PATH_CACHE_ENTRIES = 200_000;
 
-    private static final Set<String> REQUIRED_COLUMNS = Set.of("request_body", "project_id", "user_hash");
+    private static final String REQUEST_BODY = "request_body";
+
+    private static final Set<String> REQUIRED_COLUMNS = Set.of(REQUEST_BODY, "project_id", "user_hash");
 
     /** The columns the stage writes beyond the mapping: what a payload table gains in ClickHouse V16. */
     private static final Set<String> REQUIRED_TABLE_COLUMNS = Set.of(
@@ -58,6 +63,9 @@ public class RequestDeltaStages {
                     RequestDeltaEncoder encoder = new RequestDeltaEncoder(
                             mode, new ClickHouseParentLookup(writer, target.table()), PATH_CACHE_ENTRIES, registry, target.table());
                     byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
+                } else if (target.excludedColumns().contains(REQUEST_BODY)) {
+                    log.warn("sync.request-body-mode={} has no effect on target {}: its request body is excluded by "
+                            + "sync.sensitive-columns-enabled=false", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), target.table());
                 }
             }
         }

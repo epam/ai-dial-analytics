@@ -1,14 +1,17 @@
 package com.epam.aidial.analytics.service;
 
 import com.epam.aidial.analytics.configuration.SyncProperties;
+import com.epam.aidial.analytics.observability.LogCapture;
 import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.mapping.DeriverRegistry;
 import com.epam.aidial.analytics.sync.mapping.MappingConfig;
 import com.epam.aidial.analytics.sync.mapping.MappingEngine;
 import com.epam.aidial.analytics.sync.mapping.MappingFileLoader;
+import com.epam.aidial.analytics.sync.mapping.SensitiveColumnExclusion;
 import com.epam.aidial.analytics.sync.mapping.SyncTarget;
 import com.epam.aidial.analytics.sync.mapping.TransformRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.DefaultResourceLoader;
 import tools.jackson.databind.json.JsonMapper;
@@ -79,6 +82,21 @@ class RequestDeltaStagesTest {
                 .isEmpty();
     }
 
+    /** A payload target whose request body was excluded as sensitive has nothing to cut; startup says the mode does nothing to it. */
+    @Test
+    void excludedRequestBodyGetsNoStageAndWarns() {
+        MappingConfig withoutBody = SensitiveColumnExclusion.without(payload, Set.of("request_body"));
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", withoutBody, new MappingEngine(withoutBody, transforms, derivers),
+                Set.of("request_body"));
+        try (LogCapture logs = LogCapture.of(RequestDeltaStages.class)) {
+            assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.DELTA), List.of(target), writerWith(TABLE_COLUMNS),
+                    new SimpleMeterRegistry()).byTable()).isEmpty();
+            assertThat(logs.messagesAt(Level.WARN))
+                    .anySatisfy(message -> assertThat(message).contains("dial_usage_log_payload").contains("request body is excluded"))
+                    .anySatisfy(message -> assertThat(message).contains("no ingest target's mapping maps all of"));
+        }
+    }
+
     private static Map<String, Object> flush(RequestDeltaStages stages) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("request_time", "2026-01-15 10:00:00.000");
@@ -115,6 +133,6 @@ class RequestDeltaStagesTest {
     private static SyncProperties properties(boolean validateSchema, RequestBodyMode mode) {
         return new SyncProperties("-", 0, 1000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd",
                 "'date='yyyy-MM-dd", validateSchema, List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")),
-                null, null, mode);
+                null, null, mode, null);
     }
 }

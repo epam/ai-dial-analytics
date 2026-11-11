@@ -159,7 +159,7 @@ class RequestDeltaIngestTest {
         List<SyncTarget> targets = targets(inlineFiles);
         SyncProperties properties = new SyncProperties("-", 0, 1000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd",
                 "'date='yyyy-MM-dd", false, List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")),
-                inlineFiles.dropTruncated(), null, mode);
+                inlineFiles.dropTruncated(), null, mode, null);
         BlobIngestor ingestor = new BlobIngestor(blobClient(baseDir), new LogParser(jsonMapper, SyncProperties.DEFAULT_MAX_LINE_BYTES), targets,
                 IngestFlushOrder.NONE, new RequestDeltaStages(properties, targets, writer, new SimpleMeterRegistry()));
         RunSink sink = ingestor.newRunSink(writer, 1000, 268_435_456L);
