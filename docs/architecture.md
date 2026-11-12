@@ -19,7 +19,7 @@ Arrows point from caller to callee. Dashed arrows are identity checks and LLM ca
 | **adas-mcp** | MCP server that exposes ADAS schema discovery, translation and query execution as AI tools. It is registered in DIAL Core as a toolset. |
 | **AI Query Helper** | Application built on the DIAL Agentic Engine that turns a user's question into an ADAS query, using LLM models and the adas-mcp toolset through DIAL Core. |
 | **DIAL Core** | DIAL platform gateway. It hosts the Agentic Engine, routes model and toolset calls, introspects DIAL API keys and tokens for ADAS (`/v1/user/info`), and writes usage logs to blob storage. |
-| **Blob storage** | Azure Blob Storage or AWS S3 holding DIAL usage logs as gzip NDJSON files. |
+| **Blob storage** | Azure Blob Storage, AWS S3 or Google Cloud Storage holding DIAL usage logs as gzip NDJSON files. |
 | **ClickHouse** | Analytics data: ingested usage logs, aggregate rollups and enrichment tables. |
 | **PostgreSQL (ADAS)** | ADAS catalog: table definitions and column exposure, grants and row policies, pipelines, saved queries, dashboards and the audit trail. |
 | **PostgreSQL (Runner)** | The Enrichment Runner's own runtime state: its job queue, per-pipeline scan cursors, group state for group-trigger pipelines, backfill run history, dead-letter items and LLM spend counters. It holds no analytics data, and ADAS does not access it. |

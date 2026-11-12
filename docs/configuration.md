@@ -194,10 +194,12 @@ store nothing is ever ingested. The client is built on first use, so a missing o
 surfaces as a failed poll cycle every minute, not at startup. Read-only access suffices.
 
 Access goes through jclouds, on EPAM's fork because upstream's `azureblob` cannot take an Azure AD
-bearer token. Two providers are supported: `azureblob` for Azure Blob Storage, and `aws-s3` for AWS
+bearer token. Three providers are supported: `azureblob` for Azure Blob Storage; `aws-s3` for AWS
 S3 — its endpoint and region rules, credential modes and IAM policy are in
-[`aws-s3-access.md`](aws-s3-access.md). Other providers from jclouds' all-blobstore bundle are on the
-classpath and accept an identity/secret pair, but are not documented here.
+[`aws-s3-access.md`](aws-s3-access.md); and `google-cloud-storage` for Google Cloud Storage — its
+credential modes, Workload Identity binding and IAM role are in [`gcs-access.md`](gcs-access.md).
+Other providers from jclouds' all-blobstore bundle are on the classpath and accept an identity/secret
+pair, but are not documented here.
 
 For `azureblob`, auth is **shared key** when both `BLOB_IDENTITY` and `BLOB_CREDENTIAL` are set. If
 either is omitted it falls back to **Azure AD / managed identity** (`DefaultAzureCredential`), which
@@ -205,13 +207,13 @@ additionally requires `BLOB_ENDPOINT`, the **Storage Blob Data Reader** role on 
 user-assigned managed identity, a pod configured per Azure Workload Identity, and **hierarchical
 namespace (HNS) disabled** on the storage account. SAS tokens are not used.
 
-| Variable          | Property          | Default     | Required             | Description                                                                                                                                                                                                  |
-|-------------------|-------------------|-------------|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `BLOB_PROVIDER`   | `blob.provider`   | `azureblob` | No                   | jclouds provider id, `azureblob` or `aws-s3`. `filesystem` is test-scoped and unavailable at runtime.                                                                                                        |
-| `BLOB_BUCKET`     | `blob.bucket`     | `logs`      | Match producer       | Container or bucket name holding the logs.                                                                                                                                                                   |
-| `BLOB_IDENTITY`   | `blob.identity`   | _(empty)_   | For shared key       | Azure storage account name, or AWS access key id; blank with `BLOB_CREDENTIAL` selects Azure managed identity / AWS workload identity.                                                                       |
-| `BLOB_CREDENTIAL` | `blob.credential` | _(empty)_   | For shared key       | Azure account key, or AWS secret access key, from the deployment's secret store; blank with `BLOB_IDENTITY` selects managed identity / workload identity.                                                    |
-| `BLOB_ENDPOINT`   | `blob.endpoint`   | _(empty)_   | Managed identity, S3 | Endpoint override, `https://<account>.blob.core.windows.net` or `https://s3.<region>.amazonaws.com`. Blank uses the provider default, which Azure AD auth cannot resolve and which signs S3 for `us-east-1`. |
+| Variable          | Property          | Default     | Required             | Description                                                                                                                                                                                                           |
+|-------------------|-------------------|-------------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `BLOB_PROVIDER`   | `blob.provider`   | `azureblob` | No                   | jclouds provider id: `azureblob`, `aws-s3` or `google-cloud-storage`. `filesystem` is test-scoped and unavailable at runtime.                                                                                         |
+| `BLOB_BUCKET`     | `blob.bucket`     | `logs`      | Match producer       | Container or bucket name holding the logs.                                                                                                                                                                            |
+| `BLOB_IDENTITY`   | `blob.identity`   | _(empty)_   | For shared key       | Azure storage account name, AWS access key id, or GCS service-account client email; blank with `BLOB_CREDENTIAL` selects the provider's keyless mode.                                                                 |
+| `BLOB_CREDENTIAL` | `blob.credential` | _(empty)_   | For shared key       | Azure account key, AWS secret access key, or GCS PEM private key, from the deployment's secret store; blank with `BLOB_IDENTITY` selects the keyless mode.                                                            |
+| `BLOB_ENDPOINT`   | `blob.endpoint`   | _(empty)_   | Managed identity, S3 | Endpoint override, `https://<account>.blob.core.windows.net` or `https://s3.<region>.amazonaws.com`. Blank uses the provider default: correct for GCS, unresolvable by Azure AD auth, and signing S3 for `us-east-1`. |
 
 Managed-identity mode auto-applies the jclouds overrides `jclouds.azureblob.auth=azureAd` and
 `jclouds.oauth.credential-type=bearerTokenCredentials`; setting any jclouds property by hand — rarely
@@ -731,6 +733,8 @@ compatibility signal flaps for the length of the roll, and Class-1 positions sta
   the body columns need, upgrade constraints, and the grants each credential needs.
 - [`aws-s3-access.md`](aws-s3-access.md) — running `data-sync` against an S3 bucket: endpoint and
   region, workload identity, and the IAM the bucket needs.
+- [`gcs-access.md`](gcs-access.md) — running `data-sync` against a Cloud Storage bucket: credential modes,
+  Workload Identity, and the IAM the bucket needs.
 - [`column-mapping.md`](column-mapping.md) — authoring a `data-sync` mapping file.
 - [`kubernetes-exposure.md`](kubernetes-exposure.md) — exposing ADAS from a cluster.
 - [`sql-reference.md`](sql-reference.md) — the SQL surface `execute-sql` and Flight SQL accept.
