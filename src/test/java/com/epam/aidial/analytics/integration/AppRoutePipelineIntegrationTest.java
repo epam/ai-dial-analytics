@@ -84,15 +84,22 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
         mockMvc.perform(put(SETTING).contentType(JSON).content(ALLOW_INSIGHTS)).andExpect(status().isOk());
     }
 
+    /** A route transform whose single output reads its value from {@code outputJson}, an output object. */
+    private static Transforms.Builder routeWithOutput(String outputJson) {
+        return Transforms.llm().model("insights-app").preset("dial_app_route").route("insights")
+                .outputObject("tox_score", outputJson);
+    }
+
     @Test
-    void allowedRoutePipelineIsArmedAndTheFeedCarriesItsCall() throws Exception {
+    void allowedRoutePipelineIsArmedAndTheFeedCarriesItsCallAndOutputSources() throws Exception {
         allowInsights();
         mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
-                        route("insights").responseJsonata("{\"tox_score\": scores.toxicity}"), true)))
+                        routeWithOutput("{\"prose\":\"How toxic.\",\"source\":\"scores.toxicity\"}"), true)))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.transform.preset").value("dial_app_route"))
                 .andExpect(jsonPath("$.transform.route").value("insights"))
-                .andExpect(jsonPath("$.transform.response_jsonata").value("{\"tox_score\": scores.toxicity}"));
+                .andExpect(jsonPath("$.transform.outputs.tox_score.source").value("scores.toxicity"))
+                .andExpect(jsonPath("$.transform.outputs.tox_score.prose").value("How toxic."));
 
         final String entry = "$.pipelines[?(@.name=='" + PIPELINE + "')]";
         mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
@@ -100,8 +107,49 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                 .andExpect(header().string(RunnerContract.HEADER, "5"))
                 .andExpect(jsonPath(entry + ".transform.route").value(hasItem("insights")))
                 .andExpect(jsonPath(entry + ".transform.model").value(hasItem("insights-app")))
-                .andExpect(jsonPath(entry + ".transform.response_jsonata")
-                        .value(hasItem("{\"tox_score\": scores.toxicity}")));
+                .andExpect(jsonPath(entry + ".outputs[0].source").value(hasItem("scores.toxicity")));
+    }
+
+    /** The route schema follows the column: {@code tox_score} is nullable, so it may be null or absent. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeSchemaFollowsColumnNullability() throws Exception {
+        allowInsights();
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(route("insights"), true)))
+                .andExpect(status().isCreated());
+        final String compiled = mockMvc.perform(get("/v1/pipelines/" + PIPELINE + "?view=compiled"))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat((List<String>) JsonPath.read(compiled, "$.response_schema.required")).isEmpty();
+        assertThat((List<String>) JsonPath.read(compiled, "$.response_schema.properties.tox_score.type"))
+                .containsExactly("integer", "null");
+    }
+
+    @Test
+    void outputSourceOnChatTransformAndJsonataOnRouteOutputAreRefused() throws Exception {
+        allowInsights();
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(Transforms.llm()
+                        .outputObject("tox_score", "{\"source\":\"scores.toxicity\"}"), true)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString("source")));
+
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
+                        routeWithOutput("{\"jsonata\":\"scores.toxicity\"}"), true)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.message").value(containsString("jsonata")));
+    }
+
+    @Test
+    void unparseableOrIdentityOutputSourceIsRefused() throws Exception {
+        allowInsights();
+        for (String source : List.of("{title: ", "tox_score")) {
+            mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
+                            routeWithOutput("{\"source\":\"" + source + "\"}"), true)))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                    .andExpect(jsonPath("$.message").value(containsString("tox_score")));
+        }
     }
 
     @Test
@@ -115,7 +163,7 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                 .andReturn().getResponse().getContentAsString();
         for (String read : List.of(source, compiled)) {
             final Map<String, Object> transform = JsonPath.read(read, "$.transform");
-            assertThat(transform).doesNotContainKeys("route", "response_jsonata");
+            assertThat(transform).doesNotContainKey("route");
         }
     }
 
@@ -171,28 +219,12 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
     }
 
     @Test
-    void routeOrResponseMappingOnChatTransformIsRefused() throws Exception {
+    void routeOnChatTransformIsRefused() throws Exception {
         final Transforms.Builder withRoute = Transforms.llm().route("insights")
                 .output("tox_score", "How toxic the text is, 0-100.");
         mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(withRoute, true)))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.message").value(containsString("transform.route")));
-
-        final Transforms.Builder withMapping = Transforms.llm().responseJsonata("{\"tox_score\": score}")
-                .output("tox_score", "How toxic the text is, 0-100.");
-        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(withMapping, true)))
-                .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.message").value(containsString("transform.response_jsonata")));
-    }
-
-    @Test
-    void anUnparseableResponseMappingIsRefused() throws Exception {
-        allowInsights();
-        mockMvc.perform(post("/v1/pipelines").contentType(JSON)
-                        .content(body(route("insights").responseJsonata("{title: "), true)))
-                .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
-                .andExpect(jsonPath("$.message").value(containsString("transform.response_jsonata")));
     }
 
     @Test

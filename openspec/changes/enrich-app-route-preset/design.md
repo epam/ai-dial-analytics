@@ -101,20 +101,35 @@ PostgreSQL transaction-scoped advisory lock keyed on the `app-routes` setting na
 
 A pipeline write that is not a route arm does not contend.
 
-### The route's response is mapped by an optional `transform.response_jsonata`
+### Each route output reads its value with its own `source`
 
-An application's route contract is its own. A route may answer with nested objects and extra members,
-for example a usage block, while the composed schema is flat and strict. A transform-level JSONata
-expression is evaluated by the runner over the parsed body before validation, and its result is the
-output. ADAS parses it statically, as it does every JSONata member, and allows it under `dial_app_route`
-only.
+An application's route contract is its own. A route may answer with nested objects and extra members, for
+example a usage block, while the composed schema is flat. Each output of a route transform therefore carries an
+optional `source`, a JSONata expression over the route's response body, and defaults to the member of its own
+name. The runner assembles one object from the outputs' values and validates that object, so extra members of
+the response never reach validation.
 
-- *Alternative: relax `additionalProperties` for route responses.* Rejected. It fixes extra members but
-  not nesting, and it weakens the one check that catches a route answering the wrong shape.
-- *Alternative: per-output `jsonata` only.* Rejected. It runs after validation, so it cannot rescue a body
-  that fails the schema.
-- *Alternative: allow it under `chat_completion` too.* Rejected. `response_format` already constrains the
-  model, and reshaping would mask a model that ignores it.
+- *Alternative: one transform-level `response_jsonata` reshaping the whole response.* Rejected. Mapping a
+  response with dozens of fields becomes one long script that is hard to author in a form and hard to check,
+  and nothing guarantees it produces every output. Per-output sources map each output by construction, are
+  usually a dotted path, and let a parse failure or a bad value name the one output it belongs to.
+- *Alternative: relax `additionalProperties` for route responses.* Rejected. It fixes extra members but not
+  nesting, and it weakens the one check that catches a route answering the wrong shape.
+- *Alternative: reuse the output's `jsonata`.* Rejected. On a chat output `jsonata` runs after validation over
+  a response that already matches the schema; giving it a pre-validation meaning on one preset would make one
+  member mean two things. Instead `jsonata` is refused on a route output, so each output has exactly one
+  transform.
+- `prose` stays on route outputs. It is the property's description in the composed schema, which the feed
+  serves, so an application that is given the schema can use it.
+
+### A route schema follows column nullability
+
+A model call composes every property as required because strict mode demands it, and spells an optional field
+as a sentinel plus a mapping to NULL. A route call sends no `response_format`, so that constraint is absent, and
+a sentinel would only push an application's missing field through a second transform. For a route transform,
+the composer leaves an output bound to a nullable column out of `required` and lets its property accept
+`null`. A field the application omits is written as NULL where the column allows it, and refused where it does
+not.
 
 ### `{{name:json}}` raw-JSON placeholders
 
@@ -150,8 +165,8 @@ constant is raised.
   → Pipelines are imported disabled already, and the arm refusal names the setting.
 - **A route answering with more than the schema's properties fails validation.** The composed schema is
   strict, with `additionalProperties: false`.
-  → `transform.response_jsonata` maps the route's own shape onto the schema. Without it, the route must
-  answer with the bare output object.
+  → The runner validates the object assembled from the outputs' sources, not the response itself, so extra
+  response members never reach validation. Nested members are reached with a `source`.
 
 ## Migration Plan
 

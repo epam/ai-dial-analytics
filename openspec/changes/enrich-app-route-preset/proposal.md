@@ -17,10 +17,14 @@ then served twice, and the shim's only purpose is to satisfy the runner.
 - A new authored member, **`transform.route`**, is the path under the deployment's `route/` prefix.
   It is required for `dial_app_route` and refused for `chat_completion` and for `sql`. Its grammar is
   checked at write time (relative, no `.`/`..` segment, no query or fragment, bounded length).
-- A new optional member, **`transform.response_jsonata`**, accepted under `dial_app_route` only. It is
-  a JSONata expression the runner evaluates over the route's response body to produce the output object,
-  which is then validated. An application keeps its own response contract (nested objects, extra members
-  such as usage), and the pipeline maps it onto the composed schema.
+- Each output of a `dial_app_route` transform gains an optional **`source`**: a small JSONata expression,
+  usually a dotted path such as `intent_counts.check`, that reads the output's value from the route's
+  response body. An output without one takes the response member of its own name. An application keeps its
+  own response contract (nested objects, extra members such as usage), and every output is mapped by
+  construction. `prose` and `values` keep their meaning, and a route output's `jsonata` is refused.
+- For a `dial_app_route` transform the composed schema takes nullability from each column: an output bound to
+  a nullable column may be null or absent. The strict-mode rule that requires every property applies only to
+  model calls.
 - A new instance setting, **`app-routes`** (`GET`/`PUT /v1/settings/app-routes`), is the allowlist of
   `(deployment, route)` pairs a pipeline may call. When the setting is absent, no route is allowed.
   - Arming a `dial_app_route` pipeline whose pair is not listed is refused with 422
@@ -47,8 +51,8 @@ None.
 ### Modified Capabilities
 
 - `enrichment-registry`:
-  - the transform shape now has `preset: dial_app_route`, `transform.route` and
-    `transform.response_jsonata`;
+  - the transform shape now has `preset: dial_app_route`, `transform.route` and a per-output `source`;
+  - the composed schema follows column nullability for a route transform;
   - an arm-gate rule for the route allowlist;
   - the `:json` placeholder suffix in the template placeholder rule.
 - `instance-settings`:

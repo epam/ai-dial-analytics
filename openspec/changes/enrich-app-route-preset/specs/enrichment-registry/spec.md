@@ -15,8 +15,7 @@ every accepted mutation, including a change of `enabled` alone, SHALL move `upda
 [pipeline-registry](../pipeline-registry/spec.md), "A pipeline has exactly one run control"). An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
 
 **The transform SHALL be one nested block, `transform`**, stored in the pipeline's `spec`, carrying
-`type` (`llm` or `sql`), `model`, `preset`, `route`, `response_jsonata`, `params`, `request_template`, `inputs` and
-`outputs`. It SHALL be
+`type` (`llm` or `sql`), `model`, `preset`, `route`, `params`, `request_template`, `inputs` and `outputs`. It SHALL be
 nested rather than flat for a reason that is a contract, not a matter of taste: **`outputs` already
 names the derived output mapping** at the top level of a pipeline read — one entry per mapped target
 column, `{name, column, jsonata?}` — and the authored outputs are a different shape,
@@ -50,16 +49,16 @@ into a response schema. The shape SHALL be dispatched on `type`:
   application route") when `preset` is `dial_app_route`. It SHALL be absent under `chat_completion`,
   because a chat-completions call has no route to name and a stored one would be a value nothing reads.
   Each `outputs` value SHALL be either a **string** (the
-  prose the model is told about that output) or an object `{prose, values?, jsonata?}` carrying **at
-  most one** of `values` or `jsonata`. `prose` SHALL be **optional**, defaulting to the target column's
+  prose the model is told about that output) or an object `{prose, values?, jsonata?, source?}` carrying **at
+  most one** of `values` or `jsonata`. `source` is the `dial_app_route` member described in "A route output
+  reads its value from the route's response with source". `prose` SHALL be **optional**, defaulting to the target column's
   `description` — see "The response schema is composed from the target and the transform", which
   already takes an output's type, enum domain and enum order from the same column. An absent value, a
   JSON `null`, an empty object and a blank string SHALL all mean *default it*, so that one fact has one
   spelling. There SHALL be no separate refusal of "an object declaring none of the three": once `prose`
   is optional, `{}` and `{"prose": null}` are the same bound value as `null`, so a refusal could only
   reject one spelling of *default it* while accepting the others.
-- **`sql`** — `preset`, `model`, `route`, `response_jsonata`, `request_template`, `params` and `response_schema` SHALL
-  be absent, and
+- **`sql`** — `preset`, `model`, `route`, `request_template`, `params` and `response_schema` SHALL be absent, and
   each `outputs` value SHALL be a non-blank SQL expression string. `response_schema` is refused for the
   same reason as the other four, and is named because it is the one the compiled projection would
   otherwise surface: a `sql` transform constrains no model response, so a stored schema on one would be
@@ -288,7 +287,7 @@ by that key.
 #### Scenario: A sql transform carrying an llm-only member is rejected
 
 - **WHEN** `POST /v1/pipelines` is called with `transform.type: "sql"` and any of `preset`, `model`,
-  `route`, `response_jsonata`, `params`, `request_template` or `response_schema` inside the block
+  `route`, `params`, `request_template` or `response_schema` inside the block
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the llm-only field
 
 #### Scenario: An output matching no target column is rejected at declaration
@@ -479,6 +478,173 @@ by that key.
 - **WHEN** a declaration carries `preset: "embeddings"`
 - **THEN** the request is rejected with HTTP 400 `bad_request`, as any value outside the accepted set is
 
+### Requirement: The response schema is composed from the target and the transform
+
+The system SHALL compose an `llm` declaration's JSON response schema from the pipeline's target
+enrichment and its `transform.outputs`, at pipeline registration, patch and read. Composition happens
+on the pipeline because the pipeline is the only object there is: it names both the target and the
+transform, and binding the two is definitionally its job. The table SHALL stay ignorant of transforms.
+
+Composition SHALL be driven by the `outputs` **keys**, with each key's structure looked up on the
+target column of the same name:
+
+| Schema element | Source |
+|---|---|
+| property name | the `outputs` key, matched against the column's **exposed `name` only** |
+| `type` | the target column's declared type, through the mapping below |
+| `enum` values **and order** | the column's `enum_values` verbatim, else the output's `values` |
+| `description` | the output's prose, **else the target column's `description`**, else omitted |
+| property order and `required` order | the `outputs` declaration order |
+| `required` | **every** declared output; for `dial_app_route`, every output bound to a non-nullable column |
+| `additionalProperties` | always `false` |
+
+The type mapping SHALL be: `string` → `{"type": "string"}`; `enum` → `{"type": "string", "enum":
+[...]}`; `integer` and `long` → `{"type": "integer"}`; `double` and `decimal` → `{"type": "number"}`;
+`boolean` → `{"type": "boolean"}`; `timestamp` → `{"type": "string"}` with **no `format`** (strict
+schema mode rejects one); `array` → `{"type": "array", "items": <element_type mapped>}`. A column of
+any other type — `map`, `json` — SHALL be rejected with HTTP 422 naming the column and its type.
+
+The `description` default SHALL be applied **at composition time and SHALL NOT be written into the
+stored declaration**, so that the column remains the single authority for a fact the author did not
+supply. It SHALL therefore appear in the composed `response_schema` only, and SHALL NOT appear in the
+authored declaration under either projection: a derived default echoed onto the authored surface would
+be sent back by the next read-modify-write `PATCH`, become authored, and silently stop tracking the
+column. Where an output declares no prose **and** its target column has no `description`, the property
+SHALL be composed with no `description` at all rather than refused — a description-less property is
+valid under strict mode and is already what a legacy declaration with a stored schema produces — and
+`POST /v1/pipelines/{name}/preview` SHALL report it as a note. The default SHALL apply to `llm`
+outputs only: a `sql` output's string is an expression rather than prose, cannot be defaulted from any
+column, and SHALL keep being required and non-blank.
+
+Composition SHALL apply **only** where the declaration stores no `response_schema` of its own. A
+declaration carrying a stored schema serves it verbatim, and a declaration carrying neither a stored
+schema nor `outputs` — the shape a folded old-shape `llm` transform can have — composes nothing and
+calls the model unconstrained, exactly as it did before the fold.
+
+**Property order SHALL be the author's declared order, and SHALL be preserved through storage.** It
+is not cosmetic: under strict schema enforcement the model generates properties in schema order, so a
+field whose prose instructs it to derive itself from its siblings must be declarable *after* them.
+Order SHALL NOT be taken from the target's column order, which is tag-group-then-alphabetical and
+would make generation order a function of column tags. A storage form that normalizes key order SHALL
+NOT be used for either the composed schema or the stored `outputs`.
+
+For a `chat_completion` transform, `required` SHALL cover every declared output and SHALL NOT be derived
+from column nullability. Strict mode requires every property to be required, so there is no optional-output
+shape to express — and the two facts differ anyway: an enrichment column is nullable because a row may not
+be labelled yet, while a schema field is required because the model must answer. An output that may
+legitimately be absent SHALL be expressed as a sentinel value in `values` plus a `jsonata` mapping it to
+NULL.
+
+For a `dial_app_route` transform, nullability SHALL follow the bound column. An output bound to a nullable
+column SHALL be left out of `required`, and its property SHALL also accept `null`: its `type` becomes the
+pair of its type and `"null"`, and a closed `enum` domain gains `null`. An output bound to a non-nullable
+column stays required and non-null. The strict-mode argument does not apply here, because no
+`response_format` is sent and nothing holds the application to the schema. The runner validates only the
+object it assembled from the outputs' sources, and the column is what says whether NULL can be stored. A
+field the application omits is therefore written as NULL where the column allows it, and refused where it
+does not.
+
+Composing the enum domain **from the column** SHALL be preferred to declaring it on the output,
+and the consequence SHALL be accepted rather than worked around: enum **order** in the prompt is then
+whatever order the column's `enum_values` declare, which is chosen for dashboard sorting. Membership
+is the half that carries correctness — a ClickHouse enum column refuses an out-of-domain value at
+insert, so composing the domain from the column makes "the model returned a value the column cannot
+store" unrepresentable — and an order override on the output would rebuild exactly the
+two-copies-of-one-domain drift this composition removes.
+
+An output declaring `values` for a column that already declares `enum_values` SHALL be rejected with
+HTTP 422 naming both: a field has exactly one authority for its domain, chosen by which of the two
+can hold it. `values` SHALL be understood to buy **schema** enforcement only — a `string` column
+accepts anything at insert — and the rejection message for an out-of-domain value SHALL NOT imply
+otherwise.
+
+Because output names are matched to column names, an output matching no column SHALL be rejected with
+HTTP 422 naming the output and the target. A transform belongs to exactly one pipeline, which writes
+exactly one target.
+
+**Residual, stated rather than solved.** After composition the target's schema is a live input to both
+the prompt and the write mapping, and a column dropped and re-added changes the composed schema
+without any pipeline being patched, so `pipeline_generation` — the per-row provenance stamp — does not
+move either. Rows labelled either side of such a change therefore carry no per-row record of which
+schema produced them.
+
+#### Scenario: A schema is composed from the target's columns
+
+- **WHEN** a pipeline is registered naming a target whose columns include an `enum` column and a
+  `decimal` column, and a `transform` declaring an output for each
+- **THEN** the composed schema types the first as `{"type": "string", "enum": [...]}` carrying that
+  column's `enum_values` in the column's own order, and the second as `{"type": "number"}`
+
+#### Scenario: A declared prose wins over the column description
+
+- **WHEN** an output declares a non-blank `prose` and its target column also carries a `description`
+- **THEN** the composed property's `description` is the declared prose, and the column's `description`
+  is not consulted
+
+#### Scenario: Neither prose nor column description composes no description
+
+- **WHEN** an output declares no prose and its target column carries no `description`
+- **THEN** the composed property carries no `description` member at all, the schema is still valid, and
+  the pipeline is neither refused at write nor at enable
+
+#### Scenario: The defaulted description is absent from the authored surface
+
+- **WHEN** a pipeline whose output declares no prose is read with `view=source` and again with
+  `view=compiled`
+- **THEN** neither projection's authored `transform.outputs` carries a prose for that output, only the
+  derived `response_schema` carries the column's `description`, and sending the `view=source` body back
+  as a `PATCH` changes nothing
+
+#### Scenario: A stored response schema is unaffected by the default
+
+- **WHEN** a declaration stores its own `response_schema` and one of its outputs declares no prose
+- **THEN** the stored schema is served verbatim, no composition runs, and no column `description` is
+  read
+
+#### Scenario: Property order follows the outputs declaration
+
+- **WHEN** a `transform` declares outputs in the order `data_exposure`, `prohibited_request`,
+  `risk_level`
+- **THEN** the composed schema's `properties` and `required` carry that order, and it survives a
+  round trip through storage and a pipeline read
+
+#### Scenario: Every declared output is required
+
+- **WHEN** a `transform` declares an output bound to a nullable target column
+- **THEN** the composed schema lists that property in `required`, and `additionalProperties` is
+  `false`
+
+#### Scenario: A domain the column cannot carry is declared on the output
+
+- **WHEN** an output declares `values` for a target column declared plain `string`
+- **THEN** the composed schema carries those values as the property's `enum`, and the domain is
+  enforced at the model boundary rather than at insert
+
+#### Scenario: A column type with no strict-mode representation is rejected
+
+- **WHEN** an output resolves to a target column of type `map` or `json`
+- **THEN** the pipeline registration is rejected with HTTP 422 naming the column and its type
+
+#### Scenario: A timestamp property carries no format
+
+- **WHEN** an output resolves to a `timestamp` target column
+- **THEN** the composed property is `{"type": "string"}` with no `format` member
+
+#### Scenario: A declaration with no outputs composes nothing
+
+- **WHEN** an `llm` declaration folded from an old-shape evaluator version carries `output_vars` and
+  no `response_schema`
+- **THEN** no schema is composed, the entry is served without one, and the model is called
+  unconstrained as it was before the fold
+
+#### Scenario: A route schema leaves a nullable column's output optional
+
+- **GIVEN** a `dial_app_route` transform whose outputs bind a nullable `decimal` column `cost` and a
+  non-nullable `string` column `title`
+- **WHEN** its schema is composed
+- **THEN** `required` lists `title` only, `cost` has `type` `["number", "null"]`, and `title` has `type`
+  `"string"`
+
 ## ADDED Requirements
 
 ### Requirement: A transform may call a DIAL application route
@@ -618,49 +784,62 @@ reach the model as literal text.
 - **WHEN** a pipeline whose template carries `{{members:yaml}}` is enabled
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `members:yaml`
 
-### Requirement: An app-route transform may reshape the route's response with JSONata
+### Requirement: A route output reads its value from the route's response with source
 
-The system SHALL accept an optional `transform.response_jsonata` on a `dial_app_route` transform. This is
-a JSONata expression the runner evaluates over the route's parsed response body. Its result is the transform's output: the object
-validated against the compiled `response_schema`, and the object each output's own `jsonata`, or its
-direct lookup by name, is then read from.
+The system SHALL accept an optional `source` on each output of a `dial_app_route` transform. A `source` is a
+JSONata expression the runner evaluates over the route's parsed response body. Its result is that output's
+value. An output with no `source` SHALL take the response member named by the output, the same direct lookup a
+chat output uses. The runner assembles one object from every output's value, keyed by output name, validates
+it against the compiled `response_schema`, and writes it.
 
-It exists because an application's route contract is its own. A route may answer with nested objects, or
-with members the schema does not name, such as a usage block. The composed schema is strict, so such a
-route would otherwise fail validation on every call. Without the mapping, the application would have to
-change its contract to suit the pipeline, which is the coupling this preset exists to remove. A
-per-output `jsonata` cannot do the job: it runs after validation, over an object that must already match
-the schema.
+A `source` per output, rather than one expression reshaping the whole response, is what makes the mapping
+both authorable and checkable. Each output maps to one small expression, usually a dotted path such as
+`intent_counts.check`, so nothing has to be written as a single script. Every output is mapped by
+construction, either from its `source` or from its name, so there is no list of fields that can fall out of
+step with the outputs. A defect is reported against the one output it belongs to, both when the pipeline is
+armed and when a value fails validation.
 
-The member SHALL be checked for **shape** at the same gated requests as `transform.route`:
+`prose` and `values` SHALL keep their meaning on a route output. `prose` is the property's description in the
+composed schema, which the feed serves and an application may use, and `values` is a closed domain the
+assembled value is validated against.
 
-- It SHALL be refused under `chat_completion`. There, `response_format` already holds the model to the
-  schema, and a reshaping step would only hide a model that ignores it.
-- It SHALL be refused on a `sql` transform.
-- It SHALL parse as JSONata. A static parse is the same check every other JSONata member of the
-  declaration gets.
+The member SHALL be checked at the gated requests of "Static governance gate on arming and execution". Each
+refusal is HTTP 422 `pipeline_validation_failed` naming the output:
 
-Each failure SHALL be HTTP 422 `pipeline_validation_failed` naming `transform.response_jsonata`. A blank
-value SHALL mean absent, and absent SHALL mean the whole body is the output. The member SHALL be served
-in both projections and in the enrich feed inside `transform`, and SHALL be absent when undeclared.
+- A `source` SHALL be refused under `chat_completion`. A model's response is held to the schema by
+  `response_format` and is read by name.
+- An output's `jsonata` SHALL be refused under `dial_app_route`. The value is produced once, by `source`, and
+  validated after, so a second transform would only move the value past validation.
+- A `source` SHALL parse as JSONata.
+- A `source` equal to the output's own name SHALL be refused as the identity expression, as the identity
+  `jsonata` is: an absent `source` already means a direct lookup by name.
 
-#### Scenario: A nested route response is flattened onto the schema
+A blank `source` SHALL mean absent. The authored `source` SHALL be echoed in `transform.outputs` under both
+projections. On the compiled projection, the resolved `outputs` mapping SHALL carry it as `source` on each
+entry, beside `name`, `column` and `jsonata`, and SHALL omit it where the output declares none.
 
-- **WHEN** a `dial_app_route` declaration carries
-  `response_jsonata: "{\"title\": title, \"intent_counts__check\": intent_counts.check}"`
-- **THEN** it is stored, and the feed entry's `transform` carries the expression as authored
+#### Scenario: Nested route fields are mapped one output at a time
 
-#### Scenario: A response mapping on a chat transform is refused
+- **WHEN** a `dial_app_route` declaration's `outputs` carry `"title": {}` and
+  `"intent_counts__check": {"source": "intent_counts.check"}`
+- **THEN** the pipeline is stored, and the compiled `outputs` entry for `intent_counts__check` carries
+  `source` `"intent_counts.check"` while the entry for `title` carries none
 
-- **WHEN** a `chat_completion` declaration carries `response_jsonata`
-- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming
-  `transform.response_jsonata`
+#### Scenario: A source on a chat output is refused
 
-#### Scenario: An unparseable response mapping is refused
+- **WHEN** an armed `chat_completion` declaration carries an output with a `source`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the output
 
-- **WHEN** a `dial_app_route` declaration carries `response_jsonata: "{title: "`
-- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming
-  `transform.response_jsonata` when the pipeline is armed
+#### Scenario: A jsonata on a route output is refused
+
+- **WHEN** an armed `dial_app_route` declaration carries an output with a `jsonata`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the output
+
+#### Scenario: An unparseable or identity source is refused
+
+- **WHEN** an armed `dial_app_route` declaration carries an output `tox_score` whose `source` is `"{title: "`,
+  or is `"tox_score"`
+- **THEN** each is rejected with HTTP 422 `pipeline_validation_failed` naming `tox_score`
 
 ### Requirement: Both projections carry the transform's route
 

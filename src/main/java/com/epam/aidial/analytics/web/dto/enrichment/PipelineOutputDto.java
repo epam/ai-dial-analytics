@@ -40,5 +40,9 @@ public record PipelineOutputDto(
         @Schema(description = "Transform over the model response, applied before the value reaches the "
                 + "column. Absent when the value is taken directly from the response property named by "
                 + "`name`.")
-        String jsonata) {
+        String jsonata,
+
+        @Schema(description = "`dial_app_route` only: JSONata over the route's response body that yields the value "
+                + "of `name` before validation. Absent when the value is the response member named by `name`.")
+        String source) {
 }

@@ -37,6 +37,6 @@ public class OutputSpecDeserializer extends ValueDeserializer<OutputSpec> {
             return new OutputSpec(null, ctxt.readTreeAsValue(node, OutputSpecBody.class));
         }
         throw ctxt.wrongTokenException(p, OutputSpec.class, JsonToken.VALUE_STRING,
-                "a transform output is either prose (a string) or an object {prose, values?, jsonata?}");
+                "a transform output is either prose (a string) or an object {prose, values?, jsonata?, source?}");
     }
 }

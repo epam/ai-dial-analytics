@@ -212,10 +212,6 @@ public record PipelineDto(
                     example = "insights")
             String route,
 
-            @Schema(description = "JSONata over the route's response body (`dial_app_route` only); absent when "
-                    + "undeclared")
-            @JsonProperty("response_jsonata") String responseJsonata,
-
             @Schema(description = "Preset parameters (`llm` only)")
             Map<String, Object> params,
 

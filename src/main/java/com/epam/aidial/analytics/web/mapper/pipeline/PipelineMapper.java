@@ -11,6 +11,7 @@ import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
+import com.epam.aidial.analytics.service.enrichment.support.OutputShapes;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineFreshnessDiagnostics;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
@@ -116,7 +117,7 @@ public abstract class PipelineMapper {
      * which a retired spelling stops being refused on the kind it never belonged to.
      */
     private static final List<String> ENRICH_ONLY = List.of(
-            "transform.type", "transform.preset", "transform.model", "transform.route", "transform.response_jsonata",
+            "transform.type", "transform.preset", "transform.model", "transform.route",
             "transform.params",
             "transform.request_template", "transform.inputs", "transform.outputs",
             "transform.output_vars", "transform.response_schema",
@@ -283,7 +284,7 @@ public abstract class PipelineMapper {
             }
         }
         return new PatchTransformRequest(transform.type(), transform.preset(), transform.model(), transform.route(),
-                transform.responseJsonata(), transform.params(),
+                transform.params(),
                 transform.requestTemplate(), inputs,
                 transform.outputs() == null ? null : new LinkedHashMap<>(transform.outputs()),
                 transform.outputVars(), transform.responseSchema());
@@ -466,7 +467,6 @@ public abstract class PipelineMapper {
                 transform.getPreset(),
                 transform.getModel(),
                 transform.getRoute(),
-                transform.getResponseJsonata(),
                 transform.getParams() == null || transform.getParams().isEmpty()
                         ? null : transform.getParams(),
                 transform.getRequestTemplate(),
@@ -506,11 +506,11 @@ public abstract class PipelineMapper {
             return new OutputSpec(output.getSql(), null);
         }
         final boolean hasValues = output.getValues() != null && !output.getValues().isEmpty();
-        if (!hasValues && StringUtils.isBlank(output.getJsonata())) {
+        if (!hasValues && StringUtils.isBlank(output.getJsonata()) && StringUtils.isBlank(output.getSource())) {
             return output.getProse() == null ? null : new OutputSpec(output.getProse(), null);
         }
         return new OutputSpec(null,
-                new OutputSpecBody(output.getProse(), output.getValues(), output.getJsonata()));
+                new OutputSpecBody(output.getProse(), output.getValues(), output.getJsonata(), output.getSource()));
     }
 
     /** The legacy output shape, or absent when the declaration does not carry it. */
@@ -576,9 +576,12 @@ public abstract class PipelineMapper {
         final Map<String, String> transforms = spec.getTransform() == null
                 ? Map.of()
                 : spec.getTransform().jsonataByOutputName();
+        final Map<String, String> sources = spec.getTransform() == null
+                ? Map.of()
+                : OutputShapes.sourceByOutputName(spec.getTransform().getOutputs());
         return bindings.stream()
-                .map(binding -> new PipelineOutputDto(
-                        binding.getVar(), binding.getColumn(), transforms.get(binding.getVar())))
+                .map(binding -> new PipelineOutputDto(binding.getVar(), binding.getColumn(),
+                        transforms.get(binding.getVar()), sources.get(binding.getVar())))
                 .toList();
     }
 
@@ -802,7 +805,6 @@ public abstract class PipelineMapper {
             TransformPreset preset,
             String model,
             String route,
-            String responseJsonata,
             Map<String, Object> params,
             String requestTemplate,
             Map<String, VarSpec> inputs,
@@ -815,7 +817,7 @@ public abstract class PipelineMapper {
             return null;
         }
         return new TransformFields(request.type(), request.preset(), request.model(), request.route(),
-                request.responseJsonata(), request.params(), request.requestTemplate(), request.inputs(),
+                request.params(), request.requestTemplate(), request.inputs(),
                 request.outputs(), null,
                 request.responseSchema());
     }
@@ -825,7 +827,7 @@ public abstract class PipelineMapper {
             return null;
         }
         return new TransformFields(request.type(), request.preset(), request.model(), request.route(),
-                request.responseJsonata(), request.params(), request.requestTemplate(), request.inputs(),
+                request.params(), request.requestTemplate(), request.inputs(),
                 request.outputs(), request.outputVars(),
                 request.responseSchema());
     }
@@ -867,8 +869,6 @@ public abstract class PipelineMapper {
                 ? TransformPreset.CHAT_COMPLETION : request.preset());
         transform.setModel(request.model());
         transform.setRoute(request.route());
-        // Blank means absent, so one fact has one spelling: no mapping, the whole route body is the output.
-        transform.setResponseJsonata(StringUtils.isBlank(request.responseJsonata()) ? null : request.responseJsonata());
         transform.setParams(request.params());
         transform.setRequestTemplate(request.requestTemplate());
         transform.setInputBindings(toInputBindings(request.inputs()));
@@ -917,6 +917,7 @@ public abstract class PipelineMapper {
         output.setProse(spec.proseText());
         output.setValues(spec.values());
         output.setJsonata(spec.jsonata());
+        output.setSource(StringUtils.isBlank(spec.source()) ? null : spec.source());
         return output;
     }
 
@@ -1152,7 +1153,6 @@ public abstract class PipelineMapper {
                 transform == null ? null : transform.preset(),
                 transform == null ? null : transform.model(),
                 transform == null ? null : transform.route(),
-                transform == null ? null : transform.responseJsonata(),
                 transform == null ? null : transform.params(),
                 transform == null ? null : transform.requestTemplate(),
                 transform == null ? null : transform.inputs(),

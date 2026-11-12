@@ -241,13 +241,6 @@ public final class EnrichSpec implements PipelineSpec {
         @JsonProperty("route")
         private String route;
 
-        /**
-         * JSONata the runner evaluates over a route's response body to produce the output object, before that object
-         * is validated; {@code dial_app_route} only.
-         */
-        @JsonProperty("response_jsonata")
-        private String responseJsonata;
-
         /** Parameters shaping the preset's request; {@code llm} only. */
         @JsonProperty("params")
         private Map<String, Object> params;

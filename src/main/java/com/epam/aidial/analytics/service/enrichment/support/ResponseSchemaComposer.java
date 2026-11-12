@@ -67,6 +67,7 @@ public class ResponseSchemaComposer {
     private static final String NUMBER = "number";
     private static final String BOOLEAN = "boolean";
     private static final String ARRAY = "array";
+    private static final String NULL = "null";
 
     /**
      * The composed schema for one pipeline's (target, transform) pair, driven by the {@code outputs}
@@ -85,13 +86,33 @@ public class ResponseSchemaComposer {
      */
     public Map<String, Object> compose(
             List<TransformOutput> outputs, List<ColumnMappingEntity> targetColumns, String targetName) {
+        return compose(outputs, targetColumns, targetName, false);
+    }
+
+    /**
+     * As {@link #compose(List, List, String)}, and with {@code nullableFromColumn} true for a {@code dial_app_route}
+     * transform, whose schema follows each column's nullability: a nullable column's property also accepts
+     * {@code null} and is not required, so a field the route omits is written as NULL rather than refusing the row.
+     *
+     * <p>A model's schema cannot do that. Strict mode requires every property, so there an output the model may
+     * leave empty is spelled as a sentinel plus a {@code jsonata} mapping it to NULL. A route is not held to the
+     * schema by {@code response_format} at all; the runner only validates what it assembled, so the column, which
+     * says whether NULL is storable, is the right authority for whether the field may be absent.
+     */
+    public Map<String, Object> compose(List<TransformOutput> outputs, List<ColumnMappingEntity> targetColumns,
+                                       String targetName, boolean nullableFromColumn) {
         Map<String, Object> properties = new LinkedHashMap<>();
         List<String> required = new ArrayList<>(outputs.size());
         for (TransformOutput output : outputs) {
             ColumnMappingEntity column =
                     TargetOutputColumns.requireExposed(output.getName(), targetColumns, targetName);
-            properties.put(output.getName(), property(output, column, targetName));
-            required.add(output.getName());
+            Map<String, Object> property = property(output, column, targetName);
+            if (nullableFromColumn && column.isNullable()) {
+                allowNull(property);
+            } else {
+                required.add(output.getName());
+            }
+            properties.put(output.getName(), property);
         }
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put(TYPE, OBJECT);
@@ -174,6 +195,17 @@ public class ResponseSchemaComposer {
         }
         applyDeclaredDomain(output, column, property, targetName);
         return property;
+    }
+
+    /** Widens a property to accept {@code null}: its type becomes a pair, and a closed domain gains {@code null}. */
+    @SuppressWarnings("unchecked")
+    private static void allowNull(Map<String, Object> property) {
+        property.put(TYPE, List.of(property.get(TYPE), NULL));
+        if (property.get(ENUM) instanceof List<?> domain) {
+            List<Object> widened = new ArrayList<>((List<Object>) domain);
+            widened.add(null);
+            property.put(ENUM, widened);
+        }
     }
 
     private static Map<String, Object> items(ColumnMappingEntity column, String targetName) {

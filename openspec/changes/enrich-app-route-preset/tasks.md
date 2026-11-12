@@ -13,15 +13,21 @@
   grammar under `dial_app_route`, and refuse it under `chat_completion`. Add `route` to the llm-only
   members that a `sql` transform refuses. Each case is a 422 `pipeline_validation_failed` naming
   `transform.route`.
-- [x] 1.5 Add `response_jsonata` to the transform model, requests, DTO and mapper. The shape check
-  refuses it under `chat_completion` and `sql`, and refuses it when it does not parse. Each case is a 422
-  naming `transform.response_jsonata`.
+- [x] 1.5 Add a per-output `source` to the authored output (`OutputSpecBody`, `TransformOutput`) and to the
+  resolved compiled `outputs` entry (`PipelineOutputDto`). The gate refuses it under `chat_completion`, refuses a
+  route output's `jsonata`, and refuses a `source` that does not parse or is the identity expression. Each case is
+  a 422 naming the output.
+- [x] 1.5a Compose a route transform's schema from column nullability: a nullable column's output is not
+  required and accepts `null`.
 - [x] 1.6 Mapper and validator tests:
   - an app-route declaration round-trips;
   - a missing route, or a route on chat, is refused;
   - `preset: "embeddings"` is refused with 400 `bad_request`;
   - a `chat_completion` read carries no `route` member;
-  - `response_jsonata` round-trips, is refused on chat, and is refused when unparseable.
+  - an output `source` round-trips and reaches the compiled `outputs`, is refused on chat, and is refused when
+    unparseable or the identity;
+  - a route output's `jsonata` is refused;
+  - the route schema leaves a nullable column's output optional.
 
 ## 2. Raw-JSON placeholders
 
@@ -75,8 +81,8 @@
 
 - [x] 5.1 Raise `RunnerContract.VERSION_VALUE` to `5` and update the golden list in
   `RunnerContractShapeTest` for `transform.route`.
-- [x] 5.2 Feed test: an enabled app-route pipeline's compiled entry carries `preset`, `model`, `route`
-  and `response_jsonata` inside `transform`, and the response carries `Adas-Contract-Version: 5`.
+- [x] 5.2 Feed test: an enabled app-route pipeline's compiled entry carries `preset`, `model` and `route` inside
+  `transform` and `source` on its `outputs`, and the response carries `Adas-Contract-Version: 5`.
 - [x] 5.3 Catalog export/import test: `transform.route` travels in the source projection, and an imported
   route pipeline lands disabled.
 

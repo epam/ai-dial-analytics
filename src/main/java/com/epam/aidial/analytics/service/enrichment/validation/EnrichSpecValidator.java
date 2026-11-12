@@ -655,6 +655,42 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException(what + " declares the identity jsonata '"
                         + output.getName() + "'; omit jsonata, which already means a direct lookup by name");
             }
+            requireValidOutputSource(transform, output, what);
+        }
+    }
+
+    /**
+     * An output's {@code source}, dispatched on {@code preset}. Under {@code dial_app_route} it is how the output
+     * reads its value from the route's response body, so it must parse, and the output's {@code jsonata} is refused:
+     * the value is produced once, by {@code source}, and validated after. Under {@code chat_completion} a
+     * {@code source} is refused, because the model's response is held to the schema by {@code response_format} and
+     * read by name. The identity expression is refused for the same reason as the identity {@code jsonata}.
+     */
+    private static void requireValidOutputSource(EnrichSpec.TransformSpec transform, TransformOutput output,
+                                                 String what) {
+        final String source = StringUtils.trimToNull(output.getSource());
+        if (transform.getPreset() != TransformPreset.DIAL_APP_ROUTE) {
+            if (source != null) {
+                throw new PipelineValidationException(what + " declares a source, which is only valid with preset"
+                        + " 'dial_app_route'; a chat_completion output is read from the model's response by name");
+            }
+            return;
+        }
+        if (StringUtils.isNotBlank(output.getJsonata())) {
+            throw new PipelineValidationException(what + " declares jsonata on a 'dial_app_route' transform; a route"
+                    + " output reads its value with source, which is then validated, so there is no second transform");
+        }
+        if (source == null) {
+            return;
+        }
+        if (output.getName().equals(source)) {
+            throw new PipelineValidationException(what + " declares the identity source '" + output.getName()
+                    + "'; omit source, which already means a direct lookup by name");
+        }
+        try {
+            Jsonata.jsonata(source);
+        } catch (RuntimeException ex) {
+            throw new PipelineValidationException("JSONata for " + what + " source does not parse: " + ex.getMessage());
         }
     }
 
@@ -675,10 +711,8 @@ public class EnrichSpecValidator {
 
     /**
      * The members that say how the deployment is called, dispatched on {@code preset}. Under {@code dial_app_route} a
-     * {@code route} is required and must satisfy {@link AppRoutePath}, and an optional {@code response_jsonata} must
-     * parse. Under {@code chat_completion} both are refused: a chat call has no route to name, and its output is
-     * already held to the schema by {@code response_format}, so a reshaping step would only hide a model that ignores
-     * it.
+     * {@code route} is required and must satisfy {@link AppRoutePath}; under {@code chat_completion} it is refused,
+     * because a chat call has no route to name.
      */
     private static void requireValidCallShape(EnrichSpec.TransformSpec transform) {
         if (transform.getPreset() == TransformPreset.DIAL_APP_ROUTE) {
@@ -686,23 +720,11 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException("transform.route " + problem
                         + " for preset 'dial_app_route'; it is the path called under /v1/deployments/{model}/route/");
             });
-            if (transform.getResponseJsonata() != null) {
-                try {
-                    Jsonata.jsonata(transform.getResponseJsonata());
-                } catch (RuntimeException ex) {
-                    throw new PipelineValidationException(
-                            "JSONata for transform.response_jsonata does not parse: " + ex.getMessage());
-                }
-            }
             return;
         }
         if (transform.getRoute() != null) {
             throw new PipelineValidationException("transform.route is only valid with preset 'dial_app_route'; a"
                     + " chat_completion call has no route to name");
-        }
-        if (transform.getResponseJsonata() != null) {
-            throw new PipelineValidationException("transform.response_jsonata is only valid with preset"
-                    + " 'dial_app_route'; a chat_completion output is held to the schema by response_format");
         }
     }
 
@@ -719,7 +741,6 @@ public class EnrichSpecValidator {
         rejectLlmOnlyField("preset", transform.getPreset() != null);
         rejectLlmOnlyField("model", StringUtils.isNotBlank(transform.getModel()));
         rejectLlmOnlyField("route", transform.getRoute() != null);
-        rejectLlmOnlyField("response_jsonata", transform.getResponseJsonata() != null);
         // params shape the preset's request, so they are as LLM-only as the preset itself.
         rejectLlmOnlyField("params",
                 transform.getParams() != null && !transform.getParams().isEmpty());
@@ -740,6 +761,7 @@ public class EnrichSpecValidator {
             // "you sent an object" and "your expression is blank" are two messages instead of one.
             if (StringUtils.isNotBlank(output.getProse())
                     || StringUtils.isNotBlank(output.getJsonata())
+                    || StringUtils.isNotBlank(output.getSource())
                     || (output.getValues() != null && !output.getValues().isEmpty())) {
                 throw new PipelineValidationException(what + " is an object on a sql transform; a sql"
                         + " output is the expression itself, as a bare string");

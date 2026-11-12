@@ -222,10 +222,6 @@ public final class PipelineRequests {
                     + "for preset `dial_app_route`, forbidden otherwise", example = "insights")
             String route,
 
-            @Schema(description = "JSONata evaluated over the route's response body to produce the output object "
-                    + "that is validated; `dial_app_route` only")
-            @JsonProperty("response_jsonata") String responseJsonata,
-
             @Schema(description = "Preset parameters (temperature, max_tokens, …); forbidden for `sql`")
             Map<String, Object> params,
 
@@ -283,9 +279,6 @@ public final class PipelineRequests {
             @Schema(description = "The application route; required for preset `dial_app_route`, forbidden otherwise",
                     example = "insights")
             String route,
-
-            @Schema(description = "JSONata over the route's response body; `dial_app_route` only")
-            @JsonProperty("response_jsonata") String responseJsonata,
 
             @Schema(description = "Preset parameters; forbidden for `sql`")
             Map<String, Object> params,

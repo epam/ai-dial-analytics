@@ -56,8 +56,9 @@ Nothing changes for stored policies.
 ## Enrichment pipelines calling a DIAL application route
 
 An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
-`preset: dial_app_route`, a `route`, and an optional `response_jsonata` that maps the route's response onto the
-output schema (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
+`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
+response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
+nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
 also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
 
 - **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
@@ -67,7 +68,7 @@ also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped
   setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
   with `409 app_route_in_use`.
 - **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
-  `route`, `request_template` and, if needed, `response_jsonata`, then enable it again.
+  `route`, `request_template` and each nested output's `source`, then enable it again.
 - **Rollback.** Disable every `dial_app_route` pipeline, then roll ADAS and the runner back together. The
   migration that admits the setting name stays applied and is harmless to an older build.
 

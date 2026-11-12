@@ -121,8 +121,8 @@ class RunnerContractShapeTest {
                 "state: PipelineDto.StateDto", "notes: List<String>"));
         shapes.put(PipelineDto.PipelineTransformDto.class, List.of(
                 "type: TransformType", "preset: TransformPreset", "model: String",
-                // `route` and `response_jsonata` came with the `dial_app_route` preset, which raised VERSION to 5.
-                "route: String", "response_jsonata: String",
+                // `route` came with the `dial_app_route` preset, which raised VERSION to 5.
+                "route: String",
                 "params: Map<String, Object>", "request_template: String",
                 "inputs: Map<String, VarSpecBody>", "outputs: Map<String, OutputSpec>",
                 "output_vars: List<TransformVarDto>", "response_schema: Map<String, Object>"));
@@ -139,8 +139,11 @@ class RunnerContractShapeTest {
         // string or the body below — so both halves of that union are part of the wire shape.
         shapes.put(OutputSpec.class, List.of("text: String", "body: OutputSpecBody"));
         shapes.put(OutputSpecBody.class, List.of(
-                "prose: String", "values: List<String>", "jsonata: String"));
-        shapes.put(PipelineOutputDto.class, List.of("name: String", "column: String", "jsonata: String"));
+                "prose: String", "values: List<String>", "jsonata: String",
+                // `source` came with the `dial_app_route` preset, under VERSION 5.
+                "source: String"));
+        shapes.put(PipelineOutputDto.class, List.of("name: String", "column: String", "jsonata: String",
+                "source: String"));
         shapes.put(VarSpecBody.class, List.of("column: String", "jsonata: String"));
         shapes.put(TriggerRequest.class, List.of(
                 "kind: String", "cron: String", "group_by: String", "ready_when: ReadyWhenDto",

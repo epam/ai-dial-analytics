@@ -175,18 +175,18 @@ class CatalogBundleMappingTest {
     }
 
     @Test
-    void appRoutePipelineCarriesItsRouteAndResponseMappingAndImportsDisabled() {
+    void appRoutePipelineCarriesItsRouteAndOutputSourcesAndImportsDisabled() {
         final EnrichSpec spec = new EnrichSpec();
         final EnrichSpec.TransformSpec transform = spec.mutableTransform();
         transform.setType(TransformType.LLM);
         transform.setModel("insights-app");
         transform.setPreset(TransformPreset.DIAL_APP_ROUTE);
         transform.setRoute("v1/insights");
-        transform.setResponseJsonata("{\"verdict\": result.verdict}");
         transform.setRequestTemplate("{\"members\": {{members:json}}}");
         final TransformOutput verdict = new TransformOutput();
         verdict.setName("verdict");
         verdict.setProse("Whether the session went well.");
+        verdict.setSource("result.verdict");
         transform.setOutputs(new ArrayList<>(List.of(verdict)));
         final PipelineEntity stored = new PipelineEntity();
         stored.setName("insights_route");
@@ -204,7 +204,7 @@ class CatalogBundleMappingTest {
         final EnrichSpec.TransformSpec imported = ((EnrichSpec) registration.spec()).getTransform();
         assertThat(imported.getPreset()).isEqualTo(TransformPreset.DIAL_APP_ROUTE);
         assertThat(imported.getRoute()).isEqualTo("v1/insights");
-        assertThat(imported.getResponseJsonata()).isEqualTo("{\"verdict\": result.verdict}");
+        assertThat(imported.getOutputs()).extracting(TransformOutput::getSource).containsExactly("result.verdict");
     }
 
     private <T> T roundTrip(T value, Class<T> type) {

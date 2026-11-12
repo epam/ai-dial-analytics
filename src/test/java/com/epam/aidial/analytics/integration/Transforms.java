@@ -37,7 +37,6 @@ final class Transforms {
         private String model;
         private String preset;
         private String route;
-        private String responseJsonata;
         private String requestTemplate;
         private String params;
         private String responseSchema;
@@ -62,12 +61,6 @@ final class Transforms {
         /** The application route a {@code dial_app_route} transform calls. */
         Builder route(String value) {
             this.route = value;
-            return this;
-        }
-
-        /** The JSONata a {@code dial_app_route} transform maps its route's response with, unescaped. */
-        Builder responseJsonata(String value) {
-            this.responseJsonata = value;
             return this;
         }
 
@@ -141,9 +134,6 @@ final class Transforms {
             }
             if (route != null) {
                 members.add("\"route\":\"" + route + "\"");
-            }
-            if (responseJsonata != null) {
-                members.add("\"response_jsonata\":\"" + responseJsonata.replace("\"", "\\\"") + "\"");
             }
             if (params != null) {
                 members.add("\"params\":" + params);

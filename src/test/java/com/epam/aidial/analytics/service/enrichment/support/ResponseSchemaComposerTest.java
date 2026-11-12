@@ -276,4 +276,34 @@ class ResponseSchemaComposerTest {
 
         assertThat(((Map<String, Object>) schema.get("properties"))).containsOnlyKeys("detail");
     }
+
+    // --- dial_app_route: nullability follows the column ---------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeSchemaLetsNullableColumnsBeAbsentOrNull() {
+        final ColumnMappingEntity title = column("title", QueryFieldType.STRING);
+        title.setNullable(false);
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("title", "Title."), prose("cost", "Cost."), prose("sentiment", "Sentiment.")),
+                List.of(title, column("cost", QueryFieldType.DECIMAL),
+                        enumColumn("sentiment", List.of("negative", "positive"))),
+                "widget_insights", true);
+
+        assertThat((List<String>) schema.get("required")).containsExactly("title");
+        assertThat(propertyOf(schema, "title")).containsEntry("type", "string");
+        assertThat(propertyOf(schema, "cost")).containsEntry("type", List.of("number", "null"));
+        assertThat((List<Object>) propertyOf(schema, "sentiment").get("enum"))
+                .containsExactly("negative", "positive", null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void modelSchemaStillRequiresEveryOutput() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("cost", "Cost.")), List.of(column("cost", QueryFieldType.DECIMAL)), "widget_insights");
+
+        assertThat((List<String>) schema.get("required")).containsExactly("cost");
+        assertThat(propertyOf(schema, "cost")).containsEntry("type", "number");
+    }
 }

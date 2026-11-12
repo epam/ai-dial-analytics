@@ -90,7 +90,7 @@ class PipelineMapperTest {
     private static CreateTransformRequest llmTransform(LinkedHashMap<String, VarSpec> inputs) {
         final LinkedHashMap<String, OutputSpec> outputs = new LinkedHashMap<>();
         outputs.put("verdict", new OutputSpec("Whether the text is toxic.", null));
-        return new CreateTransformRequest(TransformType.LLM, null, "gpt-4o", null, null, null,
+        return new CreateTransformRequest(TransformType.LLM, null, "gpt-4o", null, null,
                 "{\"messages\": [{\"role\": \"user\", \"content\": \"{{text}}\"}]}",
                 inputs, outputs, null);
     }
@@ -360,7 +360,7 @@ class PipelineMapperTest {
     @Test
     void transformMemberOnAnAggregateIsNamedEvenWhenTheBlockOmitsItsType() {
         final CreateTransformRequest transform =
-                new CreateTransformRequest(null, null, "gpt-4o", null, null, null, null, null, null, null);
+                new CreateTransformRequest(null, null, "gpt-4o", null, null, null, null, null, null);
         final CreatePipelineRequest request = new CreatePipelineRequest(NAME, PipelineKind.AGGREGATE,
                 "usage_daily", List.of("dial_usage_log"), null,
                 List.of(new GroupKeyRequest("deployment", null, null)),
@@ -486,7 +486,7 @@ class PipelineMapperTest {
     private static PatchTransformRequest patchTransform(LinkedHashMap<String, VarSpec> inputs) {
         final LinkedHashMap<String, OutputSpec> outputs = new LinkedHashMap<>();
         outputs.put("verdict", new OutputSpec("Whether the text is toxic.", null));
-        return new PatchTransformRequest(TransformType.LLM, null, "gpt-4o", null, null, null, "{{text}}",
+        return new PatchTransformRequest(TransformType.LLM, null, "gpt-4o", null, null, "{{text}}",
                 inputs, outputs, null, null);
     }
 
