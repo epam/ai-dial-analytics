@@ -325,11 +325,11 @@ backend SHALL yield UNAVAILABLE. When `security.mode=none`, the endpoint SHALL b
 no credential form, matching HTTP behavior — no authenticator is registered, so `Basic` is neither
 required nor inspected and no `authorization` response header is emitted. Authorization SHALL mirror the
 HTTP `/v1/**` rule for every credential form alike, and that rule is now authentication plus a per-RPC
-privilege check rather than a role test. The gate SHALL admit any authenticated principal that could be
-authorized for something — one holding some privilege, or carrying some raw provider role a grant could
-name — and SHALL yield gRPC PERMISSION_DENIED only for a principal holding no privilege **and** carrying
-no provider role, for which no table is reachable by any route. Each RPC is then authorized by the
-privilege it requires (see **The Flight surface authorizes per RPC by privilege**).
+privilege check rather than a role test. The gate SHALL admit every authenticated principal, including
+one that holds no privilege and carries no provider role: every authenticated caller carries the grantee
+`*` (see `table-access-control`), so a table granting `*` is reachable by it, exactly as over HTTP. Each
+RPC is then authorized by the privilege it requires (see **The Flight surface authorizes per RPC by
+privilege**).
 
 Testing the principal for an application role here is what this replaces, and it had to go: a caller
 authorized entirely by per-table grants holds no global privilege, and it is exactly the caller — a BI
@@ -362,12 +362,12 @@ terminate TLS in front of the Flight listener.
 - **WHEN** a client presents `authorization: Basic base64("api-key:<key Core rejects>")`
 - **THEN** the call fails with UNAUTHENTICATED with the same message the `Api-Key` header path produces for a rejected key
 
-#### Scenario: Basic-authenticated principal without an application role is denied
-- **WHEN** a client presents a valid key via `Basic` that Core resolves with **no roles at all**, so the
-  principal holds no privilege and carries no provider role
-- **THEN** the call fails with PERMISSION_DENIED, as it does for the same key in an `Api-Key` header
-- **AND WHEN** the key instead resolves to roles that map to no privilege
+#### Scenario: Basic-authenticated principal without an application role is admitted
+- **WHEN** a client presents a valid key via `Basic` that Core resolves to roles that map to no privilege
 - **THEN** the call is admitted, because one of those raw roles may name it in a table's grant list
+- **AND WHEN** the key instead resolves with **no roles at all**
+- **THEN** the call is still admitted, as it is for the same key in an `Api-Key` header, because a table
+  granting `*` reaches it
 
 #### Scenario: Bearer wins over Basic
 - **WHEN** a call carries both `authorization: Bearer <valid token>` and a `Basic` credential
@@ -931,9 +931,10 @@ over HTTP and not over Flight.
 
 The gate SHALL NOT test the caller for an application role or for any particular privilege, because a
 caller authorized entirely by per-table grants holds none globally and is exactly the caller those grants
-exist for. It SHALL reject only a caller that could match nothing at all — one holding no privilege
-**and** carrying no provider role — rather than serving it an empty catalog on every call. Refusal SHALL
-use the Flight surface's existing error mapping.
+exist for. Nor SHALL it reject a caller holding no privilege and carrying no provider role: every
+authenticated caller carries the grantee `*`, so such a caller reaches every table granting `*` and is
+served an empty catalog only when none does. Refusal by the per-RPC checks SHALL use the Flight surface's
+existing error mapping.
 
 #### Scenario: A grant-only caller reaches Flight
 
@@ -942,10 +943,11 @@ use the Flight surface's existing error mapping.
 - **WHEN** it authenticates to the Flight surface
 - **THEN** it is admitted, and `GetTables` returns that table
 
-#### Scenario: A caller that can match nothing is refused
+#### Scenario: A caller with no role reaches a table granted to everyone
 
+- **GIVEN** a table whose `read` list is `["*"]`
 - **WHEN** a credential that maps to no privilege and carries no provider role authenticates
-- **THEN** the call is refused, because no table is reachable for it by any route
+- **THEN** it is admitted, and `GetTables` returns that table, which it does not list once `*` is revoked
 
 #### Scenario: Metadata is filtered to readable tables
 

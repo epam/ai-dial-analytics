@@ -1,12 +1,9 @@
 package com.epam.aidial.analytics.web.security.apikey;
 
 import com.epam.aidial.analytics.web.handler.ErrorView;
-import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.ConditionalOnSecurityMode;
 import com.epam.aidial.analytics.web.security.ErrorViewWriter;
-import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.SecurityMode;
-import com.epam.aidial.analytics.web.security.UserSecurityDetails;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -21,7 +18,6 @@ import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
@@ -30,10 +26,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * Authenticates a DIAL {@code Api-Key} presented in the {@code Api-Key} header by introspecting it
@@ -77,7 +69,8 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
         }
 
         try {
-            Authentication authentication = cache.getOrAuthenticate(apiKey, () -> authenticate(apiKey));
+            Authentication authentication = cache.getOrAuthenticate(apiKey,
+                    () -> authorityResolver.authenticate(introspector.introspect(apiKey)));
             SecurityContext context = SecurityContextHolder.createEmptyContext();
             context.setAuthentication(authentication);
             SecurityContextHolder.setContext(context);
@@ -91,24 +84,6 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
             writeError(request, response, HttpStatus.SERVICE_UNAVAILABLE, "service_unavailable",
                     "API key validation is temporarily unavailable");
         }
-    }
-
-    private Authentication authenticate(String apiKey) {
-        IntrospectionResult result = introspector.introspect(apiKey);
-        Set<Privilege> privileges = authorityResolver.resolve(result.rawRoles(), result.fromProjectKey());
-        // One shared builder for all four entry points: expanded privileges plus the raw provider roles
-        // (prefixed) for per-table grant matching.
-        List<GrantedAuthority> authorities = CallerAuthorities.build(privileges, result.rawRoles());
-        String project = result.fromProjectKey() ? result.principal() : null;
-        Map<String, Object> claims = new HashMap<>(result.claims());
-        ApiKeyAuthenticationToken token = new ApiKeyAuthenticationToken(
-                result.principal(), authorities, result.fromProjectKey(), project, claims);
-        token.setDetails(new UserSecurityDetails(result.email()));
-        if (privileges.isEmpty()) {
-            log.debug("Api-key principal '{}' (fromProjectKey={}) maps to no privilege; authenticated with "
-                    + "raw provider roles {}", result.principal(), result.fromProjectKey(), result.rawRoles());
-        }
-        return token;
     }
 
     private void writeError(HttpServletRequest request,

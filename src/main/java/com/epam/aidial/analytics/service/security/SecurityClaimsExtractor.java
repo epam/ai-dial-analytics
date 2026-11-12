@@ -13,6 +13,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -24,6 +25,9 @@ import java.util.stream.Collectors;
  */
 @Service
 public class SecurityClaimsExtractor {
+
+    /** The grantee that stands for every authenticated caller, whatever its provider roles. */
+    public static final String ANYONE = "*";
 
     private static final AuthenticationTrustResolver TRUST_RESOLVER = new AuthenticationTrustResolverImpl();
 
@@ -51,11 +55,26 @@ public class SecurityClaimsExtractor {
 
     /** The caller's email if present on the authentication details, otherwise {@code null}. */
     public String getEmail() {
-        Authentication authentication = currentAuthentication();
-        if (authentication != null && authentication.getDetails() instanceof UserSecurityDetails(String email)) {
-            return email;
-        }
-        return null;
+        final UserSecurityDetails details = details();
+        return details != null ? details.email() : null;
+    }
+
+    /** The caller's user hash, comparable with a {@code user_hash} column, or {@code null} when it has none. */
+    public String getUserHash() {
+        final UserSecurityDetails details = details();
+        return details != null ? details.userHash() : null;
+    }
+
+    /** The project of the caller's project API key, or {@code null} for every other caller. */
+    public String getProject() {
+        final UserSecurityDetails details = details();
+        return details != null ? details.project() : null;
+    }
+
+    private static UserSecurityDetails details() {
+        final Authentication authentication = currentAuthentication();
+        return authentication != null && authentication.getDetails() instanceof UserSecurityDetails details
+                ? details : null;
     }
 
     /**
@@ -79,10 +98,24 @@ public class SecurityClaimsExtractor {
      * role mapping), or an empty set when unauthenticated. Used for per-table access evaluation.
      */
     public Set<String> getProviderRoles() {
-        return authorities()
+        final Set<String> roles = authorities()
                 .filter(ProviderRoleAuthority::isProviderRole)
                 .map(ProviderRoleAuthority::strip)
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(HashSet::new));
+        // Every real caller also carries the wildcard, which a read-side grant list or a row policy may name.
+        // The system identity does not, so a policy for everyone never confines background work.
+        if (isAuthenticated() && !SystemIdentity.isSystem(currentAuthentication())) {
+            roles.add(ANYONE);
+        }
+        return roles;
+    }
+
+    /**
+     * The provider roles a real caller carrying {@code role} holds at the least: that role and {@link #ANYONE}.
+     * Grant management reasons about a bare role name with it, so a list naming {@code *} covers the role.
+     */
+    public static Set<String> carriedWith(String role) {
+        return ANYONE.equals(role) ? Set.of(ANYONE) : Set.of(role, ANYONE);
     }
 
     private java.util.stream.Stream<String> authorities() {

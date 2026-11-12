@@ -55,8 +55,8 @@ public record AccessReplacedDto(
      *
      * @param role      the granted provider role name
      * @param key       the grant key it was granted under ({@code get}, {@code read}, …)
-     * @param reason    a stable machine code: {@code already_global}, {@code enrichment_read_inert} or
-     *                  {@code sensitive_without_verb}
+     * @param reason    a stable machine code: {@code already_global}, {@code enrichment_read_inert},
+     *                  {@code sensitive_without_verb} or {@code lifts_row_policies}
      * @param message   the human-readable explanation
      */
     public record IneffectiveGrantDto(

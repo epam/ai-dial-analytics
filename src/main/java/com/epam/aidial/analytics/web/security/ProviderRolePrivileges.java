@@ -9,6 +9,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * The union of every configured {@code roles-mapping} — {@code security.defaults}, each
@@ -74,6 +75,14 @@ public class ProviderRolePrivileges {
     /** Whether {@code providerRole} already holds {@code privilege} over every table. */
     public boolean holdsGlobally(String providerRole, Privilege privilege) {
         return privilegesOf(providerRole).contains(privilege);
+    }
+
+    /** Every configured role name that holds {@code privilege} over every table. */
+    public Set<String> rolesHoldingGlobally(Privilege privilege) {
+        return byRole.entrySet().stream()
+                .filter(entry -> entry.getValue().contains(privilege))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static void absorb(Map<String, Set<Privilege>> into, Map<String, Set<Privilege>> mapping) {

@@ -2077,6 +2077,28 @@ consulted here only to **refuse**, never to exempt. The rule is evaluated when g
 schema change, not when the mapping does, so remapping a role to global `TABLE_SENSITIVE` after its
 derived `read` grant was stored is not re-examined.
 
+The grantee `*` (see `table-access-control`) SHALL take part in this rule as the role every caller
+carries. On the source side, a `read` or `sensitive` list naming `*` covers every role. On the target
+side, a `read` grant to `*` reaches every role the mapping maps to global `TABLE_SENSITIVE`, and each of
+those SHALL be read by the source as above.
+
+#### Scenario: A source granting everyone covers a named role
+
+- **GIVEN** a read source whose `read` and `sensitive` lists are both `["*"]`, and a target enrichment that
+  carries a `sensitive` column
+- **WHEN** an operator grants `team-x` `sensitive` on the target, or grants `read` to a role mapped to
+  global `TABLE_SENSITIVE`
+- **THEN** the grant is accepted, because every caller carrying that role carries `*` and reads the source
+
+#### Scenario: A read for everyone reaches the globally cleared roles
+
+- **GIVEN** a role `pii-bots` mapped to global `TABLE_SENSITIVE`, a read source whose `read` list is
+  `["analysts"]`, and a target enrichment that carries a `sensitive` column
+- **WHEN** an operator grants `*` `read` on the target
+- **THEN** the request is refused `422 sensitive_grant_widens`, naming `pii-bots`
+- **AND WHEN** the read source's `read` list is `["*"]` instead
+- **THEN** the same grant is accepted
+
 #### Scenario: A globally cleared role may not read laundered values through a read grant
 
 - **GIVEN** a role `pii-bots` that `roles-mapping` maps to `TABLE_SENSITIVE` only, a read source that

@@ -247,3 +247,6 @@ security:
     request-timeout-ms: ${API_KEY_REQUEST_TIMEOUT_MS:3000}
     roles-mapping: "${API_KEY_ROLES_MAPPING:}"
     startup-probe: ${API_KEY_STARTUP_PROBE:true}
+    logging-key: ${API_KEY_LOGGING_KEY:}
+    logging-salt: ${API_KEY_LOGGING_SALT:}
+    obfuscate-user-email: ${API_KEY_OBFUSCATE_USER_EMAIL:true}

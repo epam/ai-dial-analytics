@@ -63,7 +63,7 @@ class RowPolicyFilterTest {
     void setUp() {
         oidc = filter(SecurityMode.OIDC, "analytics");
         none = filter(SecurityMode.NONE, "analytics");
-        given(predicates.render(anyString(), any(FilterNode.class))).willAnswer(inv ->
+        given(predicates.render(anyString(), any(FilterNode.class), any())).willAnswer(inv ->
                 inv.getArgument(0) + ":" + ((ValueExpr) ((ComparisonNode) inv.getArgument(1)).args().get(1)).value());
         // `analysts` holds a per-table read grant on `events` only; `viewer` maps to TABLE_READ globally.
         given(definitions.findStoredRowPolicies()).willReturn(List.of(
@@ -89,6 +89,21 @@ class RowPolicyFilterTest {
         assertThat(oidc.filters()).containsExactly(
                 Map.entry("analytics.costs", "costs:X"),
                 Map.entry("analytics.events", "events:X"));
+    }
+
+    @Test
+    void callerValuesComeFromTheRequestsIdentityAndBlankIsUnknown() {
+        callerRoles("team-x");
+        given(claims.getUserHash()).willReturn("h1");
+        given(claims.getProject()).willReturn("  ");
+        given(predicates.render(anyString(), any(FilterNode.class), any())).willAnswer(inv -> {
+            final java.util.function.UnaryOperator<String> values = inv.getArgument(2);
+            return values.apply(RowPolicyPredicates.CALLER_USER_HASH) + "/" + values.apply(RowPolicyPredicates.CALLER_PROJECT)
+                    + "/" + values.apply("caller.email");
+        });
+
+        // A name outside the closed set resolves to nothing, whatever the identity carries.
+        assertThat(oidc.filters()).containsEntry("analytics.events", "h1/null/null");
     }
 
     @Test
