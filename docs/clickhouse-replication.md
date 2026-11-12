@@ -79,17 +79,20 @@ second replica joins. After startup, a change of the answering replica is logged
 
 - **Readiness** that reports a replica ready only once it has joined the database.
 
-The writer credential needs three grants on top of
+The writer credential needs four grants on top of
 [`clickhouse-server.md`](clickhouse-server.md#writer-credential):
 
 ```sql
 GRANT SYSTEM SYNC REPLICA ON <db>.* TO <writer>
 GRANT SYSTEM SYNC DATABASE REPLICA ON <db>.* TO <writer>
 GRANT SELECT ON system.clusters TO <writer>
+GRANT SYSTEM MERGES ON <db>.* TO <writer>
 ```
 
 Without `SELECT ON system.clusters` discovery fails, ADAS logs a WARN, and every statement runs on the
-primary. The read credential gains nothing.
+primary. Without `SYSTEM MERGES` the first-start table conversion compares row counts with merges running,
+so a merge that collapses rows between the two reads can make it give a table up and fail startup, which a restart
+retries. The read credential gains nothing.
 
 ## Clocks and the safety lag
 

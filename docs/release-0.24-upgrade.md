@@ -11,7 +11,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Plain tables convert automatically on the first start**, with a deploy that stops the previous version
   first (§3).
 - **`CLICKHOUSE_HOST` must reach only the primary replica** (§5).
-- **Three new writer grants** (§1).
+- **Four new writer grants** (§1).
 - **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
 - **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
 - **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
@@ -32,11 +32,14 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>;
   GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>;
   GRANT SELECT ON system.clusters TO <writer>;
+  GRANT SYSTEM MERGES ON <database>.* TO <writer>;
   ```
 
   Startup fails naming a missing `SYSTEM SYNC` grant: without them every pipeline run and every ingest cycle
   would be refused with `503`.
   Without `SELECT ON system.clusters` ADAS starts, logs a WARN and routes everything to the primary.
+  Without `SYSTEM MERGES` the first-start table conversion (§3) compares row counts with merges running, so a merge
+  that collapses rows between the two reads can make it give a table up and fail startup, which a restart retries.
 - **NTP** on every ClickHouse node and every ADAS pod: the pipeline safety lag covers clock skew among them.
 - **New optional keys.** `CLICKHOUSE_ROUTING_QUERIES`, `CLICKHOUSE_ROUTING_PIPELINES`,
   `CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL`, `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT` and `CLICKHOUSE_DDL_TASK_TIMEOUT`
