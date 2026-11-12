@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.web.mapper.pipeline;
 
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.service.enrichment.model.InputBinding;
+import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
 import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
@@ -171,6 +172,39 @@ class CatalogBundleMappingTest {
         assertThat(imported.getInputBindings()).extracting(InputBinding::getColumn).containsExactly("prompt");
         assertThat(((EnrichSpec) registration.spec()).getRateRpm()).isEqualTo(75);
         assertThat(specCodec.write(registration.spec())).isEqualTo(specCodec.write(spec));
+    }
+
+    @Test
+    void appRoutePipelineCarriesItsRouteAndResponseMappingAndImportsDisabled() {
+        final EnrichSpec spec = new EnrichSpec();
+        final EnrichSpec.TransformSpec transform = spec.mutableTransform();
+        transform.setType(TransformType.LLM);
+        transform.setModel("insights-app");
+        transform.setPreset(TransformPreset.DIAL_APP_ROUTE);
+        transform.setRoute("v1/insights");
+        transform.setResponseJsonata("{\"verdict\": result.verdict}");
+        transform.setRequestTemplate("{\"members\": {{members:json}}}");
+        final TransformOutput verdict = new TransformOutput();
+        verdict.setName("verdict");
+        verdict.setProse("Whether the session went well.");
+        transform.setOutputs(new ArrayList<>(List.of(verdict)));
+        final PipelineEntity stored = new PipelineEntity();
+        stored.setName("insights_route");
+        stored.setKind(PipelineKind.ENRICH);
+        stored.setTarget("session_insights");
+        stored.setTriggerKind(TriggerKind.SCHEDULE);
+        stored.setTriggerCron("0 * * * * *");
+        stored.setEnabled(true);
+        stored.setSpec(specCodec.write(spec));
+
+        final BundlePipeline bundled = roundTrip(pipelineMapper.toBundle(stored), BundlePipeline.class);
+        final PipelineRegistration registration = pipelineMapper.toRegistration(bundled);
+
+        assertThat(registration.enabled()).isFalse();
+        final EnrichSpec.TransformSpec imported = ((EnrichSpec) registration.spec()).getTransform();
+        assertThat(imported.getPreset()).isEqualTo(TransformPreset.DIAL_APP_ROUTE);
+        assertThat(imported.getRoute()).isEqualTo("v1/insights");
+        assertThat(imported.getResponseJsonata()).isEqualTo("{\"verdict\": result.verdict}");
     }
 
     private <T> T roundTrip(T value, Class<T> type) {

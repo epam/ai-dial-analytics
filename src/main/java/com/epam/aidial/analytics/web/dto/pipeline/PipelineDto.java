@@ -204,8 +204,17 @@ public record PipelineDto(
             @Schema(description = "Request-shaping preset (`llm` only)", example = "chat_completion")
             TransformPreset preset,
 
-            @Schema(description = "DIAL deployment/model (`llm` only)", example = "gemini-2.5-flash-lite")
+            @Schema(description = "DIAL deployment, a model or an application (`llm` only)",
+                    example = "gemini-2.5-flash-lite")
             String model,
+
+            @Schema(description = "The application route (`dial_app_route` only); absent otherwise",
+                    example = "insights")
+            String route,
+
+            @Schema(description = "JSONata over the route's response body (`dial_app_route` only); absent when "
+                    + "undeclared")
+            @JsonProperty("response_jsonata") String responseJsonata,
 
             @Schema(description = "Preset parameters (`llm` only)")
             Map<String, Object> params,

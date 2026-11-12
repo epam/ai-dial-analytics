@@ -116,7 +116,8 @@ public abstract class PipelineMapper {
      * which a retired spelling stops being refused on the kind it never belonged to.
      */
     private static final List<String> ENRICH_ONLY = List.of(
-            "transform.type", "transform.preset", "transform.model", "transform.params",
+            "transform.type", "transform.preset", "transform.model", "transform.route", "transform.response_jsonata",
+            "transform.params",
             "transform.request_template", "transform.inputs", "transform.outputs",
             "transform.output_vars", "transform.response_schema",
             "advanced.rows_per_scan", "advanced.rows_per_call", "advanced.rate_rpm", "advanced.sample_fraction");
@@ -281,7 +282,8 @@ public abstract class PipelineMapper {
                 inputs.put(entry.getKey(), new VarSpec(null, entry.getValue()));
             }
         }
-        return new PatchTransformRequest(transform.type(), transform.preset(), transform.model(), transform.params(),
+        return new PatchTransformRequest(transform.type(), transform.preset(), transform.model(), transform.route(),
+                transform.responseJsonata(), transform.params(),
                 transform.requestTemplate(), inputs,
                 transform.outputs() == null ? null : new LinkedHashMap<>(transform.outputs()),
                 transform.outputVars(), transform.responseSchema());
@@ -463,6 +465,8 @@ public abstract class PipelineMapper {
                 transform.getType(),
                 transform.getPreset(),
                 transform.getModel(),
+                transform.getRoute(),
+                transform.getResponseJsonata(),
                 transform.getParams() == null || transform.getParams().isEmpty()
                         ? null : transform.getParams(),
                 transform.getRequestTemplate(),
@@ -797,6 +801,8 @@ public abstract class PipelineMapper {
             TransformType type,
             TransformPreset preset,
             String model,
+            String route,
+            String responseJsonata,
             Map<String, Object> params,
             String requestTemplate,
             Map<String, VarSpec> inputs,
@@ -808,8 +814,9 @@ public abstract class PipelineMapper {
         if (request == null) {
             return null;
         }
-        return new TransformFields(request.type(), request.preset(), request.model(), request.params(),
-                request.requestTemplate(), request.inputs(), request.outputs(), null,
+        return new TransformFields(request.type(), request.preset(), request.model(), request.route(),
+                request.responseJsonata(), request.params(), request.requestTemplate(), request.inputs(),
+                request.outputs(), null,
                 request.responseSchema());
     }
 
@@ -817,8 +824,9 @@ public abstract class PipelineMapper {
         if (request == null) {
             return null;
         }
-        return new TransformFields(request.type(), request.preset(), request.model(), request.params(),
-                request.requestTemplate(), request.inputs(), request.outputs(), request.outputVars(),
+        return new TransformFields(request.type(), request.preset(), request.model(), request.route(),
+                request.responseJsonata(), request.params(), request.requestTemplate(), request.inputs(),
+                request.outputs(), request.outputVars(),
                 request.responseSchema());
     }
 
@@ -830,8 +838,8 @@ public abstract class PipelineMapper {
      * lets a refusal name the field with a 422; a mapper that dropped an {@code llm}-only member from a
      * {@code sql} transform would turn "a sql transform must not carry model" into a silent accept.
      *
-     * <p>The two exceptions. {@code preset} defaults to {@code chat_completion} for {@code llm}, because it
-     * is the only value the enum has — and the default is {@code llm}-only, so a {@code sql} body's own
+     * <p>The two exceptions. {@code preset} defaults to {@code chat_completion} for {@code llm}, because that
+     * is what a declaration naming no preset has always meant — and the default is {@code llm}-only, so a {@code sql} body's own
      * {@code preset} stays null and is refused by the gate rather than being filled in and then accepted.
      * And an output's bare string is dispatched on {@code type}: the expression for {@code sql}, prose for
      * {@code llm}. That dispatch cannot move later — both grammars are "a string" on the wire, so this is
@@ -858,6 +866,9 @@ public abstract class PipelineMapper {
         transform.setPreset(request.preset() == null && !sql
                 ? TransformPreset.CHAT_COMPLETION : request.preset());
         transform.setModel(request.model());
+        transform.setRoute(request.route());
+        // Blank means absent, so one fact has one spelling: no mapping, the whole route body is the output.
+        transform.setResponseJsonata(StringUtils.isBlank(request.responseJsonata()) ? null : request.responseJsonata());
         transform.setParams(request.params());
         transform.setRequestTemplate(request.requestTemplate());
         transform.setInputBindings(toInputBindings(request.inputs()));
@@ -1140,6 +1151,8 @@ public abstract class PipelineMapper {
                 transform == null ? null : transform.type(),
                 transform == null ? null : transform.preset(),
                 transform == null ? null : transform.model(),
+                transform == null ? null : transform.route(),
+                transform == null ? null : transform.responseJsonata(),
                 transform == null ? null : transform.params(),
                 transform == null ? null : transform.requestTemplate(),
                 transform == null ? null : transform.inputs(),

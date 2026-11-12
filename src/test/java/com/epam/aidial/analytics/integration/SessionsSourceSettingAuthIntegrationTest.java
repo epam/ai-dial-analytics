@@ -109,6 +109,21 @@ class SessionsSourceSettingAuthIntegrationTest {
     }
 
     @Test
+    void onlyTheFullAdministratorWritesTheRouteAllowlist() throws Exception {
+        final String routes = "/v1/settings/app-routes";
+        final String body = "{\"routes\":[{\"deployment\":\"insights-app\",\"route\":\"insights\"}]}";
+        mockMvc.perform(authored(put(routes), token("analyst")).content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"));
+        mockMvc.perform(authored(get(routes), token("admin"))).andExpect(status().isNotFound());
+
+        mockMvc.perform(authored(put(routes), token("admin")).content(body)).andExpect(status().isOk());
+        mockMvc.perform(authored(get(routes), token("analyst")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.routes[0].deployment").value("insights-app"));
+    }
+
+    @Test
     void rawMappingWithoutTheSettingsReadIsForbidden() throws Exception {
         mockMvc.perform(authored(get(URL), token("tableonly")))
                 .andExpect(status().isForbidden())

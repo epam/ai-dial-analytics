@@ -203,4 +203,42 @@ class TemplatePlaceholderRuleTest {
         assertThatCode(() -> TemplatePlaceholderRule.validate("  ", Set.of("request"), TriggerKind.SCHEDULE))
                 .doesNotThrowAnyException();
     }
+
+    // --- the raw-JSON suffix ----------------------------------------------------------------------------------
+
+    @Test
+    void rawMembersPlaceholderSatisfiesTheGroupRule() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"members\": {{members:json}}}", GROUP_VARS, TriggerKind.GROUP))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rawRowPlaceholderCountsAsUseOfItsInput() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"input\": {{body:json}}}", Set.of("body"), TriggerKind.SCHEDULE))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rawRowPlaceholderBindingNothingIsRefused() {
+        assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                "{\"input\": {{missing:json}}}", Set.of(), TriggerKind.SCHEDULE))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("missing");
+    }
+
+    @Test
+    void unknownSuffixIsRefusedNamingThePlaceholder() {
+        assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                "{\"members\": {{members:yaml}}}", GROUP_VARS, TriggerKind.GROUP))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("members:yaml");
+    }
+
+    @Test
+    void suffixedPlaceholderContributesItsName() {
+        assertThat(TemplatePlaceholderRule.placeholdersOf("{{a}} {{b:json}} {{ c:json }}"))
+                .containsExactly("a", "b", "c");
+    }
 }

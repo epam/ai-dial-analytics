@@ -121,6 +121,8 @@ class RunnerContractShapeTest {
                 "state: PipelineDto.StateDto", "notes: List<String>"));
         shapes.put(PipelineDto.PipelineTransformDto.class, List.of(
                 "type: TransformType", "preset: TransformPreset", "model: String",
+                // `route` and `response_jsonata` came with the `dial_app_route` preset, which raised VERSION to 5.
+                "route: String", "response_jsonata: String",
                 "params: Map<String, Object>", "request_template: String",
                 "inputs: Map<String, VarSpecBody>", "outputs: Map<String, OutputSpec>",
                 "output_vars: List<TransformVarDto>", "response_schema: Map<String, Object>"));

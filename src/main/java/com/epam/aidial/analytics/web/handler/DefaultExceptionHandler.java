@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.web.handler;
 import com.clickhouse.client.api.ServerException;
 import com.epam.aidial.analytics.configuration.logging.AccessLogFilter;
 import com.epam.aidial.analytics.exception.ActivityNotFoundException;
+import com.epam.aidial.analytics.exception.AppRouteInUseException;
 import com.epam.aidial.analytics.exception.BackfillDisabledException;
 import com.epam.aidial.analytics.exception.BackfillInProgressException;
 import com.epam.aidial.analytics.exception.BackfillNotFoundException;
@@ -305,6 +306,16 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(SettingNotFoundException.class)
     public ErrorView handleSettingNotFound(HttpServletRequest req, SettingNotFoundException ex) {
         return new ErrorView(req, HttpStatus.NOT_FOUND, "setting_not_found", ex.getMessage());
+    }
+
+    /**
+     * A conflict with stored pipelines, not a fault in the body: the allowlist is well-formed, but an enabled pipeline
+     * still calls a pair it drops, and the message names that pipeline.
+     */
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(AppRouteInUseException.class)
+    public ErrorView handleAppRouteInUse(HttpServletRequest req, AppRouteInUseException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "app_route_in_use", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)

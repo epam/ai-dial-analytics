@@ -14,9 +14,11 @@ import com.epam.aidial.analytics.service.enrichment.model.MemberSelect;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.ReadyWhen;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
+import com.epam.aidial.analytics.service.enrichment.support.AppRoutePath;
 import com.epam.aidial.analytics.service.enrichment.support.CursorColumns;
 import com.epam.aidial.analytics.service.enrichment.support.EnrichmentTypeMapping;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFieldResolver;
@@ -32,6 +34,7 @@ import com.epam.aidial.analytics.service.pipeline.QualifiedColumnTokens;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.setting.AppRoutesSettingService;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.EnrichmentAlignment;
@@ -134,6 +137,7 @@ public class EnrichSpecValidator {
     private final PipelineSpecCodec specCodec;
     private final SensitiveGrantInvariant sensitiveGrants;
     private final RelayoutStateStore relayouts;
+    private final AppRoutesSettingService appRoutes;
 
     /**
      * Runs the gate for a populated (not yet persisted) ENRICH declaration. Throws on the first failure.
@@ -150,6 +154,7 @@ public class EnrichSpecValidator {
 
         String source = requireReadSource(declaration, target, grainKey);
         requireAlignableWriter(declaration, target, transform, source);
+        requireAllowedAppRoute(transform);
         // Every reference below resolves against the read source's ENTITY — its own columns under either
         // spelling, plus each ACTIVE enrichment's under the qualified flat name. Resolved once and threaded,
         // so no two checks can disagree about what a name means, and so the enrichments a declaration
@@ -628,6 +633,7 @@ public class EnrichSpecValidator {
                     + " transform.inputs is the part deferred to enable and preview; having a template at"
                     + " all is not");
         }
+        requireValidCallShape(transform);
         if (transform.getOutputs() == null) {
             return;
         }
@@ -653,7 +659,55 @@ public class EnrichSpecValidator {
     }
 
     /**
-     * The {@code sql} shape: none of the five {@code llm}-only members, and one non-blank scalar
+     * Refuses an app-route transform whose {@code (model, route)} pair the {@code app-routes} instance setting does
+     * not list. Runs at the gated requests only, like every other refusal here, so a disabled draft is stored
+     * before an administrator allows its route. The setting's own write refuses to drop a pair an enabled pipeline
+     * uses, so this check and that guard together keep every enabled route pipeline allowed.
+     */
+    private void requireAllowedAppRoute(EnrichSpec.TransformSpec transform) {
+        if (transform.getPreset() == TransformPreset.DIAL_APP_ROUTE
+                && !appRoutes.allows(transform.getModel(), transform.getRoute())) {
+            throw new PipelineValidationException("the route (" + transform.getModel() + ", " + transform.getRoute()
+                    + ") is not listed in the 'app-routes' instance setting; an administrator allows it with"
+                    + " PUT /v1/settings/app-routes before the pipeline can be enabled");
+        }
+    }
+
+    /**
+     * The members that say how the deployment is called, dispatched on {@code preset}. Under {@code dial_app_route} a
+     * {@code route} is required and must satisfy {@link AppRoutePath}, and an optional {@code response_jsonata} must
+     * parse. Under {@code chat_completion} both are refused: a chat call has no route to name, and its output is
+     * already held to the schema by {@code response_format}, so a reshaping step would only hide a model that ignores
+     * it.
+     */
+    private static void requireValidCallShape(EnrichSpec.TransformSpec transform) {
+        if (transform.getPreset() == TransformPreset.DIAL_APP_ROUTE) {
+            AppRoutePath.problem(transform.getRoute()).ifPresent(problem -> {
+                throw new PipelineValidationException("transform.route " + problem
+                        + " for preset 'dial_app_route'; it is the path called under /v1/deployments/{model}/route/");
+            });
+            if (transform.getResponseJsonata() != null) {
+                try {
+                    Jsonata.jsonata(transform.getResponseJsonata());
+                } catch (RuntimeException ex) {
+                    throw new PipelineValidationException(
+                            "JSONata for transform.response_jsonata does not parse: " + ex.getMessage());
+                }
+            }
+            return;
+        }
+        if (transform.getRoute() != null) {
+            throw new PipelineValidationException("transform.route is only valid with preset 'dial_app_route'; a"
+                    + " chat_completion call has no route to name");
+        }
+        if (transform.getResponseJsonata() != null) {
+            throw new PipelineValidationException("transform.response_jsonata is only valid with preset"
+                    + " 'dial_app_route'; a chat_completion output is held to the schema by response_format");
+        }
+    }
+
+    /**
+     * The {@code sql} shape: none of the {@code llm}-only members, and one non-blank scalar
      * expression per authored output.
      *
      * <p>The non-blank expression check is kept exactly as it was, and deliberately does <b>not</b> follow
@@ -664,6 +718,8 @@ public class EnrichSpecValidator {
     private static void requireValidSqlShape(EnrichSpec.TransformSpec transform) {
         rejectLlmOnlyField("preset", transform.getPreset() != null);
         rejectLlmOnlyField("model", StringUtils.isNotBlank(transform.getModel()));
+        rejectLlmOnlyField("route", transform.getRoute() != null);
+        rejectLlmOnlyField("response_jsonata", transform.getResponseJsonata() != null);
         // params shape the preset's request, so they are as LLM-only as the preset itself.
         rejectLlmOnlyField("params",
                 transform.getParams() != null && !transform.getParams().isEmpty());

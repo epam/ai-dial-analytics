@@ -52,13 +52,18 @@ public final class TemplatePlaceholderRule {
     public static final List<String> MEMBER_BUILT_INS =
             List.of(MEMBERS, "members_truncated", "members_included", "members_omitted", "members_notice");
 
+    /** The one suffix a placeholder may carry: {@code {{name:json}}} renders the value as a JSON literal. */
+    public static final String JSON_SUFFIX = "json";
+
     /**
-     * A {@code {{name}}} placeholder. Whitespace inside the braces is tolerated and the name is the
-     * trimmed token, so a template written {@code {{ members }}} is read as the same variable rather than
-     * as an unknown one — the renderer substitutes on the key, and refusing a spacing variant here would
-     * refuse a template that renders correctly.
+     * A {@code {{name}}} or {@code {{name:suffix}}} placeholder. Whitespace inside the braces is tolerated and the
+     * name is the trimmed token, so a template written {@code {{ members }}} is read as the same variable rather
+     * than as an unknown one — the renderer substitutes on the key, and refusing a spacing variant here would
+     * refuse a template that renders correctly. The suffix is captured separately so the rules below judge the
+     * name alone, and so a suffix other than {@link #JSON_SUFFIX} can be refused rather than left in the prompt.
      */
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)\\s*}}");
+    private static final Pattern PLACEHOLDER =
+            Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)(?::([A-Za-z0-9_]*))?\\s*}}");
 
     private TemplatePlaceholderRule() {
     }
@@ -80,6 +85,7 @@ public final class TemplatePlaceholderRule {
         if (StringUtils.isBlank(template)) {
             return;
         }
+        requireKnownSuffixes(template);
         final Set<String> placeholders = placeholdersOf(template);
         if (triggerKind == TriggerKind.GROUP) {
             validateGroupGrain(placeholders);
@@ -149,7 +155,26 @@ public final class TemplatePlaceholderRule {
         }
     }
 
-    /** The distinct placeholder names a template references, in first-appearance order. */
+    /**
+     * Refuses a placeholder whose suffix is not {@link #JSON_SUFFIX}. Read as a name, {@code {{members:yaml}}} binds
+     * to nothing and would reach the model as literal text.
+     */
+    private static void requireKnownSuffixes(String template) {
+        final Matcher matcher = PLACEHOLDER.matcher(template);
+        while (matcher.find()) {
+            final String suffix = matcher.group(2);
+            if (suffix != null && !suffix.equals(JSON_SUFFIX)) {
+                throw new PipelineValidationException("request_template placeholder '{{" + matcher.group(1) + ":"
+                        + suffix + "}}' carries an unknown suffix; the only one is ':" + JSON_SUFFIX
+                        + "', which renders the value as a JSON literal");
+            }
+        }
+    }
+
+    /**
+     * The distinct placeholder names a template references, in first-appearance order. A suffixed placeholder
+     * contributes its name, so {@code {{members:json}}} is a use of {@code members}.
+     */
     public static Set<String> placeholdersOf(String template) {
         final Set<String> names = new LinkedHashSet<>();
         final Matcher matcher = PLACEHOLDER.matcher(template);
