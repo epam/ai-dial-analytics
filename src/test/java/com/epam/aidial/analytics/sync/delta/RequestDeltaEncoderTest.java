@@ -97,6 +97,8 @@ class RequestDeltaEncoderTest {
         assertThat(b.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
         assertThat(b.get("request_ancestor_hashes")).isEqualTo(List.of());
         assertThat(messages(b)).hasSize(4);
+        // A root records no inherited text blocks: the entry written while b still had a parent is gone.
+        assertThat(b.get("request_cache_control")).isNull();
         assertThat(c.get("request_parent_hash")).isEqualTo(b.get("request_hash"));
         assertThat(c.get("request_ancestor_hashes")).isEqualTo(List.of(b.get("request_hash")));
         assertRebuilds(b);
@@ -258,10 +260,99 @@ class RequestDeltaEncoderTest {
         assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
         assertThat(messages(t2)).hasSize(2);
         assertThat((String) t2.get("request_body")).doesNotContain("cache_control");
-        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}}]");
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"i\":2,\"at\":\"/content/0\",\"v\":{\"type\":\"ephemeral\"}},{\"text_blocks\":[0]}]");
         // Each rebuild carries its own markers only: t2's first message comes back without the marker t1 had.
         assertRebuilds(t1);
         assertRebuilds(t2);
+    }
+
+    /**
+     * Four consecutive requests shaped like a coding agent's ({@code fixtures/request-delta/coding-agent-turns.json}):
+     * the client sends the message carrying the newest cache marker as a one-text-block array and, once the marker has
+     * moved on, as the plain string. Each turn rebuilds to exactly the request it was sent as.
+     */
+    @Test
+    void messageSentAsTextBlockThenAsPlainStringStaysOnTheChain() {
+        JsonNode turns = Rebuild.MAPPER.readTree(getClass().getResourceAsStream("/fixtures/request-delta/coding-agent-turns.json"));
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (int i = 0; i < turns.size(); i++) {
+            rows.add(row("e" + i, "10:0" + i + ":00.000", turns.get(i).toString()));
+            flush(rows.get(i));
+        }
+
+        for (int i = 1; i < rows.size(); i++) {
+            assertThat(rows.get(i).get("request_parent_hash")).as("turn %d", i).isEqualTo(rows.get(i - 1).get("request_hash"));
+            assertThat(messages(rows.get(i))).as("turn %d", i).hasSize(2);
+            assertThat(Rebuild.canonical(Rebuild.body(table.row("e" + i), table.rows()))).as("turn %d", i)
+                    .isEqualTo(Rebuild.canonical(turns.get(i)));
+        }
+    }
+
+    /** The inherited message comes back in the shape this row sent, the string, though the row storing it sent the block. */
+    @Test
+    void inheritedMessageRebuildsInTheShapeItsOwnRowSent() {
+        String block = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"";
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + block + ",\"cache_control\":{\"type\":\"ephemeral\"}}]}]"));
+        String added = "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]";
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[" + msg("user", "u1") + added));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(messages(t2)).hasSize(2);
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"text_blocks\":[]}]");
+        assertRebuilds(t2);
+    }
+
+    /** An unmarked block over a parent's plain string: only the row's record can say the block was sent. */
+    @Test
+    void messageSentAsPlainStringThenAsUnmarkedTextBlockRebuildsAsSent() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"}]},"
+                + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(t2.get("request_cache_control")).isEqualTo("[{\"text_blocks\":[0]}]");
+        assertRebuilds(t2);
+    }
+
+    /** The other direction: the parent stored the plain string, and the child marks that message, so sends it as a block. */
+    @Test
+    void messageSentAsPlainStringThenAsMarkedTextBlockRebuildsAsSent() {
+        Map<String, Object> t1 = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]"));
+        Map<String, Object> t2 = row("e2", "10:01:00.000", chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\","
+                + "\"cache_control\":{\"type\":\"ephemeral\"}}]}," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+
+        flush(t1);
+        flush(t2);
+
+        assertThat(t2.get("request_parent_hash")).isEqualTo(t1.get("request_hash"));
+        assertThat(messages(t2)).hasSize(2);
+        assertRebuilds(t2);
+    }
+
+    /** Only a lone text block with nothing but its text is the plain string: any other content is another message. */
+    @Test
+    void contentThatIsNotOneBareTextBlockIsNotThePlainString() {
+        flush(row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "]")));
+        String rest = "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]";
+        Map<String, Object> twoBlocks = row("e2", "10:01:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\"},{\"type\":\"text\",\"text\":\"x\"}]}" + rest));
+        Map<String, Object> extraMember = row("e3", "10:02:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"u1\",\"citations\":[]}]}" + rest));
+        Map<String, Object> otherType = row("e4", "10:03:00.000",
+                chat("[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u1\"}]}" + rest));
+
+        flush(twoBlocks);
+        flush(extraMember);
+        flush(otherType);
+
+        assertThat(List.of(twoBlocks, extraMember, otherType)).allSatisfy(row ->
+                assertThat(row.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString()));
     }
 
     @Test

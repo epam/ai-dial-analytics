@@ -113,7 +113,7 @@ The catalog migrations seed four:
 | `dial_usage_log_payload.request_body` | LLM request body, unbounded per row; verbatim except under `SYNC_REQUEST_BODY_MODE=delta` |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
-| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
+| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, and which inherited messages a later turn sent as one text block, under `SYNC_REQUEST_BODY_MODE=delta` |
 
 Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header

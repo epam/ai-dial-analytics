@@ -5,6 +5,7 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.node.StringNode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,8 +23,12 @@ import java.util.TreeMap;
  * of each present {@link #SYSTEM_KEYS top-level system key}, in that order, then the array's elements. Every
  * {@code cache_control} member inside the history is removed and recorded as a {@link #markers() marker}, because
  * clients move that marker to the newest message on each turn: left in, the same earlier message would canonicalize
- * differently on every turn and no turn would find its parent. A system element is hashed under its key name
- * ({@link #hashedHistory()}), so requests sharing a prefix share their system keys too, names included.
+ * differently on every turn and no turn would find its parent. For the same reason a message whose content is one
+ * bare text block is hashed as if its content were the plain string: the marked message travels as a block and
+ * the same message, unmarked on the next turn, as the string. The stored body keeps the shape it was sent in, and a
+ * row with a parent records which inherited messages it sent as such a block ({@link #textBlocks}). A system
+ * element is hashed under its key name ({@link #hashedHistory()}), so requests sharing a prefix share their system
+ * keys too, names included.
  *
  * <p>Each history element and the stored body are rendered as <b>canonical JSON</b>: object members sorted by name, no
  * insignificant whitespace, numbers as parsed (floats kept exact as decimals), and an unpaired surrogate written as its
@@ -31,7 +36,7 @@ import java.util.TreeMap;
  * surrogate escape, parsing turns it into a lone {@code char}, and written back raw it would reach ClickHouse as an
  * escape the server refuses, failing the insert on every retry, or as bytes that are not UTF-8. The canonical form is
  * what the prefix hashes cover, so it is only required to be stable within a release: a different form after an upgrade
- * makes the first request of each conversation a chain root, and breaks nothing.
+ * makes the first request of each conversation a chain root; re-ingest across it only by whole UTC days.
  */
 public final class ChatRequest {
 
@@ -46,7 +51,15 @@ public final class ChatRequest {
 
     private static final String CACHE_CONTROL = "cache_control";
 
+    /** The message member whose one-text-block form and plain-string form are one message to the prefix hashes. */
+    static final String CONTENT = "content";
+
+    /** The member of the {@code request_cache_control} entry that lists the inherited messages sent as a bare text block. */
+    static final String TEXT_BLOCKS = "text_blocks";
+
     private final List<String> canonicalHistory;
+    /** {@link #canonicalHistory} with each message as the prefix hashes read it; the same strings where they agree. */
+    private final List<String> hashedElements;
     private final List<Marker> markers;
     private final int systemCount;
     private final String tools;
@@ -55,9 +68,10 @@ public final class ChatRequest {
     private final String arrayKey;
     private final List<String> systemKeys;
 
-    private ChatRequest(List<String> canonicalHistory, List<Marker> markers, List<String> systemKeys, String tools,
-                        ObjectNode rest, String arrayKey) {
+    private ChatRequest(List<String> canonicalHistory, List<String> hashedElements, List<Marker> markers, List<String> systemKeys,
+                        String tools, ObjectNode rest, String arrayKey) {
         this.canonicalHistory = canonicalHistory;
+        this.hashedElements = hashedElements;
         this.markers = markers;
         this.systemKeys = systemKeys;
         this.systemCount = systemKeys.size();
@@ -129,13 +143,35 @@ public final class ChatRequest {
 
         List<Marker> markers = new ArrayList<>();
         List<String> canonical = new ArrayList<>(history.size());
+        List<String> hashed = new ArrayList<>(history.size());
         for (int i = 0; i < history.size(); i++) {
             JsonNode element = stripMarkers(history.get(i), i, "", markers);
-            canonical.add(canonical(element));
+            String text = canonical(element);
+            canonical.add(text);
+            JsonNode plain = i < systemKeys.size() ? element : textBlockAsString(element);
+            hashed.add(plain == element ? text : canonical(plain));
         }
         String tools = rest.has(TOOLS) ? canonical(rest.get(TOOLS)) : null;
-        return new ChatRequest(List.copyOf(canonical), List.copyOf(markers), List.copyOf(systemKeys), tools,
+        return new ChatRequest(List.copyOf(canonical), List.copyOf(hashed), List.copyOf(markers), List.copyOf(systemKeys), tools,
                 forStoring ? rest : null, forStoring ? arrayKey : null);
+    }
+
+    /**
+     * A message whose {@code content} is one text block carrying nothing but its text, with that content as the plain
+     * string; any other message as it is. A client sends the message holding the newest cache marker as such a block
+     * and, once the marker has moved on, as the string, so the two shapes must hash alike.
+     */
+    static JsonNode textBlockAsString(JsonNode message) {
+        if (message.get(CONTENT) instanceof ArrayNode content && content.size() == 1
+                && content.get(0) instanceof ObjectNode block && block.size() == 2
+                && block.get("text") instanceof StringNode text
+                && block.get("type") instanceof StringNode type && "text".equals(type.asString())) {
+            ObjectNode copy = JsonNodeFactory.instance.objectNode();
+            copy.setAll((ObjectNode) message);
+            copy.set(CONTENT, text);
+            return copy;
+        }
+        return message;
     }
 
     /** The history elements, each as canonical JSON with its {@code cache_control} members removed. */
@@ -145,14 +181,29 @@ public final class ChatRequest {
 
     /**
      * The history as the prefix hashes cover it: each system element as its key and value ({@code "system":...}), then
-     * the message elements as they are. A message element is always an object, so the two never match.
+     * the message elements, a lone bare text block as content read as the plain string. A message element is always an
+     * object, so the two never match.
      */
     List<String> hashedHistory() {
-        List<String> hashed = new ArrayList<>(canonicalHistory);
+        List<String> hashed = new ArrayList<>(hashedElements);
         for (int i = 0; i < systemCount; i++) {
             hashed.set(i, canonical(JsonNodeFactory.instance.stringNode(systemKeys.get(i))) + ":" + canonicalHistory.get(i));
         }
         return hashed;
+    }
+
+    /**
+     * The indices, below {@code upTo}, of the message elements sent as a bare text block: the ones a parent may have
+     * stored as the plain string, so the row records them for its rebuild.
+     */
+    List<Integer> textBlocks(int upTo) {
+        List<Integer> blocks = new ArrayList<>();
+        for (int i = systemCount; i < Math.min(upTo, hashedElements.size()); i++) {
+            if (!hashedElements.get(i).equals(canonicalHistory.get(i))) {
+                blocks.add(i);
+            }
+        }
+        return blocks;
     }
 
     /** How many history elements come from top-level system keys; they open the history. */

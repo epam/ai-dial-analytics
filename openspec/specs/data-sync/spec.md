@@ -3403,12 +3403,17 @@ insignificant whitespace.
 For a history `h1..hn`, ingest SHALL compute the **prefix hashes**
 `p0 = H(project_id, user_hash, UTC day of request_time, tools)` and `pk = H(p(k-1), e(hk))`. `H` is a 128-bit hash;
 `e(hk)` is the canonical JSON of `hk`, preceded for a system element by its key name (`"system":…`), so a system
-element never matches a message element or the same value under another system key. The two scope values are those
+element never matches a message element or the same value under another system key. A message element whose
+`content` is an array of exactly one object with exactly the members `type` = `"text"` and a string `text` — a
+**bare text block** — SHALL be hashed as if its `content` were that string: a client sends the message carrying
+the newest cache marker as such a block and, once the marker has moved on, the same message as the plain string, so
+the two shapes are one message to the hashes. Only `e(hk)` reads it that way; the stored body keeps the shape the
+request was sent in. The two scope values are those
 the record's `dial_usage_log` row carries, and `tools` is the canonical JSON of the request's top-level `tools`,
 hashed apart from every value when the request carries none, so `null`, `[]` and an absent `tools` never match. `pn`
 is the request's **path**. Because each prefix hash folds in every element before it, the scope and the tools, two
 requests SHALL have an equal `pk` only when their first `k` history elements are identical, system key names
-included, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
+included and a bare text block read as its string, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
 SHALL never yield an equal hash.
 
 The request's **parent** SHALL be a stored or same-flush chat request whose path equals the deepest `pk`
@@ -3438,14 +3443,17 @@ normalized and canonicalized as above.
 Rows carrying the same path MAY differ in parent and stored body (a re-ingested event can link differently, and an
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
 history, so following `request_parent_hash` through whichever row is found always terminates — each parent is
-strictly shallower — and always yields the row's exact canonical history. While a row exists, a row carrying
+strictly shallower — and always yields the row's exact canonical history, once each inherited message is put in
+the shape the row sent it in: a bare text block and its plain string are one message to the hashes, so the row
+that stores a message MAY have sent the other shape, and "the same history" in this capability means equal up to
+that shape, which the rebuilt row's own record settles (see "Cache markers are kept per event"). While a row exists, a row carrying
 its parent's path SHALL exist: a path depends only on the stored history and tools, so replacing a row under the
 `ReplacingMergeTree` keeps it whichever mode wrote the copy, and parent and child share a daily partition, so
 they expire together — up to the part granularity of the TTL: with `ttl_only_drop_parts`, a day still split
 across parts can lose an earlier part before a later one, so in the last day of a day's retention a child MAY
 name a parent already dropped, and its rebuild then fails as an expired row would. One more case breaks that, and it is an operator's to avoid: a path is computed from the
 history as ingest stores it, so re-ingesting an event after changing `sync.inline-files-drop-truncated` or `sync.inline-files-max-size`, or after a
-release that changes the canonical form, gives its new copy a different path. A child that is not re-ingested
+release that changes the canonical form or how an element is hashed, gives its new copy a different path. A child that is not re-ingested
 with it then names a path no row carries any more. Re-ingesting whole UTC days after such a change avoids it,
 since a parent and its children always share one.
 `request_ancestor_hashes` lets a rebuild read the whole chain in one query in the common case, and read further
@@ -3454,7 +3462,13 @@ message array (under the key the classification above chose: the first of `messa
 value is an array), then, for a row with a parent, each system key that its chain's root carries, in the order listed
 above, valued with its history element (`h1..hs`), and the root's `tools` member when the root has one, and finally
 the row's own cache markers, SHALL yield a JSON document equal to the received body
-(same members and values; key order and whitespace are not preserved). Ingest SHALL store everything a rebuild needs,
+(same members and values; key order and whitespace are not preserved). Before the markers are restored, each
+message the row inherits SHALL be put in the shape the row sent it in: a bare text block where the row's record
+lists it, the plain string otherwise, whichever of the two the row that stores the message sent. A row that
+carries no such record was stored before shapes were recorded, when only equal shapes linked, and SHALL inherit
+its messages as stored. That is the shape it sent unless a row stored since, on the same UTC day, carries one of
+its ancestors' paths with a message in the other shape and is the row the rebuild finds; such a row's rebuild MAY
+then differ from the request in that shape, and only there. Ingest SHALL store everything a rebuild needs,
 and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
 request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
@@ -3508,10 +3522,32 @@ request body is readable beside the stored one"); `request_body` itself SHALL ke
 - **THEN** it is stored in delta form, with `system_instruction` as the first history element and the
   `contents` elements after it
 
+#### Scenario: A message sent as a text block and then as a plain string stays on the chain
+
+- **WHEN** turn 1 ends with a user message whose `content` is `[{"type":"text","text":"u1"}]` carrying a
+  `cache_control` marker, and turn 2 repeats that message as `"content":"u1"` and adds two messages
+- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages, its
+  `request_cache_control` lists no inherited text block, and its rebuild equals the request it was sent as, with
+  `"content":"u1"`
+
+#### Scenario: A message sent as a plain string and then as a marked text block rebuilds as sent
+
+- **WHEN** turn 1 holds a user message `"content":"u1"`, and turn 2 repeats it as
+  `[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]` and adds two messages
+- **THEN** turn 2's parent is turn 1, its `request_cache_control` lists that message as a text block, and its
+  rebuild equals the request it was sent as, marker included
+
+#### Scenario: Content that is not one bare text block is another message
+
+- **WHEN** a stored request holds a user message `"content":"u1"`, and a request in the same scope opens with
+  that text as one of two blocks, as a text block carrying a further member, or as a block of another `type`
+- **THEN** the new request is a root
+
 #### Scenario: The history rebuilds exactly
 
 - **WHEN** a chain root A and its descendants B and C are stored, and C is rebuilt by following
-  `request_parent_hash` from C through stored rows to the root and concatenating their history elements root first
+  `request_parent_hash` from C through stored rows to the root, concatenating their history elements root first
+  and putting each inherited message in the shape C recorded
 - **THEN** the result equals C's normalized, canonical history element for element
 
 #### Scenario: A rebuild survives a parent re-linked by re-ingest
@@ -3663,7 +3699,10 @@ names its path as parent (see "Rebuild equivalence").
 The service SHALL record, under `sync.request-body-mode=delta`, every `cache_control` member removed from a
 chat request's history in that row's `request_cache_control`, as a JSON array of entries, each giving the index
 of the history element, the location of the member inside that element, and its value verbatim.
-`request_cache_control` SHALL be `NULL` for a request that carried none. Markers SHALL belong only to
+A row with a parent SHALL carry one further entry, `{"text_blocks":[…]}`, listing the indices of the message
+elements it inherits that it sent as a bare text block, empty when it sent none: the row storing such a message
+MAY have sent it as the plain string, and the entry is what lets a rebuild return the shape this request sent.
+`request_cache_control` SHALL be `NULL` for a request with no parent that carried no marker. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
 markers into the assembled history and no others. `cache_control` members outside the history (for
 example on `tools`) SHALL stay where they are, in the stored body or in the stored `tools` a request inherits.
@@ -3676,17 +3715,28 @@ newest message on each turn, so the same earlier message would otherwise hash di
 - **WHEN** turn 1 carries `cache_control` on its last user message, and turn 2 repeats that message
   without it and adds two messages carrying `cache_control` on the newest
 - **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages without markers, and
-  its `request_cache_control` records the one marker on its newest message
+  its `request_cache_control` records the one marker on its newest message, beside its text-block entry
 
 #### Scenario: Markers are not inherited
 
 - **WHEN** turn 2's markers are restored during a rebuild
 - **THEN** the assembled request carries turn 2's own markers only, not turn 1's
 
-#### Scenario: A request without markers stores null
+#### Scenario: A root without markers stores null
 
-- **WHEN** a chat request carrying no `cache_control` member is stored in delta form
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with no parent
 - **THEN** its `request_cache_control` is `NULL`
+
+#### Scenario: A row with a parent records the text blocks it inherits
+
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with a parent, and the
+  second of its three inherited history elements is a message it sent as a bare text block
+- **THEN** its `request_cache_control` is `[{"text_blocks":[1]}]`
+
+#### Scenario: A row stored before shapes were recorded inherits its messages as stored
+
+- **WHEN** a row with a parent carries no `text_blocks` entry and its root stored a message as a bare text block
+- **THEN** its rebuild returns that message as the stored block
 
 ### Requirement: A request body that is not a chat request is stored whole
 
@@ -3757,7 +3807,7 @@ or parent the first phase found (it was re-ingested between the two reads), its 
 the remaining rounds or returned `partial`.
 
 A rebuild SHALL return `partial` when: a path on the chain is carried by no row of the partition (the parent was
-never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form or
+never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form, element-hashing or
 inline-file setting change); a bound below is reached before the chain is complete; a rebuild statement fails or the
 read's budget runs out while the rebuild is in progress; or a body on the chain does not have the shape the rebuild
 expects (for example, a stored root that is not a chat request).
