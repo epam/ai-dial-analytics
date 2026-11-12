@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.blob.credential;
 
 import com.epam.aidial.analytics.observability.EventCapture;
 import com.google.auth.oauth2.AccessToken;
+import com.google.auth.oauth2.ComputeEngineCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.sun.net.httpserver.HttpServer;
@@ -9,18 +10,16 @@ import org.jclouds.domain.Credentials;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyPairGenerator;
-import java.security.NoSuchAlgorithmException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Date;
 import java.util.List;
@@ -32,21 +31,31 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.jwtBearerClaims;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.respondJson;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.rsaPrivateKey;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.serviceAccountKeyJson;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.tokenJson;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Unit tests for {@link GcsCredentialProvider}: the key-pair-vs-keyless decision, mapping a Google access token
  * onto the jclouds bearer credential, refresh ahead of expiry, single first resolution under concurrency, lazy
- * and retryable failure, the read-only scope, principal reporting, and that no token reaches the log.
+ * and retryable failure, a refused token told apart from a missing credential, the ADC lookup order and its
+ * re-reading of a replaced file, the read-only scope, principal reporting, and that no token reaches the log.
  *
  * <p>No GCP is contacted and no ADC environment is read: keyless cases go through the package-private
- * constructor. One case does a real token exchange against a loopback server, which also proves the library's
+ * constructor, and the lookup is given its file paths. One case does a real token exchange against a loopback server, which also proves the library's
  * default transport works with the Apache httpclient 4 jars excluded from the build.
  */
 class GcsCredentialProviderTest {
 
     private static final String CLIENT_EMAIL = "adas-reader@example-project.iam.gserviceaccount.com";
+    private static final String OTHER_EMAIL = "adas-replacement@example-project.iam.gserviceaccount.com";
+
+    @TempDir
+    Path dir;
 
     private EventCapture capture;
 
@@ -159,6 +168,64 @@ class GcsCredentialProviderTest {
     }
 
     @Test
+    void refusedTokenIsReportedApartFromMissingCredential() {
+        AtomicInteger tokenRequests = new AtomicInteger();
+        GcsCredentialProvider provider = new GcsCredentialProvider(() -> new CountingCredentials("ya29.later") {
+            @Override
+            public AccessToken refreshAccessToken() throws IOException {
+                if (tokenRequests.incrementAndGet() == 1) {
+                    throw new IOException("403 Forbidden");
+                }
+                return super.refreshAccessToken();
+            }
+        });
+
+        assertThatThrownBy(provider::getCredentials)
+                .isInstanceOf(UncheckedIOException.class)
+                .hasMessageStartingWith("Failed to obtain a Google access token")
+                .hasMessageNotContaining("Cannot resolve")
+                .hasRootCauseMessage("403 Forbidden");
+        assertThat(provider.getCredentials().credential).isEqualTo("ya29.later-1");
+    }
+
+    @Test
+    void lookupPrefersTheNamedFileAndRereadsItEachTime() throws IOException {
+        Path keyFile = dir.resolve("key.json");
+        Path wellKnown = dir.resolve("application_default_credentials.json");
+        Files.writeString(keyFile, serviceAccountKeyJson(CLIENT_EMAIL, "http://127.0.0.1:1/token"));
+        Files.writeString(wellKnown, serviceAccountKeyJson(OTHER_EMAIL, "http://127.0.0.1:1/token"));
+
+        assertThat(GcsCredentialProvider.principalOf(GcsCredentialProvider.loadApplicationDefault(keyFile.toString(), wellKnown)))
+                .isEqualTo(CLIENT_EMAIL);
+        // A replaced file is read again: nothing is cached across lookups.
+        Files.writeString(keyFile, serviceAccountKeyJson(OTHER_EMAIL, "http://127.0.0.1:1/token"));
+        assertThat(GcsCredentialProvider.principalOf(GcsCredentialProvider.loadApplicationDefault(keyFile.toString(), wellKnown)))
+                .isEqualTo(OTHER_EMAIL);
+    }
+
+    @Test
+    void lookupFallsBackToGcloudFileThenMetadataServer() throws IOException {
+        Path wellKnown = dir.resolve("application_default_credentials.json");
+
+        assertThat(GcsCredentialProvider.loadApplicationDefault(null, wellKnown)).isInstanceOf(ComputeEngineCredentials.class);
+        assertThat(GcsCredentialProvider.loadApplicationDefault(" ", wellKnown)).isInstanceOf(ComputeEngineCredentials.class);
+
+        Files.writeString(wellKnown, serviceAccountKeyJson(CLIENT_EMAIL, "http://127.0.0.1:1/token"));
+        assertThat(GcsCredentialProvider.principalOf(GcsCredentialProvider.loadApplicationDefault(null, wellKnown)))
+                .isEqualTo(CLIENT_EMAIL);
+    }
+
+    @Test
+    void missingNamedFileFailsTheLookup() {
+        Path missing = dir.resolve("absent.json");
+
+        assertThatThrownBy(() -> GcsCredentialProvider.loadApplicationDefault(missing.toString(), dir.resolve("none.json")))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("GOOGLE_APPLICATION_CREDENTIALS")
+                .hasMessageContaining(missing.toString());
+    }
+
+    @Test
     void constructionLooksNothingUp() {
         AtomicInteger loads = new AtomicInteger();
 
@@ -190,10 +257,10 @@ class GcsCredentialProviderTest {
     }
 
     @Test
-    void principalIsLoggedOnceAndTokenNever() throws Exception {
+    void principalIsLoggedOnceAndTokenNever() {
         GoogleCredentials serviceAccount = ServiceAccountCredentials.newBuilder()
                 .setClientEmail(CLIENT_EMAIL)
-                .setPrivateKey(KeyPairGenerator.getInstance("RSA").generateKeyPair().getPrivate())
+                .setPrivateKey(rsaPrivateKey())
                 .build();
         assertThat(GcsCredentialProvider.principalOf(serviceAccount)).isEqualTo(CLIENT_EMAIL);
         assertThat(GcsCredentialProvider.principalOf(new CountingCredentials("x"))).isEqualTo("unknown");
@@ -212,35 +279,25 @@ class GcsCredentialProviderTest {
      * credential, and the principal logged is the account's email.
      */
     @Test
-    void serviceAccountExchangeRunsOverDefaultTransport() throws IOException, NoSuchAlgorithmException {
-        AtomicReference<String> form = new AtomicReference<>();
+    void serviceAccountExchangeRunsOverDefaultTransport() throws IOException {
+        AtomicReference<String> claims = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/token", exchange -> {
-            form.set(URLDecoder.decode(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8),
-                    StandardCharsets.UTF_8));
-            byte[] body = "{\"access_token\":\"ya29.exchanged\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
-                    .getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().add("Content-Type", "application/json");
-            exchange.sendResponseHeaders(200, body.length);
-            try (OutputStream out = exchange.getResponseBody()) {
-                out.write(body);
-            }
+            claims.set(jwtBearerClaims(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+            respondJson(exchange, 200, tokenJson("ya29.exchanged"));
         });
         server.start();
         try {
             GoogleCredentials keyFile = ServiceAccountCredentials.newBuilder()
                     .setClientEmail(CLIENT_EMAIL)
-                    .setPrivateKey(KeyPairGenerator.getInstance("RSA").generateKeyPair().getPrivate())
+                    .setPrivateKey(rsaPrivateKey())
                     .setTokenServerUri(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/token"))
                     .build();
 
             Credentials credentials = new GcsCredentialProvider(() -> keyFile).getCredentials();
 
             assertThat(credentials.credential).isEqualTo("ya29.exchanged");
-            assertThat(form.get()).contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer");
-            String claims = new String(Base64.getUrlDecoder().decode(form.get().split("assertion=")[1].split("\\.")[1]),
-                    StandardCharsets.UTF_8);
-            assertThat(claims).contains(GcsCredentialProvider.READ_ONLY_SCOPE);
+            assertThat(claims.get()).contains(GcsCredentialProvider.READ_ONLY_SCOPE);
             assertThat(logged()).singleElement()
                     .satisfies(message -> assertThat(message).contains(CLIENT_EMAIL).doesNotContain("ya29.exchanged"));
         } finally {
@@ -265,7 +322,7 @@ class GcsCredentialProviderTest {
         }
 
         @Override
-        public AccessToken refreshAccessToken() {
+        public AccessToken refreshAccessToken() throws IOException {
             return new AccessToken(prefix + "-" + refreshes.incrementAndGet(), new Date(System.currentTimeMillis() + lifetimeMillis));
         }
     }

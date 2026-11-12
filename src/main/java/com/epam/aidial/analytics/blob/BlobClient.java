@@ -278,8 +278,7 @@ public class BlobClient {
             }
         }
         // The provider outlives a failed context build, so it is closed here regardless of whether one
-        // was ever produced — an AWS workload-identity provider holds an STS client nothing else releases; the
-        // GCS provider is closed the same way.
+        // was ever produced — an AWS workload-identity provider holds an STS client nothing else releases.
         if (credentials instanceof AutoCloseable closeable) {
             try {
                 closeable.close();

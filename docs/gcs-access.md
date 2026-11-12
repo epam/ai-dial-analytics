@@ -63,8 +63,12 @@ Tokens are never logged.
 Leave the pair blank and point `GOOGLE_APPLICATION_CREDENTIALS` at a file mounted from the deployment's
 secret store. A service-account key file (JSON) works. So does a workload-identity-federation
 configuration, which lets a pod on AKS or EKS exchange its own cluster token for Google credentials. The
-variable is read by Google's credential library, not by an ADAS property, and a file it names takes
-precedence over the metadata server.
+variable is a Google convention, not an ADAS property. A file it names takes precedence over the metadata
+server, and it is read again on every retry, so a replaced file is picked up without a restart.
+
+With the variable unset, gcloud's application-default credentials file (`gcloud auth application-default
+login`) is used when it exists, which suits local development. Only after that is the metadata server
+asked.
 
 ### Key pair
 
@@ -87,10 +91,14 @@ not at startup, like every other blob misconfiguration. The client is built on f
 following surfaces as a failed poll cycle once a minute, with the watermark held, and the next cycle
 retries:
 
-- no credential available
 - an unreadable credentials file
-- a metadata server that refuses
+- a metadata server that refuses or cannot be reached, which includes running outside GCP with no
+  credentials file
 - a key the token endpoint rejects
+
+A credentials file that cannot be read is reported as `Cannot resolve Google Application Default
+Credentials`. A credential that was found but whose token request failed is reported as `Failed to obtain a
+Google access token from <source>`, with the token endpoint's answer as the cause.
 
 A grant **revoked mid-run** does not look like a credential error. Cloud Storage checks IAM on every
 request, so the token in hand keeps refreshing and the revocation arrives as a `403` every cycle until the grant

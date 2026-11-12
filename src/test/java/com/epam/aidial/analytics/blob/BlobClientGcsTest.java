@@ -15,15 +15,16 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyPairGenerator;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.jwtBearerClaims;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.pemPrivateKey;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.respondJson;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.tokenJson;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -116,7 +117,7 @@ class BlobClientGcsTest {
     }
 
     @Test
-    void keyPairReachesNativeJwtBearerFlow() throws NoSuchAlgorithmException {
+    void keyPairReachesNativeJwtBearerFlow() {
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
         BlobProperties properties = new BlobProperties(
                 "google-cloud-storage", "adas-reader@example-project.iam.gserviceaccount.com", pemPrivateKey(), BUCKET,
@@ -128,9 +129,7 @@ class BlobClientGcsTest {
         assertThat(keys).containsExactly(KEY, OTHER_KEY);
         Request token = requests.stream().filter(r -> r.path().equals("/token")).findFirst().orElseThrow();
         assertThat(token.method()).isEqualTo("POST");
-        String form = URLDecoder.decode(token.body(), StandardCharsets.UTF_8);
-        assertThat(form).contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer").contains("assertion=");
-        String claims = new String(Base64.getUrlDecoder().decode(form.split("assertion=")[1].split("\\.")[1]), StandardCharsets.UTF_8);
+        String claims = jwtBearerClaims(token.body());
         // GET/HEAD-only use means the provider asks for the read-only scope on its own.
         assertThat(claims).contains("\"iss\":\"adas-reader@example-project.iam.gserviceaccount.com\"")
                 .contains("devstorage.read_only");
@@ -163,9 +162,9 @@ class BlobClientGcsTest {
                 exchange.getRequestHeaders().getFirst("Authorization"), body));
 
         if (path.equals("/token")) {
-            json(exchange, "{\"access_token\":\"" + JWT_TOKEN + "\",\"token_type\":\"Bearer\",\"expires_in\":3600}");
+            respondJson(exchange, 200, tokenJson(JWT_TOKEN));
         } else if (path.equals("/storage/v1/b/" + BUCKET + "/o")) {
-            json(exchange, query.contains("pageToken=page-2")
+            respondJson(exchange, 200, query.contains("pageToken=page-2")
                     ? "{\"kind\":\"storage#objects\",\"items\":[" + object(OTHER_KEY, "2026-06-18T10:21:00.000Z") + "]}"
                     : "{\"kind\":\"storage#objects\",\"items\":[" + object(KEY, "2026-06-18T10:16:00.000Z") + "],"
                             + "\"nextPageToken\":\"page-2\"}");
@@ -176,7 +175,7 @@ class BlobClientGcsTest {
                 out.write(CONTENT);
             }
         } else if (path.endsWith("/o/" + KEY)) {
-            json(exchange, object(KEY, "2026-06-18T10:16:00.000Z"));
+            respondJson(exchange, 200, object(KEY, "2026-06-18T10:16:00.000Z"));
         } else {
             exchange.sendResponseHeaders(404, -1);
             exchange.close();
@@ -191,23 +190,5 @@ class BlobClientGcsTest {
                 + "\"bucket\":\"" + BUCKET + "\",\"generation\":\"1\",\"metageneration\":\"1\","
                 + "\"contentType\":\"application/gzip\",\"size\":\"" + CONTENT.length + "\",\"metadata\":{},\"acl\":[],"
                 + "\"timeCreated\":\"" + updated + "\",\"updated\":\"" + updated + "\",\"storageClass\":\"STANDARD\"}";
-    }
-
-    private static void json(HttpExchange exchange, String json) throws IOException {
-        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json; charset=UTF-8");
-        exchange.sendResponseHeaders(200, bytes.length);
-        try (OutputStream out = exchange.getResponseBody()) {
-            out.write(bytes);
-        }
-    }
-
-    /** A fresh RSA key in PKCS#8 PEM — the form a service-account key file carries. */
-    private static String pemPrivateKey() throws NoSuchAlgorithmException {
-        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-        generator.initialize(2048);
-        String base64 = Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
-                .encodeToString(generator.generateKeyPair().getPrivate().getEncoded());
-        return "-----BEGIN PRIVATE KEY-----\n" + base64 + "\n-----END PRIVATE KEY-----\n";
     }
 }

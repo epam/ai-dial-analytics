@@ -58,7 +58,8 @@ dependencies {
     // Flight 18.3 (grpc-netty 1.71) calls io.grpc.internal.ReadableBuffer.readBytes(ByteBuffer), which gRPC 1.79
     // removed: on a newer release every Flight call fails with NoSuchMethodError. The Cloud SQL connector's gax
     // stack requests 1.83/1.84, and mixed io.grpc releases fail on internal APIs, so the whole family is held at
-    // 1.78, the newest release Arrow still links against. CloudSqlConnectorTest proves the connector runs on it,
+    // 1.78, the newest release Arrow still links against. The connector touches gRPC only for ipTypes=SQL_DATA,
+    // which is unsupported for that reason; CloudSqlConnectorTest proves its default direct-TLS path loads on 1.78,
     // and the Flight integration tests prove Arrow does. Lift it together with an Arrow bump (19.x builds on 1.79).
     implementation enforcedPlatform('io.grpc:grpc-bom:1.78.0')
 

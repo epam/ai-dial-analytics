@@ -2,7 +2,7 @@
 
 This doc covers pointing the PostgreSQL table catalog at a Cloud SQL for PostgreSQL instance with IAM
 database authentication: which variables carry the connection, which identity signs in, and what the
-instance's owner has to grant. No password exists anywhere. The variables themselves are in
+instance's owner has to grant. No real password exists anywhere. The variables themselves are in
 [`configuration.md`](configuration.md#postgresql-table-catalog). This doc is the operator side of them.
 
 ADAS ships the [Cloud SQL Java Connector](https://github.com/GoogleCloudPlatform/cloud-sql-jdbc-socket-factory),
@@ -17,18 +17,24 @@ parameters go in `POSTGRES_OPS`:
 
 ```bash
 POSTGRES_DATABASE=adas
-POSTGRES_OPS=cloudSqlInstance=<project>:<region>:<instance>&enableIamAuth=true&socketFactory=com.google.cloud.sql.postgres.SocketFactory
+POSTGRES_OPS=cloudSqlInstance=<project>:<region>:<instance>&enableIamAuth=true&socketFactory=com.google.cloud.sql.postgres.SocketFactory&sslmode=disable
 POSTGRES_DATASOURCE_USERNAME=<name>@<project>.iam
-POSTGRES_DATASOURCE_PASSWORD=
 ```
 
 - `cloudSqlInstance` is the instance connection name, as `gcloud sql instances describe` prints it. It alone
   names the target, so `POSTGRES_HOST` and `POSTGRES_PORT` are ignored and can keep their defaults.
 - `POSTGRES_DATASOURCE_USERNAME` is the IAM database user: the service account's email **without** the
   `.gserviceaccount.com` suffix.
-- `POSTGRES_DATASOURCE_PASSWORD` is set, and set to empty. Left unset, it falls back to the `postgres` default.
+- `sslmode=disable` turns off the driver's own TLS negotiation. The connector already encrypts the
+  connection with its ephemeral certificate, so this does not send anything in clear text.
+- `POSTGRES_DATASOURCE_PASSWORD` is ignored under IAM authentication but must not be empty: the connector
+  documents that an empty value fails driver-level validation. Leave it unset so the `postgres` default
+  applies, or set any placeholder.
 - Add `&ipTypes=PRIVATE` when the instance has a private IP that the cluster reaches over its VPC. By default the
   connector prefers the public IP when the instance has both.
+- Don't set `ipTypes=SQL_DATA`. That one IP type routes the connection through the connector's gRPC data
+  client, which runs here on an older gRPC release than the connector was built against (Arrow Flight
+  requires it, see the `table-management` spec). No other path uses gRPC.
 
 A JDBC URL kept whole, such as `jdbc:postgresql:///<database>?cloudSqlInstance=...`, can be given instead
 through Spring's own `SPRING_DATASOURCE_URL`. It replaces the composed URL, and the `POSTGRES_HOST`, `POSTGRES_PORT`,
@@ -36,8 +42,8 @@ through Spring's own `SPRING_DATASOURCE_URL`. It replaces the composed URL, and 
 
 ## Credentials
 
-With `enableIamAuth=true` the connector signs in as the principal of Application Default Credentials. That is
-the same lookup the `google-cloud-storage` blob provider makes, so one Google service account can serve both.
+With `enableIamAuth=true` the connector signs in as the principal of Application Default Credentials. It draws
+on the same sources as the `google-cloud-storage` blob provider, so one Google service account can serve both.
 The modes are described in [`gcs-access.md`](gcs-access.md#credentials):
 
 - **Workload Identity (GKE):** annotate the pod's Kubernetes service account with
@@ -84,4 +90,4 @@ a poll cycle:
 
 Running the [Cloud SQL Auth Proxy](https://cloud.google.com/sql/docs/postgres/sql-proxy) as a sidecar with
 `--auto-iam-authn` works too and needs none of the above parameters. Point `POSTGRES_HOST` at `localhost` and
-keep the same IAM database user and empty password. The connector does the same job in-process, with no sidecar.
+keep the same IAM database user. The connector does the same job in-process, with no sidecar.

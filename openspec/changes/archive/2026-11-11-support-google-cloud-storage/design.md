@@ -62,6 +62,8 @@ Google's auth library.
 - Requester-pays buckets (`userProject`), Pub/Sub notifications (the poller is notification-free by
   spec), and any Helm chart change.
 - Writing to the bucket. ADAS only lists and reads.
+- For the catalog: MySQL or SQL Server instances, the connector's SQL Data Service (`ipTypes=SQL_DATA`), and
+  managing the IAM database user or its grants from ADAS.
 
 ## Decisions
 
@@ -69,11 +71,11 @@ Google's auth library.
 jclouds seam shared by four ingest paths. Adding a second blob abstraction for one provider would fork
 `list` / `openStream` semantics, the span instrumentation in `BlobSpans`, and the error mapping to
 `BlobAccessException`. Google's client also brings gRPC and its own Netty line, while this project
-already pins a Netty 4.2 BOM. The provider is already on the classpath and its listing semantics were
+already pins a Netty 4.2 BOM. (The Cloud SQL connector for the catalog does bring a gRPC stack, which
+cannot be avoided there; see the catalog decisions below. That is no reason to take a second one here.) The provider is already on the classpath and its listing semantics were
 verified to match. Rejected: `com.google.cloud:google-cloud-storage`.
 
-**Keyless tokens come from Application Default Credentials (`GoogleCredentials.getApplicationDefault()`),
-scoped `devstorage.read_only`.** This is a deliberate departure from the S3 design, which forbids any
+**Keyless tokens come from Application Default Credentials, scoped `devstorage.read_only`.** This is a deliberate departure from the S3 design, which forbids any
 fallback chain. The reason is a real difference between the platforms, not convenience:
 
 - On EKS the instance metadata service is the **node's** identity and the projected token is the
@@ -84,8 +86,15 @@ fallback chain. The reason is a real difference between the platforms, not conve
   (workload-identity-federation config) and how a key file is mounted without putting a PEM in an env
   var.
 
-ADC's remaining source is the gcloud user credential well-known file. It is absent in a container
-image and useful in local development. Rejected alternatives:
+ADC's remaining file source is the gcloud user credential well-known file. It is absent in a container
+image and useful in local development.
+
+The provider does this lookup itself (named file, gcloud file, `ComputeEngineCredentials.create()`) rather
+than call `GoogleCredentials.getApplicationDefault()`. The library's process-wide default provider caches
+the first credential it loads and probes for a metadata server only once. A key file the token endpoint
+rejected, then replaced, or a metadata server that was briefly unreachable at first use, would then fail
+every cycle until a restart. The App Engine and Cloud Shell sources of the library's chain don't apply to
+a pod and are left out. Rejected alternatives:
 
 - `ComputeEngineCredentials` only. Not narrower on GKE, and it loses federation and key-file use.
 - A hand-rolled metadata-server call. More code in the auth path, and caching, expiry and federation all
@@ -123,14 +132,15 @@ not need.
 library's own margins and serializes refresh internally, so concurrent sync threads cause one token
 request per window. No executor is passed, so no background refresh thread exists. Don't use the
 `getRequestMetadata(uri, executor, callback)` async path: it would start work that nothing here stops at
-shutdown. The provider still implements `AutoCloseable` and is closed from `BlobClient.shutdown()`,
-which already closes any `AutoCloseable` provider. Today that close is a no-op, but keeping it means a
-future owned transport cannot leak.
+shutdown. The provider owns no client, pool or thread, so it is not `AutoCloseable`, and
+`BlobClient.shutdown()` skips it as it does the Azure provider. A no-op close was rejected: clearing the
+cached credential would make a sync thread still running during shutdown resolve and log the principal
+again.
 
 **Failure stays per-cycle, through the existing lazy build.** `ContextBuilder` calls the supplier once
 inside `buildInjector()`, so the first token request happens inside `buildContext()`. An ADC lookup
-failure (`IOException` from `getApplicationDefault()`, or a refresh failure) is wrapped and thrown from
-`getCredentials()`, so the cycle fails whole and `context` stays `null`. The provider is created
+failure (an unreadable file) or a refused token request is wrapped, each with its own message, and thrown
+from `getCredentials()`, so the cycle fails whole and `context` stays `null`. The provider is created
 **lazily on first `getCredentials()`**, not in its constructor. That way a missing ADC never escapes as
 a construction failure, and the memoized provider field in `BlobClient` (added by the S3 change) is
 reused across failing cycles.
@@ -143,9 +153,32 @@ to `ContextBuilder.endpoint` as for the other providers.
 `google-http-client`'s `NetHttpTransport` over `HttpURLConnection`: no Netty, and no second HTTP
 implementation to collide with the AWS SDK's single `SdkHttpService`. It brings `google-http-client`,
 `google-http-client-gson`, `google-auth-library-credentials`, Guava and `auto-value-annotations`. Guava is
-already constrained to `33.7.2-jre` for a CVE, and the constraint wins. Anything the auth path never
-calls (`opencensus-*`, `grpc-context`, if present in the chosen version) is excluded with a comment, as
-the AWS block does.
+already constrained to `33.7.2-jre` for a CVE, and the constraint wins. Apache httpclient/httpcore 4,
+which only the deprecated `ApacheHttpTransport` uses, are excluded with a comment, as the AWS block does.
+`opencensus-api` and `grpc-context` were meant to go too, but they stay: `HttpRequest` calls OpenCensus
+directly, so excluding them fails the first token refresh with `NoClassDefFoundError`.
+
+**Catalog: ship the Cloud SQL connector rather than require the Cloud SQL Auth Proxy.** pgjdbc accepts a
+`socketFactory` URL parameter and passes the remaining parameters to it. The connector is such a factory: it
+calls the Cloud SQL Admin API for the instance's address and an ephemeral client certificate, opens a TLS
+socket, and with `enableIamAuth=true` puts a login-scoped token into that certificate so the server signs the
+IAM user in. The proxy needs no dependency and is documented as an alternative, but the connector does the
+same job in-process, with no sidecar to size, secure and keep in step with the pod. Selecting it from the URL
+keeps it inert for every other deployment.
+
+**Catalog: configure it through `POSTGRES_OPS`, not dedicated properties.** The connector's parameters are
+its own contract, and a property per parameter would duplicate it. The documented shape sets
+`sslmode=disable`, because the connector already owns TLS, and keeps a non-empty password, because the
+connector documents that an empty one fails driver-level validation. The `postgres` default serves.
+
+**Catalog: hold gRPC at the release Arrow Flight links against.** The connector's gax stack is built against
+a newer gRPC than Arrow Flight 18.3 supports, and Flight calls fail with `NoSuchMethodError` on gRPC 1.79 and
+later. Mixed `io.grpc` releases fail on internal APIs, so an enforced `grpc-bom` platform holds every module
+on 1.78. This is safe for the path ADAS uses: the connector reaches gRPC only through its SQL Data Service
+client, when `ipTypes` starts with `SQL_DATA`. Every other IP type connects directly after HTTP calls to the
+Admin API over `NetHttpTransport`. `SQL_DATA` is therefore unsupported and documented as such. The pin is
+lifted together with an Arrow upgrade. Apache httpclient 4 is excluded from the connector for the same
+reason as from the auth library.
 
 **Tests are plain JUnit with a JDK `HttpServer`, no emulator.** This mirrors `BlobClientAwsSigningTest`.
 Point `blob.endpoint` at `http://127.0.0.1:<port>`. Then:
@@ -182,6 +215,13 @@ principal extraction per credential type, and that no token appears in captured 
 - **[Dependency weight]** The auth library adds a few small jars for one token request per hour. →
   Bounded, Netty-free, and less security-critical code than hand-rolling the metadata and federation
   exchanges.
+- **[A catalog misconfiguration fails startup]** The migrations open the catalog at startup, so unlike blob
+  access it cannot be deferred to a later cycle. → `docs/cloud-sql-access.md` lists the failure causes.
+- **[The gRPC pin holds future dependencies too]** Anything that later needs a newer gRPC is held at 1.78. →
+  The `build.gradle` comment names the pin's reason and its exit condition.
+- **[The catalog test cannot open a database]** `CloudSqlConnectorTest` proves class loading on the pinned
+  gRPC, the URL parameters, the Admin API calls and the login-scoped token, then stops at a refused Admin API
+  call. → The direct-TLS path after that is the connector's own, unchanged by the pin.
 
 ## Migration Plan
 
@@ -196,6 +236,9 @@ Rollout is deployment-side configuration:
   `storage.objects.list` + `storage.objects.get`).
 
 Rollback is reverting `BLOB_PROVIDER`. Existing `azureblob` and `aws-s3` deployments need no action.
+
+The Cloud SQL catalog is opt-in: an operator sets `POSTGRES_OPS` and the IAM database user as
+`docs/cloud-sql-access.md` describes. Rollback is restoring the password-based URL.
 
 Before shipping, verify offline:
 

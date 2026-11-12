@@ -10,17 +10,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyPairGenerator;
-import java.security.NoSuchAlgorithmException;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.Base64;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -31,6 +27,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
 
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.jwtBearerClaims;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.respondJson;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.serviceAccountKeyJson;
+import static com.epam.aidial.analytics.blob.GoogleTestSupport.tokenJson;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -58,7 +58,7 @@ class CloudSqlConnectorTest {
 
     private HttpServer server;
     private ExecutorService handlers;
-    private final List<String> grantedScopes = new CopyOnWriteArrayList<>();
+    private final List<String> tokenClaims = new CopyOnWriteArrayList<>();
     private final List<String> adminCalls = new CopyOnWriteArrayList<>();
     private final AtomicReference<String> ephemeralCertBody = new AtomicReference<>();
     private final CountDownLatch ephemeralCertRequested = new CountDownLatch(1);
@@ -75,10 +75,9 @@ class CloudSqlConnectorTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.setExecutor(handlers);
         server.createContext("/token", exchange -> {
-            String scope = scopeOf(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
-            grantedScopes.add(scope);
-            String token = scope.contains(LOGIN_SCOPE) ? LOGIN_TOKEN : ADMIN_TOKEN;
-            respond(exchange, 200, "{\"access_token\":\"" + token + "\",\"token_type\":\"Bearer\",\"expires_in\":3600}");
+            String claims = jwtBearerClaims(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            tokenClaims.add(claims);
+            respondJson(exchange, 200, tokenJson(claims.contains(LOGIN_SCOPE) ? LOGIN_TOKEN : ADMIN_TOKEN));
         });
         server.createContext("/", exchange -> {
             String path = exchange.getRequestURI().getPath();
@@ -89,13 +88,19 @@ class CloudSqlConnectorTest {
             } else {
                 awaitEphemeralCertRequest();
             }
-            respond(exchange, 403, "{\"error\":{\"code\":403,\"message\":\"loopback refuses\",\"status\":\"PERMISSION_DENIED\"}}");
+            respondJson(exchange, 403, "{\"error\":{\"code\":403,\"message\":\"loopback refuses\",\"status\":\"PERMISSION_DENIED\"}}");
         });
         server.start();
     }
 
+    /**
+     * The connector keeps one process-wide registry whose background refresh would otherwise keep retrying the
+     * stopped loopback server for the rest of the test JVM. Reached reflectively: the connector is runtime-only,
+     * which is the classpath this test means to prove.
+     */
     @AfterEach
-    void stopLoopbackGoogle() {
+    void stopLoopbackGoogle() throws ReflectiveOperationException {
+        Class.forName("com.google.cloud.sql.core.InternalConnectorRegistry").getMethod("resetInstance").invoke(null);
         server.stop(0);
         handlers.shutdownNow();
     }
@@ -109,11 +114,13 @@ class CloudSqlConnectorTest {
         // The host and port are ignored by the connector; only cloudSqlInstance names the target.
         String url = "jdbc:postgresql://localhost:5432/catalog?cloudSqlInstance=" + INSTANCE
                 + "&enableIamAuth=true&socketFactory=com.google.cloud.sql.postgres.SocketFactory"
-                + "&cloudSqlGoogleCredentialsPath=" + keyFile
-                + "&cloudSqlAdminRootUrl=" + base + "/";
+                + "&cloudSqlGoogleCredentialsPath=" + URLEncoder.encode(keyFile.toString(), StandardCharsets.UTF_8)
+                + "&cloudSqlAdminRootUrl=" + URLEncoder.encode(base + "/", StandardCharsets.UTF_8)
+                + "&sslmode=disable";
         Properties credentials = new Properties();
         credentials.setProperty("user", "adas@example-project.iam");
-        credentials.setProperty("password", "");
+        // Ignored under IAM authentication, but the driver refuses an empty one; docs/cloud-sql-access.md says so too.
+        credentials.setProperty("password", "unused");
 
         assertThatThrownBy(() -> DriverManager.getConnection(url, credentials).close())
                 .isInstanceOf(SQLException.class)
@@ -130,7 +137,7 @@ class CloudSqlConnectorTest {
                         .contains("/projects/example-project/instances/example-instance")
                         .endsWith("Bearer " + ADMIN_TOKEN));
         // IAM database authentication: a login-scoped token rides in the certificate request.
-        assertThat(grantedScopes).anySatisfy(scope -> assertThat(scope).contains(LOGIN_SCOPE));
+        assertThat(tokenClaims).anySatisfy(claims -> assertThat(claims).contains(LOGIN_SCOPE));
         assertThat(ephemeralCertBody.get()).contains(LOGIN_TOKEN);
     }
 
@@ -142,33 +149,9 @@ class CloudSqlConnectorTest {
         }
     }
 
-    /** The {@code scope} claim of a JWT-bearer token request's assertion. */
-    private static String scopeOf(String form) {
-        String decoded = URLDecoder.decode(form, StandardCharsets.UTF_8);
-        assertThat(decoded).contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer");
-        String claims = new String(Base64.getUrlDecoder().decode(decoded.split("assertion=")[1].split("\\.")[1]),
-                StandardCharsets.UTF_8);
-        return claims;
-    }
-
-    private Path writeServiceAccountKey(String tokenUri) throws IOException, NoSuchAlgorithmException {
-        String pem = "-----BEGIN PRIVATE KEY-----\n"
-                + Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
-                        .encodeToString(KeyPairGenerator.getInstance("RSA").generateKeyPair().getPrivate().getEncoded())
-                + "\n-----END PRIVATE KEY-----\n";
-        String json = """
-                {
-                  "type": "service_account",
-                  "project_id": "example-project",
-                  "private_key_id": "0000000000000000000000000000000000000001",
-                  "private_key": "%s",
-                  "client_email": "adas@example-project.iam.gserviceaccount.com",
-                  "client_id": "000000000000000000001",
-                  "token_uri": "%s"
-                }
-                """.formatted(pem.replace("\n", "\\n"), tokenUri);
+    private Path writeServiceAccountKey(String tokenUri) throws IOException {
         Path keyFile = dir.resolve("key.json");
-        Files.writeString(keyFile, json);
+        Files.writeString(keyFile, serviceAccountKeyJson("adas@example-project.iam.gserviceaccount.com", tokenUri));
         return keyFile;
     }
 
@@ -179,14 +162,5 @@ class CloudSqlConnectorTest {
             body = new GZIPInputStream(body);
         }
         return new String(body.readAllBytes(), StandardCharsets.UTF_8);
-    }
-
-    private static void respond(HttpExchange exchange, int status, String body) throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream out = exchange.getResponseBody()) {
-            out.write(bytes);
-        }
     }
 }

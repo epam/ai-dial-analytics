@@ -503,9 +503,15 @@ rule beyond Cloud Storage's own applies.
 
 In keyless mode the service SHALL resolve an OAuth access token through Google **Application Default
 Credentials**. That is the credentials file named by `GOOGLE_APPLICATION_CREDENTIALS` when set (a
-service-account key, or a workload-identity-federation configuration), and otherwise the metadata server
-of the environment the pod runs in, which on GKE with Workload Identity is the pod's bound service
-account. The service SHALL present the token as a bearer credential on every data-plane request.
+service-account key, or a workload-identity-federation configuration), then gcloud's application-default
+credentials file when it exists, and otherwise the metadata server of the environment the pod runs in, which
+on GKE with Workload Identity is the pod's bound service account. The service SHALL present the token as a
+bearer credential on every data-plane request.
+
+Each resolution attempt SHALL look the sources up afresh. Nothing from a failed attempt is cached: a
+credentials file replaced since is read again, and a metadata server that did not answer is asked again. So
+the service does its own lookup rather than use the Google library's process-wide default, which keeps the
+first credential it loads and probes for a metadata server only once.
 
 The service SHALL request a **read-only** Cloud Storage scope for any credential type that accepts a
 requested scope. `data-sync` only lists and reads, so a credential with write capability SHALL NOT be
@@ -529,6 +535,11 @@ same time.
 - **WHEN** `GOOGLE_APPLICATION_CREDENTIALS` names a readable service-account key or workload-identity
   federation configuration
 - **THEN** the token is obtained from that file's credential, and the metadata server is not consulted
+
+#### Scenario: A replaced credentials file is read again
+
+- **WHEN** the file `GOOGLE_APPLICATION_CREDENTIALS` names is replaced after a resolution attempt
+- **THEN** the next attempt reads the new file
 
 #### Scenario: The requested scope is read-only
 
@@ -588,14 +599,25 @@ leave the ingest watermark where it was, and be retried by the next scheduled cy
 action. The failure SHALL be visible through the existing sync failure reporting: the cycle's failure
 outcome, the held watermark and its growing lag, and failure records for the daily run and backfill.
 
+A credential that cannot be found or read and a credential whose token request fails SHALL be reported
+with different messages. The second SHALL name the credential source and carry the token endpoint's answer
+as its cause, because the fix differs: a missing file or binding, against a refused or unreachable token
+request.
+
 The credential resolver SHALL be created **once** and reused across cycles, including cycles that failed
-after it was created, and SHALL be released when the service shuts down.
+after it was created. It SHALL own no client, pool or thread, so nothing of it outlives shutdown.
 
 #### Scenario: No available credential fails the cycle and is retried
 
 - **WHEN** a sync cycle needs a GCS token and Application Default Credentials cannot resolve one
 - **THEN** that cycle fails as a whole with the ingest watermark held, the failure is reported through the
   existing sync failure outcome, and the next scheduled cycle attempts it again
+
+#### Scenario: A refused token request is told apart from a missing credential
+
+- **WHEN** a credential is found but its token request fails
+- **THEN** the failure names the credential source and carries the token endpoint's answer, and does not
+  report the credential as missing
 
 #### Scenario: Startup is unaffected by a credential fault
 
@@ -605,7 +627,7 @@ after it was created, and SHALL be released when the service shuts down.
 #### Scenario: A failing cycle does not rebuild the resolver
 
 - **WHEN** many consecutive sync cycles fail to obtain a token
-- **THEN** the credential resolver is created once and reused, and it is released at shutdown
+- **THEN** the credential resolver is created once and reused
 
 ### Requirement: Date-derived prefix file discovery
 
