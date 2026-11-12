@@ -3,10 +3,12 @@ package com.epam.aidial.analytics.service.table;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
 import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.ProviderRolePrivileges;
 import lombok.RequiredArgsConstructor;
@@ -48,6 +50,7 @@ public class TableAccessService {
     private final TableCallerPermissions callerPermissions;
     private final ProviderRolePrivileges providerRolePrivileges;
     private final SensitiveGrantInvariant sensitiveGrants;
+    private final RowPolicyCodec rowPolicyCodec;
 
     /** Why a grant in the request changes nothing. */
     public enum IneffectiveReason {
@@ -59,7 +62,13 @@ public class TableAccessService {
         ENRICHMENT_READ_INERT("enrichment_read_inert"),
 
         /** A clearance for a role holding no verb it could extend on the table — it confers nothing alone. */
-        SENSITIVE_WITHOUT_VERB("sensitive_without_verb");
+        SENSITIVE_WITHOUT_VERB("sensitive_without_verb"),
+
+        /**
+         * Not inert but the opposite: a read for {@code *} on a table whose row policies include none for
+         * {@code *}. Every caller then carries a role that reads with no policy, which lifts every policy there.
+         */
+        LIFTS_ROW_POLICIES("lifts_row_policies");
 
         private final String code;
 
@@ -107,6 +116,12 @@ public class TableAccessService {
                         + PrivilegeScope.grantKey(privilege) + "' list must be empty because every modifying "
                         + "operation on it is refused regardless of any grant");
             }
+            // Only a list the request sends: a '*' stored earlier confers nothing and must not block other edits.
+            if (PrivilegeScope.isModifying(privilege) && normalized != null && normalized.contains(SecurityClaimsExtractor.ANYONE)) {
+                throw new TableValidationException("'" + SecurityClaimsExtractor.ANYONE + "' stands for every "
+                        + "authenticated caller and may be named only in a read-side list (get, read, sensitive), "
+                        + "not in '" + PrivilegeScope.grantKey(privilege) + "'");
+            }
             merged.setRolesFor(privilege, effective);
         }
         // Checked against the merged document BEFORE it is applied, deliberately. Applying it first
@@ -144,12 +159,19 @@ public class TableAccessService {
         final TableDefinitionEntity source = enrichment && definition.getSourceTable() != null
                 ? definitions.findById(definition.getSourceTable()).orElse(null)
                 : null;
+        final Set<String> policyRoles = rowPolicyCodec.read(definition.getRowPolicies()).keySet();
         requested.forEach((privilege, roles) -> {
             if (roles == null) {
                 return;
             }
             for (final String role : normalize(roles)) {
-                if (providerRolePrivileges.holdsGlobally(role, privilege)) {
+                if (privilege == Privilege.TABLE_READ && SecurityClaimsExtractor.ANYONE.equals(role)
+                        && !policyRoles.isEmpty() && !policyRoles.contains(role)) {
+                    report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.LIFTS_ROW_POLICIES,
+                            "table '" + definition.getName() + "' has row policies for " + policyRoles + " and none for '"
+                                    + role + "'; every caller carries '" + role + "', which now reads with no policy, so "
+                                    + "those policies confine no one. Store a row policy for '" + role + "' to keep them"));
+                } else if (providerRolePrivileges.holdsGlobally(role, privilege)) {
                     report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.ALREADY_GLOBAL,
                             "role '" + role + "' already holds " + privilege + " over every table, so this grant "
                                     + "changes nothing for it"));
@@ -174,7 +196,8 @@ public class TableAccessService {
             return true;
         }
         return source != null
-                && TableCallerPermissions.isGranted(source.getAccess(), Privilege.TABLE_READ, Set.of(role));
+                && TableCallerPermissions.isGranted(source.getAccess(), Privilege.TABLE_READ,
+                        SecurityClaimsExtractor.carriedWith(role));
     }
 
     /**
@@ -188,7 +211,8 @@ public class TableAccessService {
                 return true;
             }
         }
-        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET, Set.of(role));
+        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET,
+                SecurityClaimsExtractor.carriedWith(role));
     }
 
     private TableDefinitionEntity require(String tableName) {

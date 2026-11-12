@@ -77,19 +77,28 @@ public class CatalogSchemaWriter {
     public void persistSchema(String name, DefineSchemaInput draft) {
         final TableDefinitionEntity definition = definitions.findById(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // Checked before the policy guard, so an invalid column gets its own error and not the guard's.
+        if (draft.columns() != null) {
+            draft.columns().forEach(TableColumnRules::requireValidUserColumn);
+        }
         requireRowPolicyColumnsKept(definition, draft);
         if (definition.getType() == TableType.ENRICHMENT) {
             persistEnrichmentSchema(definition, draft);
         } else {
             persistSourceSchema(definition, draft);
         }
+        // A kept column may have changed type: the stored policies are validated again, against the columns
+        // just written, and a refusal rolls this transaction back.
+        columns.flush();
+        rowPolicies.requireStillValid(definition);
     }
 
     /**
      * Refuses a re-defined schema that no longer exposes a column a row policy on the table filters on, with
      * {@code 409 column_in_row_policy} naming the columns and the roles — the same guard a schema PATCH applies
      * to a drop or rename. A not-yet-materialized table can already carry policies (its columns were committed
-     * before a failed CREATE), and a policy over a missing column would fail every read by its role.
+     * before a failed CREATE), and a policy over a missing column would fail every read by its role. A changed
+     * type is judged after the write, by {@link RowPolicyService#requireStillValid}.
      */
     private void requireRowPolicyColumnsKept(TableDefinitionEntity definition, DefineSchemaInput draft) {
         final Map<String, Set<String>> policyColumns = rowPolicies.referencedColumns(definition);

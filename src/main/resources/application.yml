@@ -134,6 +134,7 @@ sync:
   inline-files-drop-truncated: ${SYNC_INLINE_FILES_DROP_TRUNCATED:true}
   inline-files-max-size: ${SYNC_INLINE_FILES_MAX_SIZE:}
   request-body-mode: ${SYNC_REQUEST_BODY_MODE:whole}
+  sensitive-columns-enabled: ${SYNC_SENSITIVE_COLUMNS_ENABLED:true}
   payload:
     ttl-days: ${SYNC_PAYLOAD_TTL_DAYS:}
     table: ${SYNC_PAYLOAD_TABLE:dial_usage_log_payload}
@@ -254,3 +255,6 @@ security:
     request-timeout-ms: ${API_KEY_REQUEST_TIMEOUT_MS:3000}
     roles-mapping: "${API_KEY_ROLES_MAPPING:}"
     startup-probe: ${API_KEY_STARTUP_PROBE:true}
+    logging-key: ${API_KEY_LOGGING_KEY:}
+    logging-salt: ${API_KEY_LOGGING_SALT:}
+    obfuscate-user-email: ${API_KEY_OBFUSCATE_USER_EMAIL:true}

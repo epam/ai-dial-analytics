@@ -28,6 +28,9 @@ import java.util.Set;
  * {@code SAVED_QUERY_WRITE} or {@code SAVED_QUERY_PUBLISH} without {@code SAVED_QUERY_READ} now confers
  * the read as well.
  *
+ * <p>Every bundle reads the instance settings ({@code SETTINGS_READ}); only {@code FULL_ADMIN}, holding every
+ * privilege, replaces them.
+ *
  * <p>Bundle names are not valid grantees in a table's access lists, which name raw provider roles.
  */
 public enum RoleBundle {
@@ -40,12 +43,14 @@ public enum RoleBundle {
             Privilege.TABLE_READ,
             Privilege.REGISTRY_READ,
             Privilege.AUDIT_READ,
-            Privilege.SAVED_QUERY_WRITE)),
+            Privilege.SAVED_QUERY_WRITE,
+            Privilege.SETTINGS_READ)),
 
     /** An analyst: read every table's non-sensitive values and keep personal saved queries. */
     READ_ONLY_ANALYTIC(EnumSet.of(
             Privilege.TABLE_READ,
-            Privilege.SAVED_QUERY_WRITE)),
+            Privilege.SAVED_QUERY_WRITE,
+            Privilege.SETTINGS_READ)),
 
     /**
      * An analyst entitled to sensitive values. The bundle that finally makes PII read reachable without
@@ -54,7 +59,8 @@ public enum RoleBundle {
     READ_ONLY_SENSITIVE_ANALYTIC(EnumSet.of(
             Privilege.TABLE_READ,
             Privilege.TABLE_SENSITIVE,
-            Privilege.SAVED_QUERY_WRITE));
+            Privilege.SAVED_QUERY_WRITE,
+            Privilege.SETTINGS_READ));
 
     private final Set<Privilege> declared;
 

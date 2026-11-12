@@ -51,6 +51,11 @@ import java.util.stream.Collectors;
  * because the role-name lookup ({@link ProviderRolePrivileges}) is a union across every configured mapping, and
  * enforcement must not credit a role with a read the caller's own provider does not give it.
  *
+ * <p>The wildcard {@link SecurityClaimsExtractor#ANYONE} is a role like any other here, one every real caller
+ * carries: a {@code read} grant naming it lets anyone read the table, a policy stored for it confines those
+ * who read through that grant alone, and a caller whose own role reads the table with no policy is still
+ * unconfined by the second case.
+ *
  * <p>A policy never grants a read — whether the table is readable at all is still decided by the grant
  * evaluator — and a policy on a role takes that role out of the second case, so a broadly-entitled role is
  * confined by giving it a policy of its own.
@@ -233,14 +238,36 @@ public class RowPolicyFilter {
                 || globalRead && rolePrivileges.holdsGlobally(role, Privilege.TABLE_READ);
     }
 
-    /** The OR of the confining policies' filters, each rendered against the table's own columns. */
+    /**
+     * The OR of the confining policies' filters, each rendered against the table's own columns with the
+     * caller values of the request being served — resolved here, per read, and never cached.
+     */
     private String predicate(String table, List<RowPolicy> confining) {
         if (confining.size() == 1) {
-            return predicates.render(table, confining.getFirst().filter());
+            return predicates.render(table, confining.getFirst().filter(), this::callerValue);
         }
         return confining.stream()
-                .map(policy -> "(" + predicates.render(table, policy.filter()) + ")")
+                .map(policy -> "(" + predicates.render(table, policy.filter(), this::callerValue) + ")")
                 .collect(Collectors.joining(" OR "));
+    }
+
+    /**
+     * The caller's value for a caller-value name, or {@code null} when it has none. An unknown value makes a
+     * comparison match nothing, which from the caller's side is indistinguishable from an empty table, so it
+     * is logged and put on the span — by name, never by content.
+     */
+    private String callerValue(String name) {
+        final String value = RowPolicyPredicates.knownCallerValue(switch (name) {
+            case RowPolicyPredicates.CALLER_USER_HASH -> claims.getUserHash();
+            case RowPolicyPredicates.CALLER_PROJECT -> claims.getProject();
+            default -> null;
+        });
+        if (value == null) {
+            log.debug("Row policy references {}, which this caller does not have; the comparison matches no row", name);
+            // One attribute per name: a single shared key would keep only the last unknown value.
+            Span.current().setAttribute("adas.row_policy.unknown." + name, true);
+        }
+        return value;
     }
 
     /**

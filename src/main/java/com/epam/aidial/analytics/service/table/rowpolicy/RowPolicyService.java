@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.table.rowpolicy;
 
+import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
@@ -100,6 +101,23 @@ public class RowPolicyService {
             }
         });
         return byColumn;
+    }
+
+    /**
+     * Refuses, with {@code 409 column_in_row_policy}, a schema of {@code definition} that a stored policy no
+     * longer validates against. Called after the new columns are written and inside the same transaction, so
+     * a refusal rolls them back.
+     */
+    public void requireStillValid(TableDefinitionEntity definition) {
+        codec.read(definition.getRowPolicies()).forEach((role, policy) -> {
+            try {
+                predicates.render(definition.getName(), policy.filter());
+            } catch (QueryValidationException ex) {
+                throw new ColumnInRowPolicyException("the schema of table '" + definition.getName() + "' does not fit "
+                        + "the row policy of role '" + role + "': " + ex.getMessage()
+                        + "; change or remove that policy first");
+            }
+        });
     }
 
     /**

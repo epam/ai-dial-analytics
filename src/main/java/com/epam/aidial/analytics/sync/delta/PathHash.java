@@ -11,7 +11,7 @@ import java.util.UUID;
  * The prefix hashes that identify a request's place in a chain: {@code p0 = H(scope, day, tools)} and
  * {@code pk = H(p(k-1), hk)}, {@code hk} as {@link ChatRequest#hashedHistory()} renders it. Each hash folds in every
  * history element before it, the scope and the tools, so two requests share {@code pk} only when their first {@code k}
- * elements are identical (a system element under the same key name), they share project, user and UTC day, and their
+ * elements are identical (a system element under the same key name, a bare text block read as its string), they share project, user and UTC day, and their
  * {@code tools} are equal JSON or both absent. A child therefore always has its parent's system keys and tools.
  * {@code H} is SHA-256 truncated to 128 bits and carried as a {@link UUID}, the type the chain columns store. Element
  * text is hashed as its UTF-16 code units rather than encoded to UTF-8 first, because the UTF-8 encoder replaces a lone
@@ -19,7 +19,7 @@ import java.util.UUID;
  */
 final class PathHash {
 
-    /** Seeds every chain; changing it re-roots every conversation once, and breaks nothing. */
+    /** Seeds every chain; changing it re-roots every conversation once; only whole UTC days may then be re-ingested. */
     private static final byte[] SEED = "adas-request-delta-v1".getBytes(StandardCharsets.UTF_8);
 
     private PathHash() {

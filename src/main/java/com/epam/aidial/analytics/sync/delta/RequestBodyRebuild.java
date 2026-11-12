@@ -5,10 +5,13 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.node.StringNode;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -156,10 +159,13 @@ public final class RequestBodyRebuild {
         for (int i = chain.size() - 2; i >= 0; i--) {
             appendMessages(history, (ObjectNode) MAPPER.readTree(chain.get(i).body()));
         }
+        final int inherited = chain.isEmpty() ? 0 : history.size();
         if (!chain.isEmpty()) {
             appendMessages(history, body);
         }
-        restoreMarkers(history, markers);
+        final JsonNode entries = markers == null ? MAPPER.createArrayNode() : MAPPER.readTree(markers);
+        restoreSentShapes(history, root.systemCount(), inherited, entries);
+        restoreMarkers(history, entries);
 
         // A row with a parent left out its system keys and tools; its chain's root stores the same ones.
         final ObjectNode keys = chain.isEmpty() ? body : (ObjectNode) MAPPER.readTree(rootText);
@@ -193,11 +199,40 @@ public final class RequestBodyRebuild {
         throw new IllegalArgumentException("a stored delta body carries no message array");
     }
 
-    private static void restoreMarkers(List<JsonNode> history, String markers) {
-        if (markers == null) {
+    /**
+     * Puts each inherited message ({@code from} to {@code to}) into the shape the row sent it in: the bare text block
+     * where the row's entry lists it, the plain string otherwise. The row that stores a message may have sent the
+     * other shape, since the two hash alike. A row with no entry was stored before shapes were recorded, when only
+     * equal shapes linked, so its messages are taken as stored (the spec names the one case where that is not the sent
+     * shape).
+     */
+    private static void restoreSentShapes(List<JsonNode> history, int from, int to, JsonNode entries) {
+        JsonNode listed = null;
+        for (JsonNode entry : entries) {
+            listed = entry.has(ChatRequest.TEXT_BLOCKS) ? entry.get(ChatRequest.TEXT_BLOCKS) : listed;
+        }
+        if (listed == null) {
             return;
         }
-        for (JsonNode marker : MAPPER.readTree(markers)) {
+        final Set<Integer> blocks = new HashSet<>();
+        listed.forEach(index -> blocks.add(index.asInt()));
+        for (int i = from; i < to; i++) {
+            if (!(history.get(i) instanceof ObjectNode message)) {
+                continue;
+            }
+            if (!blocks.contains(i)) {
+                history.set(i, ChatRequest.textBlockAsString(message));
+            } else if (message.get(ChatRequest.CONTENT) instanceof StringNode text) {
+                message.putArray(ChatRequest.CONTENT).addObject().put("type", "text").set("text", text);
+            }
+        }
+    }
+
+    private static void restoreMarkers(List<JsonNode> history, JsonNode entries) {
+        for (JsonNode marker : entries) {
+            if (marker.has(ChatRequest.TEXT_BLOCKS)) {
+                continue;
+            }
             final int element = marker.get("i").asInt();
             final String at = marker.get("at").asString();
             if (element < 0 || element >= history.size()) {

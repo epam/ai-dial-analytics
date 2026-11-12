@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
+import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.arrow.flight.CallHeaders;
@@ -91,7 +93,7 @@ class FlightBasicAuthIntegrationTest {
     private static final String ADMIN_SUFFIX = "-admin";
     private static final String VIEWER_SUFFIX = "-viewer";
     private static final String NO_ROLE_SUFFIX = "-norole";
-    /** A key Core resolves with an empty role list: nothing to match globally or by grant. */
+    /** A key Core resolves with an empty role list: it carries only '*'. */
     private static final String NO_ROLES_AT_ALL_SUFFIX = "-noroles";
 
     private static HttpServer coreServer;
@@ -99,6 +101,9 @@ class FlightBasicAuthIntegrationTest {
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;
+
+    @Autowired
+    private TableAccessService tableAccess;
 
     private BufferAllocator clientAllocator;
     private FlightClient flightClient;
@@ -231,12 +236,21 @@ class FlightBasicAuthIntegrationTest {
     }
 
     @Test
-    void keyWithNoRolesAtAllIsDeniedPermission() {
-        // Nothing to match, globally or by grant, so this caller can never reach a table. Rejected at the
-        // gate rather than served an empty catalog on every call.
-        assertThatThrownBy(() -> flightClient.authenticateBasicToken(SENTINEL, "empty" + NO_ROLES_AT_ALL_SUFFIX))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+    void keyWithNoRolesAtAllReachesTablesGrantedToEveryone() {
+        // Every authenticated caller carries '*', so the gate admits a key with no role at all, and a table
+        // granting '*' is listed to it exactly as HTTP would serve it.
+        final Optional<CredentialCallOption> credential =
+                flightClient.authenticateBasicToken(SENTINEL, "empty" + NO_ROLES_AT_ALL_SUFFIX);
+        assertThat(credential).isPresent();
+        assertThat(listedTableNames(credential.orElseThrow())).doesNotContain("dial_usage_log");
+
+        final List<String> storedRead = List.copyOf(tableAccess.getAccess("dial_usage_log").getRead());
+        tableAccess.replaceAccess("dial_usage_log", Map.of(Privilege.TABLE_READ, List.of("*")));
+        try {
+            assertThat(listedTableNames(credential.orElseThrow())).contains("dial_usage_log");
+        } finally {
+            tableAccess.replaceAccess("dial_usage_log", Map.of(Privilege.TABLE_READ, storedRead));
+        }
     }
 
     @Test

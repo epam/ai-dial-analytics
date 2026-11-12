@@ -24,7 +24,7 @@ class PrivilegeModelTest {
     private final JsonMapper jsonMapper = JsonMapper.builder().build();
 
     @Test
-    @DisplayName("the DAG has exactly the five admitted direct edges")
+    @DisplayName("the DAG has exactly the six admitted direct edges")
     void directEdges() {
         assertThat(PrivilegeImplications.directlyImplied(Privilege.TABLE_GET))
                 .containsExactly(Privilege.TABLE_LIST);
@@ -36,9 +36,11 @@ class PrivilegeModelTest {
                 .containsExactly(Privilege.SAVED_QUERY_READ);
         assertThat(PrivilegeImplications.directlyImplied(Privilege.SAVED_QUERY_PUBLISH))
                 .containsExactly(Privilege.SAVED_QUERY_READ);
+        assertThat(PrivilegeImplications.directlyImplied(Privilege.SETTINGS_WRITE))
+                .containsExactly(Privilege.SETTINGS_READ);
         // Every other privilege implies nothing at all — the sensitivity clearance included.
         final Set<Privilege> granting = EnumSet.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_MODIFY,
-                Privilege.SAVED_QUERY_WRITE, Privilege.SAVED_QUERY_PUBLISH);
+                Privilege.SAVED_QUERY_WRITE, Privilege.SAVED_QUERY_PUBLISH, Privilege.SETTINGS_WRITE);
         for (final Privilege privilege : Privilege.values()) {
             if (!granting.contains(privilege)) {
                 assertThat(PrivilegeImplications.directlyImplied(privilege))
@@ -64,6 +66,28 @@ class PrivilegeModelTest {
                 .containsExactly(Privilege.SAVED_QUERY_WRITE);
         assertThat(PrivilegeImplications.conferring(Privilege.SAVED_QUERY_PUBLISH))
                 .containsExactly(Privilege.SAVED_QUERY_PUBLISH);
+    }
+
+    @Test
+    @DisplayName("the settings write implies the settings read, and nothing implies the write")
+    void settingsWriteImpliesRead() {
+        assertThat(PrivilegeImplications.closureOf(Privilege.SETTINGS_WRITE))
+                .containsExactlyInAnyOrder(Privilege.SETTINGS_WRITE, Privilege.SETTINGS_READ);
+        assertThat(PrivilegeImplications.conferring(Privilege.SETTINGS_READ))
+                .containsExactlyInAnyOrder(Privilege.SETTINGS_READ, Privilege.SETTINGS_WRITE);
+        assertThat(PrivilegeImplications.conferring(Privilege.SETTINGS_WRITE))
+                .containsExactly(Privilege.SETTINGS_WRITE);
+    }
+
+    @Test
+    @DisplayName("every bundle reads the settings, and only the full administrator writes them")
+    void settingsAcrossBundles() {
+        for (final RoleBundle bundle : RoleBundle.values()) {
+            assertThat(bundle.privileges()).as("%s reads the settings", bundle).contains(Privilege.SETTINGS_READ);
+            assertThat(bundle.privileges().contains(Privilege.SETTINGS_WRITE))
+                    .as("%s writes the settings", bundle)
+                    .isEqualTo(bundle == RoleBundle.FULL_ADMIN);
+        }
     }
 
     @Test
@@ -113,15 +137,15 @@ class PrivilegeModelTest {
         assertThat(RoleBundle.READ_ONLY_ADMIN.privileges()).containsExactlyInAnyOrder(
                 Privilege.TABLE_READ, Privilege.TABLE_GET, Privilege.TABLE_LIST,
                 Privilege.REGISTRY_READ, Privilege.AUDIT_READ,
-                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE);
+                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE, Privilege.SETTINGS_READ);
 
         assertThat(RoleBundle.READ_ONLY_ANALYTIC.privileges()).containsExactlyInAnyOrder(
                 Privilege.TABLE_READ, Privilege.TABLE_GET, Privilege.TABLE_LIST,
-                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE);
+                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE, Privilege.SETTINGS_READ);
 
         assertThat(RoleBundle.READ_ONLY_SENSITIVE_ANALYTIC.privileges()).containsExactlyInAnyOrder(
                 Privilege.TABLE_SENSITIVE, Privilege.TABLE_READ, Privilege.TABLE_GET, Privilege.TABLE_LIST,
-                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE);
+                Privilege.SAVED_QUERY_READ, Privilege.SAVED_QUERY_WRITE, Privilege.SETTINGS_READ);
     }
 
     @Test
@@ -130,7 +154,8 @@ class PrivilegeModelTest {
         final Set<Privilege> administrative = EnumSet.of(
                 Privilege.TABLE_CREATE, Privilege.TABLE_DELETE, Privilege.TABLE_GRANT,
                 Privilege.TABLE_WRITE, Privilege.TABLE_MODIFY, Privilege.REGISTRY_ADMIN,
-                Privilege.DATA_SYNC_OPERATE, Privilege.SAVED_QUERY_PUBLISH, Privilege.AUDIT_READ);
+                Privilege.DATA_SYNC_OPERATE, Privilege.SAVED_QUERY_PUBLISH, Privilege.AUDIT_READ,
+                Privilege.SETTINGS_WRITE);
         assertThat(RoleBundle.READ_ONLY_ANALYTIC.privileges()).doesNotContainAnyElementsOf(administrative);
         assertThat(RoleBundle.READ_ONLY_SENSITIVE_ANALYTIC.privileges())
                 .as("this bundle is what finally makes PII read reachable without administrative authority")
@@ -143,7 +168,7 @@ class PrivilegeModelTest {
         assertThat(RoleBundle.READ_ONLY_SENSITIVE_ANALYTIC.declaredPrivileges())
                 .as("one source of truth for implication: the DAG, not a hand-copied closure")
                 .containsExactlyInAnyOrder(Privilege.TABLE_READ, Privilege.TABLE_SENSITIVE,
-                        Privilege.SAVED_QUERY_WRITE);
+                        Privilege.SAVED_QUERY_WRITE, Privilege.SETTINGS_READ);
         for (final RoleBundle bundle : RoleBundle.values()) {
             if (bundle != RoleBundle.FULL_ADMIN) {
                 assertThat(bundle.declaredPrivileges())

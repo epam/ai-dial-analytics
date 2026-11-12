@@ -1,0 +1,431 @@
+[
+{
+ "model": "text-1",
+ "max_tokens": 1000,
+ "stream": true,
+ "system": [
+  {
+   "type": "text",
+   "text": "text-2"
+  },
+  {
+   "type": "text",
+   "text": "text-3",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  },
+  {
+   "type": "text",
+   "text": "text-4",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  }
+ ],
+ "tools": [
+  {
+   "name": "text-5",
+   "description": "text-6",
+   "input_schema": {
+    "type": "object"
+   }
+  }
+ ],
+ "messages": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-7"
+    },
+    {
+     "type": "text",
+     "text": "text-8"
+    },
+    {
+     "type": "text",
+     "text": "text-9"
+    },
+    {
+     "type": "text",
+     "text": "text-10"
+    },
+    {
+     "type": "text",
+     "text": "text-11"
+    },
+    {
+     "type": "text",
+     "text": "text-12"
+    }
+   ]
+  },
+  {
+   "role": "system",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-13",
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  }
+ ]
+},
+{
+ "model": "text-1",
+ "max_tokens": 1000,
+ "stream": true,
+ "system": [
+  {
+   "type": "text",
+   "text": "text-2"
+  },
+  {
+   "type": "text",
+   "text": "text-3",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  },
+  {
+   "type": "text",
+   "text": "text-4",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  }
+ ],
+ "tools": [
+  {
+   "name": "text-5",
+   "description": "text-6",
+   "input_schema": {
+    "type": "object"
+   }
+  }
+ ],
+ "messages": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-7"
+    },
+    {
+     "type": "text",
+     "text": "text-8"
+    },
+    {
+     "type": "text",
+     "text": "text-9"
+    },
+    {
+     "type": "text",
+     "text": "text-10"
+    },
+    {
+     "type": "text",
+     "text": "text-11"
+    },
+    {
+     "type": "text",
+     "text": "text-12"
+    }
+   ]
+  },
+  {
+   "role": "system",
+   "content": "text-13"
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "text-14",
+     "signature": "text-15"
+    },
+    {
+     "type": "text",
+     "text": "text-16",
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-17",
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  }
+ ]
+},
+{
+ "model": "text-1",
+ "max_tokens": 1000,
+ "stream": true,
+ "system": [
+  {
+   "type": "text",
+   "text": "text-2"
+  },
+  {
+   "type": "text",
+   "text": "text-3",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  },
+  {
+   "type": "text",
+   "text": "text-4",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  }
+ ],
+ "tools": [
+  {
+   "name": "text-5",
+   "description": "text-6",
+   "input_schema": {
+    "type": "object"
+   }
+  }
+ ],
+ "messages": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-7"
+    },
+    {
+     "type": "text",
+     "text": "text-8"
+    },
+    {
+     "type": "text",
+     "text": "text-9"
+    },
+    {
+     "type": "text",
+     "text": "text-10"
+    },
+    {
+     "type": "text",
+     "text": "text-11"
+    },
+    {
+     "type": "text",
+     "text": "text-12"
+    }
+   ]
+  },
+  {
+   "role": "system",
+   "content": "text-13"
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "text-14",
+     "signature": "text-15"
+    },
+    {
+     "type": "text",
+     "text": "text-16"
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "text-17"
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "text-14",
+     "signature": "text-18"
+    },
+    {
+     "type": "tool_use",
+     "id": "text-19",
+     "name": "text-20",
+     "input": {
+      "arg": "text-21"
+     },
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": [
+    {
+     "tool_use_id": "text-19",
+     "type": "tool_result",
+     "content": "text-22",
+     "is_error": false,
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  }
+ ]
+},
+{
+ "model": "text-1",
+ "max_tokens": 1000,
+ "stream": true,
+ "system": [
+  {
+   "type": "text",
+   "text": "text-2"
+  },
+  {
+   "type": "text",
+   "text": "text-3",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  },
+  {
+   "type": "text",
+   "text": "text-4",
+   "cache_control": {
+    "type": "ephemeral"
+   }
+  }
+ ],
+ "tools": [
+  {
+   "name": "text-5",
+   "description": "text-6",
+   "input_schema": {
+    "type": "object"
+   }
+  }
+ ],
+ "messages": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-7"
+    },
+    {
+     "type": "text",
+     "text": "text-8"
+    },
+    {
+     "type": "text",
+     "text": "text-9"
+    },
+    {
+     "type": "text",
+     "text": "text-10"
+    },
+    {
+     "type": "text",
+     "text": "text-11"
+    },
+    {
+     "type": "text",
+     "text": "text-12"
+    }
+   ]
+  },
+  {
+   "role": "system",
+   "content": "text-13"
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "text-14",
+     "signature": "text-15"
+    },
+    {
+     "type": "text",
+     "text": "text-16"
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "text-17"
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "thinking",
+     "thinking": "text-14",
+     "signature": "text-18"
+    },
+    {
+     "type": "tool_use",
+     "id": "text-19",
+     "name": "text-20",
+     "input": {
+      "arg": "text-21"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": [
+    {
+     "tool_use_id": "text-19",
+     "type": "tool_result",
+     "content": "text-22",
+     "is_error": false
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "text-23",
+     "cache_control": {
+      "type": "ephemeral"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "text-24"
+  }
+ ]
+}
+]

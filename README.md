@@ -42,7 +42,8 @@ an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can
 ## Features
 
 - **Usage log ingestion:** a near-real-time poller plus a daily reconciliation sweep load DIAL usage logs
-  from Azure Blob Storage or AWS S3. Ingestion is idempotent and deduplicated by the ClickHouse engine.
+  from Azure Blob Storage, AWS S3 or Google Cloud Storage. Ingestion is idempotent and deduplicated by the
+  ClickHouse engine.
 - **Configurable column mapping:** target columns, source paths and transforms are declared in YAML and
   checked against the live table at startup.
 - **Table catalog:** a PostgreSQL-backed catalog of ClickHouse tables, with schema creation and evolution
@@ -151,6 +152,7 @@ All functional endpoints live under `/v1`. Errors share one JSON shape:
 | Pipelines | `/v1/pipelines` | [aggregate-pipeline](openspec/specs/aggregate-pipeline/spec.md), [pipeline-registry](openspec/specs/pipeline-registry/spec.md) |
 | Saved queries | `/v1/saved-queries` | [saved-queries](openspec/specs/saved-queries/spec.md) |
 | Dashboards | `/v1/dashboards` | [dashboards](openspec/specs/dashboards/spec.md) |
+| Settings | `/v1/settings` | [instance-settings](openspec/specs/instance-settings/spec.md) |
 | Audit trail | `/v1/activities` | [audit-trail](openspec/specs/audit-trail/spec.md) |
 | Data sync | `POST /v1/data-sync/backfill` | [data-sync-backfill](openspec/specs/data-sync-backfill/spec.md) |
 | OTLP sinks | `/v1/otel/sinks`, `/v1/otel/sink/{name}` | [otel-sink](openspec/specs/otel-sink/spec.md), [Claude Code example](docs/claude-code-telemetry.md) |
@@ -207,6 +209,8 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 | ClickHouse server setup and grants | [docs/clickhouse-server.md](docs/clickhouse-server.md) |
 | ClickHouse replication and failover | [docs/clickhouse-replication.md](docs/clickhouse-replication.md) |
 | AWS S3 access | [docs/aws-s3-access.md](docs/aws-s3-access.md) |
+| Google Cloud Storage access | [docs/gcs-access.md](docs/gcs-access.md) |
+| Cloud SQL catalog with IAM auth | [docs/cloud-sql-access.md](docs/cloud-sql-access.md) |
 | Column mapping for ingestion | [docs/column-mapping.md](docs/column-mapping.md) |
 | SQL reference | [docs/sql-reference.md](docs/sql-reference.md) |
 | Heavy and sensitive columns | [docs/heavy-columns.md](docs/heavy-columns.md) |

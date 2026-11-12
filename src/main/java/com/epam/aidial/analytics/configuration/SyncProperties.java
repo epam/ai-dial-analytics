@@ -44,6 +44,9 @@ import java.util.List;
  *                              (unset or blank) means no limit, and a negative value fails binding, and so startup
  * @param requestBodyMode       how a payload row's request body is stored: whole, or cut to its new history + parent link for a chat
  *                              request; {@code null} (unset) means {@link RequestBodyMode#WHOLE}. An unknown value fails binding, and so startup
+ * @param sensitiveColumnsEnabled whether ingest writes the columns the catalog flags {@code sensitive} on each target table; under
+ *                              {@code false} they are left out of the target's mapping at startup and take their ClickHouse defaults.
+ *                              {@code null} (unset) means {@code true}
  */
 @Validated
 @ConfigurationProperties(prefix = "sync")
@@ -60,7 +63,8 @@ public record SyncProperties(
         @NotEmpty List<@Valid Target> targets,
         Boolean inlineFilesDropTruncated,
         DataSize inlineFilesMaxSize,
-        RequestBodyMode requestBodyMode) {
+        RequestBodyMode requestBodyMode,
+        Boolean sensitiveColumnsEnabled) {
 
     /** The {@code sync.max-line-bytes} default that {@code application.yml} ships (64 MiB). */
     public static final int DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
@@ -80,6 +84,7 @@ public record SyncProperties(
             throw new IllegalArgumentException("sync.inline-files-max-size must not be negative: " + inlineFilesMaxSize);
         }
         requestBodyMode = requestBodyMode == null ? RequestBodyMode.WHOLE : requestBodyMode;
+        sensitiveColumnsEnabled = sensitiveColumnsEnabled == null || sensitiveColumnsEnabled;
     }
 
     /** The inline-files settings as one policy; an unset size is {@link InlineFilesPolicy#NO_LIMIT}. */
