@@ -41,7 +41,8 @@ an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can
 ## Features
 
 - **Usage log ingestion:** a near-real-time poller plus a daily reconciliation sweep load DIAL usage logs
-  from Azure Blob Storage or AWS S3. Ingestion is idempotent and deduplicated by the ClickHouse engine.
+  from Azure Blob Storage, AWS S3 or Google Cloud Storage. Ingestion is idempotent and deduplicated by the
+  ClickHouse engine.
 - **Configurable column mapping:** target columns, source paths and transforms are declared in YAML and
   checked against the live table at startup.
 - **Table catalog:** a PostgreSQL-backed catalog of ClickHouse tables, with schema creation and evolution
@@ -206,6 +207,8 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | ClickHouse server setup and grants | [docs/clickhouse-server.md](docs/clickhouse-server.md) |
 | AWS S3 access | [docs/aws-s3-access.md](docs/aws-s3-access.md) |
+| Google Cloud Storage access | [docs/gcs-access.md](docs/gcs-access.md) |
+| Cloud SQL catalog with IAM auth | [docs/cloud-sql-access.md](docs/cloud-sql-access.md) |
 | Column mapping for ingestion | [docs/column-mapping.md](docs/column-mapping.md) |
 | SQL reference | [docs/sql-reference.md](docs/sql-reference.md) |
 | Heavy and sensitive columns | [docs/heavy-columns.md](docs/heavy-columns.md) |

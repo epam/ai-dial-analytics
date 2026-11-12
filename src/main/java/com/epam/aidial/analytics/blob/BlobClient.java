@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.blob;
 import com.epam.aidial.analytics.blob.credential.AwsCredentialProvider;
 import com.epam.aidial.analytics.blob.credential.AzureCredentialProvider;
 import com.epam.aidial.analytics.blob.credential.CredentialProvider;
+import com.epam.aidial.analytics.blob.credential.GcsCredentialProvider;
 import com.epam.aidial.analytics.configuration.BlobProperties;
 import com.epam.aidial.analytics.exception.BlobAccessException;
 import com.google.common.collect.ImmutableSet;
@@ -32,9 +33,9 @@ import java.util.Properties;
 
 /**
  * The only component that knows about jclouds / the blob backend. Builds a {@link BlobStoreContext}
- * from configuration (provider {@code azureblob} or {@code aws-s3} for real storage, {@code filesystem} in
- * tests) and exposes prefix listing and per-blob streaming. The provider abstraction keeps the rest of the
- * service free of any cloud-specific API.
+ * from configuration (provider {@code azureblob}, {@code aws-s3} or {@code google-cloud-storage} for real
+ * storage, {@code filesystem} in tests) and exposes prefix listing and per-blob streaming. The provider
+ * abstraction keeps the rest of the service free of any cloud-specific API.
  *
  * <p>The context is created lazily on first use so the service still boots when the blob store is
  * unreachable; the failure then surfaces per sync run.
@@ -185,8 +186,10 @@ public class BlobClient {
      * pair ({@code null} when absent). For {@code azureblob}, {@link AzureCredentialProvider} mirrors the
      * same shared-key-vs-Azure-AD decision based on whether both are present; for {@code aws-s3},
      * {@link AwsCredentialProvider} makes the same decision between a static access-key pair and AWS
-     * workload identity (EKS IRSA). Both branches sit ahead of the fallback so the inert placeholders stay
-     * confined to providers that ignore credentials entirely ({@code filesystem} in tests).
+     * workload identity (EKS IRSA); for {@code google-cloud-storage}, {@link GcsCredentialProvider} chooses
+     * between a service-account key pair and a keyless Application Default Credentials token. All three
+     * branches sit ahead of the fallback so the inert placeholders stay confined to providers that ignore
+     * credentials entirely ({@code filesystem} in tests).
      *
      * <p>Package-private rather than {@code private} so a test can substitute a fixed credential.
      */
@@ -196,6 +199,9 @@ public class BlobClient {
         }
         if (isAwsS3()) {
             return new AwsCredentialProvider(identity, credential, properties.endpoint());
+        }
+        if (isGoogleCloudStorage()) {
+            return new GcsCredentialProvider(identity, credential);
         }
         Credentials fallback = new Credentials(
                 identity == null ? DEFAULT_IDENTITY : identity,
@@ -207,7 +213,10 @@ public class BlobClient {
      * Builds the jclouds context overrides. Operator-supplied {@code blob.overrides.*} take precedence;
      * when {@code azureblob} runs in managed-identity mode (no account name/key), the Azure AD bearer-token
      * overrides are auto-applied so the EPAM jclouds fork uses the token from {@link AzureCredentialProvider}.
-     * Mirrors ai-dial-core's documented Azure AD setup.
+     * Mirrors ai-dial-core's documented Azure AD setup. A keyless {@code google-cloud-storage} source gets the
+     * bearer-token OAuth type for the token from {@link GcsCredentialProvider}; with a key pair, jclouds'
+     * default JWT-bearer flow signs with the key itself and nothing is added. A blank endpoint is correct for
+     * GCS — one global JSON API, no region in the signature — so it is not warned about.
      *
      * @param managedIdentity whether no shared-key pair is configured (decided once in {@link #buildContext})
      */
@@ -223,6 +232,9 @@ public class BlobClient {
                 log.warn("azureblob managed-identity mode without blob.endpoint set; Azure AD auth "
                         + "requires endpoint https://<account>.blob.core.windows.net");
             }
+        }
+        if (isGoogleCloudStorage() && managedIdentity) {
+            overrides.putIfAbsent("jclouds.oauth.credential-type", "bearerTokenCredentials");
         }
         if (isAwsS3() && !isPresent(properties.endpoint())) {
             // No override to apply — aws-s3 needs none — but a blank endpoint is the one way this provider
@@ -241,6 +253,10 @@ public class BlobClient {
 
     private boolean isAwsS3() {
         return "aws-s3".equalsIgnoreCase(properties.provider());
+    }
+
+    private boolean isGoogleCloudStorage() {
+        return "google-cloud-storage".equalsIgnoreCase(properties.provider());
     }
 
     private static boolean isPresent(String value) {
