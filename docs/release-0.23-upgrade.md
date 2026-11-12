@@ -106,6 +106,10 @@ points at the new location. The images themselves are built the same way.
   stays stopped. Do it immediately before that deploy: the runner still deployed drops a disabled pipeline from its
   cache, and the pipeline's dead-letter items lose their stored labels while it stays disabled. See [pipeline-registry](../openspec/specs/pipeline-registry/spec.md), "A pipeline has exactly one
   run control".
+- **`roles-mapping` with raw privileges.** The new sessions-source setting (§3e) is read with `SETTINGS_READ` and
+  written with `SETTINGS_WRITE`. Every read-only bundle gains `SETTINGS_READ` and `FULL_ADMIN` gains both, but a
+  mapping that names raw privileges gains neither: add `SETTINGS_READ` to the roles whose holders use the sessions
+  view, or their read answers `403`.
 - **Evaluator archive (optional).** 0.23 drops the read-only evaluator archive and the rule history left
   over from the fold (§4). The drop cannot be undone: the dump is the only copy of the definitions as they
   stood before the evaluator fold (0.2.2) and of the pre-fold rule revisions. To keep them, dump the four
@@ -236,6 +240,32 @@ Rows already stored are unchanged. A backfill with `"includeIngested": true` app
 re-fires the row-grain enrichments over the re-ingested rows. A counter that keeps rising points at a producer field or
 a mapping `kind` that does not match. The DIAL Core fields the shipped mappings read are expected to stay at zero.
 
+## 3d. Sensitive columns kept out of ingest, opt-in
+
+New `SYNC_SENSITIVE_COLUMNS_ENABLED` (see [`configuration.md`](configuration.md#data-sync-schedule)). Under `false`,
+ingest stops writing the columns the catalog flags `sensitive` on each target table, and new rows hold their
+ClickHouse defaults there (see [`data-sync`](../openspec/specs/data-sync/spec.md)). Nothing changes under `true`, the
+default.
+
+- **Under `false`, startup fails** when a target table has no catalog definition, or when a column it would leave
+  out is a deduplication-key, grain, identity, ordering-key, partition, version or TTL column.
+- Rows already stored keep their values, and switching back to `true` restores the columns on new rows only. Under
+  `SYNC_REQUEST_BODY_MODE=delta`, a parent re-ingested under `false` loses its body, so its delta children can no
+  longer be rebuilt.
+- **Rollback.** A build older than 0.23 ignores the variable and writes sensitive columns again.
+
+## 3e. Sessions-source setting
+
+New endpoints `GET` and `PUT /v1/settings/sessions-source` store which source table holds session rows and which of
+its fields play the session roles (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). Reading
+needs the new privilege `SETTINGS_READ`, which every read-only bundle carries; writing needs `SETTINGS_WRITE`, which
+only `FULL_ADMIN` carries. `GET` answers `404 setting_not_found` until a setting is stored, so store one with `PUT`
+after the deploy wherever the sessions view is used. Postgres `V53` creates the backing table at startup.
+
+- **A `roles-mapping` that names raw privileges** gains neither privilege (§1).
+- **Rollback.** A build older than 0.23 does not know `SETTINGS_READ` or `SETTINGS_WRITE` and fails startup on a
+  `roles-mapping` that names either. Remove them before rolling back. The new table is ignored and may be left in place.
+
 ## 4. Migrations (automatic on startup)
 
 | Migration | Effect |
@@ -249,6 +279,8 @@ a mapping `kind` that does not match. The DIAL Core fields the shipped mappings 
 | Postgres `V50` | Registers `request_cache_control` on `dial_usage_log_payload`, sensitive and heavy, and extends the seeded `request_body` description. |
 | Postgres `V51` | Adds `dashboard` and its audit mirror `dashboard_aud`, for the new `/v1/dashboards` API. Both start empty. |
 | Postgres `V52` | Adds the nullable `settings` column to `dashboard` and `dashboard_aud`. |
+| Postgres `V53` | Adds `instance_setting` and its audit mirror `instance_setting_aud`, for the sessions-source setting (§3e). Both start empty. |
+| Postgres `V54` | Re-describes `request_cache_control` on `dial_usage_log_payload` to name its `text_blocks` entry (§7). A description an operator edited is left alone. |
 
 The relayout itself is runtime DDL, not a migration: it runs after startup, off the probe path.
 
@@ -298,7 +330,9 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
 | Evaluator archive removed (`GET /v1/evaluators*`) | `404 not_found` | Read the definition from the pipeline's `transform` (`GET /v1/pipelines/{name}`); dump the tables first if the pre-fold definitions are wanted (§1) |
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
-| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's. Every chat turn's `request_body`, the first included, is re-serialized (keys sorted, no whitespace) and its `cache_control` markers move to `request_cache_control` | Only when you set `delta`: check readers that need a later turn's whole history or tools, the body text as sent, or `cache_control` in the body (§7) |
+| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's. Every chat turn's `request_body`, the first included, is re-serialized (keys sorted, no whitespace) and its `cache_control` markers move to `request_cache_control` | Only when you set `delta`: re-point pipelines and readers that need a turn's whole request to `request_body_full` first; check readers that need the body text as sent, or `cache_control` in the body (§7) |
+| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; a raw-privilege `roles-mapping` does not, and its holders get `403` reading the setting | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; remove both names before a rollback (§1, §3e) |
+| Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column (§3d) |
 | Payload rows carry the caller's identity | `dial_usage_log_payload` stores `project_id` and `user_hash` on every row, under every mode, next to the bodies. The catalog hides both; the table already holds the caller's `jwt_claims` | Account for it where direct ClickHouse access to the payload table is granted |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
 | Flight SQL server name changed to `ai-dial-analytics` | `GetSqlInfo` and JDBC/ADBC metadata report the new product name; client settings keyed on the old name stop applying | Match the new name in the client; it cannot be set back (§1) |
@@ -330,6 +364,36 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
   days only under `whole-with-path` or `delta` on 0.23:** a build older than 0.23, or `whole`, writes rows without the
   path, and the later turns that link to them can no longer be rebuilt. Roll back from `delta` to `whole-with-path`
   for that reason, and set `delta` only once no pre-0.23 pod is left ingesting.
+  - **Read a turn's whole request from `request_body_full`.** Under `delta`, `request_body` holds only what a row's
+    parent lacked. The new computed fields `dial_usage_log_payload.request_body_full` and `request_body_rebuild`
+    return the rebuilt request and whether it is `stored`, `rebuilt` or `partial`. **Before setting `delta`,
+    re-point every pipeline whose `transform.inputs` binds `request_body` to `request_body_full`** (and bind
+    `request_body_rebuild` too if the pipeline should tell a `partial` rebuild apart), and move saved queries and
+    other readers that need a turn's whole request the same way. Under `whole` and `whole-with-path`,
+    `request_body_full` returns the stored body marked `stored`, so re-pointing first is safe. ADAS does not rewrite
+    pipelines. Both fields are projection-only: filtering, sorting or grouping on them answers `400 bad_request`.
+  - A later turn's `request_cache_control` holds a `{"text_blocks":[…]}` entry, usually empty, naming the earlier
+    messages the turn sent as one text block, so it is not `NULL` when the turn carried no `cache_control` marker. A
+    reader that parses the column skips that entry.
+  - **An environment that ran a 0.23 release candidate under `delta` or `whole-with-path`:** a message sent as one
+    text block now hashes like the same message sent as a plain string, so a request whose history holds such a
+    block gets a different path than under the release candidate. A conversation in progress at the upgrade whose
+    history holds one links its next turn to an earlier turn or starts a new chain, once. Re-ingest across the
+    upgrade only by whole UTC days: such an event re-ingested alone takes the new path, and its children stored
+    before can no longer be rebuilt. A later turn stored before the upgrade has no `text_blocks` entry and rebuilds
+    its earlier messages as they are stored. Pods on different builds during a rolling upgrade may miss each other's
+    rows as parents for such requests, which costs storage only. Rolling back to a release candidate: re-point
+    pipelines bound to `request_body_full` back to `request_body` first, since a release candidate refuses them.
+- `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` (default `8`) and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` (`20000`) —
+  bound the chain lookups one read of `request_body_full` / `request_body_rebuild` may run; past them rows read
+  `partial`. See [`configuration.md`](configuration.md#request-body-rebuild).
+- `SYNC_SENSITIVE_COLUMNS_ENABLED` (default `true`) — `false` keeps the columns the catalog flags `sensitive` out of
+  ingest (§3d).
+- `BLOB_PROVIDER=google-cloud-storage` — Google Cloud Storage as the `data-sync` blob source, with a service-account
+  key pair in `BLOB_IDENTITY` / `BLOB_CREDENTIAL` or, with both blank, Application Default Credentials (GKE Workload
+  Identity). See [`gcs-access.md`](gcs-access.md). The PostgreSQL catalog can likewise run on Cloud SQL with IAM
+  database authentication through connector parameters in `POSTGRES_OPS`, with no new variable; see
+  [`cloud-sql-access.md`](cloud-sql-access.md).
 - `SYNC_MAX_LINE_BYTES` (default `67108864`) — the largest decompressed log line ingest reads; a longer line is skipped and
   counted as malformed.
 - `SYNC_PAYLOAD_TTL_DAYS` (default unset) — the payload table's retention in days, `-1` for none, applied at
