@@ -348,6 +348,7 @@ public final class RequestDeltaEncoder {
                 return;
             }
             row.put(REQUEST_BODY, request.stored(0));
+            row.put(REQUEST_CACHE_CONTROL, Item.markers(request, 0));
         }
 
         /**
@@ -519,16 +520,26 @@ public final class RequestDeltaEncoder {
             List<UUID> lineage = parent == null ? List.of() : parent.lineage(ANCESTORS_HINT);
             row.put(REQUEST_ANCESTOR_HASHES, lineage.stream().map(UUID::toString).toList());
             row.put(REQUEST_BODY, request.stored(parentDepth));
-            row.put(REQUEST_CACHE_CONTROL, markers(request));
+            row.put(REQUEST_CACHE_CONTROL, markers(request, parentDepth));
             return true;
         }
 
-        private static String markers(ChatRequest request) {
-            if (request.markers().isEmpty()) {
+        /**
+         * The row's {@code request_cache_control}: its markers and, for a row with a parent, one entry listing the
+         * inherited messages it sent as a bare text block, so its rebuild returns each in the shape this request sent
+         * whatever shape the row that stores the message sent. The entry is written even when empty: a row without
+         * one was stored before shapes were recorded, and inherits its messages as stored.
+         */
+        private static String markers(ChatRequest request, int parentDepth) {
+            if (request.markers().isEmpty() && parentDepth == 0) {
                 return null;
             }
             ArrayNode markers = JsonNodeFactory.instance.arrayNode();
             request.markers().forEach(marker -> markers.add(marker.toJson()));
+            if (parentDepth > 0) {
+                ArrayNode blocks = markers.addObject().putArray(ChatRequest.TEXT_BLOCKS);
+                request.textBlocks(parentDepth).forEach(blocks::add);
+            }
             return ChatRequest.escapeLoneSurrogates(markers.toString());
         }
     }

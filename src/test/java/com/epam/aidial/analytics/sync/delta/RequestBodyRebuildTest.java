@@ -64,6 +64,40 @@ class RequestBodyRebuildTest {
         assertRebuilt(result, "{\"input\":[{\"content\":\"u1\",\"role\":\"user\"},{\"content\":\"u2\",\"role\":\"user\"}],\"instructions\":\"i\"}");
     }
 
+    /** A row that lists a message the root stored as a plain string gets the block back, and its marker on it. */
+    @Test
+    void listedMessageStoredAsPlainStringRestoresTheTextBlock() {
+        root("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}]}");
+
+        RequestBodyRebuild.Result result = rebuild("{\"messages\":[{\"content\":\"u2\",\"role\":\"user\"}]}", ROOT,
+                "[{\"at\":\"/content/0\",\"i\":0,\"v\":{\"type\":\"ephemeral\"}},{\"text_blocks\":[0]}]");
+
+        assertRebuilt(result, "{\"messages\":[{\"content\":[{\"cache_control\":{\"type\":\"ephemeral\"},\"text\":\"u1\",\"type\":\"text\"}],"
+                + "\"role\":\"user\"},{\"content\":\"u2\",\"role\":\"user\"}]}");
+    }
+
+    /** A row that lists nothing gets the plain string where the root stored the block; its own messages keep their shape. */
+    @Test
+    void unlistedMessageStoredAsTextBlockComesBackAsThePlainString() {
+        root("{\"messages\":[{\"content\":[{\"text\":\"u1\",\"type\":\"text\"}],\"role\":\"user\"}]}");
+        String own = "{\"content\":[{\"text\":\"u2\",\"type\":\"text\"}],\"role\":\"user\"}";
+
+        RequestBodyRebuild.Result result = rebuild("{\"messages\":[" + own + "]}", ROOT, "[{\"text_blocks\":[]}]");
+
+        assertRebuilt(result, "{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}," + own + "]}");
+    }
+
+    /** A row stored before shapes were recorded carries no entry and inherits the block as stored. */
+    @Test
+    void rowWithoutTheEntryInheritsTheStoredShape() {
+        String block = "{\"content\":[{\"text\":\"u1\",\"type\":\"text\"}],\"role\":\"user\"}";
+        root("{\"messages\":[" + block + "]}");
+
+        RequestBodyRebuild.Result result = rebuild("{\"messages\":[{\"content\":\"u2\",\"role\":\"user\"}]}", ROOT, null);
+
+        assertRebuilt(result, "{\"messages\":[" + block + ",{\"content\":\"u2\",\"role\":\"user\"}]}");
+    }
+
     @Test
     void toolsAreInheritedFromTheRoot() {
         root("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}],\"tools\":[{\"name\":\"t\"}]}");

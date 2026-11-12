@@ -17,6 +17,15 @@ Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
   marked `stored`, so re-pointing first is safe. ADAS does not rewrite pipelines.
 - **Rollback.** Re-point such pipelines back to `request_body` and switch ingest to `whole-with-path` first: a build
   older than 0.24 refuses a pipeline bound to `request_body_full`.
+- **An environment already on `delta` or `whole-with-path`:** a message sent as one text block now hashes like the
+  same message sent as a plain string, so a request whose history holds such a block gets a different path than under 0.23. A conversation in progress
+  at the upgrade whose history holds one links its next turn to an earlier turn or starts a new chain, once. Re-ingest across the upgrade, or after a rollback, only by whole
+  UTC days: such an event re-ingested alone takes the new path, and its children stored before can no longer be rebuilt.
+  Instances on different builds during a rolling upgrade may miss each other's rows as parents for such requests,
+  which costs storage only. A later turn's `request_cache_control` is no longer `NULL` when the turn carried no marker:
+  it holds a `{"text_blocks":[…]}` entry, usually empty, naming the earlier messages the turn sent as one text block.
+  A reader that parses the column skips that entry. A later turn stored before the upgrade has no entry and rebuilds
+  its earlier messages as they are stored; Postgres `V54` updates the column's seeded description.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` — new; see
   [`configuration.md`](configuration.md#request-body-rebuild).
 

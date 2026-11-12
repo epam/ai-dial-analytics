@@ -39,3 +39,14 @@ Each file is a `transform` block reduced to the members `TemplatePlaceholderRule
 ### `transforms/widget-summary.json` — `llm`, **row grain**
 
 - One var, referenced once as a top-level `{{placeholder}}` — the row-grain rule's positive case.
+
+# Request-delta fixtures
+
+## `request-delta/coding-agent-turns.json` — four consecutive requests of one conversation
+
+Read by `RequestDeltaEncoderTest`. **Synthetic, modelled on the shape of a coding-agent client's requests.** Every
+string is a `text-N` placeholder, equal strings sharing one placeholder, so what repeats from turn to turn still
+repeats. The property it encodes: the message carrying the newest `cache_control` marker is sent as a
+one-text-block array, and the same message is sent as a plain string on the next turn, once the marker has
+moved on. Behaviour: `openspec/specs/data-sync/spec.md`, "A chat request body is stored as its new history and
+a parent link".
