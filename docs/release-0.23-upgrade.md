@@ -249,9 +249,10 @@ default.
 
 - **Under `false`, startup fails** when a target table has no catalog definition, or when a column it would leave
   out is a deduplication-key, grain, identity, ordering-key, partition, version or TTL column.
-- Rows already stored keep their values, and switching back to `true` restores the columns on new rows only. Under
-  `SYNC_REQUEST_BODY_MODE=delta`, a parent re-ingested under `false` loses its body, so its delta children can no
-  longer be rebuilt.
+- Rows already stored keep their values, and switching back to `true` restores the columns on new rows only.
+- `SYNC_REQUEST_BODY_MODE` has no effect under `false`, and startup logs a warning saying so: payload rows carry no
+  body and no path. A `delta` parent re-ingested under `false` loses both, so its delta children can no longer be
+  rebuilt.
 - **Rollback.** A 0.23 release candidate or an earlier build ignores the variable and writes sensitive columns
   again.
 
@@ -268,8 +269,8 @@ after the deploy wherever the sessions view is used. Postgres `V53` creates the 
   rolling back:
   - Remove `SETTINGS_READ` and `SETTINGS_WRITE` from `roles-mapping`. The older build fails startup on a mapping
     that names either.
-  - Delete the setting's audit activities. Every `PUT` records one under the resource type `Setting`, which the older
-    build cannot read, so any `/v1/activities` page holding one fails:
+  - Delete the setting's audit activities. Every successful `PUT` records one under the resource type `Setting`,
+    which the older build cannot read, so any `/v1/activities` page holding one fails:
 
     ```sql
     DELETE FROM audit_activity WHERE resource_type = 'Setting';
@@ -390,11 +391,12 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
     text block now hashes like the same message sent as a plain string, so a request whose history holds such a
     block gets a different path than under the release candidate. A conversation in progress at the upgrade whose
     history holds one links its next turn to an earlier turn or starts a new chain, once. Re-ingest across the
-    upgrade only by whole UTC days: such an event re-ingested alone takes the new path, and its children stored
-    before can no longer be rebuilt. A later turn stored before the upgrade has no `text_blocks` entry and rebuilds
-    its earlier messages as they are stored. Pods on different builds during a rolling upgrade may miss each other's
-    rows as parents for such requests, which costs storage only. Rolling back to a release candidate: re-point
-    pipelines bound to `request_body_full` back to `request_body` first, since a release candidate refuses them.
+    upgrade, or after a rollback to a release candidate, only by whole UTC days: such an event re-ingested alone
+    takes the new path, and its children stored before can no longer be rebuilt. A later turn stored before the
+    upgrade has no `text_blocks` entry and rebuilds its earlier messages as they are stored. Pods on different
+    builds during a rolling upgrade may miss each other's rows as parents for such requests, which costs storage
+    only. Rolling back to a release candidate: re-point pipelines bound to `request_body_full` back to
+    `request_body` first, since a release candidate refuses them.
 - `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` (default `8`) and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` (`20000`) —
   bound the chain lookups one read of `request_body_full` / `request_body_rebuild` may run; past them rows read
   `partial`. See [`configuration.md`](configuration.md#request-body-rebuild).

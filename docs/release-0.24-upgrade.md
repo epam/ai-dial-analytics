@@ -27,12 +27,13 @@ ordinary role name that matched only a caller carrying a provider role spelled `
   (`PUT /v1/tables/{name}/access`) unless that is what you want. After the upgrade, the startup log lists every
   table that names `*` and where.
 - A `*` stored in `write` or `modify` grants nothing, and a later edit of that list is refused while it keeps it.
-
 - **Flight SQL admits every authenticated caller.** The connection gate used to turn away a caller holding no
   privilege and no provider role; such a caller can now be reached by a `*` grant. Each call is still decided per
   table.
-- **Rollback.** A build older than 0.24 reads `*` as an ordinary role name again, so callers who read a table
-  only through a `*` grant or policy lose access to it.
+- **Rollback.** A build older than 0.24 reads `*` as an ordinary role name again. Callers who read a table only
+  through a `*` grant lose access to it, and a `*` row policy confines nobody, so a caller it confined who reads the
+  table another way sees every row. Delete `*` policies, or the read paths they narrow, before rolling back if a
+  rollback must not widen reads.
 
 ## Row policies on the caller's own rows
 
@@ -46,13 +47,14 @@ Nothing changes for stored policies.
   (see [`configuration.md`](configuration.md#identity-providers)), and from `API_KEY_LOGGING_KEY`,
   `API_KEY_LOGGING_SALT` and `API_KEY_OBFUSCATE_USER_EMAIL` for a per-user API key
   (see [`configuration.md`](configuration.md#api-key-authentication)). Set them to the values DIAL Core uses for
-  the same provider. The salt is a credential: keep it in the deployment's secret store. Without the settings a
-  caller has no user hash, and a policy matching on `caller.user_hash` gives that caller no rows.
+  the same provider; leave the API-key settings unset when Core's providers use different salts. The salt is a
+  credential: keep it in the deployment's secret store. Without the settings a caller has no user hash, and a
+  policy matching on `caller.user_hash` gives that caller no rows.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
   confines fails. Replace or delete such policies before rolling back.
 
 | Change | Effect | Action |
 |---|---|---|
-| `*` means every authenticated caller in read-side grant lists and row policies | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after |
+| `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
-| Row policies may use `caller.user_hash` / `caller.project`; Flight SQL admits every authenticated caller | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |
+| Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |
