@@ -35,7 +35,7 @@ enabling `delta` silently degrades both.
 - **Discovery** lists the two fields under `dial_usage_log`'s schema for a caller cleared for the payload table's
   sensitive columns, with a new `projection_only: true` flag. They are not catalog rows: `GET
   /v1/tables/dial_usage_log_payload` does not list them, and no Postgres or ClickHouse migration is added.
-- **Docs.** `docs/release-0.4-upgrade.md` tells operators to re-point pipelines that bind
+- **Docs.** `docs/release-0.23-upgrade.md` tells operators to re-point pipelines that bind
   `dial_usage_log_payload.request_body` to `request_body_full` before enabling `delta`;
   `docs/heavy-columns.md` and `docs/configuration.md` gain the matching entries.
 

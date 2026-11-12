@@ -20,7 +20,7 @@
 
 - [x] 4.1 `docs/configuration.md`: replace the `SYNC_INLINE_FILES_MODE` row with one row each for `SYNC_INLINE_FILES_DROP_TRUNCATED` and `SYNC_INLINE_FILES_MAX_SIZE`
 - [x] 4.2 `docs/column-mapping.md`, `README.md`, and the comments of `mapping/dial-usage-log-payload.yaml` reworded to the two settings
-- [x] 4.3 `docs/release-0.4-upgrade.md`: describe the two settings and note that `SYNC_INLINE_FILES_MODE` is gone and ignored if left set
+- [x] 4.3 `docs/release-0.23-upgrade.md`: describe the two settings and note that `SYNC_INLINE_FILES_MODE` is gone and ignored if left set
 
 ## 5. Verify
 

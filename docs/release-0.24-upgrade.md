@@ -12,10 +12,9 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   first (§3).
 - **`CLICKHOUSE_HOST` must reach only the primary replica** (§5).
 - **Three new writer grants** (§1).
-- **Request bodies stored in delta form** (opt-in) need pipelines re-pointed before ingest switches (§6).
-- **Chart `y_field` is an array** in saved-query and dashboard responses (§7).
-- **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§8).
-- **New privileges `SETTINGS_READ` and `SETTINGS_WRITE`** for the sessions-source setting (§10).
+- **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
+- **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
+- **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
 
 ---
 
@@ -86,33 +85,7 @@ ClickHouse pod keeps working while there is one replica. Replace it with an endp
 primary pod before a second replica joins: startup refuses a host that resolves to several addresses, or
 that different replicas answer over fresh connections.
 
-## 6. Request bodies rebuilt on read
-
-New computed fields `dial_usage_log_payload.request_body_full` and `request_body_rebuild` return a chat turn's whole
-request when it is stored in delta form (see [`heavy-columns.md`](heavy-columns.md#request-bodies-in-delta-form)).
-Nothing changes under `SYNC_REQUEST_BODY_MODE=whole`, the default.
-
-- **Before setting `SYNC_REQUEST_BODY_MODE=delta`, re-point every pipeline whose `transform.inputs` binds
-  `dial_usage_log_payload.request_body` to `dial_usage_log_payload.request_body_full`** (and bind
-  `request_body_rebuild` too if the pipeline should tell a `partial` rebuild apart), and move saved queries and other
-  readers that need a turn's whole request the same way. `request_body` keeps returning what is stored;
-  `request_body_full` returns the rebuilt request, and under `whole` and `whole-with-path` it returns the stored body
-  marked `stored`, so re-pointing first is safe. ADAS does not rewrite pipelines.
-- **Rollback.** Re-point such pipelines back to `request_body` and switch ingest to `whole-with-path` first: a build
-  older than 0.24 refuses a pipeline bound to `request_body_full`.
-- **An environment already on `delta` or `whole-with-path`:** a message sent as one text block now hashes like the
-  same message sent as a plain string, so a request whose history holds such a block gets a different path than under 0.23. A conversation in progress
-  at the upgrade whose history holds one links its next turn to an earlier turn or starts a new chain, once. Re-ingest across the upgrade, or after a rollback, only by whole
-  UTC days: such an event re-ingested alone takes the new path, and its children stored before can no longer be rebuilt.
-  Instances on different builds during a rolling upgrade may miss each other's rows as parents for such requests,
-  which costs storage only. A later turn's `request_cache_control` is no longer `NULL` when the turn carried no marker:
-  it holds a `{"text_blocks":[…]}` entry, usually empty, naming the earlier messages the turn sent as one text block.
-  A reader that parses the column skips that entry. A later turn stored before the upgrade has no entry and rebuilds
-  its earlier messages as they are stored; Postgres `V54` updates the column's seeded description.
-- **New optional keys.** `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS` and `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS`
-  ([`configuration.md`](configuration.md#request-body-rebuild)).
-
-## 7. Multi-series charts
+## 6. Multi-series charts
 
 A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
 columns, one per series (see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). Responses always carry the
@@ -125,7 +98,7 @@ one-element array without a migration.
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
 
-## 8. The `*` grantee
+## 7. The `*` grantee
 
 `*` in a table's `get`, `read` or `sensitive` grant list, or as the role of a row policy, now stands for every
 authenticated caller (see [`row-level-security.md`](row-level-security.md)). Earlier builds stored `*` as an
@@ -136,32 +109,31 @@ ordinary role name that matched only a caller carrying a provider role spelled `
   (`PUT /v1/tables/{name}/access`) unless that is what you want. After the upgrade, the startup log lists every
   table that names `*` and where.
 - A `*` stored in `write` or `modify` grants nothing, and a later edit of that list is refused while it keeps it.
+- **Flight SQL admits every authenticated caller.** The connection gate used to turn away a caller holding no
+  privilege and no provider role; such a caller can now be reached by a `*` grant. Each call is still decided per
+  table.
+- **Rollback.** A build older than 0.24 reads `*` as an ordinary role name again. Callers who read a table only
+  through a `*` grant lose access to it, and a `*` row policy confines nobody, so a caller it confined who reads the
+  table another way sees every row. Delete `*` policies, or the read paths they narrow, before rolling back if a
+  rollback must not widen reads.
 
-## 9. Sensitive columns kept out of ingest, opt-in
+## 8. Row policies on the caller's own rows
 
-New `SYNC_SENSITIVE_COLUMNS_ENABLED` (see [`configuration.md`](configuration.md#data-sync-schedule)). Under `false`,
-ingest stops writing the columns the catalog flags `sensitive` on each target table, and new rows hold their
-ClickHouse defaults there (see [`data-sync`](../openspec/specs/data-sync/spec.md)). Nothing changes under `true`, the
-default.
+A row policy may compare a `string` column with a value of the caller reading the table, `caller.user_hash` or
+`caller.project`, and `PUT /v1/tables/{name}/row-policies/{role}` accepts the policy as a SQL condition in `where`
+instead of `filter` (see [`row-level-security.md`](row-level-security.md#own-rows-comparing-a-column-with-the-caller)).
+Nothing changes for stored policies.
 
-- **Under `false`, startup fails** when a target table has no catalog definition, or when a column it would leave
-  out is a deduplication-key, grain, identity, ordering-key, partition, version or TTL column.
-- Rows already stored keep their values, and switching back to `true` restores the columns on new rows only. Under
-  `SYNC_REQUEST_BODY_MODE=delta`, a parent re-ingested under `false` loses its body, so its delta children can no
-  longer be rebuilt.
-- **Rollback.** A build older than 0.24 ignores the variable and writes sensitive columns again.
-
-## 10. Sessions-source setting
-
-New endpoints `GET` and `PUT /v1/settings/sessions-source` store which source table holds session rows and which of
-its fields play the session roles (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). Reading
-needs the new privilege `SETTINGS_READ`, which every read-only bundle now carries; writing needs `SETTINGS_WRITE`,
-which only `FULL_ADMIN` carries. Flyway migration `V53` creates the backing table at startup.
-
-- **A `roles-mapping` that names raw privileges** rather than a bundle gains neither privilege. Add `SETTINGS_READ`
-  to the roles whose holders use the sessions view, or they get `403` on the read.
-- **Rollback.** A build older than 0.24 does not know `SETTINGS_READ` or `SETTINGS_WRITE` and fails startup on a
-  `roles-mapping` that names either. Remove them before rolling back. The new table is ignored and may be left in place.
+- **`caller.user_hash` needs new settings.** It is derived the way DIAL Core derives its `user.id` log field, from
+  `providers.<name>.logging-key`, `.logging-salt` and `.obfuscate-user-email` for an identity provider
+  (see [`configuration.md`](configuration.md#identity-providers)), and from `API_KEY_LOGGING_KEY`,
+  `API_KEY_LOGGING_SALT` and `API_KEY_OBFUSCATE_USER_EMAIL` for a per-user API key
+  (see [`configuration.md`](configuration.md#api-key-authentication)). Set them to the values DIAL Core uses for
+  the same provider; leave the API-key settings unset when Core's providers use different salts. The salt is a
+  credential: keep it in the deployment's secret store. Without the settings a caller has no user hash, and a
+  policy matching on `caller.user_hash` gives that caller no rows.
+- **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
+  confines fails. Replace or delete such policies before rolling back.
 
 ## Summary
 
@@ -169,8 +141,6 @@ which only `FULL_ADMIN` carries. Flyway migration `V53` creates the backing tabl
 |---|---|---|
 | Replicated ClickHouse storage required | An `Atomic` database is refused at startup; plain tables in a `Replicated` database convert on the first start | Set up Keeper, server settings and writer grants (§1); change an `Atomic` engine by hand (§2); stop the previous version before deploying (§3) |
 | `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
-| `*` means every authenticated caller in read-side grant lists and row policies | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after (§8) |
-| Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | Readers of `request_body` see only a later turn's new messages | Only when you set `delta`: re-point pipelines and readers to `request_body_full` (§6) |
-| Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column (§9) |
-| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; raw-privilege mappings do not | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; remove both names before a rollback (§10) |
-| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§7) |
+| `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§7) |
+| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
+| Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |

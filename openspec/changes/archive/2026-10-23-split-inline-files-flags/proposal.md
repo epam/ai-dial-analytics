@@ -42,7 +42,7 @@ setting for it.
   `sync.inline-files-max-size` added (`application.yml`, `docs/configuration.md`).
 - Code: `SyncProperties`, `MappingConfiguration`, `MappingEngine`, and the `sync.inline` package
   (`InlineFilesMode` replaced, `InlineFileRewrite`, `InlineFileStripper`), with their tests.
-- Docs: `docs/configuration.md`, `docs/column-mapping.md`, `docs/release-0.4-upgrade.md`, `README.md`, and
+- Docs: `docs/configuration.md`, `docs/column-mapping.md`, `docs/release-0.23-upgrade.md`, `README.md`, and
   the comments of `mapping/dial-usage-log-payload.yaml`.
 - No `/v1` endpoint, catalog schema or migration changes. Stored rows change only for deployments that set
   a limit; ingesting a record again under different settings replaces its row with the new result.
