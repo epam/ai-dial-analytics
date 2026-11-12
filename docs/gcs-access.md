@@ -64,7 +64,9 @@ Leave the pair blank and point `GOOGLE_APPLICATION_CREDENTIALS` at a file mounte
 secret store. A service-account key file (JSON) works. So does a workload-identity-federation
 configuration, which lets a pod on AKS or EKS exchange its own cluster token for Google credentials. The
 variable is a Google convention, not an ADAS property. A file it names takes precedence over the metadata
-server, and it is read again on every retry, so a replaced file is picked up without a restart.
+server. It is read again whenever resolution is retried: after a failed first resolution, and after a
+resolved credential fails to renew. So a rotated key is picked up without a restart once the old one is
+disabled.
 
 With the variable unset, gcloud's application-default credentials file (`gcloud auth application-default
 login`) is used when it exists, which suits local development. Only after that is the metadata server

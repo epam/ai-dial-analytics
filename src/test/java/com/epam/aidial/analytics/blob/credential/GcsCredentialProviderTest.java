@@ -168,6 +168,33 @@ class GcsCredentialProviderTest {
     }
 
     @Test
+    void failedRenewalDropsTheCredentialAndTheNextCallResolvesAgain() {
+        // The first credential stands for a rotated-away key: its first token is issued, every renewal is refused.
+        AtomicInteger loads = new AtomicInteger();
+        GcsCredentialProvider provider = new GcsCredentialProvider(() -> {
+            if (loads.incrementAndGet() == 1) {
+                return new CountingCredentials("ya29.old", 30_000L) {
+                    @Override
+                    public AccessToken refreshAccessToken() throws IOException {
+                        if (refreshes.get() >= 1) {
+                            throw new IOException("invalid_grant: Invalid JWT Signature.");
+                        }
+                        return super.refreshAccessToken();
+                    }
+                };
+            }
+            return new CountingCredentials("ya29.rotated");
+        });
+
+        assertThat(provider.getCredentials().credential).isEqualTo("ya29.old-1");
+        assertThatThrownBy(provider::getCredentials)
+                .isInstanceOf(UncheckedIOException.class)
+                .hasMessageStartingWith("Failed to obtain a Google access token");
+        assertThat(provider.getCredentials().credential).isEqualTo("ya29.rotated-1");
+        assertThat(loads.get()).isEqualTo(2);
+    }
+
+    @Test
     void refusedTokenIsReportedApartFromMissingCredential() {
         AtomicInteger tokenRequests = new AtomicInteger();
         GcsCredentialProvider provider = new GcsCredentialProvider(() -> new CountingCredentials("ya29.later") {

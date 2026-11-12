@@ -44,11 +44,19 @@ through Spring's own `SPRING_DATASOURCE_URL`. It replaces the composed URL, and 
 
 With `enableIamAuth=true` the connector signs in as the principal of Application Default Credentials. It draws
 on the same sources as the `google-cloud-storage` blob provider, so one Google service account can serve both.
-The modes are described in [`gcs-access.md`](gcs-access.md#credentials):
+The modes are described in [`gcs-access.md`](gcs-access.md#credentials).
+
+Cloud SQL needs that principal to be a **Google service account**, because an IAM database user is a user,
+a service account or a group, never a federated principal. So not every mode that works for GCS works here:
 
 - **Workload Identity (GKE):** annotate the pod's Kubernetes service account with
-  `iam.gke.io/gcp-service-account` and grant `roles/iam.workloadIdentityUser`.
-- **Mounted key file or federation from another cloud:** point `GOOGLE_APPLICATION_CREDENTIALS` at it.
+  `iam.gke.io/gcp-service-account` and grant `roles/iam.workloadIdentityUser`. Granting roles directly to
+  the Kubernetes service account's federated principal, which `gcs-access.md` also allows, leaves no
+  database user to sign in as.
+- **Mounted key file:** point `GOOGLE_APPLICATION_CREDENTIALS` at a service-account key.
+- **Federation from another cloud:** point `GOOGLE_APPLICATION_CREDENTIALS` at a configuration that
+  impersonates a service account (it has a `service_account_impersonation_url`). Without impersonation the
+  sign-in is refused.
 
 The connector refreshes its token and ephemeral client certificate in the background. Pooled connections
 survive a refresh, and no restart is needed.
@@ -66,14 +74,26 @@ The service account needs:
   gcloud sql users create <name>@<project>.iam --instance=<instance> --type=cloud_iam_service_account
   ```
 
-- Inside the database, read/write on the catalog tables, plus DDL while migrations run. On PostgreSQL 15 and
-  later, `public` no longer grants `CREATE` to everyone, so grant it explicitly. Run as a user holding
-  `cloudsqlsuperuser`:
+- Inside a **fresh** database, the right to connect and to create objects in `public`, where the migrations
+  put every catalog table. The IAM user then owns each table it creates. On PostgreSQL 15 and later, `public`
+  no longer grants `CREATE` to everyone, so grant it explicitly. Run as a user holding `cloudsqlsuperuser`:
 
   ```sql
-  GRANT ALL PRIVILEGES ON DATABASE adas TO "<name>@<project>.iam";
-  GRANT ALL ON SCHEMA public TO "<name>@<project>.iam";
+  GRANT CONNECT, TEMPORARY ON DATABASE adas TO "<name>@<project>.iam";
+  GRANT USAGE, CREATE ON SCHEMA public TO "<name>@<project>.iam";
   ```
+
+- When an **existing** catalog switches from a password user to the IAM user, those grants cover none of the
+  tables already there: queries fail with `permission denied for table`, and the next migration fails with
+  `must be owner of table`, which aborts startup. Hand the old user's objects over first, connected to the
+  catalog database as a user that is a member of both roles:
+
+  ```sql
+  REASSIGN OWNED BY <old-user> TO "<name>@<project>.iam";
+  ```
+
+  Granting the old role to the IAM user (`GRANT <old-user> TO "<name>@<project>.iam";`) also works, and keeps
+  the old user's objects where they are.
 
 ## Failure
 

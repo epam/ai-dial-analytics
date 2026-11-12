@@ -509,7 +509,9 @@ on GKE with Workload Identity is the pod's bound service account. The service SH
 bearer credential on every data-plane request.
 
 Each resolution attempt SHALL look the sources up afresh. Nothing from a failed attempt is cached: a
-credentials file replaced since is read again, and a metadata server that did not answer is asked again. So
+credentials file replaced since is read again, and a metadata server that did not answer is asked again. A
+resolved credential whose renewal fails SHALL be dropped the same way, so the next attempt resolves from
+scratch and a rotated key or a replaced federation configuration takes effect without a restart. So
 the service does its own lookup rather than use the Google library's process-wide default, which keeps the
 first credential it loads and probes for a metadata server only once.
 
@@ -540,6 +542,12 @@ same time.
 
 - **WHEN** the file `GOOGLE_APPLICATION_CREDENTIALS` names is replaced after a resolution attempt
 - **THEN** the next attempt reads the new file
+
+#### Scenario: A failed renewal resolves the credential again
+
+- **WHEN** a credential resolved earlier can no longer renew its token, for example because its key was
+  rotated and disabled
+- **THEN** that cycle fails, and the next attempt resolves the credential from its sources again
 
 #### Scenario: The requested scope is read-only
 

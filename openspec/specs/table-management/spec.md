@@ -1623,7 +1623,8 @@ by its parameters in the JDBC URL query string (`POSTGRES_OPS`), namely `socketF
 `enableIamAuth=true`. With `enableIamAuth=true` the connector signs in as the IAM principal of the
 Application Default Credentials, Workload Identity on GKE or the file `GOOGLE_APPLICATION_CREDENTIALS` names,
 with an OAuth token carrying the `sqlservice.login` scope. The username names that principal as an IAM database
-user. The password is ignored but SHALL be non-empty, as the connector requires, so the `postgres` default
+user, so the principal is a Google service account (bound or impersonated), never a bare federated principal,
+which Cloud SQL has no database user for. The password is ignored but SHALL be non-empty, as the connector requires, so the `postgres` default
 serves. The query string also carries `sslmode=disable`, because the connector already owns TLS. The host and
 port the URL is composed with are ignored, because `cloudSqlInstance` alone names the target. A URL without
 `socketFactory` never loads the connector and is unaffected.

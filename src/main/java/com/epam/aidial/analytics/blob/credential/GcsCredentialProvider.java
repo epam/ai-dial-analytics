@@ -42,7 +42,8 @@ import java.util.List;
  * <p>Resolution is <em>lazy</em>: nothing is looked up until the first {@link #getCredentials()}, so a
  * missing credential fails that sync cycle rather than construction, and a failed first resolution is
  * retried from scratch by the next cycle — a credentials file that was fixed in the meantime is re-read, and
- * the metadata server is asked again.
+ * the metadata server is asked again. A failed renewal of a resolved credential drops it the same way, so a
+ * rotated key or a replaced federation configuration is picked up by the next cycle, with no restart.
  *
  * <p>The provider owns no client, pool or thread, so it has nothing to close.
  *
@@ -105,6 +106,7 @@ public class GcsCredentialProvider implements CredentialProvider {
             try {
                 credentials.refreshIfExpired();
             } catch (IOException ex) {
+                discard(credentials);
                 throw refreshFailure(credentials, ex);
             }
         }
@@ -172,6 +174,16 @@ public class GcsCredentialProvider implements CredentialProvider {
             }
         }
         return current;
+    }
+
+    /**
+     * Drops a resolved credential whose renewal failed, so the next call resolves from scratch. Compared
+     * before clearing, so a credential another thread has already re-resolved is kept.
+     */
+    private synchronized void discard(GoogleCredentials failed) {
+        if (resolved == failed) {
+            resolved = null;
+        }
     }
 
     /**
