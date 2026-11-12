@@ -252,7 +252,8 @@ default.
 - Rows already stored keep their values, and switching back to `true` restores the columns on new rows only. Under
   `SYNC_REQUEST_BODY_MODE=delta`, a parent re-ingested under `false` loses its body, so its delta children can no
   longer be rebuilt.
-- **Rollback.** A build older than 0.23 ignores the variable and writes sensitive columns again.
+- **Rollback.** A 0.23 release candidate or an earlier build ignores the variable and writes sensitive columns
+  again.
 
 ## 3e. Sessions-source setting
 
@@ -263,8 +264,18 @@ only `FULL_ADMIN` carries. `GET` answers `404 setting_not_found` until a setting
 after the deploy wherever the sessions view is used. Postgres `V53` creates the backing table at startup.
 
 - **A `roles-mapping` that names raw privileges** gains neither privilege (§1).
-- **Rollback.** A build older than 0.23 does not know `SETTINGS_READ` or `SETTINGS_WRITE` and fails startup on a
-  `roles-mapping` that names either. Remove them before rolling back. The new table is ignored and may be left in place.
+- **Rollback.** A 0.23 release candidate or an earlier build knows neither the setting nor its privileges. Before
+  rolling back:
+  - Remove `SETTINGS_READ` and `SETTINGS_WRITE` from `roles-mapping`. The older build fails startup on a mapping
+    that names either.
+  - Delete the setting's audit activities. Every `PUT` records one under the resource type `Setting`, which the older
+    build cannot read, so any `/v1/activities` page holding one fails:
+
+    ```sql
+    DELETE FROM audit_activity WHERE resource_type = 'Setting';
+    ```
+
+  The tables `instance_setting` and `instance_setting_aud` are ignored by the older build and may be left in place.
 
 ## 4. Migrations (automatic on startup)
 
@@ -331,7 +342,7 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
 | OpenAPI component `EvaluatorVarDto` renamed `TransformVarDto`; `Evaluators` tag gone | Generated clients change; wire JSON does not | Regenerate the client |
 | Ingest trims inline files from payload bodies (`SYNC_INLINE_FILES_DROP_TRUNCATED=true` by default) | A body truncated at 4 MiB is stored without its half inline file | Set `SYNC_INLINE_FILES_DROP_TRUNCATED=false` to store bodies as sent (§7) |
 | Request-delta storage, opt-in (`SYNC_REQUEST_BODY_MODE=delta`) | A later chat turn's `request_body` holds only its new messages, and no tools when they equal the earlier turn's. Every chat turn's `request_body`, the first included, is re-serialized (keys sorted, no whitespace) and its `cache_control` markers move to `request_cache_control` | Only when you set `delta`: re-point pipelines and readers that need a turn's whole request to `request_body_full` first; check readers that need the body text as sent, or `cache_control` in the body (§7) |
-| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; a raw-privilege `roles-mapping` does not, and its holders get `403` reading the setting | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; remove both names before a rollback (§1, §3e) |
+| Sessions-source setting, new privileges `SETTINGS_READ` / `SETTINGS_WRITE` | Bundles gain them; a raw-privilege `roles-mapping` does not, and its holders get `403` reading the setting | Add `SETTINGS_READ` to raw-privilege mappings that need the setting; before a rollback, remove both names and delete the `Setting` audit activities (§1, §3e) |
 | Sensitive-column ingest switch, opt-in (`SYNC_SENSITIVE_COLUMNS_ENABLED=false`) | New rows hold defaults in the columns the catalog flags `sensitive` | None by default; under `false`, startup fails on an undefined target table or a sensitive key column (§3d) |
 | Payload rows carry the caller's identity | `dial_usage_log_payload` stores `project_id` and `user_hash` on every row, under every mode, next to the bodies. The catalog hides both; the table already holds the caller's `jwt_claims` | Account for it where direct ClickHouse access to the payload table is granted |
 | Default `service.name` changed to `ai-dial-analytics` | Telemetry arrives under the new service name; filters on `analytics-data-access-service` find nothing | Set `OTEL_SERVICE_NAME=analytics-data-access-service` to keep the old name (§1) |
