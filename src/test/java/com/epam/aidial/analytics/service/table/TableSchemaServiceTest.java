@@ -843,6 +843,42 @@ class TableSchemaServiceTest {
         verify(writer, never()).applyPatch(any(), anyList(), anyList(), anyList(), anyList(), any());
     }
 
+    @Test
+    void failedAlterWhoseColumnsArePresentOnThePrimaryIsTreatedAsApplied() {
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0));
+        given(typeMapper.toDdlType(QueryFieldType.LONG, null, null, false)).willReturn("Int64");
+        given(ddlRenderer.addColumnCommand(any())).willReturn("ADD COLUMN `score` Int64");
+        given(ddlRenderer.renderAlter(eq("widget_metrics"), anyList())).willReturn("ALTER ...");
+        willThrow(new ClickHouseQueryException("timed out waiting for replicas", null)).given(ddlExecutor).execute(any());
+        given(inspector.columnTypes("widget_metrics")).willReturn(java.util.Map.of("widget_id", "String", "score", "Int64"));
+        given(catalogService.get("widget_metrics")).willReturn(
+                new TableView(source("widget_metrics", TableStatus.ACTIVE), List.of()));
+
+        service.patchSchema("widget_metrics", addColumn("score", QueryFieldType.LONG));
+
+        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+    }
+
+    @Test
+    void failedAlterThatDropsAndReAddsOneNameIsReported() {
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0),
+                column("widget_metrics", "x", QueryFieldType.STRING, 1));
+        given(typeMapper.toDdlType(QueryFieldType.STRING, null, null, false)).willReturn("String");
+        given(ddlRenderer.dropColumnCommand("x")).willReturn("DROP COLUMN `x`");
+        given(ddlRenderer.addColumnCommand(any())).willReturn("ADD COLUMN `x` String");
+        given(ddlRenderer.renderAlter(eq("widget_metrics"), anyList())).willReturn("ALTER ...");
+        willThrow(new ClickHouseQueryException("rejected", null)).given(ddlExecutor).execute(any());
+        // The live columns read the same whether the ALTER applied or not.
+        org.mockito.Mockito.lenient().when(inspector.columnTypes("widget_metrics"))
+                .thenReturn(java.util.Map.of("widget_id", "String", "x", "String"));
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", new PatchInput(
+                List.of(new ColumnInput("x", "x", QueryFieldType.STRING, null, null, null, null, null, null, false, false)),
+                List.of("x"), List.of(), List.of(), Change.leave())))
+                .isInstanceOf(ClickHouseQueryException.class);
+        verify(writer, never()).applyPatch(any(), anyList(), anyList(), anyList(), anyList(), any());
+    }
+
     // --- an eligible enrichment not laid out aligned yet -----------------------------------------
 
     /** {@code dial_usage_log}'s shape, and an identity-keyed enrichment of it whose relayout has not run. */

@@ -5,6 +5,8 @@ import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.RequestBodyRebuildProperties;
 import com.epam.aidial.analytics.service.query.ComputedFields;
@@ -31,6 +33,8 @@ import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.SelectQuery;
 import org.jooq.impl.DSL;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -68,6 +72,19 @@ import static org.mockito.Mockito.verify;
 @ExtendWith(MockitoExtension.class)
 class StructuredQueryExecutorTest {
 
+    /** Pipeline statements run only inside a pipeline run; each test drives one as if inside it. */
+    private ReplicaScope.Binding pipelineRun;
+
+    @BeforeEach
+    void bindPipelineRun() {
+        pipelineRun = ReplicaRouterStubs.pipelineRun();
+    }
+
+    @AfterEach
+    void unbindPipelineRun() {
+        pipelineRun.close();
+    }
+
     /** The key {@code QuerySettings.serverSetting("final", ...)} stores under in {@code getAllSettings()}. */
     private static final String FINAL_KEY = FinalSettings.FINAL_KEY;
 
@@ -93,7 +110,7 @@ class StructuredQueryExecutorTest {
 
     /** An executor over the mocked client whose rebuild statements go through that client too. */
     private StructuredQueryExecutor executor(StructuredQueryBuilder queryBuilder, RowPolicyFilter rowPolicies) {
-        return new StructuredQueryExecutor(queryBuilder, ctx, clickHouse, rowPolicies,
+        return new StructuredQueryExecutor(queryBuilder, ctx, clickHouse, rowPolicies, ReplicaRouterStubs.inPlace(),
                 new ComputedFieldCompleter(new RequestChainReader(clickHouse), new RequestBodyRebuildProperties(8, 100), meters));
     }
 
@@ -311,6 +328,14 @@ class StructuredQueryExecutorTest {
         assertThat(sent.subList(0, 3)).allSatisfy(s -> assertThat(s).containsEntry(filterKey, "{'default.t':'1 = 0'}"));
         assertThat(sent.get(3)).doesNotContainKey(filterKey);
         verify(confining, times(2)).apply(any(QuerySettings.class));
+    }
+
+    /** A pipeline scan outside a pipeline run would execute on the primary rather than the run's home. */
+    @Test
+    void pipelineScanOutsidePipelineRunIsRefused() {
+        pipelineRun.close();
+        assertThatThrownBy(() -> executor(builder, RowPolicyFilterStubs.inert()).executeScan(scanStatement()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside a pipeline run");
     }
 
     // ---- computed fields: the rebuild shares the read's wall-clock ceiling ----

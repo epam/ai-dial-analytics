@@ -327,7 +327,7 @@ class FlightSqlIntegrationTest extends AbstractClickHouseIntegrationTest {
             // one every enrichment has — version-collapsing — because a final read renders FINAL on the join,
             // which ClickHouse refuses on a plain MergeTree.
             enrichmentClient().queryAll("CREATE TABLE user_dim (user_hash String, display_name Nullable(String)) "
-                    + "ENGINE = ReplacingMergeTree ORDER BY user_hash");
+                    + "ENGINE = ReplicatedReplacingMergeTree ORDER BY user_hash");
             enrichmentClient().queryAll("INSERT INTO user_dim VALUES ('u1', 'User One')");
             registerEnrichmentCatalog();
 
@@ -390,7 +390,7 @@ class FlightSqlIntegrationTest extends AbstractClickHouseIntegrationTest {
         fixture().add(r -> r.eventKind("chat").userHash("u1").totalTokens(1)).insert();
         try {
             enrichmentClient().queryAll("CREATE TABLE user_dim (user_hash String, display_name Nullable(String)) "
-                    + "ENGINE = ReplacingMergeTree ORDER BY user_hash");
+                    + "ENGINE = ReplicatedReplacingMergeTree ORDER BY user_hash");
             registerEnrichmentCatalog();
 
             final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1");
@@ -1439,7 +1439,7 @@ class FlightSqlIntegrationTest extends AbstractClickHouseIntegrationTest {
                             + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
                     .setUsername(container.getUsername())
                     .setPassword(container.getPassword())
-                    .setDefaultDatabase(container.getDatabaseName())
+                    .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
                     .build();
         }
         return enrichmentTools;

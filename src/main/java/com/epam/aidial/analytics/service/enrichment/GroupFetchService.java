@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.service.enrichment;
 
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
+import com.epam.aidial.analytics.clickhouse.replication.SyncPlan;
 import com.epam.aidial.analytics.configuration.GroupFetchProperties;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.ScanProperties;
@@ -155,6 +157,7 @@ public class GroupFetchService {
     private final ScanProperties scanProperties;
     private final GroupFetchProperties groupFetchProperties;
     private final PipelineBudgetProperties readBudget;
+    private final ReplicaRouter replicas;
 
     public GroupPage fetch(String pipelineName, String groupKey, Integer limit) {
         return fetch(pipelines.resolveForScan(pipelineName), groupKey, limit);   // 404 unknown_pipeline if absent
@@ -167,6 +170,30 @@ public class GroupFetchService {
      */
     private GroupPage fetch(ResolvedEnrichPipeline resolved, String groupKey, Integer limit) {
         Assembly a = prepare(resolved, groupKey);
+        // Every statement of the call on the pipeline's home replica, brought up to date after the catalog reads.
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(a.pipelineName(), syncPlan(a))) {
+            return fetchOnHome(a, groupKey, limit);
+        }
+    }
+
+    /**
+     * What a group read synchronizes on its home: the source, then every enrichment one of its columns comes from
+     * (filter, preference, ordering, group key, response and bound columns). An enrichment the call never reads is
+     * not synced, so a replica lagging on it cannot refuse the call.
+     */
+    private SyncPlan syncPlan(Assembly a) {
+        Set<String> referenced = new LinkedHashSet<>(a.filter().columns());
+        if (a.prefer() != null) {
+            referenced.addAll(a.prefer().columns());
+        }
+        referenced.addAll(a.bound());
+        referenced.addAll(a.response());
+        referenced.addAll(a.policy());
+        return SyncPlan.of(List.of(a.source()), List.copyOf(EnrichmentJoins.referencedEnrichments(a.model(), referenced)), null)
+                .withSafetyLag(scanProperties.safetyLag());
+    }
+
+    private GroupPage fetchOnHome(Assembly a, String groupKey, Integer limit) {
         StatementTag selectTag = new StatementTag(a.pipelineName(), "group-select");
         int effectiveLimit = resolveLimit(limit, a.select());
 
@@ -353,6 +380,12 @@ public class GroupFetchService {
      */
     public MemberSample previewMembers(ResolvedEnrichPipeline resolved, String groupKey, int sampleRows) {
         Assembly assembly = prepare(resolved, groupKey);
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(assembly.pipelineName(), syncPlan(assembly))) {
+            return previewMembersOnHome(assembly, groupKey, sampleRows);
+        }
+    }
+
+    private MemberSample previewMembersOnHome(Assembly assembly, String groupKey, int sampleRows) {
         QueryEntityModel model = assembly.model();
         Map<String, QueryFieldBinding> bindings = model.bindings();
         Set<String> bound = assembly.bound();

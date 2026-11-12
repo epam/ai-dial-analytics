@@ -13,6 +13,7 @@ import org.apache.arrow.memory.RootAllocator;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -24,9 +25,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * ClickHouse client at a port nothing listens on (migrations disabled so startup succeeds; the
  * Postgres catalog still provides {@code dial_usage_log}). {@code getFlightInfo} still succeeds —
  * the two-call model derives the schema without touching the store — while {@code doGet} fails
- * with UNAVAILABLE and no raw driver message.
+ * with UNAVAILABLE and no raw driver message. The storage gate is opened by hand: this is ClickHouse failing while
+ * the instance serves, whereas an instance that never reached ClickHouse keeps Flight SQL closed.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
+@Import(OpenStorageGate.class)
 class FlightClickHouseDownIntegrationTest {
 
     @Autowired

@@ -27,7 +27,7 @@ class TableDdlRendererTest {
                 .contains("CREATE TABLE `user_region`")
                 .contains("`user_id` String")
                 .contains("`region` String")
-                .contains("ENGINE = MergeTree")
+                .contains("ENGINE = ReplicatedMergeTree\n")
                 .contains("ORDER BY (`user_id`)")
                 .doesNotContain("PARTITION BY")
                 .doesNotContain("TTL")
@@ -47,7 +47,7 @@ class TableDdlRendererTest {
         assertThat(sql)
                 .contains("`call_count` Int64")
                 .contains("`_updated_at` DateTime64(3) DEFAULT now64(3)")
-                .contains("ENGINE = ReplacingMergeTree(`_updated_at`)")
+                .contains("ENGINE = ReplicatedReplacingMergeTree(`_updated_at`)")
                 // The ordering key is the unique key: a re-written (deployment, day) collapses to the
                 // latest version rather than adding a second row.
                 .contains("ORDER BY (`deployment`, `day`)");
@@ -62,9 +62,9 @@ class TableDdlRendererTest {
                 new TtlDdl("day", 10, TtlUnit.YEAR, false)));
 
         assertThat(sql)
-                .contains("ENGINE = ReplacingMergeTree(`_updated_at`)")
+                .contains("ENGINE = ReplicatedReplacingMergeTree(`_updated_at`)")
                 .contains("PARTITION BY toYYYYMM(`day`)")
-                .endsWith("TTL `day` + INTERVAL 10 YEAR");
+                .contains("TTL `day` + INTERVAL 10 YEAR\nSETTINGS ");
     }
 
     /** ClickHouse has no {@code toYYYY}: a yearly partition is {@code toYear}. */
@@ -76,6 +76,33 @@ class TableDdlRendererTest {
                 List.of("request_time"), "request_time", PartitionGranularity.YEAR, null));
 
         assertThat(sql).contains("PARTITION BY toYear(`request_time`)");
+    }
+
+    /**
+     * Every table is replicated with insert deduplication off: a replicated table deduplicates identical inserted
+     * blocks by default, which would drop a repeated upsert value or a rebuild that reproduces its last output.
+     */
+    @Test
+    void rendersDeduplicationSettingsOnEveryTable() {
+        final String plain = renderer.renderCreate("user_region", new CreateSpec(
+                TableType.SOURCE, TableWriteMode.APPEND,
+                List.of(new DdlColumn("user_id", "String")), List.of("user_id"), null, null, null));
+        assertThat(plain).endsWith("\nSETTINGS replicated_deduplication_window = 0, "
+                + "replicated_deduplication_window_for_async_inserts = 0");
+    }
+
+    /** {@code ttl_only_drop_parts} and the deduplication settings share one {@code SETTINGS} clause. */
+    @Test
+    void mergesDeduplicationSettingsWithTtlOnlyDropParts() {
+        final String sql = renderer.renderCreate("labels", new CreateSpec(
+                TableType.ENRICHMENT, TableWriteMode.APPEND,
+                List.of(new DdlColumn("id", "String"), new DdlColumn("d", "Date")), List.of("id"), "d",
+                PartitionGranularity.DAY, new TtlDdl("d", 30, TtlUnit.DAY, false), true, List.of()));
+        assertThat(sql)
+                .contains("ENGINE = ReplicatedReplacingMergeTree(`_updated_at`)")
+                .endsWith("\nSETTINGS ttl_only_drop_parts = 1, replicated_deduplication_window = 0, "
+                        + "replicated_deduplication_window_for_async_inserts = 0");
+        assertThat(sql.split("SETTINGS", -1)).hasSize(2);
     }
 
     @Test
@@ -103,7 +130,7 @@ class TableDdlRendererTest {
                 List.of("event_date"), null, null,
                 new TtlDdl("event_date", 6, TtlUnit.MONTH, false)));
 
-        assertThat(sql).endsWith("TTL `event_date` + INTERVAL 6 MONTH");
+        assertThat(sql).contains("TTL `event_date` + INTERVAL 6 MONTH\nSETTINGS ");
     }
 
     @Test
@@ -114,7 +141,7 @@ class TableDdlRendererTest {
                 List.of("request_time"), null, null,
                 new TtlDdl("request_time", 1, TtlUnit.YEAR, true)));
 
-        assertThat(sql).endsWith("TTL toDateTime(`request_time`) + INTERVAL 1 YEAR");
+        assertThat(sql).contains("TTL toDateTime(`request_time`) + INTERVAL 1 YEAR\nSETTINGS ");
     }
 
     @Test
@@ -138,7 +165,7 @@ class TableDdlRendererTest {
         assertThat(sql)
                 .contains("`widget_id` String")
                 .contains("`_updated_at` DateTime64(3)")
-                .contains("ENGINE = ReplacingMergeTree(`_updated_at`)")
+                .contains("ENGINE = ReplicatedReplacingMergeTree(`_updated_at`)")
                 .contains("ORDER BY (`widget_id`)");
     }
 

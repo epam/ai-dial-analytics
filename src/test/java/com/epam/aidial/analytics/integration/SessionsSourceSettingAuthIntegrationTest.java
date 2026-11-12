@@ -37,6 +37,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",
@@ -51,7 +53,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
                 + "\"tableonly\":[\"TABLE_READ\"],\"settingswriter\":[\"SETTINGS_WRITE\",\"TABLE_READ\"]}",
 })
 @AutoConfigureMockMvc
-@Import(TestSecurityConfig.class)
+@Import({TestSecurityConfig.class, OpenStorageGate.class})
 class SessionsSourceSettingAuthIntegrationTest {
 
     static final String AUDIENCE = "adas-test";

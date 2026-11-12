@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.table;
 
+import com.epam.aidial.analytics.clickhouse.ReplicatedDdl;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import org.springframework.stereotype.Component;
 
@@ -10,10 +11,10 @@ import java.util.stream.Collectors;
 /**
  * Renders the ClickHouse DDL ADAS issues for catalog tables it materializes, and the {@code ALTER}s
  * for schema evolution. Engine is chosen by table kind <em>and</em> write discipline: an {@code append}
- * {@code source} is a plain {@code MergeTree} (with an optional {@code PARTITION BY}); an
- * {@code upsert_by_key} {@code source} is a {@code ReplacingMergeTree(_updated_at)} ordered by its
+ * {@code source} is a {@code ReplicatedMergeTree} (with an optional {@code PARTITION BY}); an
+ * {@code upsert_by_key} {@code source} is a {@code ReplicatedReplacingMergeTree(_updated_at)} ordered by its
  * {@code ordering_key} (which is therefore its unique key); an {@code enrichment} is a
- * {@code ReplacingMergeTree(_updated_at)} ordered by its grain key, so at most one row survives per
+ * {@code ReplicatedReplacingMergeTree(_updated_at)} ordered by its grain key, so at most one row survives per
  * grain key (physical {@code ZERO_OR_ONE} cardinality). Every version-collapsing table carries the
  * system {@code _updated_at} column (the version key) — one definition, both callers; the
  * {@code _writer} column is deferred until ADAS has auth. Identifiers are
@@ -25,6 +26,13 @@ import java.util.stream.Collectors;
  * {@code TTL <col> + INTERVAL <n> <UNIT>} — the column wrapped as {@code toDateTime(col)} for a
  * {@code timestamp} ({@code DateTime64}) column, which ClickHouse would otherwise reject
  * ({@code BAD_TTL_EXPRESSION}).
+ *
+ * <p><b>Replicated engines, no arguments, no insert deduplication.</b> The session database is a
+ * {@code Replicated} database, so every table is the {@code Replicated} variant of its engine family with no
+ * Keeper path or replica arguments (ClickHouse fills in the database's defaults), and every table carries
+ * {@link #NO_INSERT_DEDUPLICATION}: replicated tables deduplicate identical inserted blocks by default, which
+ * would drop a repeated upsert value or a rebuild that reproduces its last output. See
+ * {@code openspec/specs/clickhouse-replication/spec.md}.
  */
 @Component
 public class TableDdlRenderer {
@@ -37,6 +45,13 @@ public class TableDdlRenderer {
     // row-inserting clients pin async_insert=0 so a stamp is per insert, not per async flush; see
     // ClickHouseWriterClient.ASYNC_INSERT.
     private static final String UPDATED_AT_TYPE = "DateTime64(3) DEFAULT now64(3)";
+
+    /**
+     * The table settings that switch insert deduplication off on a replicated table. The table setting is the
+     * only spelling honoured across the supported server range: the query-level {@code insert_deduplicate} is
+     * ignored by newer servers and {@code deduplicate_insert} does not exist on older ones.
+     */
+    public static final String NO_INSERT_DEDUPLICATION = ReplicatedDdl.NO_INSERT_DEDUPLICATION;
 
     /** One physical column to declare: its (validated) ClickHouse name and rendered DDL type. */
     public record DdlColumn(String name, String type) {}
@@ -108,8 +123,8 @@ public class TableDdlRenderer {
                 .map(Identifiers::quote)
                 .collect(Collectors.joining(", "));
         final String engine = collapsing
-                ? "ReplacingMergeTree(" + Identifiers.quote(UPDATED_AT) + ")"
-                : "MergeTree";
+                ? "ReplicatedReplacingMergeTree(" + Identifiers.quote(UPDATED_AT) + ")"
+                : "ReplicatedMergeTree";
 
         final StringBuilder ddl = new StringBuilder()
                 .append("CREATE TABLE ").append(Identifiers.quote(tableName)).append(" (\n")
@@ -122,9 +137,11 @@ public class TableDdlRenderer {
         if (spec.ttl() != null) {
             ddl.append("\nTTL ").append(ttlExpr(spec.ttl()));
         }
+        ddl.append("\nSETTINGS ");
         if (spec.ttlOnlyDropParts()) {
-            ddl.append("\nSETTINGS ttl_only_drop_parts = 1");
+            ddl.append("ttl_only_drop_parts = 1, ");
         }
+        ddl.append(NO_INSERT_DEDUPLICATION);
         return ddl.toString();
     }
 

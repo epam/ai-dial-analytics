@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 /**
  * Base for the structured-query integration tests. Boots the full Spring Boot application
@@ -146,8 +147,25 @@ abstract class AbstractClickHouseIntegrationTest {
      * known-empty tables.
      */
     protected void truncate() {
-        writeClient().queryAll("TRUNCATE TABLE " + TABLE);
-        writeClient().queryAll("TRUNCATE TABLE " + PAYLOAD_TABLE);
+        clear(TABLE);
+        clear(PAYLOAD_TABLE);
+    }
+
+    /**
+     * Empties {@code table} by dropping the partitions that hold data, in one statement, and issues nothing when it is
+     * empty already. Not {@code TRUNCATE}: on a replicated table it costs a few Keeper round trips for every partition
+     * the table has <em>ever</em> had, so a suite that seeds rows across many days and truncates before each test would
+     * pay more per test as it goes.
+     */
+    protected void clear(String table) {
+        final List<String> partitions = writeClient().queryAll("SELECT DISTINCT partition_id FROM system.parts "
+                        + "WHERE database = currentDatabase() AND table = '" + table + "' AND active").stream()
+                .map(row -> row.getString("partition_id")).toList();
+        if (partitions.isEmpty()) {
+            return;
+        }
+        writeClient().queryAll("ALTER TABLE " + table + " " + partitions.stream()
+                .map(id -> "DROP PARTITION ID '" + id + "'").collect(Collectors.joining(", ")));
     }
 
     /**
@@ -240,7 +258,10 @@ abstract class AbstractClickHouseIntegrationTest {
                                     + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
                             .setUsername(container.getUsername())
                             .setPassword(container.getPassword())
-                            .setDefaultDatabase(container.getDatabaseName())
+                            .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
+                            // As the production row-inserting clients do: the server's async_insert default
+                            // would hold every fixture INSERT for the async flush's busy timeout.
+                            .serverSetting("async_insert", "0")
                             .build();
                     writeClient = local;
                 }

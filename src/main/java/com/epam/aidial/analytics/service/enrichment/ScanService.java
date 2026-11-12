@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.service.enrichment;
 
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
+import com.epam.aidial.analytics.clickhouse.replication.SyncPlan;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.ScanProperties;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
@@ -131,6 +133,7 @@ public class ScanService {
     private final PipelineBudgetProperties readBudget;
     private final TransitionLog transitions;
     private final TableDefinitionRepository definitions;
+    private final ReplicaRouter replicas;
 
     /**
      * The runner's scan: one page, and one outcome line for it (see {@link #logOutcome}).
@@ -143,8 +146,11 @@ public class ScanService {
         return scanned.page();
     }
 
-    /** One scan's page, and how long its statement took ({@code null} when no statement ran). */
-    private record Scanned(ScanPage page, Long statementMs) {}
+    /**
+     * One scan's page, how long its statement took and the replica it ran on (both {@code null} when no statement
+     * ran). The replica is carried out because the outcome line is logged after the run has closed.
+     */
+    private record Scanned(ScanPage page, Long statementMs, String replica) {}
 
     /**
      * The outcome line of a runner scan: the pipeline, its generation, the rows, {@code has_more}, {@code lag_s},
@@ -161,11 +167,11 @@ public class ScanService {
             return;
         }
         final String queryId = scanned.statementMs() == null ? null : StatementTag.current();
-        log.info("scan pipeline={} gen={} rows={} has_more={} lag_s={} statement_ms={} total_ms={} query_id={}",
+        log.info("scan pipeline={} gen={} rows={} has_more={} lag_s={} statement_ms={} total_ms={} query_id={} replica={}",
                 pipelineName, resolved.declaration().generation(), page.rows().size(), page.hasMore(),
                 page.lagSeconds() == null ? "-" : page.lagSeconds(),
                 scanned.statementMs() == null ? "-" : scanned.statementMs(), totalMs,
-                queryId == null ? "-" : queryId);
+                queryId == null ? "-" : queryId, scanned.replica() == null ? "-" : scanned.replica());
     }
 
     private Scanned run(ResolvedEnrichPipeline resolved, String cursor, Integer limit, Instant from, Instant to) {
@@ -182,15 +188,19 @@ public class ScanService {
         if (plan.withholdsEverything()) {
             // An enrichment this read depends on has recorded no usable position, so no row is safely
             // readable yet. An empty page echoing the cursor is the honest answer — rows are late, not absent.
-            return new Scanned(toPage(new ArrayList<>(), source.name(), cursor, effectiveLimit), null);
+            return new Scanned(toPage(new ArrayList<>(), source.name(), cursor, effectiveLimit), null, null);
         }
 
         SelectQuery<Record> select = buildScan(plan, cursorValues, effectiveLimit, from, to);
-        final long statementStarted = System.nanoTime();
-        List<Map<String, Object>> rows = PipelineReadBudget.run(
-                executor, select, plan.model(), "enrichment scan", readBudget, new StatementTag(pipelineName, "scan"));
-        final long statementMs = Elapsed.millisSince(statementStarted);
-        return new Scanned(toPage(rows, source.name(), cursor, effectiveLimit), statementMs);
+        // On the pipeline's home replica, brought up to date after the catalog reads above: a page served by a new
+        // home continues from the cursor without a gap, because the home has every row committed before the sync.
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(pipelineName, syncPlan(plan))) {
+            final long statementStarted = System.nanoTime();
+            List<Map<String, Object>> rows = PipelineReadBudget.run(
+                    executor, select, plan.model(), "enrichment scan", readBudget, new StatementTag(pipelineName, "scan"));
+            final long statementMs = Elapsed.millisSince(statementStarted);
+            return new Scanned(toPage(rows, source.name(), cursor, effectiveLimit), statementMs, run.replica());
+        }
     }
 
     /** The read source and its cursor columns, resolved once the pipeline is known to be scannable. */
@@ -535,11 +545,13 @@ public class ScanService {
         select.addOrderBy(CursorPredicates.versionExpr(plan.cursorColumns()).desc(),
                 CursorPredicates.identityExpr(plan.cursorColumns()).desc());
         select.addLimit(limit);
-        List<Map<String, Object>> rows = PipelineReadBudget.run(executor, select, model, "preview sample",
-                readBudget, new StatementTag(plan.pipelineName(), "preview"));
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(plan.pipelineName(), syncPlan(plan))) {
+            List<Map<String, Object>> rows = PipelineReadBudget.run(executor, select, model, "preview sample",
+                    readBudget, new StatementTag(plan.pipelineName(), "preview"));
 
-        Long aboveBound = plan.bound() == null ? null : newestAbove(plan, from, to);
-        return new RowSample(rows, columns, null, plan.bound(), aboveBound);
+            Long aboveBound = plan.bound() == null ? null : newestAbove(plan, from, to);
+            return new RowSample(rows, columns, null, plan.bound(), aboveBound);
+        }
     }
 
     /**
@@ -604,8 +616,16 @@ public class ScanService {
         if (plan.withholdsEverything()) {
             return new GroupPick(null, plan.bound().enrichment(), columns);
         }
-        String key = newestGroupKey(plan, Instant.now().minus(Duration.ofHours(24)));
-        return new GroupPick(key != null ? key : newestGroupKey(plan, null), null, columns);
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(plan.pipelineName(), syncPlan(plan))) {
+            String key = newestGroupKey(plan, Instant.now().minus(Duration.ofHours(24)));
+            return new GroupPick(key != null ? key : newestGroupKey(plan, null), null, columns);
+        }
+    }
+
+    /** What a read of {@code plan} synchronizes on its home: the source, then every enrichment its statement joins. */
+    private SyncPlan syncPlan(ScanPlan plan) {
+        return SyncPlan.of(List.of(plan.source()), EnrichmentJoins.referencedEnrichments(plan.model(), plan.statement()),
+                null).withSafetyLag(scanProperties.safetyLag());
     }
 
     private String newestGroupKey(ScanPlan plan, Instant from) {

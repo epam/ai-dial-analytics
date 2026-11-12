@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<!--
+  Single-node replication for the Testcontainers ClickHouse: an embedded ClickHouse Keeper, the
+  server's own Keeper client pointed at it, and the macros a Replicated database and its
+  Replicated*MergeTree tables expand. ADAS requires a Replicated session database on every
+  deployment, single-node included (openspec/specs/clickhouse-replication/spec.md), so the whole
+  suite runs on replicated storage. Copied into /etc/clickhouse-server/config.d/ by
+  ClickHouseContainerSupport.
+-->
+<clickhouse>
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <!-- A throwaway Keeper: every Keeper write otherwise waits out the fsync throttle, and a replicated
+                 DDL makes a dozen or more of them in sequence. Durability does not matter to the suite. -->
+            <min_time_between_fsyncs_ms>0</min_time_between_fsyncs_ms>
+            <force_sync>false</force_sync>
+        </coordination_settings>
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>localhost</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+    <zookeeper>
+        <node>
+            <host>localhost</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+    <macros>
+        <shard>01</shard>
+        <replica>replica-1</replica>
+    </macros>
+</clickhouse>

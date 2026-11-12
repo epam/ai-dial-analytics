@@ -385,7 +385,7 @@ class Class1MaterializeIntegrationTest extends AbstractClickHouseIntegrationTest
      */
     @Test
     void sqlPipelineMaterializesFromTheReadSourceItDeclares() throws Exception {
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics (request_time, _ingested_at, project_id, trace_id, "
                 + "core_span_id, deployment, user_hash, chat_id, response_id, rate, comment) VALUES "
                 + "('2026-01-01 00:00:00.000','2020-01-01 00:00:01.000','p','t1','s1','d','u','c','resp_1',1,NULL),"
@@ -415,7 +415,7 @@ class Class1MaterializeIntegrationTest extends AbstractClickHouseIntegrationTest
         } finally {
             mockMvc.perform(delete("/v1/tables/c1_rated"));
             mockMvc.perform(delete("/v1/tables/c1_events"));
-            execute("TRUNCATE TABLE rate_analytics");
+            clear("rate_analytics");
         }
     }
 

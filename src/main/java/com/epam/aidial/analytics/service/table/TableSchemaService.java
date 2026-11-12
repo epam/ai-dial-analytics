@@ -17,9 +17,11 @@ import com.epam.aidial.analytics.service.table.relayout.RelayoutStateStore;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -68,6 +70,7 @@ import java.util.function.UnaryOperator;
  * limit of hiding — column names are not a secrecy guarantee.
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class TableSchemaService {
 
@@ -419,7 +422,18 @@ public class TableSchemaService {
             commands.add(ddlRenderer.removeTtlCommand());
         }
         if (!commands.isEmpty()) {
-            ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
+            try {
+                ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
+            } catch (RuntimeException ex) {
+                // An ALTER the primary executed is applied, even when the statement then failed waiting for another
+                // replica or with an error another replica reported: that replica applies it from the database log,
+                // so the catalog follows the primary rather than staying behind it.
+                if (!alterTookEffect(name, drops, renames, adds)) {
+                    throw ex;
+                }
+                log.warn("The schema change of table '{}' took effect on the primary although the ALTER reported a "
+                        + "failure ({}); it is treated as applied", name, ex.getMessage());
+            }
         }
 
         writer.applyPatch(name,
@@ -431,6 +445,36 @@ public class TableSchemaService {
                         u.tag(), u.displayName(), u.description(), u.sensitive(), u.heavy())).toList(),
                 ttlChange);
         return catalogService.get(name);
+    }
+
+    /**
+     * Whether an {@code ALTER} with column changes took effect on the primary: every added column is present with the
+     * type the ALTER gave it, every rename's target is present and its source gone, and every dropped column is gone.
+     * A column that already existed under the added name with another type, which made ClickHouse reject the ALTER,
+     * therefore does not count. False when it carries no column change, or when the columns cannot be read, and also
+     * when a dropped name is added or renamed to again: the live columns look the same whether that ALTER applied or
+     * not, so the failure is reported rather than guessed past.
+     */
+    private boolean alterTookEffect(String table, List<String> dropped, List<ResolvedRename> renames, List<ResolvedAdd> added) {
+        if (dropped.isEmpty() && renames.isEmpty() && added.isEmpty()) {
+            return false;
+        }
+        try {
+            final Map<String, String> live = inspector.columnTypes(table);
+            final Set<String> present = new HashSet<>();
+            added.forEach(add -> present.add(add.column().sourceName()));
+            renames.forEach(rename -> present.add(rename.to()));
+            if (dropped.stream().anyMatch(present::contains)) {
+                return false;
+            }
+            return added.stream().allMatch(add -> ClickHouseTableInspector.sameType(live.get(add.column().sourceName()),
+                            add.ddlType()))
+                    && renames.stream().allMatch(rename -> live.containsKey(rename.to())
+                            && (present.contains(rename.fromSourceName()) || !live.containsKey(rename.fromSourceName())))
+                    && dropped.stream().noneMatch(live::containsKey);
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /**

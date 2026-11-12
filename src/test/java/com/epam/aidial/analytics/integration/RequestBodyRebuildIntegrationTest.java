@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.integration;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseClientWrapper;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
 import com.epam.aidial.analytics.configuration.RequestBodyRebuildProperties;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -57,6 +58,8 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
 
     @Autowired
     private UsageLogWriter writer;
+    @Autowired
+    private ReplicaRouter replicas;
     @Autowired
     private JsonMapper json;
     @Autowired
@@ -139,7 +142,7 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
         turn("short-2", "11:00:01.000", messages("user:s"));
         turn("short-1", "11:00:02.000", messages("user:s", "assistant:s", "user:t"));
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
-        StructuredQueryExecutor bounded = new StructuredQueryExecutor(builder, renderContext, clickHouse, rowPolicies,
+        StructuredQueryExecutor bounded = new StructuredQueryExecutor(builder, renderContext, clickHouse, rowPolicies, replicas,
                 new ComputedFieldCompleter(reader, new RequestBodyRebuildProperties(1, 20000), meters));
         QueryEntityModel model = catalog.findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
 
@@ -164,7 +167,7 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
         turn("t2", "10:01:00.000", messages("user:u1", "assistant:a1", "user:u2"));
         turn("t3", "10:02:00.000", c);
         QueryEntityModel model = catalog.findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
-        StructuredQueryExecutor unshaped = new StructuredQueryExecutor(builder.withoutReadShaping(), renderContext, clickHouse, rowPolicies,
+        StructuredQueryExecutor unshaped = new StructuredQueryExecutor(builder.withoutReadShaping(), renderContext, clickHouse, rowPolicies, replicas,
                 new ComputedFieldCompleter(reader, new RequestBodyRebuildProperties(8, 20000), new SimpleMeterRegistry()));
 
         Map<String, Object> row = unshaped.execute(model, structured(traceIn("t3")), 100, new QuerySettings()).rows().getFirst();
