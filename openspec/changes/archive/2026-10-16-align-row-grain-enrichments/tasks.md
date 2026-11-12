@@ -55,7 +55,7 @@
 
 - [x] 7.1 Confirm the delta specs match the shipped behavior (table-management, structured-query, enrichment-runtime, aggregate-pipeline, class1-enrichment)
 - [x] 7.2 OpenAPI: `layout` member and the 503 `table_relayout_in_progress` response; adas-mcp tool docs and snapshot refresh
-- [x] 7.3 `docs/release-0.4-upgrade.md`: migration runs by itself, what it logs, ~3 expected Class-1 tick failures per table
+- [x] 7.3 `docs/release-0.23-upgrade.md`: migration runs by itself, what it logs, ~3 expected Class-1 tick failures per table
 - [x] 7.4 No `docs/configuration.md` change (no property added)
 
 ## 8. Verification
