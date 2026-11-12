@@ -72,7 +72,7 @@ class IngestRetrySweepTest {
                 Map.of("jclouds.filesystem.basedir", baseDir.toString()));
         syncProps = new SyncProperties(
                 "-", 0, 100, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy/MM/dd", "'date='yyyy-MM-dd", false,
-                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null);
+                List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")), null, null, null, null);
         TransformRegistry transforms = new TransformRegistry();
         DeriverRegistry derivers = new DeriverRegistry(jsonMapper);
         MappingConfig mapping = new MappingFileLoader(new DefaultResourceLoader(), transforms, derivers).load("classpath:mapping/dial-usage-log.yaml");

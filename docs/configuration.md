@@ -194,10 +194,12 @@ store nothing is ever ingested. The client is built on first use, so a missing o
 surfaces as a failed poll cycle every minute, not at startup. Read-only access suffices.
 
 Access goes through jclouds, on EPAM's fork because upstream's `azureblob` cannot take an Azure AD
-bearer token. Two providers are supported: `azureblob` for Azure Blob Storage, and `aws-s3` for AWS
+bearer token. Three providers are supported: `azureblob` for Azure Blob Storage; `aws-s3` for AWS
 S3 — its endpoint and region rules, credential modes and IAM policy are in
-[`aws-s3-access.md`](aws-s3-access.md). Other providers from jclouds' all-blobstore bundle are on the
-classpath and accept an identity/secret pair, but are not documented here.
+[`aws-s3-access.md`](aws-s3-access.md); and `google-cloud-storage` for Google Cloud Storage — its
+credential modes, Workload Identity binding and IAM role are in [`gcs-access.md`](gcs-access.md).
+Other providers from jclouds' all-blobstore bundle are on the classpath and accept an identity/secret
+pair, but are not documented here.
 
 For `azureblob`, auth is **shared key** when both `BLOB_IDENTITY` and `BLOB_CREDENTIAL` are set. If
 either is omitted it falls back to **Azure AD / managed identity** (`DefaultAzureCredential`), which
@@ -205,13 +207,13 @@ additionally requires `BLOB_ENDPOINT`, the **Storage Blob Data Reader** role on 
 user-assigned managed identity, a pod configured per Azure Workload Identity, and **hierarchical
 namespace (HNS) disabled** on the storage account. SAS tokens are not used.
 
-| Variable          | Property          | Default     | Required             | Description                                                                                                                                                                                                  |
-|-------------------|-------------------|-------------|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `BLOB_PROVIDER`   | `blob.provider`   | `azureblob` | No                   | jclouds provider id, `azureblob` or `aws-s3`. `filesystem` is test-scoped and unavailable at runtime.                                                                                                        |
-| `BLOB_BUCKET`     | `blob.bucket`     | `logs`      | Match producer       | Container or bucket name holding the logs.                                                                                                                                                                   |
-| `BLOB_IDENTITY`   | `blob.identity`   | _(empty)_   | For shared key       | Azure storage account name, or AWS access key id; blank with `BLOB_CREDENTIAL` selects Azure managed identity / AWS workload identity.                                                                       |
-| `BLOB_CREDENTIAL` | `blob.credential` | _(empty)_   | For shared key       | Azure account key, or AWS secret access key, from the deployment's secret store; blank with `BLOB_IDENTITY` selects managed identity / workload identity.                                                    |
-| `BLOB_ENDPOINT`   | `blob.endpoint`   | _(empty)_   | Managed identity, S3 | Endpoint override, `https://<account>.blob.core.windows.net` or `https://s3.<region>.amazonaws.com`. Blank uses the provider default, which Azure AD auth cannot resolve and which signs S3 for `us-east-1`. |
+| Variable          | Property          | Default     | Required             | Description                                                                                                                                                                                                           |
+|-------------------|-------------------|-------------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `BLOB_PROVIDER`   | `blob.provider`   | `azureblob` | No                   | jclouds provider id: `azureblob`, `aws-s3` or `google-cloud-storage`. `filesystem` is test-scoped and unavailable at runtime.                                                                                         |
+| `BLOB_BUCKET`     | `blob.bucket`     | `logs`      | Match producer       | Container or bucket name holding the logs.                                                                                                                                                                            |
+| `BLOB_IDENTITY`   | `blob.identity`   | _(empty)_   | For shared key       | Azure storage account name, AWS access key id, or GCS service-account client email; blank with `BLOB_CREDENTIAL` selects the provider's keyless mode.                                                                 |
+| `BLOB_CREDENTIAL` | `blob.credential` | _(empty)_   | For shared key       | Azure account key, AWS secret access key, or GCS PEM private key, from the deployment's secret store; blank with `BLOB_IDENTITY` selects the keyless mode.                                                            |
+| `BLOB_ENDPOINT`   | `blob.endpoint`   | _(empty)_   | Managed identity, S3 | Endpoint override, `https://<account>.blob.core.windows.net` or `https://s3.<region>.amazonaws.com`. Blank uses the provider default: correct for GCS, unresolvable by Azure AD auth, and signing S3 for `us-east-1`. |
 
 Managed-identity mode auto-applies the jclouds overrides `jclouds.azureblob.auth=azureAd` and
 `jclouds.oauth.credential-type=bearerTokenCredentials`; setting any jclouds property by hand — rarely
@@ -244,6 +246,13 @@ neither.
 | Variable              | Property            | Default | Required | Description                                                                                                          |
 |-----------------------|---------------------|---------|----------|----------------------------------------------------------------------------------------------------------------------|
 | `FORCE_FINAL_QUERIES` | `query.force-final` | `true`  | No       | Migration switch: `true` reads every user-facing query `FINAL` whatever it says; `false` honours the query's `FINAL`. |
+
+### Request body rebuild
+
+| Variable                                   | Property                                   | Default | Required | Description                                                                                                                             |
+|--------------------------------------------|--------------------------------------------|---------|----------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`    | `query.request-body-rebuild.max-rounds`    | `8`     | No       | Chain-lookup rounds one read may run for `request_body_full` / `request_body_rebuild`; past it rows read `partial`. At least `1`.       |
+| `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS` | `query.request-body-rebuild.max-ancestors` | `20000` | No       | Distinct ancestor rows one read of `request_body_full` / `request_body_rebuild` may resolve; past it rows read `partial`. At least `1`. |
 
 ### Saved queries
 
@@ -454,6 +463,7 @@ nothing.
 | `SYNC_INLINE_FILES_DROP_TRUNCATED` | `sync.inline-files-drop-truncated` | `true`                                          | No             | Cut a payload body DIAL Core truncated at 4 MiB back to before the inline file the cut landed in. |
 | `SYNC_INLINE_FILES_MAX_SIZE`    | `sync.inline-files-max-size`    | unset (no limit)                                | No             | Remove inline files whose stored base64 is longer than this (`256KB`, `1MB`; a bare number is bytes); `0` removes all. Negative fails startup. |
 | `SYNC_REQUEST_BODY_MODE`        | `sync.request-body-mode`        | `whole`                                         | No             | `whole`, `whole-with-path` (whole, plus a hidden path a `delta` row can link to; roll back to it from `delta`) or `delta` (a chat request's `request_body` cut to its new messages, without the system keys and tools shared with its parent). Others fail startup. |
+| `SYNC_SENSITIVE_COLUMNS_ENABLED` | `sync.sensitive-columns-enabled` | `true`                                          | No             | `false` stops ingest writing the columns the catalog flags `sensitive` (payload bodies, claims, headers, rating comment); new rows hold `NULL` / `{}` there. |
 | `SYNC_TABLE`                    | `sync.targets[0].table`         | `dial_usage_log`                                | No             | First ingest target's table — the usage log; its retention is `SYNC_USAGE_LOG_TTL_DAYS`.                                                                                         |
 | `SYNC_MAPPING_FILE`             | `sync.targets[0].mapping-file`  | `classpath:mapping/dial-usage-log.yaml`         | No             | First target's mapping file — the match-all mapping.                                                                                                                             |
 | `SYNC_PAYLOAD_TABLE`            | `sync.targets[1].table`         | `dial_usage_log_payload`                        | No             | Second ingest target's table — the payload enrichment holding the five verbatim-content columns; its retention is `SYNC_PAYLOAD_TTL_DAYS`.                                       |
@@ -531,7 +541,7 @@ In `none` mode — the default — all endpoints are open and **every authorizat
 including sensitive-column masking and the unauthenticated Flight port. Deploy `none` only on a
 trusted, non-internet-exposed network segment.
 
-Provider role names are mapped onto **application privileges** — sixteen atomic values named
+Provider role names are mapped onto **application privileges** — eighteen atomic values named
 `<OBJECT>_<VERB>` — and the raw names are retained for per-table grant matching. A `roles-mapping` value
 may name a privilege directly or one of four **bundles** that expand to a privilege set; the two forms may
 be mixed in one list. A value that names neither **fails startup**.
@@ -539,9 +549,9 @@ be mixed in one list. A value that names neither **fails startup**.
 | Bundle | Declares |
 |---|---|
 | `FULL_ADMIN` | every privilege |
-| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE` |
-| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE` |
+| `READ_ONLY_ADMIN` | `TABLE_READ`, `REGISTRY_READ`, `AUDIT_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_ANALYTIC` | `TABLE_READ`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
+| `READ_ONLY_SENSITIVE_ANALYTIC` | `TABLE_READ`, `TABLE_SENSITIVE`, `SAVED_QUERY_WRITE`, `SETTINGS_READ` |
 
 `READ_ONLY_SENSITIVE_ANALYTIC` is what makes reading a `sensitive` column reachable without
 administrative authority. `TABLE_SENSITIVE` is a clearance, not a verb: it confers nothing alone and
@@ -717,6 +727,8 @@ compatibility signal flaps for the length of the roll, and Class-1 positions sta
   the body columns need, upgrade constraints, and the grants each credential needs.
 - [`aws-s3-access.md`](aws-s3-access.md) — running `data-sync` against an S3 bucket: endpoint and
   region, workload identity, and the IAM the bucket needs.
+- [`gcs-access.md`](gcs-access.md) — running `data-sync` against a Cloud Storage bucket: credential modes,
+  Workload Identity, and the IAM the bucket needs.
 - [`column-mapping.md`](column-mapping.md) — authoring a `data-sync` mapping file.
 - [`kubernetes-exposure.md`](kubernetes-exposure.md) — exposing ADAS from a cluster.
 - [`sql-reference.md`](sql-reference.md) — the SQL surface `execute-sql` and Flight SQL accept.

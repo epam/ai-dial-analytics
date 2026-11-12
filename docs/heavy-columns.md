@@ -113,7 +113,7 @@ The catalog migrations seed four:
 | `dial_usage_log_payload.request_body` | LLM request body, unbounded per row; verbatim except under `SYNC_REQUEST_BODY_MODE=delta` |
 | `dial_usage_log_payload.response_body` | verbatim LLM response body, unbounded per row |
 | `dial_usage_log_payload.assembled_response` | the producer's merged streaming response, unbounded per row |
-| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, under `SYNC_REQUEST_BODY_MODE=delta` |
+| `dial_usage_log_payload.request_cache_control` | the `cache_control` markers taken out of a chat request's history, and which inherited messages a later turn sent as one text block, under `SYNC_REQUEST_BODY_MODE=delta` |
 
 Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header
@@ -155,9 +155,39 @@ WHERE request_time >= now() - INTERVAL 1 HOUR LIMIT 10;
 A text search over `request_body` usually finds each message once, in the turn that first sent it; a conversation
 that starts a new chain, on a new UTC day for example, stores its history again.
 
-A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`.
+A query that needs a later turn's whole history, or its tools, does not find them in that turn's `request_body`. It
+reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, after the statement runs, to the request
+as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
+`dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
+byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
+request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two
+always agree. `request_body_rebuild` selected alone reads no body and reports `resolvable` instead of `rebuilt`: the
+row's chain was found, but a body that turns out not to rebuild (its `partial` reason `invalid`) is detected only when
+`request_body_full` is read too. Select both when the status must describe the body you get.
+
+```sql
+-- one hop, read back whole
+SELECT trace_id, "dial_usage_log_payload.request_body_full", "dial_usage_log_payload.request_body_rebuild"
+FROM dial_usage_log
+WHERE trace_id = 'trace-0001' AND core_span_id = 'span-0003'
+  AND request_time >= '2026-03-02 10:00:00' AND request_time < '2026-03-02 10:01:00'
+LIMIT 1;
+```
+
+Both fields are **projection-only**: they can be selected, aliased or not, by a single-entity query, and bound as a
+pipeline's `transform.inputs`, but not filtered, sorted, grouped, passed to a function or read inside a join, derived
+table, CTE, subquery or set operation (`400 bad_request`; `422 pipeline_validation_failed` in a pipeline declaration,
+a disabled draft included).
+Discovery marks them `projection_only: true`. A rebuild reads the row's chain inside its own UTC day — first the small
+chain columns, then the bodies of exactly the rows on the chain — so it costs extra statements for delta rows only,
+none for rows stored whole. It runs within what is left of the read's time budget, after the read's own statements,
+and rows it has no time left for read `partial`. The bounds on chain-lookup rounds and on distinct ancestors also
+apply per read, so a large read — a Flight SQL pull, a CSV export, a pipeline scan page — of rows that sit deep in
+many separate long chains degrades to `partial` (reason `limit`) past them: read fewer rows per request, or filter to
+fewer conversations, rather than raise the bounds. The bounds are in
+[configuration](configuration.md#request-body-rebuild).
 The behaviour is specified in `openspec/specs/data-sync/spec.md` ("A chat request body is stored as its new history
-and a parent link").
+and a parent link", "A rebuilt request body is readable beside the stored one").
 
 To leave `delta`, switch to `whole-with-path`, not `whole`: a turn re-ingested under it keeps the hidden path the
 later turns link to. Under every mode the payload table also stores each row's `project_id` and `user_hash`, which the

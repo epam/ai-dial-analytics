@@ -224,6 +224,7 @@ neither is today authenticated with inert placeholder values that no bucket acce
 carries no meaning that this requirement takes away. Confining the placeholder defaults to the providers
 that still need them (`filesystem` in tests) is part of the same rule: an `aws-s3` source SHALL NOT be
 handed a placeholder credential, because the resulting `403` describes neither what is missing nor where.
+The same confinement applies to `google-cloud-storage` (see `Google Cloud Storage blob source`).
 
 Selecting workload identity SHALL require nothing of the deployment beyond the blob source's own settings
 and what the cluster injects into the pod — no key material in configuration, no secret to rotate, and no
@@ -242,7 +243,7 @@ provider-specific override to set.
 
 #### Scenario: Other providers keep their existing credential handling
 
-- **WHEN** the blob provider is anything other than `aws-s3` or `azureblob`
+- **WHEN** the blob provider is anything other than `aws-s3`, `azureblob` or `google-cloud-storage`
 - **THEN** its credential handling is unchanged, including the placeholder defaults used when no pair is
   configured
 
@@ -431,6 +432,210 @@ error path rather than by the error.
 - **WHEN** many consecutive sync cycles fail to obtain credentials
 - **THEN** the credential resolver and the client it owns are created once and reused, and they are
   released at shutdown
+
+### Requirement: Google Cloud Storage blob source
+
+The service SHALL support a Google Cloud Storage bucket as the `data-sync` blob source, selected by the blob
+provider `google-cloud-storage`, alongside `azureblob` and `aws-s3`. Every path that reads the blob source
+reads it the same way it reads the other two providers: the daily scheduled run, the near-real-time poller
+(both listing modes), backfill, and the failure retry sweep. Ingestion semantics SHALL NOT depend on the
+provider. That covers prefix listing followed to completion across pages, the last-modified time the
+poller's watermark compares against (the object's update time), and per-blob streaming of the raw bytes.
+
+The service SHALL choose the credential mode from the blob identity and blob credential, the same rule the
+other providers apply:
+
+- **both set**: the identity is a service-account client email and the credential is that account's
+  private key in PEM form. The service SHALL authenticate with the service-account token flow built into
+  the provider and SHALL NOT resolve any ambient credential.
+- **either blank**: the service SHALL authenticate keylessly, with a short-lived access token resolved at
+  runtime (see `Keyless Google Cloud Storage credentials resolve through Application Default
+  Credentials`). No key material is required in configuration.
+
+The trigger SHALL be the blank pair itself, not a new property. A `google-cloud-storage` source SHALL NOT be
+handed the placeholder credentials used for providers that ignore credentials. The resulting OAuth
+failure names neither what is missing nor where.
+
+The blob endpoint SHALL be optional for this provider. When blank, the provider's public JSON API endpoint
+is used. When set, it replaces that endpoint for every data-plane request, for example a private-access
+endpoint for the same API. The bucket SHALL be addressed by name in the request path, so no bucket-naming
+rule beyond Cloud Storage's own applies.
+
+#### Scenario: A GCS source ingests through every read path
+
+- **WHEN** the blob provider is `google-cloud-storage` and the bucket holds blobs under the active
+  date-derived prefix
+- **THEN** the poller, the daily run, backfill and the retry sweep list and read them exactly as they do for
+  the other providers, and the poller selects them by the objects' update time
+
+#### Scenario: A listing larger than one page is followed to completion
+
+- **WHEN** a listed prefix holds more objects than the provider returns in one page
+- **THEN** the service follows the continuation token until no token is returned, and every object under the
+  prefix is listed exactly once
+
+#### Scenario: A configured service-account key pair is used as given
+
+- **WHEN** the blob provider is `google-cloud-storage` and both the blob identity (a service-account client
+  email) and the blob credential (its PEM private key) are set
+- **THEN** requests are authorized with tokens obtained from that key, and no Application Default
+  Credentials lookup is made
+
+#### Scenario: A blank pair on a GCS source selects keyless access
+
+- **WHEN** the blob provider is `google-cloud-storage` and the blob identity or the blob credential is unset
+  or blank
+- **THEN** requests are authorized with a runtime-resolved access token, and no placeholder credential is
+  sent
+
+#### Scenario: A blank endpoint uses the public API endpoint
+
+- **WHEN** the blob provider is `google-cloud-storage` and no blob endpoint is configured
+- **THEN** data-plane requests go to the provider's public Cloud Storage JSON API endpoint, and no warning is
+  raised for the blank endpoint
+
+#### Scenario: A configured endpoint replaces the public one
+
+- **WHEN** the blob endpoint is set for a `google-cloud-storage` source
+- **THEN** every listing and read is sent to that endpoint with the same bucket path and authorization
+
+### Requirement: Keyless Google Cloud Storage credentials resolve through Application Default Credentials
+
+In keyless mode the service SHALL resolve an OAuth access token through Google **Application Default
+Credentials**. That is the credentials file named by `GOOGLE_APPLICATION_CREDENTIALS` when set (a
+service-account key, or a workload-identity-federation configuration), then gcloud's application-default
+credentials file when it exists, and otherwise the metadata server of the environment the pod runs in, which
+on GKE with Workload Identity is the pod's bound service account. The service SHALL present the token as a
+bearer credential on every data-plane request.
+
+Each resolution attempt SHALL look the sources up afresh. Nothing from a failed attempt is cached: a
+credentials file replaced since is read again, and a metadata server that did not answer is asked again. A
+resolved credential whose renewal fails SHALL be dropped the same way, so the next attempt resolves from
+scratch and a rotated key or a replaced federation configuration takes effect without a restart. So
+the service does its own lookup rather than use the Google library's process-wide default, which keeps the
+first credential it loads and probes for a metadata server only once.
+
+The service SHALL request a **read-only** Cloud Storage scope for any credential type that accepts a
+requested scope. `data-sync` only lists and reads, so a credential with write capability SHALL NOT be
+needed or requested. IAM on the bucket remains the effective boundary.
+
+Tokens SHALL be refreshed before they expire, driven by the token's own expiry rather than a fixed
+interval. Refresh SHALL happen on the calling thread when a request needs a token, so no background
+thread outlives shutdown. A sync cycle SHALL never send an expired token while a refresh is possible, and
+neither token expiry nor its renewal SHALL require a restart, a pod cycle or a configuration change. A
+token SHALL be requested at most once per renewal window, even when several sync threads need one at the
+same time.
+
+#### Scenario: GKE Workload Identity supplies the token
+
+- **WHEN** a keyless `google-cloud-storage` source runs in a pod whose Kubernetes service account is bound
+  to a Google service account through Workload Identity, and `GOOGLE_APPLICATION_CREDENTIALS` is unset
+- **THEN** the token issued for the bound service account authorizes the bucket requests
+
+#### Scenario: A credentials file supplies the token
+
+- **WHEN** `GOOGLE_APPLICATION_CREDENTIALS` names a readable service-account key or workload-identity
+  federation configuration
+- **THEN** the token is obtained from that file's credential, and the metadata server is not consulted
+
+#### Scenario: A replaced credentials file is read again
+
+- **WHEN** the file `GOOGLE_APPLICATION_CREDENTIALS` names is replaced after a resolution attempt
+- **THEN** the next attempt reads the new file
+
+#### Scenario: A failed renewal resolves the credential again
+
+- **WHEN** a credential resolved earlier can no longer renew its token, for example because its key was
+  rotated and disabled
+- **THEN** that cycle fails, and the next attempt resolves the credential from its sources again
+
+#### Scenario: The requested scope is read-only
+
+- **WHEN** a token is requested in keyless mode from a credential type that accepts a scope
+- **THEN** the only scope requested is Cloud Storage read-only
+
+#### Scenario: An expiring token is renewed in place
+
+- **WHEN** a sync cycle runs after the current token has reached its renewal margin
+- **THEN** a new token is obtained and the cycle proceeds, with no restart and no operator action
+
+#### Scenario: Concurrent first use requests one token
+
+- **WHEN** several sync threads need a token at the same moment and none is cached
+- **THEN** a single token request is made and every thread uses its result
+
+### Requirement: The resolved Google principal is reported, its credentials never are
+
+When a keyless `google-cloud-storage` source first resolves a token, the service SHALL log, once at info
+level, the principal the token was issued for (the service-account email) when the credential type
+exposes it, and the credential source it came from (credentials file or metadata server). When the
+principal cannot be determined, the service SHALL log the credential source and state that the principal
+is unknown.
+
+This is how a misconfiguration becomes visible. On GCP the metadata server answers whether or not
+Workload Identity is in effect. A pod scheduled where it is not enabled therefore gets the **node's**
+service account, not the bound one. If that account can read the bucket, ingest succeeds under an
+identity nobody granted for this purpose. Naming the principal at first resolution lets an operator see
+the substitution without a new property.
+
+The service SHALL NOT log an access token, a refresh token, a private key, or the contents of a credentials
+file, whether resolution succeeds, renews or fails.
+
+#### Scenario: The principal is named at first resolution
+
+- **WHEN** a keyless GCS source resolves its first token from a credential that exposes its account email
+- **THEN** one info-level log record names that email and the credential source
+
+#### Scenario: A node service account is visible as such
+
+- **WHEN** the metadata server resolves the node's default service account instead of a bound one
+- **THEN** the logged principal is the node's service account, distinguishable from the intended one
+
+#### Scenario: Token material is never logged
+
+- **WHEN** credentials are resolved, renewed, or fail to resolve, in either credential mode
+- **THEN** no log record contains an access token, a refresh token, a private key or credentials-file
+  contents
+
+### Requirement: A Google credential failure fails the sync cycle, not startup
+
+The service SHALL treat a failure to obtain Google Cloud Storage credentials as a **failure of the sync
+cycle that needed them**, and SHALL NOT refuse to start because of one. Such failures include no
+Application Default Credentials available, an unreadable or malformed credentials file, a metadata server
+that refuses or times out, and a key pair the token endpoint rejects. Each SHALL fail that cycle whole,
+leave the ingest watermark where it was, and be retried by the next scheduled cycle with no operator
+action. The failure SHALL be visible through the existing sync failure reporting: the cycle's failure
+outcome, the held watermark and its growing lag, and failure records for the daily run and backfill.
+
+A credential that cannot be found or read and a credential whose token request fails SHALL be reported
+with different messages. The second SHALL name the credential source and carry the token endpoint's answer
+as its cause, because the fix differs: a missing file or binding, against a refused or unreachable token
+request.
+
+The credential resolver SHALL be created **once** and reused across cycles, including cycles that failed
+after it was created. It SHALL own no client, pool or thread, so nothing of it outlives shutdown.
+
+#### Scenario: No available credential fails the cycle and is retried
+
+- **WHEN** a sync cycle needs a GCS token and Application Default Credentials cannot resolve one
+- **THEN** that cycle fails as a whole with the ingest watermark held, the failure is reported through the
+  existing sync failure outcome, and the next scheduled cycle attempts it again
+
+#### Scenario: A refused token request is told apart from a missing credential
+
+- **WHEN** a credential is found but its token request fails
+- **THEN** the failure names the credential source and carries the token endpoint's answer, and does not
+  report the credential as missing
+
+#### Scenario: Startup is unaffected by a credential fault
+
+- **WHEN** the service starts with a `google-cloud-storage` blob source whose credentials cannot be resolved
+- **THEN** startup completes and the query surface serves normally; only the sync cycles fail
+
+#### Scenario: A failing cycle does not rebuild the resolver
+
+- **WHEN** many consecutive sync cycles fail to obtain a token
+- **THEN** the credential resolver is created once and reused
 
 ### Requirement: Date-derived prefix file discovery
 
@@ -3193,6 +3398,105 @@ that were mapped before the failing one are complete, and are written as usual.
 - **THEN** neither the usage-log row nor the payload row of that record is written, and the blob's failure is
   recorded with the reason `mapping_error`
 
+### Requirement: Sensitive columns can be excluded from ingest
+
+The service SHALL accept an ingest setting `sync.sensitive-columns-enabled` (`SYNC_SENSITIVE_COLUMNS_ENABLED`), a
+boolean with default `true`.
+
+- **Under `true`,** ingest SHALL behave exactly as it would without the setting, and the catalog SHALL NOT be read
+  for it.
+- **Under `false`,** each ingest target SHALL leave out of every row it writes each column its mapping declares
+  that the catalog flags `sensitive` on that target's table. The catalog is matched on the column's physical name,
+  `column_mapping.source_name`. A left-out column SHALL take its ClickHouse default on the stored row: `NULL` for a
+  `Nullable` column, `{}` for a `JSON` column, and the type's zero value otherwise. The service SHALL NOT read,
+  transform, rewrite or count that column's source value for the row. Every other mapped column, the row itself and
+  the target's emit predicate SHALL be unaffected. A record SHALL still produce a row in every target it produced
+  one in before, so the all-or-none rule (see "A record is written for all of its targets or for none") and the
+  grain join between `dial_usage_log` and `dial_usage_log_payload` hold.
+
+The excluded set SHALL be resolved once per target at startup, from the catalog as it stands after the catalog
+migrations have run. A column flagged `sensitive` by a later migration is therefore excluded without a code or
+mapping change once the service restarts. With the seeded catalog this excludes `jwt_claims`, `request_tags`,
+`request_body`, `response_body`, `assembled_response` and `request_cache_control` from `dial_usage_log_payload`,
+and `comment` from `rate_analytics`. `dial_usage_log` has no sensitive column and is written as before.
+
+Under `false`, startup SHALL fail, naming the target table and the column, when a column the catalog flags
+`sensitive` is one the ingest cannot do without for that target:
+
+- the deduplication-key columns `trace_id`, `core_span_id` and `request_time` (see "Records without a
+  deduplication key are dropped");
+- the table's grain key, identity column, ordering-key columns, partition column, version column or TTL column as
+  the catalog's table definition records them.
+
+Leaving one of these out would drop every row, collapse rows that do not belong together, or put rows in the epoch
+partition where retention drops them.
+
+Under `false`, startup SHALL also fail, naming the table, when a target's table has no catalog definition: its
+sensitivity cannot be known, and writing it as mapped would store exactly what the setting is meant to keep out.
+The operator defines the table in the catalog or points the target at a table the catalog defines.
+
+Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it.
+
+The setting SHALL apply only to rows written while it is in effect. It SHALL NOT change rows already stored, the
+catalog's `sensitive` flags, read-side masking, or the physical table schema. Switching it back to `true` SHALL
+make new rows carry the columns again. Rows written while it was `false` keep their defaults. A record
+re-ingested later is written under the setting in effect at that time, and the row it writes replaces the earlier
+one as any re-ingested row does (see "Primary-key deduplication"). Under `delta` this includes a parent: a
+parent re-ingested under `false` is rewritten with no body and no path, so a delta child stored from another blob
+and not re-ingested with it names a path no row carries and can no longer be rebuilt, as for a parent re-ingested
+under `whole` (see "The request body storage mode is configurable").
+
+#### Scenario: The default writes sensitive columns
+
+- **WHEN** the service starts without `SYNC_SENSITIVE_COLUMNS_ENABLED` and ingests a chat completion record
+  carrying claims, headers, a request body and a response body
+- **THEN** the `dial_usage_log_payload` row carries `jwt_claims`, `request_tags`, `request_body`, `response_body`
+  and `assembled_response` as captured today
+
+#### Scenario: Disabled leaves the payload content columns at their defaults
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests the same record
+- **THEN** the `dial_usage_log_payload` row exists with the same `event_id`, `request_time`, `trace_id`,
+  `core_span_id`, `project_id` and `user_hash` it would otherwise carry, `request_body`, `response_body`,
+  `assembled_response` and `request_cache_control` are `NULL`, and `jwt_claims` and `request_tags` are `{}`
+
+#### Scenario: Disabled keeps the usage-log row whole
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a record
+- **THEN** its `dial_usage_log` row carries every column it would carry under `true`, and a query joining the
+  payload table on `event_id` still finds the payload row
+
+#### Scenario: Disabled leaves the rating comment at its default
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a `/rate` record with a
+  comment
+- **THEN** the `rate_analytics` row is written with its `rate`, `rate_raw` and `event_id`, and `comment` is `NULL`
+
+#### Scenario: The excluded set follows the catalog flag
+
+- **WHEN** a catalog migration flags a further mapped column of an ingest target `sensitive` and the service
+  restarts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`
+- **THEN** that column is left out of the target's new rows, and the startup log lists it among the target's
+  excluded columns
+
+#### Scenario: A sensitive key column fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and the catalog flags `trace_id`, or
+  the target table's grain key, `sensitive` on an ingest target's table
+- **THEN** startup fails, naming the table and the column
+
+#### Scenario: A target without a catalog definition fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and a configured target names a table
+  the catalog does not define
+- **THEN** startup fails, naming the table
+
+#### Scenario: Rows stored before the switch are unchanged
+
+- **WHEN** rows were ingested under `true` and the service restarts under `false`
+- **THEN** the rows already stored still carry their sensitive values, and only rows written after the restart
+  carry the defaults
+
 ### Requirement: The request body storage mode is configurable
 
 The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUEST_BODY_MODE`), set to
@@ -3226,6 +3530,13 @@ validation off is an ordinary setting, not a sign that no table exists. A target
 have its bodies stored as mapped, with a warning. A check that fails SHALL fail that flush before any body is cut,
 like any other ClickHouse error. Under `delta` with no target qualifying, startup SHALL log a warning that the
 setting has no effect.
+
+A target's mapping is taken here after sensitive-column exclusion (see "Sensitive columns can be excluded from
+ingest"). A target whose `request_body` is excluded SHALL therefore not qualify, and SHALL get no request-delta
+processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
+default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while the
+switch is `false`, startup SHALL log one warning that the mode has no effect, naming the switch, in place of the
+`delta` warning above, whose advice to check the mappings would mislead.
 
 #### Scenario: The default stores request bodies whole
 
@@ -3275,6 +3586,14 @@ setting has no effect.
   ingested
 - **THEN** B's parent is A's path, and B rebuilds through A's whole body
 
+#### Scenario: An excluded request body gets no request-delta processing
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and `SYNC_REQUEST_BODY_MODE=delta`, and
+  ingests a chat request
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns-enabled`, and the
+  payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
+  `request_parent_hash`, and an empty `request_ancestor_hashes`
+
 ### Requirement: A chat request body is stored as its new history and a parent link
 
 A request body SHALL be a **chat request** when it parses as a JSON object carrying a **message array** — an
@@ -3289,12 +3608,17 @@ insignificant whitespace.
 For a history `h1..hn`, ingest SHALL compute the **prefix hashes**
 `p0 = H(project_id, user_hash, UTC day of request_time, tools)` and `pk = H(p(k-1), e(hk))`. `H` is a 128-bit hash;
 `e(hk)` is the canonical JSON of `hk`, preceded for a system element by its key name (`"system":…`), so a system
-element never matches a message element or the same value under another system key. The two scope values are those
+element never matches a message element or the same value under another system key. A message element whose
+`content` is an array of exactly one object with exactly the members `type` = `"text"` and a string `text` — a
+**bare text block** — SHALL be hashed as if its `content` were that string: a client sends the message carrying
+the newest cache marker as such a block and, once the marker has moved on, the same message as the plain string, so
+the two shapes are one message to the hashes. Only `e(hk)` reads it that way; the stored body keeps the shape the
+request was sent in. The two scope values are those
 the record's `dial_usage_log` row carries, and `tools` is the canonical JSON of the request's top-level `tools`,
 hashed apart from every value when the request carries none, so `null`, `[]` and an absent `tools` never match. `pn`
 is the request's **path**. Because each prefix hash folds in every element before it, the scope and the tools, two
 requests SHALL have an equal `pk` only when their first `k` history elements are identical, system key names
-included, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
+included and a bare text block read as its string, and they share project, user, UTC day and `tools`. Equal message text under a different history or scope
 SHALL never yield an equal hash.
 
 The request's **parent** SHALL be a stored or same-flush chat request whose path equals the deepest `pk`
@@ -3324,14 +3648,17 @@ normalized and canonicalized as above.
 Rows carrying the same path MAY differ in parent and stored body (a re-ingested event can link differently, and an
 event stored as a root can share its path with one stored as a child), yet every one of them yields the same
 history, so following `request_parent_hash` through whichever row is found always terminates — each parent is
-strictly shallower — and always yields the row's exact canonical history. While a row exists, a row carrying
+strictly shallower — and always yields the row's exact canonical history, once each inherited message is put in
+the shape the row sent it in: a bare text block and its plain string are one message to the hashes, so the row
+that stores a message MAY have sent the other shape, and "the same history" in this capability means equal up to
+that shape, which the rebuilt row's own record settles (see "Cache markers are kept per event"). While a row exists, a row carrying
 its parent's path SHALL exist: a path depends only on the stored history and tools, so replacing a row under the
 `ReplacingMergeTree` keeps it whichever mode wrote the copy, and parent and child share a daily partition, so
 they expire together — up to the part granularity of the TTL: with `ttl_only_drop_parts`, a day still split
 across parts can lose an earlier part before a later one, so in the last day of a day's retention a child MAY
 name a parent already dropped, and its rebuild then fails as an expired row would. One more case breaks that, and it is an operator's to avoid: a path is computed from the
 history as ingest stores it, so re-ingesting an event after changing `sync.inline-files-drop-truncated` or `sync.inline-files-max-size`, or after a
-release that changes the canonical form, gives its new copy a different path. A child that is not re-ingested
+release that changes the canonical form or how an element is hashed, gives its new copy a different path. A child that is not re-ingested
 with it then names a path no row carries any more. Re-ingesting whole UTC days after such a change avoids it,
 since a parent and its children always share one.
 `request_ancestor_hashes` lets a rebuild read the whole chain in one query in the common case, and read further
@@ -3340,8 +3667,15 @@ message array (under the key the classification above chose: the first of `messa
 value is an array), then, for a row with a parent, each system key that its chain's root carries, in the order listed
 above, valued with its history element (`h1..hs`), and the root's `tools` member when the root has one, and finally
 the row's own cache markers, SHALL yield a JSON document equal to the received body
-(same members and values; key order and whitespace are not preserved). This change SHALL store everything a rebuild needs; it SHALL NOT
-itself expose a rebuilt body.
+(same members and values; key order and whitespace are not preserved). Before the markers are restored, each
+message the row inherits SHALL be put in the shape the row sent it in: a bare text block where the row's record
+lists it, the plain string otherwise, whichever of the two the row that stores the message sent. A row that
+carries no such record was stored before shapes were recorded, when only equal shapes linked, and SHALL inherit
+its messages as stored. That is the shape it sent unless a row stored since, on the same UTC day, carries one of
+its ancestors' paths with a message in the other shape and is the row the rebuild finds; such a row's rebuild MAY
+then differ from the request in that shape, and only there. Ingest SHALL store everything a rebuild needs,
+and the read surfaces SHALL expose the rebuilt body as `dial_usage_log_payload.request_body_full` (see "A rebuilt
+request body is readable beside the stored one"); `request_body` itself SHALL keep returning the stored body.
 
 #### Scenario: A follow-up turn stores only its new messages
 
@@ -3393,10 +3727,32 @@ itself expose a rebuilt body.
 - **THEN** it is stored in delta form, with `system_instruction` as the first history element and the
   `contents` elements after it
 
+#### Scenario: A message sent as a text block and then as a plain string stays on the chain
+
+- **WHEN** turn 1 ends with a user message whose `content` is `[{"type":"text","text":"u1"}]` carrying a
+  `cache_control` marker, and turn 2 repeats that message as `"content":"u1"` and adds two messages
+- **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages, its
+  `request_cache_control` lists no inherited text block, and its rebuild equals the request it was sent as, with
+  `"content":"u1"`
+
+#### Scenario: A message sent as a plain string and then as a marked text block rebuilds as sent
+
+- **WHEN** turn 1 holds a user message `"content":"u1"`, and turn 2 repeats it as
+  `[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]` and adds two messages
+- **THEN** turn 2's parent is turn 1, its `request_cache_control` lists that message as a text block, and its
+  rebuild equals the request it was sent as, marker included
+
+#### Scenario: Content that is not one bare text block is another message
+
+- **WHEN** a stored request holds a user message `"content":"u1"`, and a request in the same scope opens with
+  that text as one of two blocks, as a text block carrying a further member, or as a block of another `type`
+- **THEN** the new request is a root
+
 #### Scenario: The history rebuilds exactly
 
 - **WHEN** a chain root A and its descendants B and C are stored, and C is rebuilt by following
-  `request_parent_hash` from C through stored rows to the root and concatenating their history elements root first
+  `request_parent_hash` from C through stored rows to the root, concatenating their history elements root first
+  and putting each inherited message in the shape C recorded
 - **THEN** the result equals C's normalized, canonical history element for element
 
 #### Scenario: A rebuild survives a parent re-linked by re-ingest
@@ -3548,7 +3904,10 @@ names its path as parent (see "Rebuild equivalence").
 The service SHALL record, under `sync.request-body-mode=delta`, every `cache_control` member removed from a
 chat request's history in that row's `request_cache_control`, as a JSON array of entries, each giving the index
 of the history element, the location of the member inside that element, and its value verbatim.
-`request_cache_control` SHALL be `NULL` for a request that carried none. Markers SHALL belong only to
+A row with a parent SHALL carry one further entry, `{"text_blocks":[…]}`, listing the indices of the message
+elements it inherits that it sent as a bare text block, empty when it sent none: the row storing such a message
+MAY have sent it as the plain string, and the entry is what lets a rebuild return the shape this request sent.
+`request_cache_control` SHALL be `NULL` for a request with no parent that carried no marker. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
 markers into the assembled history and no others. `cache_control` members outside the history (for
 example on `tools`) SHALL stay where they are, in the stored body or in the stored `tools` a request inherits.
@@ -3561,17 +3920,28 @@ newest message on each turn, so the same earlier message would otherwise hash di
 - **WHEN** turn 1 carries `cache_control` on its last user message, and turn 2 repeats that message
   without it and adds two messages carrying `cache_control` on the newest
 - **THEN** turn 2's parent is turn 1, its `request_body` holds only the two added messages without markers, and
-  its `request_cache_control` records the one marker on its newest message
+  its `request_cache_control` records the one marker on its newest message, beside its text-block entry
 
 #### Scenario: Markers are not inherited
 
 - **WHEN** turn 2's markers are restored during a rebuild
 - **THEN** the assembled request carries turn 2's own markers only, not turn 1's
 
-#### Scenario: A request without markers stores null
+#### Scenario: A root without markers stores null
 
-- **WHEN** a chat request carrying no `cache_control` member is stored in delta form
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with no parent
 - **THEN** its `request_cache_control` is `NULL`
+
+#### Scenario: A row with a parent records the text blocks it inherits
+
+- **WHEN** a chat request carrying no `cache_control` member is stored in delta form with a parent, and the
+  second of its three inherited history elements is a message it sent as a bare text block
+- **THEN** its `request_cache_control` is `[{"text_blocks":[1]}]`
+
+#### Scenario: A row stored before shapes were recorded inherits its messages as stored
+
+- **WHEN** a row with a parent carries no `text_blocks` entry and its root stored a message as a bare text block
+- **THEN** its rebuild returns that message as the stored block
 
 ### Requirement: A request body that is not a chat request is stored whole
 
@@ -3598,6 +3968,178 @@ content column.
 - **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`
 - **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, and it is not
   linked to any parent
+
+### Requirement: A rebuilt request body is readable beside the stored one
+
+The payload enrichment SHALL expose two read-only fields computed on read, beside `request_body`, under the qualified
+names `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild`. They SHALL NOT be
+stored: no column, ingest stage or migration is added for them, and ingest SHALL be unchanged by them.
+
+- **`request_body_full`** (`string`, nullable) SHALL hold the row's request body as the request carried it, rebuilt
+  by the rebuild equivalence of "A chat request body is stored as its new history and a parent link": the history its
+  `request_parent_hash` chain supplies followed by its own message array elements, put back under the key the
+  classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
+  at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
+  members and values; key order and whitespace are not preserved — written as compact JSON.
+- **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
+  `request_body_full` holds:
+  - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
+  - `stored`, with `request_body_full` equal to the stored `request_body` byte for byte, for a row whose
+    `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` — a body stored whole under either
+    mode, a root without markers, a body that is not a chat request, a row ingested before delta storage;
+  - `rebuilt`, with the rebuilt body, for a row with a parent whose chain reaches a root, or a root carrying cache
+    markers;
+  - `resolvable`, only when `request_body_rebuild` is read without `request_body_full`, for a row that would otherwise
+    be checked for `rebuilt`: its chain was found, but no body was read (see below);
+  - `partial`, with `request_body_full` equal to the stored `request_body` byte for byte, for a rebuild that cannot
+    be completed (see below).
+
+A rebuild SHALL NOT turn a stored body into `NULL` and SHALL NOT fail the read: every failure below SHALL return the
+stored body marked `partial`. `request_body` SHALL keep returning exactly what is stored, whatever either field
+returns.
+
+**The chain is read partition-locally, in two phases.** Every row a rebuild reads SHALL lie in the requested row's
+own UTC-day partition, which is where its chain lives (see "A parent never crosses a UTC day or a user scope"); a
+rebuild SHALL NOT read any other partition. The first phase SHALL resolve each requested row's chain from the
+chain columns alone — no body — looking paths up in batches, seeded from the requested row's
+`request_ancestor_hashes` and, where a found row's parent is still missing, from that missing path and the found
+row's own `request_ancestor_hashes`, round after round until every chain reaches a root, a round finds nothing new,
+or a bound below is reached. Any row carrying a path SHALL serve, since every such row yields the same history. The
+second phase SHALL read the bodies of the rows the chains name, by their `event_id`, and only those. Both phases
+SHALL read deduplicated — the latest version per `event_id`, deduplicated inside each partition. The walk SHALL use
+the parent link of the very row whose body it reads; when a row read in the second phase no longer carries the path
+or parent the first phase found (it was re-ingested between the two reads), its chain SHALL be resolved again within
+the remaining rounds or returned `partial`.
+
+A rebuild SHALL return `partial` when: a path on the chain is carried by no row of the partition (the parent was
+never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form, element-hashing or
+inline-file setting change); a bound below is reached before the chain is complete; a rebuild statement fails or the
+read's budget runs out while the rebuild is in progress; or a body on the chain does not have the shape the rebuild
+expects (for example, a stored root that is not a chat request).
+
+**Bounds.** Two settings SHALL bound the work one read spends on rebuilds:
+`query.request-body-rebuild.max-rounds` (`QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`, default `8`), the number of
+first-phase lookup rounds, and `query.request-body-rebuild.max-ancestors`
+(`QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS`, default `20000`), the number of distinct ancestor rows one read may
+resolve. Each SHALL be at least `1`, or startup SHALL fail naming the setting. A row whose chain is incomplete when
+either is reached SHALL be returned `partial`; rows whose chains completed SHALL be returned `rebuilt`. The rebuild
+statements SHALL run under the same resource settings as the read that asked for them, sharing what is left of its
+wall-clock ceiling rather than being granted a new one, and SHALL run after the read's own statements (its row query
+and, when requested, its total count), so a rebuild never takes the time those need. A rebuild statement SHALL NOT be
+issued once less than one second of that ceiling is left; the rows it would have served SHALL be returned `partial`
+with reason `failed`. A failed or skipped statement SHALL make `partial` only the rows of the UTC day it served; the
+rows of other days SHALL keep resolving.
+
+**Access.** The fields SHALL be `sensitive` when `request_body` or `request_cache_control` is, since the rebuilt body
+returns the values of both, and SHALL therefore be visible to a caller only when it may see every sensitive column
+among the two. The ancestors a rebuild reads SHALL be read under the same governance as the requested row and
+SHALL never be returned as rows of their own. Because a chain stays inside one project, user and UTC day and a
+rebuilt body equals what the requested row's own request carried, a rebuild SHALL disclose nothing the same row
+would not disclose had it been stored whole. Restricting the ancestors a rebuild reads by deployment or model
+inside a project is not part of this requirement.
+
+**Observability.** Every completed value SHALL be counted on `query.request.rebuild.rows`, tagged `outcome`
+(`stored`, `rebuilt`, `resolvable`, `partial`) and `surface` (`query` for the query surfaces, `pipeline` for the pipeline data
+plane), and every `partial` value additionally on `query.request.rebuild.partial`, tagged `reason`: `missing`,
+`limit`, `failed` or `invalid`. A read that returns any `partial` value SHALL log one WARN line naming the counts per
+reason and the number of rounds, and never a body or a hash. A read whose rows are all `stored` SHALL issue no
+rebuild statement. A read projecting `request_body_rebuild` without `request_body_full` SHALL run the first phase
+only and read no body, reporting `resolvable` for every chain that phase completes, a root carrying cache markers
+included; projected together, the two fields SHALL always agree, and `resolvable` SHALL NOT be reported. `resolvable`
+states that the chain was found, not that its bodies rebuild: a body or marker of the wrong shape (reason `invalid`)
+is detected only by a read that also projects `request_body_full`, which may return `partial` for a row the
+status-only read reported `resolvable`. `rebuilt` SHALL mean only that the body was rebuilt. Every rebuild statement SHALL carry a query id of its own, never the triggering statement's: on the
+query surfaces `adas-query-rebuild-{uuid}`, on a pipeline read the id the enrichment-runtime capability prescribes, and
+on an untagged pipeline read `adas-pipeline-rebuild-{uuid}`; each SHALL be logged on the statement logger like the
+service's other statements, its bound paths and event ids counted rather than printed.
+
+#### Scenario: A follow-up turn reads back whole
+
+- **WHEN** turns A, B and C of one conversation were stored under `delta` and a query projects
+  `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild` for C
+- **THEN** the row carries C's body as it was sent — its whole message array, A's system prompt and A's `tools`
+  included — and `request_body_rebuild` is `rebuilt`
+- **AND** `dial_usage_log_payload.request_body` of the same row still holds only C's new messages
+
+#### Scenario: A body stored whole is returned unchanged
+
+- **WHEN** a row whose `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` is read with
+  `request_body_full`
+- **THEN** `request_body_full` equals the stored `request_body` byte for byte, `request_body_rebuild` is `stored`, and
+  no rebuild statement is issued for it
+
+#### Scenario: A root with cache markers gets its markers back
+
+- **WHEN** a chat request that is a root carried `cache_control` on its last message and is read with
+  `request_body_full`
+- **THEN** the rebuilt body carries that marker where it was sent, `request_body_rebuild` is `rebuilt`, and no
+  ancestor is read
+
+#### Scenario: A missing ancestor returns the stored delta marked partial
+
+- **WHEN** a row's chain names a path that no row of its partition carries
+- **THEN** `request_body_full` equals the stored `request_body`, `request_body_rebuild` is `partial`,
+  `query.request.rebuild.partial{reason=missing}` is incremented, and the read succeeds
+
+#### Scenario: A chain deeper than the ancestor hint is followed
+
+- **WHEN** a row's chain has 300 ancestors, so its `request_ancestor_hashes` holds only the nearest 128
+- **THEN** later rounds resolve the rest from the found rows' own hints, and the row is `rebuilt`
+
+#### Scenario: A bound makes the row partial, not the read fail
+
+- **WHEN** `QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS=1` and a row's chain is longer than its hint covers
+- **THEN** that row is returned `partial` with its stored body, `query.request.rebuild.partial{reason=limit}` is
+  incremented, and the other rows of the read are unaffected
+
+#### Scenario: A failing rebuild statement degrades to partial
+
+- **WHEN** a rebuild statement fails after the read's own statement succeeded
+- **THEN** every row whose rebuild needed it is returned `partial` with its stored body, the reason is `failed`, and
+  the response is still `200`
+
+#### Scenario: A spent budget stops the rebuild, not the read
+
+- **WHEN** a read's own statements leave less than one second of its wall-clock ceiling and its rows need a rebuild
+- **THEN** no rebuild statement is issued, those rows are returned `partial` with their stored bodies and reason
+  `failed`, and the read, its total count included, succeeds
+
+#### Scenario: A parent re-ingested between the two phases is not mixed
+
+- **WHEN** an ancestor's event is re-ingested between the two phases and its surviving row links to a different
+  parent
+- **THEN** the rebuild either follows the surviving row's link and returns `rebuilt` with the requested row's exact
+  body, or returns `partial` with the stored body — never a body assembled from two versions of one event
+
+#### Scenario: The rebuild never leaves the row's day
+
+- **WHEN** a page of rows from 2026-03-02 and 2026-03-03 is read with `request_body_full`
+- **THEN** every rebuild statement is restricted to those two partitions, and each row's ancestors are looked up in
+  its own day only
+
+#### Scenario: An invalid bound fails startup
+
+- **WHEN** the service starts with `QUERY_REQUEST_BODY_REBUILD_MAX_ANCESTORS=0`
+- **THEN** startup fails, naming the setting
+
+#### Scenario: A row without a payload row reads null
+
+- **WHEN** a `dial_usage_log` row whose payload row has expired is read with both fields
+- **THEN** both fields are `NULL`
+
+### Requirement: Pipelines binding the stored body are re-pointed before delta storage is enabled
+
+`request_body` SHALL keep its meaning on every surface, so enabling `SYNC_REQUEST_BODY_MODE=delta` changes what
+every existing reader of `dial_usage_log_payload.request_body` receives for a later chat turn. The release notes for
+the request-delta storage SHALL tell operators to re-point every pipeline whose `transform.inputs` binds
+`dial_usage_log_payload.request_body`, and every saved query or other consumer that needs a turn's whole request, to
+`dial_usage_log_payload.request_body_full` before enabling `delta`. ADAS SHALL NOT rewrite a stored pipeline or
+saved query to do so.
+
+#### Scenario: The upgrade notes name the replacement field
+
+- **WHEN** an operator reads the release notes' row for request-delta storage
+- **THEN** it names `dial_usage_log_payload.request_body_full` as the field to bind before enabling `delta`
 
 ### Requirement: A value that fails to coerce to its column's kind is counted and falls back like an absent one
 

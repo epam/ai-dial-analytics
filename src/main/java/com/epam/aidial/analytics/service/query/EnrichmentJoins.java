@@ -12,6 +12,7 @@ import org.jooq.impl.DSL;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -449,16 +450,28 @@ public final class EnrichmentJoins {
             projection.add(enrichment.enrichmentPartition());
         }
         projection.addAll(shape.computed());
+        final Set<String> projected = new HashSet<>();
+        projection.forEach(field -> projected.add(field.getName()));
         for (final String name : enrichment.exposedNames()) {
             final QueryFieldBinding binding = model.bindings().get(name);
             if (!referenced.contains(name) || binding == null || shape.omitted().contains(name)) {
                 continue;
             }
+            if (binding.isComputed()) {
+                // A computed field's stand-in renders over the enrichment's physical columns, which the outer
+                // statement addresses through this derived table's alias, so the table projects each of them, once.
+                for (final Field<?> read : binding.reads()) {
+                    if (projected.add(read.getUnqualifiedName().last())) {
+                        projection.add(read);
+                    }
+                }
+                continue;
+            }
             final Set<List<String>> paths = usage.prunedPaths(name);
             if (paths.isEmpty()) {
-                // An adopted alignment column is exposed as well as compared; it is projected once, above.
-                if (!enrichment.partitionAligned() || !binding.field().getUnqualifiedName().last()
-                        .equals(enrichment.enrichmentPartition().getUnqualifiedName().last())) {
+                // An adopted alignment column is exposed as well as compared, and a computed field may have read a
+                // column already; each is projected once.
+                if (projected.add(binding.field().getUnqualifiedName().last())) {
                     projection.add(binding.field());
                 }
                 continue;
