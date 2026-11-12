@@ -3733,6 +3733,11 @@ newest message on each turn, so the same earlier message would otherwise hash di
   second of its three inherited history elements is a message it sent as a bare text block
 - **THEN** its `request_cache_control` is `[{"text_blocks":[1]}]`
 
+#### Scenario: A row stored before shapes were recorded inherits its messages as stored
+
+- **WHEN** a row with a parent carries no `text_blocks` entry and its root stored a message as a bare text block
+- **THEN** its rebuild returns that message as the stored block
+
 ### Requirement: A request body that is not a chat request is stored whole
 
 The service SHALL store a request body that is not a chat request in `request_body` exactly as it is stored

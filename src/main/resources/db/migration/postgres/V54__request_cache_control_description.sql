@@ -1,8 +1,4 @@
--- request_cache_control of dial_usage_log_payload now also records, for a request stored with a parent, which
--- inherited messages it sent as one text block. Only the seeded description is replaced, so a description an
--- operator has edited since stays as it is.
---
--- Specified in openspec/specs/data-sync/spec.md (requirement "Cache markers are kept per event").
+-- Re-describe dial_usage_log_payload.request_cache_control (adds the text_blocks entry); openspec/specs/data-sync/spec.md
 UPDATE column_mapping
    SET description = 'What a rebuild of this chat request needs beside its stored body, as a JSON array: the '
                          || 'cache_control markers removed from its history (element index, location and value) and, '
