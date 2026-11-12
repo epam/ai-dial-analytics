@@ -759,7 +759,7 @@ Grants are each environment's own policy, so granting access on an imported tabl
 
 ### Requirement: Caller values in row policies
 
-A row policy filter MAY reference a **caller value**: a `param` expression whose `name` is exactly
+A row policy filter SHALL accept a **caller value**: a `param` expression whose `name` is exactly
 `caller.user_hash` or `caller.project`. The set is closed and the names are matched case-sensitively; a
 `param` with any other name, including one that differs only in case, SHALL be refused
 `422 validation_error`. No other content of the caller's credential SHALL be reachable from a policy.
