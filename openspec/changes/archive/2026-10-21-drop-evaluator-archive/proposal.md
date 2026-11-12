@@ -61,7 +61,7 @@ spec text that has to keep explaining an object that no longer does anything.
   live types renamed across roughly sixty files; stale Javadoc reworded.
 - **Tests**: the archive test, service test and V41 replay test deleted; audit, constraint, compiled-projection
   and strict-binding tests adjusted; `fixtures/evaluator-versions/` renamed.
-- **Docs**: `README.md`, `docs/catalog-promotion.md`, `docs/release-0.4-upgrade.md` (migration row, the
+- **Docs**: `README.md`, `docs/catalog-promotion.md`, `docs/release-0.23-upgrade.md` (migration row, the
   optional pre-upgrade dump, the breaking-change row, the OpenAPI rename); `openspec/config.yaml` context
   (bare-array endpoints, typed-path-variable example, audit note).
 - **Other repositories**: `adas-mcp`'s evaluator read tools (`adas_list_evaluators`, `adas_get_evaluator`,

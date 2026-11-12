@@ -37,5 +37,5 @@ _None._
 
 - **Config**: `SYNC_PAYLOAD_TTL_DAYS` default changes from `90` to unset; the two `configuration.md` rows.
 - **Code**: `IngestTtlReconciler` and the two retention records.
-- **Docs**: the release-0.4 upgrade note drops its hand-set-`TTL` warning.
+- **Docs**: the release-0.23 upgrade note drops its hand-set-`TTL` warning.
 - **No** API, catalog or migration change.

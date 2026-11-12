@@ -171,7 +171,7 @@ Paths below are relative to `src/main/java/com/epam/aidial/analytics/` (producti
 
 ## 8. Specs and docs
 
-- [x] 8.1 `docs/release-0.4-upgrade.md`: in §6, extend the request-delta row's action to "re-point pipelines binding
+- [x] 8.1 `docs/release-0.23-upgrade.md`: in §6, extend the request-delta row's action to "re-point pipelines binding
       `dial_usage_log_payload.request_body` to `request_body_full` before enabling `delta`"; in §7, add the two new
       variables and the same instruction under `SYNC_REQUEST_BODY_MODE`; note the rollback order (design Migration
       Plan).

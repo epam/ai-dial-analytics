@@ -33,7 +33,7 @@
 - [x] 5.1 When archiving, also hand-edit the `enrichment-registry` Purpose (the "`/v1/evaluators` survives only as a read-only archive" sentence), which a delta cannot reach
 - [x] 5.2 `openspec/config.yaml` context: two frozen bare-array endpoints, not three; drop the `/v1/evaluators` typed-path-variable example; reword the "evaluator tables are not audited" paragraph
 - [x] 5.3 `README.md`: drop the "retained evaluator archive" sentence; `docs/catalog-promotion.md`: drop "evaluators" from the list of resources that are never promoted
-- [x] 5.4 `docs/release-0.4-upgrade.md`: add an optional `pg_dump -t evaluator -t evaluator_version` step to §1, a V48 row to §4, a §6 breaking-change row (`/v1/evaluators*` → 404), and a note on the OpenAPI component rename and the `legacy_rule_id` drop due in the next release
+- [x] 5.4 `docs/release-0.23-upgrade.md`: add an optional `pg_dump -t evaluator -t evaluator_version` step to §1, a V48 row to §4, a §6 breaking-change row (`/v1/evaluators*` → 404), and a note on the OpenAPI component rename and the `legacy_rule_id` drop due in the next release
 - [x] 5.5 No `docs/configuration.md` change: the change adds and renames no property
 
 ## 6. Verification

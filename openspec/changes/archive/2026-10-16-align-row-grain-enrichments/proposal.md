@@ -77,5 +77,5 @@ the exported `request_time` as the alignment column and re-derives the layout fr
 - **Runner:** paired change — carry `__partition_v` from the scanned row to the write row; contract version
   3 → 4 on both sides, so the two deploy together (exact-match check). The runner already retries a 503 from its committed cursor.
 - **Config:** none (grace delay and chunking are constants).
-- **Docs:** `docs/release-0.4-upgrade.md` gains a note that the migration runs by itself, what it logs and
+- **Docs:** `docs/release-0.23-upgrade.md` gains a note that the migration runs by itself, what it logs and
   the ~3 expected Class-1 tick failures.

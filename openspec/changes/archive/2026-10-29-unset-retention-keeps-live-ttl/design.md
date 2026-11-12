@@ -95,4 +95,4 @@ put the payload first in a case where only the other order was provably safe.
 ## Migration Plan
 
 No migration. An upgrade with both properties unset issues no `ALTER`, whatever the tables carry. The
-release-0.4 upgrade note loses its hand-set-`TTL` warning.
+release-0.23 upgrade note loses its hand-set-`TTL` warning.
