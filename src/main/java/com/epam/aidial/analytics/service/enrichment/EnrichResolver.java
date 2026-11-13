@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.enrichment;
 
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.support.ResponseSchemaComposer;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
@@ -147,7 +148,7 @@ public class EnrichResolver {
         return schemaComposer.compose(transform.getOutputs(),
                 targetColumns != null ? targetColumns
                         : columns.findByTableNameOrderByOrdinal(pipeline.getTarget()),
-                pipeline.getTarget());
+                pipeline.getTarget(), transform.getPreset() == TransformPreset.DIAL_APP_ROUTE);
     }
 
     /**

@@ -36,6 +36,7 @@ final class Transforms {
         private final String type;
         private String model;
         private String preset;
+        private String route;
         private String requestTemplate;
         private String params;
         private String responseSchema;
@@ -54,6 +55,12 @@ final class Transforms {
 
         Builder preset(String value) {
             this.preset = value;
+            return this;
+        }
+
+        /** The application route a {@code dial_app_route} transform calls. */
+        Builder route(String value) {
+            this.route = value;
             return this;
         }
 
@@ -124,6 +131,9 @@ final class Transforms {
             }
             if (preset != null) {
                 members.add("\"preset\":\"" + preset + "\"");
+            }
+            if (route != null) {
+                members.add("\"route\":\"" + route + "\"");
             }
             if (params != null) {
                 members.add("\"params\":" + params);

@@ -47,5 +47,10 @@ public record OutputSpecBody(
         @Schema(description = "Transform applied to the model's field before it reaches the column. Omit for "
                 + "a direct lookup by name; the identity expression is refused.",
                 example = "(coding_task_type = \"none\") ? null : coding_task_type")
-        String jsonata) {
+        String jsonata,
+
+        @Schema(description = "`dial_app_route` only: JSONata over the route's response body that yields this "
+                + "field's value, which is then validated against the column. Omit for a direct lookup by name; the "
+                + "identity expression is refused.", example = "intent_counts.check")
+        String source) {
 }

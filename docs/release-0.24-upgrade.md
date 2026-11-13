@@ -3,6 +3,16 @@
 What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
 follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
+Three things make this release more than a redeploy:
+
+- a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `4` to `5`; a
+  runner on the other version is refused, so enrichment pauses until both sides match
+  ([Enrichment pipelines calling a DIAL application route](#enrichment-pipelines-calling-a-dial-application-route));
+- a **breaking response shape**: a chart's `y_field` is now an array, so a client that reads it as a string must
+  move to the array ([Multi-series charts](#multi-series-charts));
+- a **wider meaning of `*`** in read-side grant lists and row policies, which now stands for every authenticated
+  caller, so look for a stored `*` before upgrading ([The `*` grantee](#the--grantee)).
+
 ## Multi-series charts
 
 A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
@@ -53,8 +63,31 @@ Nothing changes for stored policies.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
   confines fails. Replace or delete such policies before rolling back.
 
+## Enrichment pipelines calling a DIAL application route
+
+An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
+`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
+response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
+nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
+also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
+
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
+  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
+- **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
+  in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
+  setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
+  with `409 app_route_in_use`.
+- **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
+  `route`, `request_template` and each nested output's `source`, then enable it again.
+- **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
+  sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
+  `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
+  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
+  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
+
 | Change | Effect | Action |
 |---|---|---|
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |

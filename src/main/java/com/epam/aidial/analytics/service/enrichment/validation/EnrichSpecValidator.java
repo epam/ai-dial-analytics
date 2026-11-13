@@ -14,9 +14,11 @@ import com.epam.aidial.analytics.service.enrichment.model.MemberSelect;
 import com.epam.aidial.analytics.service.enrichment.model.OutputBinding;
 import com.epam.aidial.analytics.service.enrichment.model.ReadyWhen;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
+import com.epam.aidial.analytics.service.enrichment.support.AppRoutePath;
 import com.epam.aidial.analytics.service.enrichment.support.CursorColumns;
 import com.epam.aidial.analytics.service.enrichment.support.EnrichmentTypeMapping;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFieldResolver;
@@ -32,6 +34,7 @@ import com.epam.aidial.analytics.service.pipeline.QualifiedColumnTokens;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.setting.AppRoutesSettingService;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.EnrichmentAlignment;
@@ -134,6 +137,7 @@ public class EnrichSpecValidator {
     private final PipelineSpecCodec specCodec;
     private final SensitiveGrantInvariant sensitiveGrants;
     private final RelayoutStateStore relayouts;
+    private final AppRoutesSettingService appRoutes;
 
     /**
      * Runs the gate for a populated (not yet persisted) ENRICH declaration. Throws on the first failure.
@@ -198,6 +202,9 @@ public class EnrichSpecValidator {
         // The grain key is read by every derivation and stored as the target's key, so a sensitive one is
         // copied into the target on every row, and its author must be entitled to it like any reference.
         checkEntitlement(Set.of(grainKey), entity, source, "grain key");
+        // Last on purpose: it takes the app-routes advisory lock, held until the arming write commits, so every
+        // check above runs before the lock is taken rather than while other arms and setting writes wait on it.
+        requireAllowedAppRoute(transform);
     }
 
     /**
@@ -628,6 +635,7 @@ public class EnrichSpecValidator {
                     + " transform.inputs is the part deferred to enable and preview; having a template at"
                     + " all is not");
         }
+        requireValidCallShape(transform);
         if (transform.getOutputs() == null) {
             return;
         }
@@ -649,11 +657,93 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException(what + " declares the identity jsonata '"
                         + output.getName() + "'; omit jsonata, which already means a direct lookup by name");
             }
+            requireValidOutputSource(transform, output, what);
         }
     }
 
     /**
-     * The {@code sql} shape: none of the five {@code llm}-only members, and one non-blank scalar
+     * An output's {@code source}, dispatched on {@code preset}. Under {@code dial_app_route} it is how the output
+     * reads its value from the route's response body, so it must parse, and the output's {@code jsonata} is refused:
+     * the value is produced once, by {@code source}, and validated after. Under {@code chat_completion} a
+     * {@code source} is refused, because the model's response is held to the schema by {@code response_format} and
+     * read by name. The identity expression is refused for the same reason as the identity {@code jsonata}.
+     */
+    private static void requireValidOutputSource(EnrichSpec.TransformSpec transform, TransformOutput output,
+                                                 String what) {
+        final String source = StringUtils.trimToNull(output.getSource());
+        if (transform.getPreset() != TransformPreset.DIAL_APP_ROUTE) {
+            if (source != null) {
+                throw new PipelineValidationException(what + " declares a source, which is only valid with preset"
+                        + " 'dial_app_route'; a chat_completion output is read from the model's response by name");
+            }
+            return;
+        }
+        if (StringUtils.isNotBlank(output.getJsonata())) {
+            throw new PipelineValidationException(what + " declares jsonata on a 'dial_app_route' transform; a route"
+                    + " output reads its value with source, which is then validated, so there is no second transform");
+        }
+        if (source == null) {
+            return;
+        }
+        if (output.getName().equals(source)) {
+            throw new PipelineValidationException(what + " declares the identity source '" + output.getName()
+                    + "'; omit source, which already means a direct lookup by name");
+        }
+        try {
+            Jsonata.jsonata(source);
+        } catch (RuntimeException ex) {
+            throw new PipelineValidationException("JSONata for " + what + " source does not parse: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Refuses an app-route transform whose {@code (model, route)} pair the {@code app-routes} instance setting does
+     * not list. Runs at the gated requests only, like every other refusal here, so a disabled draft is stored
+     * before an administrator allows its route. The setting's own write refuses to drop a pair an enabled pipeline
+     * uses, so this check and that guard together keep every enabled route pipeline allowed.
+     */
+    private void requireAllowedAppRoute(EnrichSpec.TransformSpec transform) {
+        if (transform.getPreset() == TransformPreset.DIAL_APP_ROUTE
+                && !appRoutes.allows(transform.getModel(), transform.getRoute())) {
+            throw new PipelineValidationException("the route (" + transform.getModel() + ", " + transform.getRoute()
+                    + ") is not listed in the 'app-routes' instance setting; an administrator allows it with"
+                    + " PUT /v1/settings/app-routes before the pipeline can be enabled");
+        }
+    }
+
+    /**
+     * A route transform declares {@code outputs}. The legacy {@code output_vars} compose no schema and skip the
+     * per-output {@code source} checks, so a route armed on them would serve no {@code response_schema}.
+     */
+    private static void requireRouteOutputs(EnrichSpec.TransformSpec transform) {
+        if (transform.getOutputVars() != null && !transform.getOutputVars().isEmpty()) {
+            throw new PipelineValidationException("preset 'dial_app_route' requires 'outputs'; the legacy 'output_vars'"
+                    + " compose no response schema, so the route's response would be validated against nothing");
+        }
+    }
+
+    /**
+     * The members that say how the deployment is called, dispatched on {@code preset}. Under {@code dial_app_route} a
+     * {@code route} is required and must satisfy {@link AppRoutePath}; under {@code chat_completion} it is refused,
+     * because a chat call has no route to name.
+     */
+    private static void requireValidCallShape(EnrichSpec.TransformSpec transform) {
+        if (transform.getPreset() == TransformPreset.DIAL_APP_ROUTE) {
+            AppRoutePath.problem(transform.getRoute()).ifPresent(problem -> {
+                throw new PipelineValidationException("transform.route " + problem
+                        + " for preset 'dial_app_route'; it is the path called under /v1/deployments/{model}/route/");
+            });
+            requireRouteOutputs(transform);
+            return;
+        }
+        if (transform.getRoute() != null) {
+            throw new PipelineValidationException("transform.route is only valid with preset 'dial_app_route'; a"
+                    + " chat_completion call has no route to name");
+        }
+    }
+
+    /**
+     * The {@code sql} shape: none of the {@code llm}-only members, and one non-blank scalar
      * expression per authored output.
      *
      * <p>The non-blank expression check is kept exactly as it was, and deliberately does <b>not</b> follow
@@ -664,6 +754,7 @@ public class EnrichSpecValidator {
     private static void requireValidSqlShape(EnrichSpec.TransformSpec transform) {
         rejectLlmOnlyField("preset", transform.getPreset() != null);
         rejectLlmOnlyField("model", StringUtils.isNotBlank(transform.getModel()));
+        rejectLlmOnlyField("route", transform.getRoute() != null);
         // params shape the preset's request, so they are as LLM-only as the preset itself.
         rejectLlmOnlyField("params",
                 transform.getParams() != null && !transform.getParams().isEmpty());
@@ -684,6 +775,7 @@ public class EnrichSpecValidator {
             // "you sent an object" and "your expression is blank" are two messages instead of one.
             if (StringUtils.isNotBlank(output.getProse())
                     || StringUtils.isNotBlank(output.getJsonata())
+                    || StringUtils.isNotBlank(output.getSource())
                     || (output.getValues() != null && !output.getValues().isEmpty())) {
                 throw new PipelineValidationException(what + " is an object on a sql transform; a sql"
                         + " output is the expression itself, as a bare string");

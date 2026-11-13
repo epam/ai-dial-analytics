@@ -4,6 +4,8 @@ import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import tools.jackson.databind.JsonNode;
 
 import java.io.InputStream;
@@ -143,7 +145,7 @@ class TemplatePlaceholderRuleTest {
                 .hasMessageContaining("{{requeest}}")
                 // The reason it matters: the renderer replaces only keys present in the inputs map, so an
                 // unmatched placeholder survives into the prompt verbatim rather than rendering empty.
-                .hasMessageContaining("left in the prompt");
+                .hasMessageContaining("fails every unit");
     }
 
     @Test
@@ -201,6 +203,71 @@ class TemplatePlaceholderRuleTest {
         assertThatCode(() -> TemplatePlaceholderRule.validate(null, Set.of("request"), TriggerKind.SCHEDULE))
                 .doesNotThrowAnyException();
         assertThatCode(() -> TemplatePlaceholderRule.validate("  ", Set.of("request"), TriggerKind.SCHEDULE))
+                .doesNotThrowAnyException();
+    }
+
+    // --- the raw-JSON suffix ----------------------------------------------------------------------------------
+
+    @Test
+    void rawMembersPlaceholderSatisfiesTheGroupRule() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"members\": {{members:json}}}", GROUP_VARS, TriggerKind.GROUP))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rawRowPlaceholderCountsAsUseOfItsInput() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"input\": {{body:json}}}", Set.of("body"), TriggerKind.SCHEDULE))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rawRowPlaceholderBindingNothingIsRefused() {
+        assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                "{\"input\": {{missing:json}}}", Set.of(), TriggerKind.SCHEDULE))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("missing");
+    }
+
+    @Test
+    void unknownSuffixIsRefusedNamingThePlaceholder() {
+        assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                "{\"members\": {{members:yaml}}}", GROUP_VARS, TriggerKind.GROUP))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("members:yaml");
+    }
+
+    @Test
+    void suffixedPlaceholderContributesItsName() {
+        assertThat(TemplatePlaceholderRule.placeholdersOf("{{a}} {{b:json}} {{ c:json }}"))
+                .containsExactly("a", "b", "c");
+    }
+
+    /** A token the placeholder grammar does not read binds to nothing in the runner, so it is refused at both grains. */
+    @ParameterizedTest
+    @ValueSource(strings = {"{{a:b:json}}", "{{members :json}}", "{{a-b}}", "{{}}", "{{ }}", "{{\"x\": 1}}"})
+    void malformedTokenIsRefusedNamingIt(String token) {
+        for (TriggerKind kind : List.of(TriggerKind.GROUP, TriggerKind.SCHEDULE)) {
+            assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                    "{{members}} " + token, Set.of("members"), kind))
+                    .isInstanceOf(PipelineValidationException.class)
+                    .hasMessageContaining(token)
+                    .hasMessageContaining("is not a placeholder");
+        }
+    }
+
+    @Test
+    void whitespaceAroundWellFormedTokenIsNotMalformed() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{{ members }} {{ members_notice }} {{  members:json  }}", GROUP_VARS, TriggerKind.GROUP))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void bracesThatFormNoTokenAreLeftAlone() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"a\": {\"b\": {{body:json}}}} {{ unclosed", Set.of("body"), TriggerKind.SCHEDULE))
                 .doesNotThrowAnyException();
     }
 }
