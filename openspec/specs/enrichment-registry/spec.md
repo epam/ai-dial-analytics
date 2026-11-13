@@ -2022,7 +2022,8 @@ column stays required and non-null. The strict-mode argument does not apply here
 `response_format` is sent and nothing holds the application to the schema. The runner validates only the
 object it assembled from the outputs' sources, and the column is what says whether NULL can be stored. A
 field the application omits is therefore written as NULL where the column allows it, and refused where it
-does not.
+does not. It follows that when every output is bound to a nullable column, a `200` answer of `{}` validates
+and is written as an all-NULL row recorded as done.
 
 Composing the enum domain **from the column** SHALL be preferred to declaring it on the output,
 and the consequence SHALL be accepted rather than worked around: enum **order** in the prompt is then
@@ -2090,7 +2091,7 @@ schema produced them.
 
 #### Scenario: Every declared output is required
 
-- **WHEN** a `transform` declares an output bound to a nullable target column
+- **WHEN** a `chat_completion` transform declares an output bound to a nullable target column
 - **THEN** the composed schema lists that property in `required`, and `additionalProperties` is
   `false`
 
@@ -3178,9 +3179,8 @@ A route violating any of these SHALL be rejected with HTTP 422 `pipeline_validat
 `transform.route`.
 
 At the same moments, a `dial_app_route` transform SHALL be refused with HTTP 422 `pipeline_validation_failed`
-when it carries the legacy `output_vars` or a stored `response_schema`. A route's schema is composed from
-`outputs` and follows column nullability, and either legacy shape would bypass that: `output_vars` compose no
-schema, and a stored `response_schema` wins over composition. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
+when it carries the legacy `output_vars`. They compose no schema and skip the per-output `source` checks, so
+such a route would be armed with no `response_schema` served. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
 Core matches against the application's own route configuration, and ADAS SHALL NOT normalize it.
 
 #### Scenario: A nested route is accepted
@@ -3207,12 +3207,10 @@ Core matches against the application's own route configuration, and ADAS SHALL N
 - **WHEN** an armed declaration carries a 257-character `route` of valid segment characters
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
 
-#### Scenario: A route transform in a legacy output shape is rejected
+#### Scenario: A route transform in the legacy output shape is rejected
 
-- **WHEN** an armed `dial_app_route` declaration carries a stored `response_schema`, or `output_vars` in place
-  of `outputs`
-- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `response_schema` or
-  `output_vars`
+- **WHEN** an armed `dial_app_route` declaration carries `output_vars` in place of `outputs`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `output_vars`
 
 ### Requirement: An app-route pipeline is armed only for an allowed route
 
@@ -3287,8 +3285,8 @@ the part before the suffix, unchanged in every other respect:
 - the other built-in member variables accept the suffix too.
 
 A placeholder carrying any other `:suffix` SHALL be refused at the same moments as that rule, with HTTP
-422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing and
-reach the model as literal text.
+422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing, and the
+runner would fail every unit it renders.
 
 Every `{{...}}` token SHALL be a placeholder. The runner's renderer reads every match of `\{\{([^{}]*)}}` as
 one, trims it, and fails the unit when no variable binds it, so a token outside the grammar would fail every

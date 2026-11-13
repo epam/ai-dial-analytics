@@ -60,7 +60,7 @@ public final class TemplatePlaceholderRule {
      * name is the trimmed token, so a template written {@code {{ members }}} is read as the same variable rather
      * than as an unknown one — the renderer substitutes on the key, and refusing a spacing variant here would
      * refuse a template that renders correctly. The suffix is captured separately so the rules below judge the
-     * name alone, and so a suffix other than {@link #JSON_SUFFIX} can be refused rather than left in the prompt.
+     * name alone, and so a suffix other than {@link #JSON_SUFFIX} can be refused before the runner fails on it.
      */
     private static final Pattern PLACEHOLDER =
             Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)(?::([A-Za-z0-9_]*))?\\s*}}");
@@ -183,7 +183,7 @@ public final class TemplatePlaceholderRule {
 
     /**
      * Refuses a placeholder whose suffix is not {@link #JSON_SUFFIX}. Read as a name, {@code {{members:yaml}}} binds
-     * to nothing and would reach the model as literal text.
+     * to nothing, and the runner would fail every unit it renders.
      */
     private static void requireKnownSuffixes(String template) {
         final Matcher matcher = PLACEHOLDER.matcher(template);

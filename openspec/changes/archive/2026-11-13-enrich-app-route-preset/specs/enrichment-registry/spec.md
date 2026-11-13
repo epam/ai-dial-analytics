@@ -616,7 +616,7 @@ schema produced them.
 
 #### Scenario: Every declared output is required
 
-- **WHEN** a `transform` declares an output bound to a nullable target column
+- **WHEN** a `chat_completion` transform declares an output bound to a nullable target column
 - **THEN** the composed schema lists that property in `required`, and `additionalProperties` is
   `false`
 
@@ -778,8 +778,8 @@ the part before the suffix, unchanged in every other respect:
 - the other built-in member variables accept the suffix too.
 
 A placeholder carrying any other `:suffix` SHALL be refused at the same moments as that rule, with HTTP
-422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing and
-reach the model as literal text.
+422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing, and the
+runner would fail every unit it renders.
 
 Every `{{...}}` token SHALL be a placeholder. The runner's renderer reads every match of `\{\{([^{}]*)}}` as
 one, trims it, and fails the unit when no variable binds it, so a token outside the grammar would fail every

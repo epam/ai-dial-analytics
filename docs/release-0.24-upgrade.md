@@ -79,21 +79,15 @@ also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped
   with `409 app_route_in_use`.
 - **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
   `route`, `request_template` and each nested output's `source`, then enable it again.
-- **Templates with a stray `{{...}}` token.** The contract-5 runner reads every `{{...}}` token as a
-  placeholder and fails each unit where nothing binds it, so a token outside `{{name}}` / `{{name:json}}` (a
-  pasted JSON sample such as `{{"label": "x"}}`, or `{{ user.name }}`) is now refused when a pipeline is armed
-  or previewed. Before upgrading, run `POST /v1/pipelines/{name}/preview` on each enabled `llm` pipeline: an
-  affected one answers `422 pipeline_validation_failed` naming the token. Rewrite the template so it carries no
-  `{{`, then patch it.
 - **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
   sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
   `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
-  back together. For the same reason, create no route pipeline until every ADAS pod runs 0.24. The migration
-  that admits the setting name stays applied and is harmless to an older build.
+  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
+  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
 
 | Change | Effect | Action |
 |---|---|---|
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; preview enabled `llm` pipelines for stray `{{...}}` tokens; before a rollback, re-declare or delete route pipelines |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |

@@ -712,17 +712,13 @@ public class EnrichSpecValidator {
     }
 
     /**
-     * A route's schema is composed from {@code outputs} and follows column nullability, and either legacy shape would
-     * bypass that: a stored {@code response_schema} wins over composition, and {@code output_vars} compose nothing.
+     * A route transform declares {@code outputs}. The legacy {@code output_vars} compose no schema and skip the
+     * per-output {@code source} checks, so a route armed on them would serve no {@code response_schema}.
      */
-    private static void requireComposedRouteSchema(EnrichSpec.TransformSpec transform) {
+    private static void requireRouteOutputs(EnrichSpec.TransformSpec transform) {
         if (transform.getOutputVars() != null && !transform.getOutputVars().isEmpty()) {
             throw new PipelineValidationException("preset 'dial_app_route' requires 'outputs'; the legacy 'output_vars'"
                     + " compose no response schema, so the route's response would be validated against nothing");
-        }
-        if (transform.getResponseSchema() != null) {
-            throw new PipelineValidationException("preset 'dial_app_route' does not take a stored 'response_schema';"
-                    + " a route's schema is composed from 'outputs' and the target columns' nullability");
         }
     }
 
@@ -737,7 +733,7 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException("transform.route " + problem
                         + " for preset 'dial_app_route'; it is the path called under /v1/deployments/{model}/route/");
             });
-            requireComposedRouteSchema(transform);
+            requireRouteOutputs(transform);
             return;
         }
         if (transform.getRoute() != null) {

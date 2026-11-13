@@ -144,7 +144,7 @@ not.
 The suffix is explicit, chosen over inferring "value position" from where the placeholder sits in the
 template. Inference would need a JSON-aware scanner over a template that is not valid JSON before
 rendering, in two repositories that must agree byte for byte. ADAS validates the name before the suffix
-exactly as today, and refuses any other suffix so a typo is not left in the prompt literally. The
+exactly as today, and refuses any other suffix, because the runner binds nothing to it and would fail every unit. The
 `TemplatePlaceholderRule` pattern gains an optional `(:json)?` group. The runner's renderer gains the
 matching branch.
 
@@ -188,7 +188,9 @@ constant is raised.
   2. Disable the pipeline.
   3. Patch `preset`, `route` and `request_template`.
   4. Enable it.
-- Rollback: disable every `dial_app_route` pipeline, then roll both services back together.
+- Rollback: an older build cannot read a stored `preset: dial_app_route`, disabled or not, so delete every route
+  pipeline or patch it back to `chat_completion` first, then roll both services back together. For the same
+  reason, store no route pipeline, draft included, until every ADAS pod runs this build.
 
 ## Open Questions
 

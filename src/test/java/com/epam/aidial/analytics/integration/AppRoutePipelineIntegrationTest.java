@@ -183,14 +183,8 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
     }
 
     @Test
-    void routeTransformWithLegacyOutputVarsOrStoredResponseSchemaIsRefused() throws Exception {
+    void routeTransformWithLegacyOutputVarsIsRefused() throws Exception {
         allowInsights();
-        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
-                        route("insights").responseSchema("{\"type\":\"object\"}"), true)))
-                .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
-                .andExpect(jsonPath("$.message").value(containsString("response_schema")));
-
         mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(route("insights"), false)))
                 .andExpect(status().isCreated());
         final Transforms.Builder legacy = Transforms.llm().model("insights-app").preset("dial_app_route")
