@@ -154,7 +154,6 @@ public class EnrichSpecValidator {
 
         String source = requireReadSource(declaration, target, grainKey);
         requireAlignableWriter(declaration, target, transform, source);
-        requireAllowedAppRoute(transform);
         // Every reference below resolves against the read source's ENTITY — its own columns under either
         // spelling, plus each ACTIVE enrichment's under the qualified flat name. Resolved once and threaded,
         // so no two checks can disagree about what a name means, and so the enrichments a declaration
@@ -203,6 +202,9 @@ public class EnrichSpecValidator {
         // The grain key is read by every derivation and stored as the target's key, so a sensitive one is
         // copied into the target on every row, and its author must be entitled to it like any reference.
         checkEntitlement(Set.of(grainKey), entity, source, "grain key");
+        // Last on purpose: it takes the app-routes advisory lock, held until the arming write commits, so every
+        // check above runs before the lock is taken rather than while other arms and setting writes wait on it.
+        requireAllowedAppRoute(transform);
     }
 
     /**
@@ -710,6 +712,21 @@ public class EnrichSpecValidator {
     }
 
     /**
+     * A route's schema is composed from {@code outputs} and follows column nullability, and either legacy shape would
+     * bypass that: a stored {@code response_schema} wins over composition, and {@code output_vars} compose nothing.
+     */
+    private static void requireComposedRouteSchema(EnrichSpec.TransformSpec transform) {
+        if (transform.getOutputVars() != null && !transform.getOutputVars().isEmpty()) {
+            throw new PipelineValidationException("preset 'dial_app_route' requires 'outputs'; the legacy 'output_vars'"
+                    + " compose no response schema, so the route's response would be validated against nothing");
+        }
+        if (transform.getResponseSchema() != null) {
+            throw new PipelineValidationException("preset 'dial_app_route' does not take a stored 'response_schema';"
+                    + " a route's schema is composed from 'outputs' and the target columns' nullability");
+        }
+    }
+
+    /**
      * The members that say how the deployment is called, dispatched on {@code preset}. Under {@code dial_app_route} a
      * {@code route} is required and must satisfy {@link AppRoutePath}; under {@code chat_completion} it is refused,
      * because a chat call has no route to name.
@@ -720,6 +737,7 @@ public class EnrichSpecValidator {
                 throw new PipelineValidationException("transform.route " + problem
                         + " for preset 'dial_app_route'; it is the path called under /v1/deployments/{model}/route/");
             });
+            requireComposedRouteSchema(transform);
             return;
         }
         if (transform.getRoute() != null) {

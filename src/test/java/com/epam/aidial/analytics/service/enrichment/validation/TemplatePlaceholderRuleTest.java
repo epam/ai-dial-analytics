@@ -145,7 +145,7 @@ class TemplatePlaceholderRuleTest {
                 .hasMessageContaining("{{requeest}}")
                 // The reason it matters: the renderer replaces only keys present in the inputs map, so an
                 // unmatched placeholder survives into the prompt verbatim rather than rendering empty.
-                .hasMessageContaining("left in the prompt");
+                .hasMessageContaining("fails every unit");
     }
 
     @Test

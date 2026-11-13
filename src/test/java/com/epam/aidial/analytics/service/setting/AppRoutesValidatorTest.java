@@ -26,7 +26,16 @@ class AppRoutesValidatorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"insights-app", "team/insights-app", "insights_app.v2", "Insights-App"})
+    @ValueSource(strings = {"a/../../x", "..", ".", "team/./insights-app", "team//insights-app", "/insights-app",
+        "insights-app/", "team\\insights-app", "insights​app"})
+    void deploymentThatCouldLeaveTheDeploymentsPathOrLookLikeAnotherIsRefused(String deployment) {
+        assertThatThrownBy(() -> AppRoutesValidator.validate(one(deployment)))
+                .isInstanceOf(SettingValidationException.class)
+                .hasMessageContaining("routes[0].deployment");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"insights-app", "team/insights-app", "insights_app.v2", "Insights-App", "a..b"})
     void deploymentIdsDialAcceptsAreAllowedSlashIncluded(String deployment) {
         assertThatCode(() -> AppRoutesValidator.validate(one(deployment))).doesNotThrowAnyException();
     }

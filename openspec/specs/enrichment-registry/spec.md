@@ -2212,8 +2212,8 @@ it is a top-level placeholder, and at group grain it is a field of each member o
 - **Row grain** (`schedule`): every `{{placeholder}}` in the template SHALL be a `transform.inputs`
   key, and every `transform.inputs` key SHALL appear as a placeholder. There SHALL be **no** built-in placeholders
   at row grain — the render inputs are exactly the declared bindings. Both directions SHALL be
-  enforced with HTTP 422 `pipeline_validation_failed` naming the offending name: an unmatched
-  placeholder is left in the prompt **literally** rather than rendered empty, and an unused `transform.inputs` key
+  enforced with HTTP 422 `pipeline_validation_failed` naming the offending name: the runner binds nothing to an
+  unmatched placeholder and fails every unit it renders, and an unused `transform.inputs` key
   projects a column, possibly a heavy one, for nothing. A placeholder the declaration **does** bind
   SHALL be accepted whatever it is called, the member-variable names included: nothing supplies those
   at row grain, so their names reserve nothing there, and the refusal below tells an author to bind a
@@ -2231,8 +2231,7 @@ two-repo change rather than a valid template that fails registration. A list sho
 refuse a template that renders correctly.
 
 The already-enabled case is not a courtesy: a declaration patch to an enabled pipeline reaches the feed
-at the next sync, so a template patched against inputs that do not bind would be rendered with literal
-`{{placeholder}}` text and charged for. "Armed" in this requirement therefore means the pipeline's state
+at the next sync, so a template patched against inputs that do not bind would fail every unit it renders. "Armed" in this requirement therefore means the pipeline's state
 after the write, not the act of flipping the flag.
 
 The check SHALL **not** run on a declaration write that leaves the pipeline disabled. A declaration is
@@ -3176,7 +3175,12 @@ admits a pipeline. A route SHALL:
   cannot reach the URL by a second spelling.
 
 A route violating any of these SHALL be rejected with HTTP 422 `pipeline_validation_failed` naming
-`transform.route`. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
+`transform.route`.
+
+At the same moments, a `dial_app_route` transform SHALL be refused with HTTP 422 `pipeline_validation_failed`
+when it carries the legacy `output_vars` or a stored `response_schema`. A route's schema is composed from
+`outputs` and follows column nullability, and either legacy shape would bypass that: `output_vars` compose no
+schema, and a stored `response_schema` wins over composition. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
 Core matches against the application's own route configuration, and ADAS SHALL NOT normalize it.
 
 #### Scenario: A nested route is accepted
@@ -3202,6 +3206,13 @@ Core matches against the application's own route configuration, and ADAS SHALL N
 
 - **WHEN** an armed declaration carries a 257-character `route` of valid segment characters
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
+
+#### Scenario: A route transform in a legacy output shape is rejected
+
+- **WHEN** an armed `dial_app_route` declaration carries a stored `response_schema`, or `output_vars` in place
+  of `outputs`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `response_schema` or
+  `output_vars`
 
 ### Requirement: An app-route pipeline is armed only for an allowed route
 

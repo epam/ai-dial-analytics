@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.setting;
 
 import com.epam.aidial.analytics.exception.AppRouteInUseException;
+import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.SettingNotFoundException;
 import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
@@ -10,6 +11,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -33,6 +35,7 @@ import java.util.Optional;
  * two, so neither check can pass against the other's old state. Because the invariant always holds, the data plane
  * and the runner do not re-check it.
  */
+@Slf4j
 @Service
 public class AppRoutesSettingService {
 
@@ -121,9 +124,7 @@ public class AppRoutesSettingService {
     private void requireNoEnabledPipelineLosesItsRoute(AppRoutesSetting setting) {
         final List<String> losing = new ArrayList<>();
         for (PipelineEntity pipeline : pipelines.list(null, PipelineKind.ENRICH, true, null)) {
-            final EnrichSpec.TransformSpec transform = Optional.ofNullable(specCodec.readEnrich(pipeline))
-                    .map(EnrichSpec::getTransform)
-                    .orElse(null);
+            final EnrichSpec.TransformSpec transform = routeTransformOf(pipeline);
             if (transform == null || transform.getPreset() != TransformPreset.DIAL_APP_ROUTE) {
                 continue;
             }
@@ -134,6 +135,21 @@ public class AppRoutesSettingService {
         if (!losing.isEmpty()) {
             throw new AppRouteInUseException("the new '" + NAME + "' setting drops a route that an enabled pipeline"
                     + " calls: " + String.join(", ", losing) + "; disable the pipeline first");
+        }
+    }
+
+    /**
+     * The pipeline's transform, or null when its stored declaration cannot be read. Every enabled enrich pipeline is
+     * read here, chat and sql ones included, so one drifted row must not block every allowlist edit. Skipping it is
+     * safe for the invariant: the runner's sync feed cannot serve a declaration ADAS cannot read, so it calls no route.
+     */
+    private EnrichSpec.TransformSpec routeTransformOf(PipelineEntity pipeline) {
+        try {
+            return Optional.ofNullable(specCodec.readEnrich(pipeline)).map(EnrichSpec::getTransform).orElse(null);
+        } catch (IllegalStateException | PipelineValidationException ex) {
+            log.warn("pipeline '{}' is skipped by the app-routes in-use check: its declaration is unreadable: {}",
+                    pipeline.getName(), ex.getMessage());
+            return null;
         }
     }
 

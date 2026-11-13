@@ -116,11 +116,12 @@ public class ResponseSchemaComposer {
         }
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put(TYPE, OBJECT);
-        // `required` is not a choice and cannot become one: strict mode requires every property to be
-        // required, so there is no optional-output shape to express. Column nullability would have been the
-        // wrong source anyway — an enrichment column is nullable because a row may not be labelled yet,
-        // while a schema field is required because the model must answer. A field that may legitimately be
-        // absent is spelled as a sentinel value plus a jsonata mapping it to NULL.
+        // For a chat_completion transform `required` is not a choice and cannot become one: strict mode requires
+        // every property to be required, so there is no optional-output shape to express. Column nullability
+        // would have been the wrong source there anyway — an enrichment column is nullable because a row may not
+        // be labelled yet, while a schema field is required because the model must answer. A field that may
+        // legitimately be absent is spelled as a sentinel value plus a jsonata mapping it to NULL. A route
+        // transform (nullableFromColumn) is the exception described on this method.
         schema.put("required", required);
         schema.put("properties", properties);
         schema.put("additionalProperties", false);

@@ -130,8 +130,9 @@ public final class TemplatePlaceholderRule {
      * <b>no</b> built-ins — the row-grain render supplies only the declared bindings.
      *
      * <p>The placeholder direction matters for a sharper reason than a typo rendering blank: the runner's
-     * renderer replaces only keys <em>present in the inputs map</em>, so an unmatched {@code {{requeest}}}
-     * is left in the prompt <b>literally</b>. (Empty is what a bound var with a null value renders as.)
+     * renderer reads every {@code {{...}}} token as a placeholder and fails the unit when no input binds it, so
+     * an unmatched {@code {{requeest}}} would fail every unit the pipeline renders. (Empty is what a bound var
+     * with a null value renders as.)
      * The reverse direction catches a var that projects a column — possibly a heavy one — for nothing.
      *
      * <p>A declared var <b>wins over the built-in name</b>, and the order of the two checks below is what
@@ -151,8 +152,8 @@ public final class TemplatePlaceholderRule {
                         + " only the declared vars; use a group trigger, or bind a var of that name");
             }
             throw new PipelineValidationException("request_template references '{{" + placeholder
-                    + "}}', which no var declares; an unmatched placeholder is left in the prompt"
-                    + " literally rather than rendered empty, so declare the var or fix the spelling");
+                    + "}}', which no var declares; the runner binds nothing to it and fails every unit it"
+                    + " renders, so declare the var or fix the spelling");
         }
         for (final String var : varNames) {
             if (!placeholders.contains(var)) {

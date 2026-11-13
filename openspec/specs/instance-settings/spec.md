@@ -305,9 +305,14 @@ nothing and leaving any previously stored value unchanged, when:
 - `routes` is missing or `null`;
 - it lists more than 100 pairs;
 - an entry's `deployment` is missing or blank, or longer than 256 characters;
-- an entry's `deployment` carries whitespace, a control character, `?`, `#` or `%`. No DIAL deployment id
-  carries one, so a pair naming such an id could never match a declaration's call. A `/` SHALL be
-  accepted, because DIAL application ids may contain one;
+- an entry's `deployment` carries whitespace, a control or format character, `\`, `?`, `#` or `%`. No DIAL
+  deployment id carries one, so a pair naming such an id could never match a declaration's call, and a format
+  character would make two entries look identical. A `/` SHALL be accepted, because DIAL application ids may
+  contain one;
+- an entry's `deployment` starts or ends with `/`, or has an empty, `.` or `..` segment between them. A
+  declaration's `model` has no grammar beyond equalling a listed pair, so this is the only guard on the
+  deployment half of `/v1/deployments/{model}/route/{route}`, which a normalizing client or proxy would
+  otherwise resolve out of `/v1/deployments/`;
 - an entry's `route` is missing, or violates the route grammar of "A transform may call a DIAL application
   route" (see [enrichment-registry](../enrichment-registry/spec.md)). One grammar serves both writes, so a
   pair the setting accepts is a pair a declaration can name;
@@ -326,6 +331,13 @@ allows a call that DIAL then answers with its own error.
 #### Scenario: A deployment carrying a URL delimiter or whitespace is refused
 
 - **WHEN** `PUT /v1/settings/app-routes` lists the deployment `"insights app"` or `"insights-app?x=1"`
+- **THEN** the response is `422` with error code `validation_error` naming `routes[0].deployment`, and
+  nothing is stored
+
+#### Scenario: A deployment that could leave the deployments path is refused
+
+- **WHEN** `PUT /v1/settings/app-routes` lists the deployment `"a/../../x"`, `"team//insights-app"`,
+  `"/insights-app"` or `"team\\insights-app"`
 - **THEN** the response is `422` with error code `validation_error` naming `routes[0].deployment`, and
   nothing is stored
 
@@ -379,6 +391,11 @@ name every such pipeline with its pair. A disabled pipeline SHALL NOT block the 
 again when it is armed, so dropping the pair leaves it as a draft that cannot be enabled, rather than as a
 running pipeline calling a route nobody allowed.
 
+An enabled pipeline whose stored declaration this build cannot read SHALL be skipped by the check and logged,
+not fail the write. The check reads every enabled enrich pipeline, so one drifted row would otherwise block
+every allowlist edit. The runner's sync feed cannot serve a declaration ADAS cannot read, so a skipped
+pipeline calls no route.
+
 This guard, with the arm gate, is what keeps "every enabled route pipeline's pair is allowed" true at all
 times. It is why neither the data plane nor the runner re-checks the setting. The setting write and an arming pipeline write SHALL be serialized against each
 other, so the two checks cannot each pass against the other's old state. One transaction SHALL NOT enable a pipeline on a pair while
@@ -390,6 +407,12 @@ another drops that pair.
 - **WHEN** `PUT /v1/settings/app-routes` writes `{"routes":[]}`
 - **THEN** the response is `409` with error code `app_route_in_use` naming `insights-enrich`, and the stored
   setting is unchanged
+
+#### Scenario: An unreadable declaration does not block the write
+
+- **GIVEN** an enabled enrich pipeline whose stored declaration this build cannot read
+- **WHEN** `PUT /v1/settings/app-routes` is sent
+- **THEN** the write is judged on the remaining pipelines, and the skipped one is logged
 
 #### Scenario: Disabling the pipeline first lets the pair be dropped
 

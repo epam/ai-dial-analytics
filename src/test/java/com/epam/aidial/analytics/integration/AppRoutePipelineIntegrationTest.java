@@ -183,6 +183,25 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
     }
 
     @Test
+    void routeTransformWithLegacyOutputVarsOrStoredResponseSchemaIsRefused() throws Exception {
+        allowInsights();
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
+                        route("insights").responseSchema("{\"type\":\"object\"}"), true)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString("response_schema")));
+
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(route("insights"), false)))
+                .andExpect(status().isCreated());
+        final Transforms.Builder legacy = Transforms.llm().model("insights-app").preset("dial_app_route")
+                .route("insights").outputVars("[{\"name\":\"tox_score\",\"type\":\"integer\"}]");
+        mockMvc.perform(patch("/v1/pipelines/" + PIPELINE).contentType(JSON).content(body(legacy, true)))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(containsString("output_vars")));
+    }
+
+    @Test
     void unparseableOrIdentityOutputSourceIsRefused() throws Exception {
         allowInsights();
         for (String source : List.of("{title: ", "tox_score")) {
@@ -303,6 +322,21 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
         mockMvc.perform(patch("/v1/pipelines/" + PIPELINE).contentType(JSON).content("{\"enabled\":true}"))
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("pipeline_validation_failed"));
+    }
+
+    /** A stored declaration this build cannot read is skipped by the in-use check rather than failing every PUT. */
+    @Test
+    void unreadableEnabledDeclarationDoesNotBlockSettingWrites() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(
+                        Transforms.llm().output("tox_score", "How toxic the text is, 0-100."), true)))
+                .andExpect(status().isCreated());
+        jdbc.update("UPDATE pipeline SET spec = CAST(? AS jsonb) WHERE name = ?",
+                "{\"transform\":{\"type\":\"llm\",\"preset\":\"not_a_preset\"}}", PIPELINE);
+        try {
+            mockMvc.perform(put(SETTING).contentType(JSON).content(ALLOW_INSIGHTS)).andExpect(status().isOk());
+        } finally {
+            jdbc.update("DELETE FROM pipeline WHERE name = ?", PIPELINE);
+        }
     }
 
     /**
