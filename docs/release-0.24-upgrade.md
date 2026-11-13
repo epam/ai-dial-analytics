@@ -3,6 +3,16 @@
 What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
 follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
+Three things make this release more than a redeploy:
+
+- a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `4` to `5`; a
+  runner on the other version is refused, so enrichment pauses until both sides match
+  ([Enrichment pipelines calling a DIAL application route](#enrichment-pipelines-calling-a-dial-application-route));
+- a **breaking response shape**: a chart's `y_field` is now an array, so a client that reads it as a string must
+  move to the array ([Multi-series charts](#multi-series-charts));
+- a **wider meaning of `*`** in read-side grant lists and row policies, which now stands for every authenticated
+  caller, so look for a stored `*` before upgrading ([The `*` grantee](#the--grantee)).
+
 ## Multi-series charts
 
 A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
