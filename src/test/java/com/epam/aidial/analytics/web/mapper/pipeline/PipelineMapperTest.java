@@ -31,6 +31,7 @@ import com.epam.aidial.analytics.web.dto.pipeline.PipelineRequests.TruncRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.function.Supplier;
@@ -244,6 +245,26 @@ class PipelineMapperTest {
         // The read-side accessors are unaffected: they resolve a null transform through the detached
         // empty instance, so nothing downstream has to test for one.
         assertThat(spec.getInputBindings()).isEmpty();
+    }
+
+    @Test
+    void blankRouteIsStoredAsAbsentAndAnAuthoredOneAsWritten() {
+        for (String blank : Arrays.asList(null, "", "   ")) {
+            assertThat(((EnrichSpec) mapper.toRegistration(enrichWithRoute(blank)).spec()).getTransform().getRoute())
+                    .isNull();
+        }
+        assertThat(((EnrichSpec) mapper.toRegistration(enrichWithRoute("v1/Insights")).spec()).getTransform()
+                .getRoute()).isEqualTo("v1/Insights");
+    }
+
+    private static CreatePipelineRequest enrichWithRoute(String route) {
+        final LinkedHashMap<String, OutputSpec> outputs = new LinkedHashMap<>();
+        outputs.put("verdict", new OutputSpec("Whether the text is toxic.", null));
+        final CreateTransformRequest transform = new CreateTransformRequest(TransformType.LLM,
+                TransformPreset.DIAL_APP_ROUTE, "insights-app", route, null, "{\"text\": \"{{text}}\"}",
+                vars("text", "request_body"), outputs, null);
+        return new CreatePipelineRequest("toxicity-live", PipelineKind.ENRICH, "usage_toxicity", null, null,
+                null, null, null, schedule(), transform, null, false);
     }
 
     @Test

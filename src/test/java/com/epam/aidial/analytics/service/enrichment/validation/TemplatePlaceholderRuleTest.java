@@ -4,6 +4,8 @@ import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import tools.jackson.databind.JsonNode;
 
 import java.io.InputStream;
@@ -240,5 +242,32 @@ class TemplatePlaceholderRuleTest {
     void suffixedPlaceholderContributesItsName() {
         assertThat(TemplatePlaceholderRule.placeholdersOf("{{a}} {{b:json}} {{ c:json }}"))
                 .containsExactly("a", "b", "c");
+    }
+
+    /** A token the placeholder grammar does not read binds to nothing in the runner, so it is refused at both grains. */
+    @ParameterizedTest
+    @ValueSource(strings = {"{{a:b:json}}", "{{members :json}}", "{{a-b}}", "{{}}", "{{ }}", "{{\"x\": 1}}"})
+    void malformedTokenIsRefusedNamingIt(String token) {
+        for (TriggerKind kind : List.of(TriggerKind.GROUP, TriggerKind.SCHEDULE)) {
+            assertThatThrownBy(() -> TemplatePlaceholderRule.validate(
+                    "{{members}} " + token, Set.of("members"), kind))
+                    .isInstanceOf(PipelineValidationException.class)
+                    .hasMessageContaining(token)
+                    .hasMessageContaining("is not a placeholder");
+        }
+    }
+
+    @Test
+    void whitespaceAroundWellFormedTokenIsNotMalformed() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{{ members }} {{ members_notice }} {{  members:json  }}", GROUP_VARS, TriggerKind.GROUP))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void bracesThatFormNoTokenAreLeftAlone() {
+        assertThatCode(() -> TemplatePlaceholderRule.validate(
+                "{\"a\": {\"b\": {{body:json}}}} {{ unclosed", Set.of("body"), TriggerKind.SCHEDULE))
+                .doesNotThrowAnyException();
     }
 }

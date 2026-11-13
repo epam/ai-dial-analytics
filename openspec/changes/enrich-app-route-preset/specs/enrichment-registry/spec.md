@@ -46,8 +46,9 @@ into a response schema. The shape SHALL be dispatched on `type`:
   - `dial_app_route`: the runner POSTs to `/v1/deployments/{model}/route/{route}` and reads the whole
     response body as the output.
   `route` SHALL be required and SHALL match the route grammar (see "A transform may call a DIAL
-  application route") when `preset` is `dial_app_route`. It SHALL be absent under `chat_completion`,
-  because a chat-completions call has no route to name and a stored one would be a value nothing reads.
+  application route") when `preset` is `dial_app_route`. At the gated requests of "Static governance gate
+  on arming and execution" it SHALL be absent under `chat_completion`, because a chat-completions call has
+  no route to name and a stored one would be a value nothing reads; a disabled draft is stored as written.
   Each `outputs` value SHALL be either a **string** (the
   prose the model is told about that output) or an object `{prose, values?, jsonata?, source?}` carrying **at
   most one** of `values` or `jsonata`. `source` is the `dial_app_route` member described in "A route output
@@ -468,6 +469,11 @@ by that key.
 - **WHEN** that declaration is armed
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
 
+#### Scenario: A blank route is stored as absent
+
+- **WHEN** a disabled declaration carries `route: ""` or a whitespace-only `route`
+- **THEN** it is stored with no `route`, and a read of the pipeline carries no `route` member
+
 #### Scenario: A route on a chat-completion transform is rejected
 
 - **WHEN** an armed declaration carries `transform.route` with `preset` `chat_completion` or with `preset` omitted
@@ -651,8 +657,10 @@ schema produced them.
 
 An `llm` transform whose `preset` is `dial_app_route` SHALL declare which route of the application named by
 `model` it calls. The runner calls `POST /v1/deployments/{model}/route/{route}`, where `/v1/deployments/{id}/route/`
-is DIAL Core's prefix for an application's custom routes. The route takes the rendered `request_template`
-as its body and answers with the transform's output object as its whole body. A route does not take part
+is DIAL Core's prefix for an application's custom routes. The request body SHALL be the rendered
+`request_template` with `transform.params` overlaid on its top-level JSON object, the same overlay a
+`chat_completion` call applies: each `params` member is set on the body, replacing a member of the same
+name the template rendered. The route answers with the transform's output object as its whole body. A route does not take part
 in the chat-completions contract, so the declaration SHALL NOT be read as one: there is no `response_format`
 to send and no assistant message to repair. The compiled `response_schema` SHALL still be served for the
 pipeline, and the runner holds the route's response to it as it does a model's.
@@ -670,13 +678,20 @@ admits a pipeline. A route SHALL:
   cannot reach the URL by a second spelling.
 
 A route violating any of these SHALL be rejected with HTTP 422 `pipeline_validation_failed` naming
-`transform.route`. The route SHALL be stored and echoed as authored, case included. It is a path DIAL
+`transform.route`. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
 Core matches against the application's own route configuration, and ADAS SHALL NOT normalize it.
 
 #### Scenario: A nested route is accepted
 
 - **WHEN** a declaration carries `preset: "dial_app_route"` and `route: "v1/insights"`
 - **THEN** the declaration is stored with `route` `"v1/insights"`
+
+#### Scenario: Params are overlaid on a route's body
+
+- **GIVEN** a `dial_app_route` declaration whose `request_template` renders to `{"text": "...", "mode": "fast"}`
+  and whose `params` is `{"mode": "thorough", "limit": 5}`
+- **WHEN** the runner calls the route
+- **THEN** the body it POSTs is `{"text": "...", "mode": "thorough", "limit": 5}`
 
 #### Scenario: A traversing route is rejected
 
@@ -766,6 +781,14 @@ A placeholder carrying any other `:suffix` SHALL be refused at the same moments 
 422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing and
 reach the model as literal text.
 
+Every `{{...}}` token SHALL be a placeholder. The runner's renderer reads every match of `\{\{([^{}]*)}}` as
+one, trims it, and fails the unit when no variable binds it, so a token outside the grammar would fail every
+unit the pipeline renders. The grammar is a name of letters, digits and underscores, optionally followed by
+`:` and a suffix, with optional whitespace inside the braces. A token outside it, such as `{{a:b:json}}`,
+`{{members :json}}`, `{{a-b}}` or `{{}}`, SHALL be refused at the same moments as the placeholder rule,
+with HTTP 422 `pipeline_validation_failed` naming the token. Whitespace around a well-formed token, as in
+`{{ members }}`, is not refused.
+
 #### Scenario: A raw members placeholder satisfies the group rule
 
 - **GIVEN** a group pipeline whose template is `{"members": {{members:json}}}`
@@ -783,6 +806,17 @@ reach the model as literal text.
 
 - **WHEN** a pipeline whose template carries `{{members:yaml}}` is enabled
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `members:yaml`
+
+#### Scenario: A token outside the placeholder grammar is refused
+
+- **WHEN** a pipeline whose template carries `{{a:b:json}}`, `{{members :json}}` or `{{a-b}}` is enabled
+- **THEN** each is rejected with HTTP 422 `pipeline_validation_failed` naming the token
+
+#### Scenario: Whitespace inside the braces is tolerated
+
+- **GIVEN** a group pipeline whose template is `{{ members }} {{ members_notice }}`
+- **WHEN** it is enabled
+- **THEN** the gate accepts it
 
 ### Requirement: A route output reads its value from the route's response with source
 

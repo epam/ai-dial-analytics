@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.service.enrichment.support.AppRoutePath;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Validates an app-routes body on write. The route grammar is the declaration's own ({@link AppRoutePath}), so a pair
@@ -15,6 +16,12 @@ final class AppRoutesValidator {
 
     static final int MAX_ROUTES = 100;
     static final int MAX_DEPLOYMENT_LENGTH = 256;
+
+    /**
+     * What a deployment id may not carry: whitespace, a control character, or a character that would end or re-encode
+     * the URL path. A {@code /} is allowed, because DIAL application ids may contain one.
+     */
+    private static final Pattern FORBIDDEN_IN_DEPLOYMENT = Pattern.compile("[\\s\\p{Z}\\p{Cc}?#%]");
 
     private AppRoutesValidator() {
     }
@@ -42,9 +49,12 @@ final class AppRoutesValidator {
                 throw new SettingValidationException(at + ".deployment is longer than " + MAX_DEPLOYMENT_LENGTH
                         + " characters");
             }
-            final int index = i;
+            if (FORBIDDEN_IN_DEPLOYMENT.matcher(entry.deployment()).find()) {
+                throw new SettingValidationException(at + ".deployment carries whitespace, a control character, '?', '#'"
+                        + " or '%', none of which a DIAL deployment id carries");
+            }
             AppRoutePath.problem(entry.route()).ifPresent(problem -> {
-                throw new SettingValidationException("routes[" + index + "].route " + problem);
+                throw new SettingValidationException(at + ".route " + problem);
             });
             if (!seen.add(entry)) {
                 throw new SettingValidationException(at + " repeats the pair (" + entry.deployment() + ", "

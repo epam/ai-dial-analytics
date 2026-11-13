@@ -113,6 +113,9 @@ nothing and leaving any previously stored value unchanged, when:
 - `routes` is missing or `null`;
 - it lists more than 100 pairs;
 - an entry's `deployment` is missing or blank, or longer than 256 characters;
+- an entry's `deployment` carries whitespace, a control character, `?`, `#` or `%`. No DIAL deployment id
+  carries one, so a pair naming such an id could never match a declaration's call. A `/` SHALL be
+  accepted, because DIAL application ids may contain one;
 - an entry's `route` is missing, or violates the route grammar of "A transform may call a DIAL application
   route" (see [enrichment-registry](../enrichment-registry/spec.md)). One grammar serves both writes, so a
   pair the setting accepts is a pair a declaration can name;
@@ -127,6 +130,17 @@ allows a call that DIAL then answers with its own error.
 - **WHEN** `PUT /v1/settings/app-routes` lists `{"deployment":"insights-app","route":"../admin"}`
 - **THEN** the response is `422` with error code `validation_error` naming `routes[0].route`, and nothing is
   stored
+
+#### Scenario: A deployment carrying a URL delimiter or whitespace is refused
+
+- **WHEN** `PUT /v1/settings/app-routes` lists the deployment `"insights app"` or `"insights-app?x=1"`
+- **THEN** the response is `422` with error code `validation_error` naming `routes[0].deployment`, and
+  nothing is stored
+
+#### Scenario: A deployment id may carry a slash
+
+- **WHEN** `PUT /v1/settings/app-routes` lists `{"deployment":"team/insights-app","route":"insights"}`
+- **THEN** the setting is stored with that deployment as written
 
 #### Scenario: A duplicate pair is refused
 
@@ -148,8 +162,9 @@ The system SHALL expose:
   stored setting carrying the new `updated_at` and `updated_by`.
 
 `PUT` SHALL replace the whole document; there SHALL be no partial update. A `PUT` whose body equals the
-stored value SHALL still succeed and SHALL refresh `updated_at` and `updated_by`. Every failure SHALL use the
-`ErrorView` contract. A successful write SHALL be recorded as a `Setting` activity whose resource id is
+stored value SHALL still succeed and SHALL refresh `updated_at` and `updated_by`. Concurrent `PUT`s SHALL
+resolve to last-writer-wins, as for `sessions-source`, with every read returning one complete written value,
+never a mix of two. Every failure SHALL use the `ErrorView` contract. A successful write SHALL be recorded as a `Setting` activity whose resource id is
 `app-routes` (see [audit-trail](../audit-trail/spec.md)).
 
 #### Scenario: Replace overwrites the previous allowlist
@@ -195,5 +210,7 @@ another drops that pair.
 
 - **WHEN** a `PATCH` enabling a pipeline on `(insights-app, insights)` and a `PUT` dropping that pair run
   concurrently
-- **THEN** exactly one of them succeeds: either the pipeline is enabled and the setting still lists the
-  pair, or the setting no longer lists it and the pipeline is disabled
+- **THEN** exactly one of them answers `200`, and the other is refused by its own check: the `PUT` with `409`
+  `app_route_in_use` when the arm won, the `PATCH` with `422` `pipeline_validation_failed` when the removal
+  won. Either the pipeline is enabled and the setting still lists the pair, or the setting no longer lists it
+  and the pipeline is disabled

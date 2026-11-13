@@ -65,6 +65,13 @@ public final class TemplatePlaceholderRule {
     private static final Pattern PLACEHOLDER =
             Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)(?::([A-Za-z0-9_]*))?\\s*}}");
 
+    /**
+     * Every {@code {{...}}} token, well-formed or not: the pattern the runner's renderer scans with. A token it finds
+     * that is not a {@link #PLACEHOLDER} binds to nothing there and fails every unit it renders, so it is refused here
+     * rather than ignored.
+     */
+    private static final Pattern TOKEN = Pattern.compile("\\{\\{([^{}]*)}}");
+
     private TemplatePlaceholderRule() {
     }
 
@@ -85,6 +92,7 @@ public final class TemplatePlaceholderRule {
         if (StringUtils.isBlank(template)) {
             return;
         }
+        requireWellFormedTokens(template);
         requireKnownSuffixes(template);
         final Set<String> placeholders = placeholdersOf(template);
         if (triggerKind == TriggerKind.GROUP) {
@@ -151,6 +159,23 @@ public final class TemplatePlaceholderRule {
                 throw new PipelineValidationException("var '" + var + "' appears in no {{placeholder}} of"
                         + " request_template, so it is projected from the source and never used; remove it"
                         + " or reference it");
+            }
+        }
+    }
+
+    /**
+     * Refuses a {@code {{...}}} token that is not a placeholder, such as {@code {{a:b:json}}}, {@code {{members :json}}}
+     * or {@code {{a-b}}}. The runner reads every such token as a placeholder and finds no variable for it, so a
+     * template carrying one fails at every render.
+     */
+    private static void requireWellFormedTokens(String template) {
+        final Matcher matcher = TOKEN.matcher(template);
+        while (matcher.find()) {
+            if (!PLACEHOLDER.matcher(matcher.group()).matches()) {
+                throw new PipelineValidationException("request_template token '" + matcher.group() + "' is not a"
+                        + " placeholder: one is {{name}} or {{name:json}}, where the name is letters, digits and"
+                        + " underscores, with optional whitespace inside the braces; the runner would find no"
+                        + " variable for it and fail every unit it renders");
             }
         }
     }

@@ -99,7 +99,15 @@ PostgreSQL transaction-scoped advisory lock keyed on the `app-routes` setting na
 - the setting `PUT` takes it always;
 - a pipeline write takes it only when the pipeline will be armed with `preset: dial_app_route`.
 
-A pipeline write that is not a route arm does not contend.
+A pipeline write that is not a route arm does not contend. A catalog import preview or apply arms each
+imported pipeline inside its validation pass, whose transaction is always rolled back. Once it reaches a route
+pipeline it holds the lock to the end of that pass, so a concurrent `PUT /v1/settings/app-routes` waits for
+the pass rather than racing it. Two concurrent `PUT`s are last-writer-wins, as for `sessions-source`: the lock
+orders them and the guard checks each against the pipelines as they stand when it runs.
+
+The lock is PostgreSQL's two-key form, keyed on `hashtext('instance_setting')` and `hashtext('app-routes')`.
+PostgreSQL keeps the two-key space apart from the single-key one the enrichment relayout locks use, so a hash
+collision between the two cannot make them wait on each other.
 
 ### Each route output reads its value with its own `source`
 

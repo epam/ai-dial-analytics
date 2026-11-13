@@ -10,20 +10,27 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.web.servlet.ResultActions;
 
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -47,8 +54,14 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
     private static final MediaType JSON = MediaType.APPLICATION_JSON;
     private static final String ALLOW_INSIGHTS = "{\"routes\":[{\"deployment\":\"insights-app\",\"route\":\"insights\"}]}";
 
+    /** The lock {@code AppRoutesSettingService} takes around both checks; a test holds it to force an overlap. */
+    private static final String APP_ROUTES_LOCK =
+            "SELECT pg_advisory_xact_lock(hashtext('instance_setting'), hashtext('app-routes'))";
+
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private DataSource dataSource;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -108,6 +121,35 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                 .andExpect(jsonPath(entry + ".transform.route").value(hasItem("insights")))
                 .andExpect(jsonPath(entry + ".transform.model").value(hasItem("insights-app")))
                 .andExpect(jsonPath(entry + ".outputs[0].source").value(hasItem("scores.toxicity")));
+    }
+
+    /** An output with a {@code source} carries it on its compiled entry; one without carries no {@code source} member. */
+    @Test
+    void compiledOutputCarriesSourceOnlyWhereDeclared() throws Exception {
+        final String target = "ar_nested";
+        IntegrationTables.enrichment(mockMvc, target, SOURCE, "widget_id",
+                "[{\"source_name\":\"title\",\"name\":\"title\",\"type\":\"string\"},"
+                        + "{\"source_name\":\"intent_counts__check\",\"name\":\"intent_counts__check\",\"type\":\"long\"}]");
+        try {
+            allowInsights();
+            final Transforms.Builder transform = Transforms.llm().model("insights-app").preset("dial_app_route")
+                    .route("insights").outputObject("title", "{}")
+                    .outputObject("intent_counts__check", "{\"source\":\"intent_counts.check\"}");
+            mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(transform, true)
+                            .replace("\"target\":\"" + ENRICHMENT + "\"", "\"target\":\"" + target + "\"")))
+                    .andExpect(status().isCreated());
+
+            final String compiled = mockMvc.perform(get("/v1/pipelines/" + PIPELINE + "?view=compiled"))
+                    .andReturn().getResponse().getContentAsString();
+            final List<Map<String, Object>> outputs = JsonPath.read(compiled, "$.outputs");
+            assertThat(outputs).filteredOn(entry -> "title".equals(entry.get("name"))).singleElement()
+                    .satisfies(entry -> assertThat(entry).doesNotContainKey("source"));
+            assertThat(outputs).filteredOn(entry -> "intent_counts__check".equals(entry.get("name"))).singleElement()
+                    .satisfies(entry -> assertThat(entry).containsEntry("source", "intent_counts.check"));
+        } finally {
+            mockMvc.perform(delete("/v1/pipelines/" + PIPELINE));
+            mockMvc.perform(delete("/v1/tables/" + target));
+        }
     }
 
     /** The route schema follows the column: {@code tox_score} is nullable, so it may be null or absent. */
@@ -264,8 +306,10 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
     }
 
     /**
-     * An arm and a removal of the same pair race. Whichever wins, the invariant holds afterwards: the pipeline is
-     * enabled only if the setting still lists its pair.
+     * An arm and a removal of the same pair overlap for real: a separate transaction holds the lock both take, both
+     * requests are seen waiting on it, and only then is it released. Exactly one succeeds, the other is refused by
+     * its own check, and the invariant holds afterwards: the pipeline is enabled only if the setting still lists its
+     * pair.
      */
     @Test
     void concurrentArmAndRemovalNeverBothSucceed() throws Exception {
@@ -273,31 +317,94 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
         mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(route("insights"), false)))
                 .andExpect(status().isCreated());
 
-        final CountDownLatch start = new CountDownLatch(1);
-        final Callable<Integer> arm = () -> {
-            start.await();
-            return mockMvc.perform(patch("/v1/pipelines/" + PIPELINE).contentType(JSON).content("{\"enabled\":true}"))
-                    .andReturn().getResponse().getStatus();
-        };
-        final Callable<Integer> drop = () -> {
-            start.await();
-            return mockMvc.perform(put(SETTING).contentType(JSON).content("{\"routes\":[]}"))
-                    .andReturn().getResponse().getStatus();
-        };
+        final Callable<Integer> arm = () -> mockMvc.perform(patch("/v1/pipelines/" + PIPELINE).contentType(JSON)
+                .content("{\"enabled\":true}")).andReturn().getResponse().getStatus();
+        final Callable<Integer> drop = () -> mockMvc.perform(put(SETTING).contentType(JSON)
+                .content("{\"routes\":[]}")).andReturn().getResponse().getStatus();
         final ExecutorService pool = Executors.newFixedThreadPool(2);
+        final List<Integer> statuses;
         try {
-            final Future<Integer> armed = pool.submit(arm);
-            final Future<Integer> dropped = pool.submit(drop);
-            start.countDown();
-            assertThat(List.of(armed.get(), dropped.get())).containsAnyOf(200);
+            final Future<Integer> armed;
+            final Future<Integer> dropped;
+            try (Connection holder = dataSource.getConnection()) {
+                holder.setAutoCommit(false);
+                try {
+                    try (Statement lock = holder.createStatement()) {
+                        lock.execute(APP_ROUTES_LOCK);
+                    }
+                    armed = pool.submit(arm);
+                    dropped = pool.submit(drop);
+                    awaitAdvisoryLockWaiters(2);
+                } finally {
+                    // Ending the transaction releases its lock, and both waiting requests contend for it.
+                    holder.rollback();
+                    holder.setAutoCommit(true);
+                }
+            }
+            statuses = List.of(armed.get(30, TimeUnit.SECONDS), dropped.get(30, TimeUnit.SECONDS));
         } finally {
             pool.shutdownNow();
         }
 
+        assertThat(statuses).filteredOn(code -> code == 200).hasSize(1);
+        assertThat(statuses).filteredOn(code -> code != 200).singleElement().isIn(409, 422);
         final boolean enabled = JsonPath.read(mockMvc.perform(get("/v1/pipelines/" + PIPELINE))
                 .andReturn().getResponse().getContentAsString(), "$.enabled");
         final List<Object> routes = JsonPath.read(mockMvc.perform(get(SETTING))
                 .andReturn().getResponse().getContentAsString(), "$.routes");
         assertThat(enabled).isEqualTo(!routes.isEmpty());
+    }
+
+    /** Waits, bounded, until {@code count} transactions are blocked on a two-key advisory lock. */
+    private void awaitAdvisoryLockWaiters(int count) throws InterruptedException {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (true) {
+            final Long waiting = jdbc.queryForObject("SELECT count(*) FROM pg_locks"
+                    + " WHERE locktype = 'advisory' AND objsubid = 2 AND NOT granted", Long.class);
+            if (waiting != null && waiting >= count) {
+                return;
+            }
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("expected " + count + " requests waiting on the app-routes lock, saw "
+                        + waiting);
+            }
+            Thread.sleep(20);
+        }
+    }
+
+    /**
+     * The allowlist is an instance setting, so a bundle does not carry it: an imported route pipeline whose pair
+     * the target does not allow is reported not armable, naming the setting, until the pair is allowed there.
+     */
+    @Test
+    void importedRoutePipelineIsArmableOnlyOnceItsPairIsAllowed() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(route("insights"), false)))
+                .andExpect(status().isCreated());
+        final String bundle = mockMvc.perform(post("/v1/catalog/export").contentType(JSON)
+                        .content("{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + PIPELINE + "\"}]}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(bundle).doesNotContain("app-routes");
+        mockMvc.perform(delete("/v1/pipelines/" + PIPELINE)).andExpect(status().isNoContent());
+        jdbc.update("DELETE FROM pipeline_aud WHERE name = ?", PIPELINE);
+
+        final String entry = "$.pipelines[?(@.name == '" + PIPELINE + "')]";
+        previewImport(bundle)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath(entry + ".import_action").value(hasItem("CREATE")))
+                .andExpect(jsonPath(entry + ".armable").value(hasItem(false)))
+                .andExpect(jsonPath(entry + ".arm_problems[*]").value(hasItem(containsString("app-routes"))));
+
+        allowInsights();
+        previewImport(bundle)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath(entry + ".armable").value(hasItem(true)));
+    }
+
+    private ResultActions previewImport(String bundle) throws Exception {
+        return mockMvc.perform(multipart("/v1/catalog/import/preview")
+                .file(new MockMultipartFile("file", "bundle.json", MediaType.APPLICATION_JSON_VALUE,
+                        bundle.getBytes(StandardCharsets.UTF_8)))
+                .param("resolution_policy", "SKIP_IF_EXISTS"));
     }
 }

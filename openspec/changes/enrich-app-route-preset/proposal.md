@@ -59,6 +59,8 @@ None.
   - the closed setting-name set gains `app-routes`;
   - its body, validation, API, in-use guard and authorization.
 - `enrichment-runtime`: the runner contract version this build serves is `5`.
+- `catalog-export-import`: instance settings do not travel in a bundle, so an imported route pipeline
+  whose pair the target does not allow reports not armable, naming `app-routes`.
 
 ## Impact
 

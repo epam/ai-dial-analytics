@@ -88,7 +88,16 @@ class AppRoutesSettingIntegrationTest extends AbstractClickHouseIntegrationTest 
         expectInvalid(routes("insights-app", "../admin"), "routes[0].route");
         expectInvalid(routes("insights-app", "insights", "insights-app", "insights"), "routes[1]");
         expectInvalid("{\"routes\":[{\"route\":\"insights\"}]}", "routes[0].deployment");
+        expectInvalid(routes("insights app", "insights"), "routes[0].deployment");
+        expectInvalid(routes("insights-app?x=1", "insights"), "routes[0].deployment");
         mockMvc.perform(get(URL)).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void deploymentIdMayCarrySlash() throws Exception {
+        mockMvc.perform(put(URL).contentType(JSON).content(routes("team/insights-app", "insights")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.routes[0].deployment").value("team/insights-app"));
     }
 
     @Test

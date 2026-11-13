@@ -36,6 +36,8 @@
   with 422 naming the placeholder.
 - [x] 2.2 Tests cover the three scenarios of "A template placeholder may render its value as raw JSON",
   plus a row-grain `{{v:json}}` that binds nothing.
+- [x] 2.3 Refuse every `{{...}}` token outside the placeholder grammar (`{{a:b:json}}`, `{{members :json}}`,
+  `{{a-b}}`), which the runner would fail as unbound; whitespace around a well-formed token stays accepted.
 
 ## 3. `app-routes` instance setting
 
@@ -44,7 +46,7 @@
   (`AppRoutesSetting`) and its DTO. `routes` is an ordered list of `{deployment, route}`.
 - [x] 3.2 Add `AppRoutesValidator`, which returns 422 `validation_error` naming the entry by index. It
   checks that `routes` is present and holds at most 100 entries, that each `deployment` is non-blank and at
-  most 256 characters, the route grammar (it reuses `AppRoutePath`), and that no pair is an exact duplicate.
+  most 256 characters with no whitespace, control character, `?`, `#` or `%` (a `/` is allowed), the route grammar (it reuses `AppRoutePath`), and that no pair is an exact duplicate.
 - [x] 3.3 Add `AppRoutesSettingService` with get and replace, an audited `Setting` activity, and the
   in-use guard: 409 `app_route_in_use` naming each enabled `dial_app_route` pipeline whose pair the new body
   drops.
@@ -75,7 +77,8 @@
   - arm refused when the pair is not listed, and when no setting exists;
   - a disabled route pipeline is stored, then armed once the pair is allowed;
   - a case mismatch is refused;
-  - a concurrent arm and removal never both succeed (two transactions, one must lose).
+  - a concurrent arm and removal never both succeed: a separate transaction holds the lock until both
+    requests wait on it, then exactly one answers 200 and the other 409 or 422.
 
 ## 5. Feed and contract
 
@@ -85,6 +88,8 @@
   `transform` and `source` on its `outputs`, and the response carries `Adas-Contract-Version: 5`.
 - [x] 5.3 Catalog export/import test: `transform.route` travels in the source projection, and an imported
   route pipeline lands disabled.
+- [x] 5.4 Catalog import preview: an imported route pipeline whose pair the target does not allow reports
+  `armable: false` naming `app-routes`, and `armable: true` once the pair is allowed.
 
 ## 6. Docs and specs
 
@@ -92,9 +97,11 @@
   - the contract bump, so ADAS and the Enrichment Runner deploy together;
   - the `app-routes` setting, absent means no route allowed;
   - the disable → patch → enable sequence for moving a pipeline off a chat shim.
+- [x] 6.1a Add to `docs/catalog-promotion.md` §"What does not travel" that the `app-routes` and
+  `sessions-source` settings stay behind, and that each route pair is allowed on the target before arming.
 - [x] 6.2 Confirm that no configuration property is added, so nothing changes in `docs/configuration.md`.
 - [x] 6.3 Check every scenario above against a test, and confirm the merged
-  `enrichment-registry`, `instance-settings` and `enrichment-runtime` specs match the shipped behavior.
+  `enrichment-registry`, `instance-settings`, `enrichment-runtime` and `catalog-export-import` specs match the shipped behavior.
 - [x] 6.4 Run the public-repo hygiene sweep (`.claude/skills/pr-ready/hygiene-sweep.pl`) over the change.
 
 ## 7. Verify

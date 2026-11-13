@@ -868,7 +868,8 @@ public abstract class PipelineMapper {
         transform.setPreset(request.preset() == null && !sql
                 ? TransformPreset.CHAT_COMPLETION : request.preset());
         transform.setModel(request.model());
-        transform.setRoute(request.route());
+        // A blank route means absent, like a blank output source; a non-blank one is kept as authored.
+        transform.setRoute(StringUtils.isBlank(request.route()) ? null : request.route());
         transform.setParams(request.params());
         transform.setRequestTemplate(request.requestTemplate());
         transform.setInputBindings(toInputBindings(request.inputs()));

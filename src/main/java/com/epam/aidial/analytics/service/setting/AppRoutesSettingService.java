@@ -10,7 +10,6 @@ import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
 import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -40,10 +39,11 @@ public class AppRoutesSettingService {
     private static final String NAME = InstanceSettingName.APP_ROUTES.wireName();
 
     /**
-     * The advisory lock both writes take. It is namespaced the same way the relayout locks are, so the key space is
-     * shared without colliding.
+     * The advisory lock both writes take. It uses the two-key form, whose key space PostgreSQL keeps apart from the
+     * single-key locks the relayout jobs take, so a hash collision with one of those cannot make the two wait on each
+     * other. Nothing else takes a two-key advisory lock.
      */
-    private static final String LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('instance_setting:" + NAME + "'))";
+    private static final String LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('instance_setting'), hashtext('" + NAME + "'))";
 
     private final InstanceSettingRepository repository;
     private final PipelineRepository pipelines;
@@ -85,11 +85,9 @@ public class AppRoutesSettingService {
         AppRoutesValidator.validate(setting);
         final String value = write(setting);
         final String author = securityEnabled ? claims.getAuthor() : null;
-        try {
-            return transactions.execute(status -> store(setting, value, author));
-        } catch (DataIntegrityViolationException firstInsertLost) {
-            return transactions.execute(status -> store(setting, value, author));
-        }
+        // No retry on a lost first insert, unlike sessions-source: store() takes the lock before it reads the row, so
+        // two first writes are serialized and the second finds the row the first committed.
+        return transactions.execute(status -> store(setting, value, author));
     }
 
     /**

@@ -81,3 +81,7 @@ Every pipeline lands **disabled**, whatever `exported_enabled` says.
 - **Runner state.** Scan cursors, dead letters and spend counters belong to the Enrichment Runner.
 - **Data-sync backfill.** Run any backfill of `dial_usage_log` separately (`POST /v1/data-sync/backfill`).
 - **OTLP sinks and saved queries.** Recreate sinks on the target; saved queries are owner-scoped.
+- **Instance settings.** `app-routes` and `sessions-source` belong to the instance, not the bundle. An imported
+  `dial_app_route` pipeline previews `armable: false` naming `app-routes` until its pair is listed: allow each
+  pair on the target with `PUT /v1/settings/app-routes` before arming (step 5), and set `sessions-source` there
+  if the target serves sessions.
