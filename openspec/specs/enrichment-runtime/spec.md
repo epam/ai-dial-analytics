@@ -2602,8 +2602,11 @@ column across every partition per batch, which is the cost the aligned layout re
 carries it from the scanned row to the write row unchanged; a wrong value only leaves that row unmatched under
 the tuple join, and attaches it to no other source row.
 
-The runner contract version this build serves SHALL be `4`, so a runner that does not echo the value
-is refused by the exact-match contract check rather than having its rows refused one by one.
+The runner contract version this build serves SHALL be `5`. A runner that does not echo the value, or
+cannot decode the `dial_app_route` transform preset (see
+[enrichment-registry](../enrichment-registry/spec.md), "Both projections carry the transform's route"), is
+refused by the exact-match contract check, rather than having its rows or its pipelines refused one by
+one.
 
 #### Scenario: The scan returns the partition value of an aligned target
 

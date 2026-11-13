@@ -773,7 +773,7 @@ every accepted mutation, including a change of `enabled` alone, SHALL move `upda
 [pipeline-registry](../pipeline-registry/spec.md), "A pipeline has exactly one run control"). An unknown pipeline name SHALL be rejected with HTTP 404 `unknown_pipeline`.
 
 **The transform SHALL be one nested block, `transform`**, stored in the pipeline's `spec`, carrying
-`type` (`llm` or `sql`), `model`, `preset`, `params`, `request_template`, `inputs` and `outputs`. It SHALL be
+`type` (`llm` or `sql`), `model`, `preset`, `route`, `params`, `request_template`, `inputs` and `outputs`. It SHALL be
 nested rather than flat for a reason that is a contract, not a matter of taste: **`outputs` already
 names the derived output mapping** at the top level of a pipeline read — one entry per mapped target
 column, `{name, column, jsonata?}` — and the authored outputs are a different shape,
@@ -796,16 +796,28 @@ into a response schema. The shape SHALL be dispatched on `type`:
   replacing `transform` wholesale and omitting `request_template` would be stored on an **enabled**
   pipeline and leave it armed with no prompt, because the placeholder rule's own blank guard returns
   early and cannot see it. `preset` SHALL be optional, defaulting to
-  `chat_completion`, its only accepted value. Each `outputs` value SHALL be either a **string** (the
-  prose the model is told about that output) or an object `{prose, values?, jsonata?}` carrying **at
-  most one** of `values` or `jsonata`. `prose` SHALL be **optional**, defaulting to the target column's
+  `chat_completion`; its accepted values SHALL be exactly `chat_completion` and `dial_app_route`.
+  `model` names a DIAL deployment under either preset, a model or an application alike. The preset
+  selects how that deployment is called:
+  - `chat_completion`: the runner POSTs to the deployment's chat-completions endpoint and reads the output
+    from the first choice's message content.
+  - `dial_app_route`: the runner POSTs to `/v1/deployments/{model}/route/{route}` and reads the whole
+    response body as the output.
+  `route` SHALL be required and SHALL match the route grammar (see "A transform may call a DIAL
+  application route") when `preset` is `dial_app_route`. At the gated requests of "Static governance gate
+  on arming and execution" it SHALL be absent under `chat_completion`, because a chat-completions call has
+  no route to name and a stored one would be a value nothing reads; a disabled draft is stored as written.
+  Each `outputs` value SHALL be either a **string** (the
+  prose the model is told about that output) or an object `{prose, values?, jsonata?, source?}` carrying **at
+  most one** of `values` or `jsonata`. `source` is the `dial_app_route` member described in "A route output
+  reads its value from the route's response with source". `prose` SHALL be **optional**, defaulting to the target column's
   `description` — see "The response schema is composed from the target and the transform", which
   already takes an output's type, enum domain and enum order from the same column. An absent value, a
   JSON `null`, an empty object and a blank string SHALL all mean *default it*, so that one fact has one
   spelling. There SHALL be no separate refusal of "an object declaring none of the three": once `prose`
   is optional, `{}` and `{"prose": null}` are the same bound value as `null`, so a refusal could only
   reject one spelling of *default it* while accepting the others.
-- **`sql`** — `preset`, `model`, `request_template`, `params` and `response_schema` SHALL be absent, and
+- **`sql`** — `preset`, `model`, `route`, `request_template`, `params` and `response_schema` SHALL be absent, and
   each `outputs` value SHALL be a non-blank SQL expression string. `response_schema` is refused for the
   same reason as the other four, and is named because it is the one the compiled projection would
   otherwise surface: a `sql` transform constrains no model response, so a stored schema on one would be
@@ -1034,7 +1046,7 @@ by that key.
 #### Scenario: A sql transform carrying an llm-only member is rejected
 
 - **WHEN** `POST /v1/pipelines` is called with `transform.type: "sql"` and any of `preset`, `model`,
-  `params`, `request_template` or `response_schema` inside the block
+  `route`, `params`, `request_template` or `response_schema` inside the block
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the llm-only field
 
 #### Scenario: An output matching no target column is rejected at declaration
@@ -1201,6 +1213,34 @@ by that key.
   to the target enrichment's grain key, and a `trigger.ready_when` carrying at least one readiness
   condition
 - **THEN** the pipeline is created and HTTP 201 returned
+
+#### Scenario: An app-route transform is declared inline
+
+- **WHEN** `POST /v1/pipelines` is called with `transform.type: "llm"`, `preset: "dial_app_route"`,
+  `model: "insights-app"`, `route: "insights"` and a non-blank `request_template`
+- **THEN** the pipeline is created, and `GET` returns the block with `preset` `"dial_app_route"` and
+  `route` `"insights"` as authored
+
+#### Scenario: An app-route transform without a route is rejected
+
+- **GIVEN** a declaration carrying `preset: "dial_app_route"` and no `route`, or a blank one
+- **WHEN** that declaration is armed
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
+
+#### Scenario: A blank route is stored as absent
+
+- **WHEN** a disabled declaration carries `route: ""` or a whitespace-only `route`
+- **THEN** it is stored with no `route`, and a read of the pipeline carries no `route` member
+
+#### Scenario: A route on a chat-completion transform is rejected
+
+- **WHEN** an armed declaration carries `transform.route` with `preset` `chat_completion` or with `preset` omitted
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
+
+#### Scenario: An unknown preset is refused at the binding
+
+- **WHEN** a declaration carries `preset: "embeddings"`
+- **THEN** the request is rejected with HTTP 400 `bad_request`, as any value outside the accepted set is
 
 ### Requirement: An ENRICH pipeline's read source is declarable
 
@@ -1935,7 +1975,7 @@ target column of the same name:
 | `enum` values **and order** | the column's `enum_values` verbatim, else the output's `values` |
 | `description` | the output's prose, **else the target column's `description`**, else omitted |
 | property order and `required` order | the `outputs` declaration order |
-| `required` | **every** declared output |
+| `required` | **every** declared output; for `dial_app_route`, every output bound to a non-nullable column |
 | `additionalProperties` | always `false` |
 
 The type mapping SHALL be: `string` → `{"type": "string"}`; `enum` → `{"type": "string", "enum":
@@ -1968,11 +2008,21 @@ Order SHALL NOT be taken from the target's column order, which is tag-group-then
 would make generation order a function of column tags. A storage form that normalizes key order SHALL
 NOT be used for either the composed schema or the stored `outputs`.
 
-`required` SHALL cover every declared output and SHALL NOT be derived from column nullability. Strict
-mode requires every property to be required, so there is no optional-output shape to express — and the
-two facts differ anyway: an enrichment column is nullable because a row may not be labelled yet, while
-a schema field is required because the model must answer. An output that may legitimately be absent
-SHALL be expressed as a sentinel value in `values` plus a `jsonata` mapping it to NULL.
+For a `chat_completion` transform, `required` SHALL cover every declared output and SHALL NOT be derived
+from column nullability. Strict mode requires every property to be required, so there is no optional-output
+shape to express — and the two facts differ anyway: an enrichment column is nullable because a row may not
+be labelled yet, while a schema field is required because the model must answer. An output that may
+legitimately be absent SHALL be expressed as a sentinel value in `values` plus a `jsonata` mapping it to
+NULL.
+
+For a `dial_app_route` transform, nullability SHALL follow the bound column. An output bound to a nullable
+column SHALL be left out of `required`, and its property SHALL also accept `null`: its `type` becomes the
+pair of its type and `"null"`, and a closed `enum` domain gains `null`. An output bound to a non-nullable
+column stays required and non-null. The strict-mode argument does not apply here, because no
+`response_format` is sent and nothing holds the application to the schema. The runner validates only the
+object it assembled from the outputs' sources, and the column is what says whether NULL can be stored. A
+field the application omits is therefore written as NULL where the column allows it, and refused where it
+does not.
 
 Composing the enum domain **from the column** SHALL be preferred to declaring it on the output,
 and the consequence SHALL be accepted rather than worked around: enum **order** in the prompt is then
@@ -2066,6 +2116,14 @@ schema produced them.
   no `response_schema`
 - **THEN** no schema is composed, the entry is served without one, and the model is called
   unconstrained as it was before the fold
+
+#### Scenario: A route schema leaves a nullable column's output optional
+
+- **GIVEN** a `dial_app_route` transform whose outputs bind a nullable `decimal` column `cost` and a
+  non-nullable `string` column `title`
+- **WHEN** its schema is composed
+- **THEN** `required` lists `title` only, `cost` has `type` `["number", "null"]`, and `title` has `type`
+  `"string"`
 
 ### Requirement: A transform's outputs are one fact in two stored shapes
 
@@ -3092,3 +3150,251 @@ statement reads in the field's place.
   is, and an author without `TABLE_SENSITIVE` on `dial_usage_log_payload` binds
   `dial_usage_log_payload.request_body_full`
 - **THEN** the request is rejected with HTTP 403 `sensitive_column_not_entitled`
+
+### Requirement: A transform may call a DIAL application route
+
+An `llm` transform whose `preset` is `dial_app_route` SHALL declare which route of the application named by
+`model` it calls. The runner calls `POST /v1/deployments/{model}/route/{route}`, where `/v1/deployments/{id}/route/`
+is DIAL Core's prefix for an application's custom routes. The request body SHALL be the rendered
+`request_template` with `transform.params` overlaid on its top-level JSON object, the same overlay a
+`chat_completion` call applies: each `params` member is set on the body, replacing a member of the same
+name the template rendered. The route answers with the transform's output object as its whole body. A route does not take part
+in the chat-completions contract, so the declaration SHALL NOT be read as one: there is no `response_format`
+to send and no assistant message to repair. The compiled `response_schema` SHALL still be served for the
+pipeline, and the runner holds the route's response to it as it does a model's.
+
+`transform.route` SHALL be checked for **shape** wherever the rest of the transform's shape is checked:
+at the gated requests of "Static governance gate on arming and execution", meaning a write that arms the
+pipeline and the preview of a disabled one. A disabled draft is stored as written, like every other
+transform member. Nothing calls a disabled pipeline's route, and the runner re-checks the grammar when it
+admits a pipeline. A route SHALL:
+
+- be 1 to 256 characters;
+- consist of one or more segments separated by single `/`, with no leading or trailing `/`;
+- have segments matching `[A-Za-z0-9._~-]+`, none of them exactly `.` or `..`;
+- carry no `?`, `#` or `%`. Percent-encoding is refused rather than decoded, so an encoded `..` or `/`
+  cannot reach the URL by a second spelling.
+
+A route violating any of these SHALL be rejected with HTTP 422 `pipeline_validation_failed` naming
+`transform.route`. The route SHALL be stored and echoed as authored, case included; a blank one SHALL be stored as absent. It is a path DIAL
+Core matches against the application's own route configuration, and ADAS SHALL NOT normalize it.
+
+#### Scenario: A nested route is accepted
+
+- **WHEN** a declaration carries `preset: "dial_app_route"` and `route: "v1/insights"`
+- **THEN** the declaration is stored with `route` `"v1/insights"`
+
+#### Scenario: Params are overlaid on a route's body
+
+- **GIVEN** a `dial_app_route` declaration whose `request_template` renders to `{"text": "...", "mode": "fast"}`
+  and whose `params` is `{"mode": "thorough", "limit": 5}`
+- **WHEN** the runner calls the route
+- **THEN** the body it POSTs is `{"text": "...", "mode": "thorough", "limit": 5}`
+
+#### Scenario: A traversing route is rejected
+
+- **WHEN** an armed declaration carries `route` `"../admin"`, `"a/./b"`, `"/insights"`, `"insights/"`, `"a//b"`,
+  `"insights?x=1"` or `"%2e%2e/admin"`
+- **THEN** each is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`, and
+  nothing is stored
+
+#### Scenario: An over-long route is rejected
+
+- **WHEN** an armed declaration carries a 257-character `route` of valid segment characters
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `transform.route`
+
+### Requirement: An app-route pipeline is armed only for an allowed route
+
+The static governance gate SHALL refuse an `llm` transform with `preset: "dial_app_route"` unless the
+pair `(model, route)` is listed in the `app-routes` instance setting (see
+[instance-settings](../instance-settings/spec.md)). The refusal SHALL be HTTP 422
+`pipeline_validation_failed`, and its message SHALL name the deployment, the route and the setting. The
+check SHALL run at exactly the gated requests of "Static governance gate on arming and execution": a
+write that leaves the pipeline armed, and the preview of a disabled pipeline. A write that leaves the
+pipeline disabled SHALL store the declaration whether or not its pair is allowed. An author may compose
+a route pipeline before an administrator allows the route, as with any other referential check.
+
+The comparison SHALL be exact and case-sensitive on both halves. That is the one case rule for this
+lookup, because DIAL Core matches deployment ids and route paths case-sensitively. When the setting is
+absent, no pair is allowed. The default is closed: a route is an arbitrary `POST` to an application
+with source data in its body. A chat-completions call is compute by contract, but a route may have side
+effects, so an instance calls none until an administrator names one.
+
+The data-plane endpoints SHALL NOT re-run this check. The `app-routes` setting cannot drop a pair that
+an enabled pipeline uses (see [instance-settings](../instance-settings/spec.md), "An allowed route in use
+by an enabled pipeline cannot be removed"), so an enabled route pipeline's pair is allowed for as long as
+it stays enabled. A re-check would only refuse what that guard already keeps true.
+
+#### Scenario: Arming a route pipeline whose route is not allowed is refused
+
+- **GIVEN** the `app-routes` setting lists `(insights-app, insights)` only
+- **WHEN** a pipeline declaring `model: "insights-app"`, `route: "summaries"` is enabled
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `insights-app`,
+  `summaries` and `app-routes`, and the pipeline stays disabled
+
+#### Scenario: Arming with no setting stored is refused
+
+- **WHEN** no `app-routes` setting has ever been stored and a `dial_app_route` pipeline is created with
+  `enabled: true`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed`
+
+#### Scenario: A disabled route pipeline is stored before its route is allowed
+
+- **WHEN** a `dial_app_route` pipeline whose pair is not allowed is created with `enabled: false`
+- **THEN** it is created with HTTP 201, and enabling it succeeds once the pair has been added to the
+  setting
+
+#### Scenario: The comparison is case-sensitive
+
+- **GIVEN** the setting lists `(insights-app, insights)`
+- **WHEN** a pipeline declaring `route: "Insights"` is enabled
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed`
+
+### Requirement: A template placeholder may render its value as raw JSON
+
+A `request_template` placeholder SHALL have two forms:
+
+- `{{name}}`, the existing form, renders the value **escaped** for embedding inside a JSON string
+  literal.
+- `{{name:json}}` renders the value as a **JSON literal**, for a template that places the value in JSON
+  value position:
+  - a string becomes a quoted JSON string;
+  - a number or boolean stays a bare literal;
+  - a list or map becomes its JSON text;
+  - a bound null becomes `null`.
+
+  This is what lets a route body carry a group's members as structured JSON
+  (`{"members": {{members:json}}}`) rather than as one escaped string. The form is not specific to
+  `dial_app_route`.
+
+The suffix SHALL be exactly `:json`, immediately after the name. The placeholder rule in "A transform's
+template placeholders are validated against the pipeline's trigger grain" SHALL apply to the **name**,
+the part before the suffix, unchanged in every other respect:
+
+- at row grain, `{{v:json}}` is a use of the `transform.inputs` key `v`;
+- at group grain, `{{members:json}}` satisfies the requirement that `{{members}}` appear at least once;
+- the other built-in member variables accept the suffix too.
+
+A placeholder carrying any other `:suffix` SHALL be refused at the same moments as that rule, with HTTP
+422 `pipeline_validation_failed` naming the placeholder. Read as a name, it would bind to nothing and
+reach the model as literal text.
+
+Every `{{...}}` token SHALL be a placeholder. The runner's renderer reads every match of `\{\{([^{}]*)}}` as
+one, trims it, and fails the unit when no variable binds it, so a token outside the grammar would fail every
+unit the pipeline renders. The grammar is a name of letters, digits and underscores, optionally followed by
+`:` and a suffix, with optional whitespace inside the braces. A token outside it, such as `{{a:b:json}}`,
+`{{members :json}}`, `{{a-b}}` or `{{}}`, SHALL be refused at the same moments as the placeholder rule,
+with HTTP 422 `pipeline_validation_failed` naming the token. Whitespace around a well-formed token, as in
+`{{ members }}`, is not refused.
+
+#### Scenario: A raw members placeholder satisfies the group rule
+
+- **GIVEN** a group pipeline whose template is `{"members": {{members:json}}}`
+- **WHEN** it is enabled
+- **THEN** the gate accepts it, because `members` appears
+
+#### Scenario: A raw row placeholder counts as a use of its input
+
+- **GIVEN** a row pipeline binding `transform.inputs` key `body` and a template
+  `{"input": {{body:json}}}`
+- **WHEN** it is enabled
+- **THEN** the gate accepts it, and does not report `body` as unused
+
+#### Scenario: An unknown suffix is refused
+
+- **WHEN** a pipeline whose template carries `{{members:yaml}}` is enabled
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `members:yaml`
+
+#### Scenario: A token outside the placeholder grammar is refused
+
+- **WHEN** a pipeline whose template carries `{{a:b:json}}`, `{{members :json}}` or `{{a-b}}` is enabled
+- **THEN** each is rejected with HTTP 422 `pipeline_validation_failed` naming the token
+
+#### Scenario: Whitespace inside the braces is tolerated
+
+- **GIVEN** a group pipeline whose template is `{{ members }} {{ members_notice }}`
+- **WHEN** it is enabled
+- **THEN** the gate accepts it
+
+### Requirement: A route output reads its value from the route's response with source
+
+The system SHALL accept an optional `source` on each output of a `dial_app_route` transform. A `source` is a
+JSONata expression the runner evaluates over the route's parsed response body. Its result is that output's
+value. An output with no `source` SHALL take the response member named by the output, the same direct lookup a
+chat output uses. The runner assembles one object from every output's value, keyed by output name, validates
+it against the compiled `response_schema`, and writes it.
+
+A `source` per output, rather than one expression reshaping the whole response, is what makes the mapping
+both authorable and checkable. Each output maps to one small expression, usually a dotted path such as
+`intent_counts.check`, so nothing has to be written as a single script. Every output is mapped by
+construction, either from its `source` or from its name, so there is no list of fields that can fall out of
+step with the outputs. A defect is reported against the one output it belongs to, both when the pipeline is
+armed and when a value fails validation.
+
+`prose` and `values` SHALL keep their meaning on a route output. `prose` is the property's description in the
+composed schema, which the feed serves and an application may use, and `values` is a closed domain the
+assembled value is validated against.
+
+The member SHALL be checked at the gated requests of "Static governance gate on arming and execution". Each
+refusal is HTTP 422 `pipeline_validation_failed` naming the output:
+
+- A `source` SHALL be refused under `chat_completion`. A model's response is held to the schema by
+  `response_format` and is read by name.
+- An output's `jsonata` SHALL be refused under `dial_app_route`. The value is produced once, by `source`, and
+  validated after, so a second transform would only move the value past validation.
+- A `source` SHALL parse as JSONata.
+- A `source` equal to the output's own name SHALL be refused as the identity expression, as the identity
+  `jsonata` is: an absent `source` already means a direct lookup by name.
+
+A blank `source` SHALL mean absent. The authored `source` SHALL be echoed in `transform.outputs` under both
+projections. On the compiled projection, the resolved `outputs` mapping SHALL carry it as `source` on each
+entry, beside `name`, `column` and `jsonata`, and SHALL omit it where the output declares none.
+
+#### Scenario: Nested route fields are mapped one output at a time
+
+- **WHEN** a `dial_app_route` declaration's `outputs` carry `"title": {}` and
+  `"intent_counts__check": {"source": "intent_counts.check"}`
+- **THEN** the pipeline is stored, and the compiled `outputs` entry for `intent_counts__check` carries
+  `source` `"intent_counts.check"` while the entry for `title` carries none
+
+#### Scenario: A source on a chat output is refused
+
+- **WHEN** an armed `chat_completion` declaration carries an output with a `source`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the output
+
+#### Scenario: A jsonata on a route output is refused
+
+- **WHEN** an armed `dial_app_route` declaration carries an output with a `jsonata`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the output
+
+#### Scenario: An unparseable or identity source is refused
+
+- **WHEN** an armed `dial_app_route` declaration carries an output `tox_score` whose `source` is `"{title: "`,
+  or is `"tox_score"`
+- **THEN** each is rejected with HTTP 422 `pipeline_validation_failed` naming `tox_score`
+
+### Requirement: Both projections carry the transform's route
+
+`transform.route` SHALL be an authored member of the transform block, served under both `view=source`
+and `view=compiled`. Under the rule that an undeclared declaration member is absent from the projection,
+it SHALL be absent when the declaration carries none, which is always the case under `chat_completion`.
+The enrich feed SHALL carry it inside `transform`, beside `model` and `preset`, so a consumer needs no
+second lookup to build the call. Catalog export SHALL carry it in the pipeline's source projection like
+every other authored member.
+
+Adding the `dial_app_route` preset is a **breaking** change to the compiled projection. An entry whose
+`preset` is a value the consumer cannot decode is not one it may run under a default. The runner
+contract version SHALL therefore be raised to `5` (see [pipeline-registry](../pipeline-registry/spec.md),
+"Every pipeline response carries the runner contract version").
+
+#### Scenario: The feed carries the route
+
+- **GIVEN** an enabled `dial_app_route` pipeline with `route: "insights"`
+- **WHEN** the runner reads `GET /v1/pipelines?kind=enrich&view=compiled`
+- **THEN** that entry's `transform` carries `preset` `"dial_app_route"`, `model` and `route`
+  `"insights"`, and the response carries `Adas-Contract-Version: 5`
+
+#### Scenario: A chat-completion transform carries no route member
+
+- **WHEN** a `chat_completion` pipeline is read under either projection
+- **THEN** its `transform` has no `route` member at all, not a `null` one
