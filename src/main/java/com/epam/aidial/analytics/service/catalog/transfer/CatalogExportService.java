@@ -122,8 +122,8 @@ public class CatalogExportService {
     }
 
     /**
-     * A table in bundle shape, whatever the caller may see: every stored column and, when {@code withAccess},
-     * its grants. For import's {@code prev}, which describes the target's own object to the importing caller.
+     * A table in bundle shape, whatever the caller may see: every stored column, and no grants, which never
+     * travel. For import's {@code prev}, which describes the target's own object to the importing caller.
      */
     @Transactional(readOnly = true)
     public BundleTable bundleTable(TableDefinitionEntity definition) {

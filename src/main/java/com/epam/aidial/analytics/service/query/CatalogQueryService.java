@@ -132,8 +132,8 @@ public class CatalogQueryService {
      *
      * <p>An entity is visible if and only if its <b>source</b> is: the source table is the statement's
      * {@code FROM}, so there is nothing to serve without it. An enrichment is never addressable on its own
-     * (only a {@code SOURCE} passes the filter below), which is why a {@code read} grant on an enrichment
-     * alone is inert — and why serving one through its source's entity is refused rather than accommodated:
+     * (only a {@code SOURCE} passes the filter below), which is why its read side is its source's — and why
+     * serving one to a caller who cannot see its source is refused rather than accommodated:
      * the grain key is the <em>source's</em> column, so projecting it would disclose the source's row
      * population and its grain-key values, a source read in disguise.
      */
@@ -187,9 +187,9 @@ public class CatalogQueryService {
         // and in the empty-projection "select all" expansion.
         //
         // Per owning table rather than once per request, because a queryable entity is a composite: a
-        // source flattened with its active enrichments. One caller can legitimately read the source and not
-        // an enrichment, or see the source's sensitive columns and not the enrichment's. The decision is
-        // taken where each column's owning table is in hand, which is the argument this method already had.
+        // source flattened with its active enrichments. An enrichment's read side is its source's, so its
+        // read and clearance answers match the source's; asking per table keeps the one evaluation
+        // (GoverningAccess) the single place that decides it.
         final String sourceName = source.getName();
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         final List<QuerySchemaFieldDto> schema = new ArrayList<>();

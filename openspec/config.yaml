@@ -218,7 +218,10 @@ context: |
   - **Authorization is a privilege, held globally or granted per table.** Eighteen `Privilege` values;
     six are table-scoped (`TABLE_LIST`/`GET`/`READ`/`SENSITIVE`/`WRITE`/`MODIFY`) and a caller's
     effective access is the union of what it holds globally and what a table's `access` lists grant its
-    raw provider roles — five keys, since `TABLE_LIST` is global-or-implied and has none. The three read
+    raw provider roles — five keys, since `TABLE_LIST` is global-or-implied and has none. For an
+    enrichment the read-side lists and the clearance are its source's (`GoverningAccess`, shared by the
+    evaluator and the reported permissions): it stores only `write` and `modify`, and its own `modify`
+    still implies `get` on it. The three read
     rungs form a ladder, derived at check time and never written into
     a stored list; `TABLE_WRITE` implies nothing. `TABLE_SENSITIVE` is a **clearance, not a rung**: it
     implies nothing and extends `GET`/`READ`/`MODIFY` on the same table to its sensitive columns, so a
@@ -228,8 +231,9 @@ context: |
     `roles-mapping` and are expanded at parse time — **no gate may branch on a bundle name**.
   - **Read exposure is decided per owning table, at one chokepoint.** `CatalogQueryService.buildModel`
     applies both the read bar and the `sensitive` filter where each column's owning table is in hand, so
-    discovery, DSL, SQL, translation and Flight agree and a flattened entity can legitimately expose a
-    source's sensitive columns and hide an enrichment's. **Route every new read surface through it**, or
+    discovery, DSL, SQL, translation and Flight agree. An enrichment's read bar and clearance are its
+    source's, so a flattened entity no longer exposes a source's sensitive columns while hiding an
+    enrichment's. **Route every new read surface through it**, or
     it bypasses both filters with nothing failing. The bar is an explicit parameter
     (`findModel(entity, bar)`): `TABLE_READ` to execute, `TABLE_GET` to translate or validate,
     `TABLE_LIST` to list.

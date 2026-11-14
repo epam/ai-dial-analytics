@@ -47,7 +47,7 @@ import java.util.regex.Pattern;
  * checks that every dependency is in the bundle or already on the target, orders the objects, checks the
  * catalog limits on the totals, and collects the environment-specific values.
  *
- * <p>What the planner cannot see — identifier grammar, column rules, grant invariants, the pipeline gates —
+ * <p>What the planner cannot see — identifier grammar, column rules, the pipeline gates —
  * is left to the validation pass, which runs the real services ({@link CatalogImportValidator}).
  */
 @Component

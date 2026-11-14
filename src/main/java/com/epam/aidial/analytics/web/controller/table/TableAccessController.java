@@ -47,7 +47,9 @@ public class TableAccessController {
     @RequiresPrivilege(Privilege.TABLE_GRANT)
     @Operation(summary = "Get a table's grants",
             description = "Returns all five grant lists for the table, as stored. Requires TABLE_GRANT, "
-                    + "because the lists disclose which provider roles exist and what they may do.")
+                    + "because the lists disclose which provider roles exist and what they may do. An enrichment's "
+                    + "get, read and sensitive confer nothing, its read side being its source's; one an earlier "
+                    + "build stored is cleared by sending it empty.")
     public AccessDto get(@Parameter(description = "Table name") @PathVariable String name) {
         return AccessDto.of(service.getAccess(name));
     }
@@ -58,7 +60,9 @@ public class TableAccessController {
             description = "Merges the grant lists: a key present in the body replaces that list, an absent "
                     + "key keeps the stored one, and an explicit empty array revokes it. Returns the same five "
                     + "lists GET returns, plus the caller's effective permissions and any grant that changes "
-                    + "nothing.")
+                    + "nothing. On an enrichment a non-empty get, read or sensitive is refused 409 "
+                    + "enrichment_follows_source, after 404 for an unknown table and before any other check of the "
+                    + "lists; grant its source instead.")
     public AccessReplacedDto replace(
             @Parameter(description = "Table name") @PathVariable String name,
             @Valid @RequestBody ReplaceAccessRequest request) {

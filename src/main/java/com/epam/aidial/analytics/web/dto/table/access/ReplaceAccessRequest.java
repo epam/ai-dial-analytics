@@ -16,20 +16,27 @@ import java.util.List;
  * <p>There is no {@code list} key: {@code get} is what shows one table, and seeing every table is the
  * global {@code TABLE_LIST}. A body carrying {@code list} is refused {@code 400} like any unknown member.
  *
+ * <p>On an enrichment a non-empty {@code get}, {@code read} or {@code sensitive} is refused
+ * {@code 409 enrichment_follows_source}: its read side is its source's. Sent empty, they are accepted.
+ *
  * <p>Role names must be non-blank (validated in the service, 422 otherwise) and are trimmed and
  * de-duplicated.
  */
 public record ReplaceAccessRequest(
         @Schema(description = "Roles that may see this table and read its definition and columns; absent keeps, "
-                + "[] revokes")
+                + "[] revokes" + ReplaceAccessRequest.ENRICHMENT_REFUSED)
         List<String> get,
-        @Schema(description = "Roles that may read this table's non-sensitive values; absent keeps, [] revokes")
+        @Schema(description = "Roles that may read this table's non-sensitive values; absent keeps, [] revokes"
+                + ReplaceAccessRequest.ENRICHMENT_REFUSED)
         List<String> read,
         @Schema(description = "Roles cleared for this table's sensitive columns, for the get/read/modify they also hold; "
-                + "absent keeps, [] revokes")
+                + "absent keeps, [] revokes" + ReplaceAccessRequest.ENRICHMENT_REFUSED)
         List<String> sensitive,
         @Schema(description = "Roles that may insert rows; absent keeps, [] revokes")
         List<String> write,
         @Schema(description = "Roles that may change the schema or description; absent keeps, [] revokes")
         List<String> modify) {
+
+    private static final String ENRICHMENT_REFUSED = "; non-empty on an enrichment is refused 409 enrichment_follows_source, "
+            + "grant its source instead";
 }

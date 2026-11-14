@@ -19,7 +19,7 @@ import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.DashboardConflictException;
 import com.epam.aidial.analytics.exception.DashboardNotFoundException;
 import com.epam.aidial.analytics.exception.DashboardValidationException;
-import com.epam.aidial.analytics.exception.DeclarationUnresolvableException;
+import com.epam.aidial.analytics.exception.EnrichmentFollowsSourceException;
 import com.epam.aidial.analytics.exception.IllegalFinalException;
 import com.epam.aidial.analytics.exception.InlineQueryRejectedException;
 import com.epam.aidial.analytics.exception.InvalidCursorException;
@@ -45,7 +45,6 @@ import com.epam.aidial.analytics.exception.SavedQueryNotFoundException;
 import com.epam.aidial.analytics.exception.SavedQueryValidationException;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
-import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.exception.SettingNotFoundException;
 import com.epam.aidial.analytics.exception.SettingValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
@@ -319,29 +318,10 @@ public class DefaultExceptionHandler {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "validation_error", ex.getMessage());
     }
 
-    /**
-     * Its own code rather than {@code validation_error}: the refusal names a pipeline the operator was
-     * probably not thinking about when it edited a grant list, so a client has to be able to tell this
-     * apart from a malformed body.
-     */
-    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
-    @ExceptionHandler(SensitiveGrantWidensException.class)
-    public ErrorView handleSensitiveGrantWidens(HttpServletRequest req, SensitiveGrantWidensException ex) {
-        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "sensitive_grant_widens", ex.getMessage());
-    }
-
-    /**
-     * A conflict with stored state rather than a fault in the request: the operator's edit is well-formed,
-     * and a pipeline it does not name cannot be read.
-     */
     @ResponseStatus(HttpStatus.CONFLICT)
-    @ExceptionHandler(DeclarationUnresolvableException.class)
-    public ErrorView handleDeclarationUnresolvable(
-            HttpServletRequest req, DeclarationUnresolvableException ex) {
-        log.warn("[{}] Request: {} - a stored pipeline declaration could not be resolved",
-                req.getMethod(), req.getServletPath(), ex);
-        return new ErrorView(
-                req, HttpStatus.CONFLICT, "pipeline_declaration_unresolvable", ex.getMessage());
+    @ExceptionHandler(EnrichmentFollowsSourceException.class)
+    public ErrorView handleEnrichmentFollowsSource(HttpServletRequest req, EnrichmentFollowsSourceException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "enrichment_follows_source", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)

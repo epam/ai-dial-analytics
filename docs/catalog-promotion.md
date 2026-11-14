@@ -58,10 +58,11 @@ missing, but refuses a table left behind PENDING or FAILED: delete it (`DELETE /
 
 ## 4. Grant access
 
-Imported tables have **no grants**: only callers holding the global privileges can see or read them. Grant
-each table on this environment with `PUT /v1/tables/{name}/access`, using this environment's provider role
-names. Grant a source table before its enrichments, so a `sensitive` grant on an enrichment finds the matching
-grant on its source.
+Imported tables have **no grants** of their own: only callers holding the global privileges can see or read
+them, except that an imported enrichment of a source this environment already grants is readable at once by
+that source's readers. Grant each source on this environment with `PUT /v1/tables/{name}/access`, using this
+environment's provider role names. An enrichment follows its source's `get`, `read` and `sensitive` lists and
+takes none of its own (`409 enrichment_follows_source`); grant it only `write` or `modify`.
 
 ## 5. Arm the pipelines
 

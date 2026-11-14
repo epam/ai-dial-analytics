@@ -25,10 +25,10 @@ import org.springframework.stereotype.Component;
  *       former {@code TABLE_READ_SENSITIVE} carried that read implicitly; this carries it explicitly.</li>
  * </ul>
  *
- * <p>Ownership matters because a queryable entity is a composite — a source flattened with its active
- * enrichments — so one request can legitimately see the source's sensitive columns and not an
- * enrichment's, or the reverse. The decision is therefore taken where each column's owning table is in
- * hand rather than hoisted once per request, which is what the previous single global answer did.
+ * <p>Each column is judged on its owning table. A queryable entity is a composite — a source flattened with
+ * its active enrichments — and an enrichment's read side is its source's ({@code GoverningAccess}), so within
+ * one entity every column answers the same read and clearance questions; the verb bars still differ, since an
+ * enrichment's own {@code modify} confers {@code TABLE_GET} on it alone.
  *
  * <p>This is the one signal the query model consults ({@link
  * com.epam.aidial.analytics.service.query.CatalogQueryService}); because discovery, structured execution,

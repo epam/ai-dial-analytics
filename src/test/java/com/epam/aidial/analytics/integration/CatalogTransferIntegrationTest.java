@@ -43,7 +43,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * it), and imported.
  *
  * <p>The fixture is a source, an enrichment of it, a sensitive enrichment of {@code dial_usage_log} with grants
- * on both, an aggregate target, two enrich pipelines and an aggregate pipeline whose only reference to the
+ * on both (read-side on the source, write on the enrichment), an aggregate target, two enrich pipelines and an aggregate pipeline whose only reference to the
  * enrichment is inside its filter and group key.
  */
 class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
@@ -87,7 +87,8 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                  {"source_name":"events","name":"events","type":"long"}]""", "[\"sentiment\"]");
         putAccess(BASE, "{\"read\":[\"" + READERS + "\"]}");
         putAccess(SYSTEM, "{\"read\":[\"" + READERS + "\"],\"sensitive\":[\"" + READERS + "\"]}");
-        putAccess(DUL, "{\"read\":[\"" + READERS + "\"],\"sensitive\":[\"" + READERS + "\"]}");
+        // An enrichment's read side is its source's; only its write and modify lists are its own.
+        putAccess(DUL, "{\"write\":[\"" + READERS + "\"]}");
         createPipeline("{\"name\":\"" + SENT_LIVE + "\",\"kind\":\"enrich\",\"target\":\"" + SENT + "\","
                 + Transforms.sql().output("sentiment", "lower('POS')").member()
                 + ",\"trigger\":{\"kind\":\"schedule\"},\"enabled\":true}");

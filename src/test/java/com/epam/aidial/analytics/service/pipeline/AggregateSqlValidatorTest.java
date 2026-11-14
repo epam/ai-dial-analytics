@@ -25,7 +25,6 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
 import org.jooq.impl.DSL;
@@ -80,8 +79,6 @@ class AggregateSqlValidatorTest {
     private SensitiveColumnAccess sensitiveAccess;
     @Mock
     private EnrichmentFreshness freshness;
-    @Mock
-    private SensitiveGrantInvariant sensitiveGrants;
 
     private AggregateSpecValidator validator;
 
@@ -94,7 +91,7 @@ class AggregateSqlValidatorTest {
         final SensitiveProjectionGuard guard = new SensitiveProjectionGuard(sensitiveAccess, columns, catalog);
         validator = new AggregateSpecValidator(definitions, pipelines, new QueryFunctionCatalog(), mock(FilterSqlValidator.class),
                 guard, new EntityFieldResolver(columns, catalog), freshness,
-                new PipelineSpecCodec(new JsonMapperConfiguration().jsonMapper()), sensitiveGrants, reader);
+                new PipelineSpecCodec(new JsonMapperConfiguration().jsonMapper()), reader);
 
         final TableDefinitionEntity input = table(INPUT, TableType.SOURCE);
         input.setVersionColumn("_ingested_at");

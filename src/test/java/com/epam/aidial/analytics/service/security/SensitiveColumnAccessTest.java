@@ -3,6 +3,8 @@ package com.epam.aidial.analytics.service.security;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
 import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
@@ -27,11 +29,10 @@ import static org.mockito.Mockito.when;
 /**
  * Policy matrix for {@link SensitiveColumnAccess}, which is now decided <b>per owning table</b>.
  *
- * <p>The per-table cases are the point: one flattened entity can legitimately expose the source's sensitive
- * columns and hide an enrichment's, so a single global answer — what this used to give — cannot express the
- * policy. The {@code none}-mode case still fails open, and it now reads the mode from the one resolver every
- * other gate reads, which is what stops {@code SECURITY_MODE=OIDC} from leaving this open while HTTP
- * enforces.
+ * <p>Each column is judged on its owning table, and an enrichment's read side is its source's, so within one
+ * flattened entity the source's grants decide both tables. The {@code none}-mode case still fails open, and it
+ * reads the mode from the one resolver every other gate reads, which is what stops {@code SECURITY_MODE=OIDC}
+ * from leaving this open while HTTP enforces.
  */
 class SensitiveColumnAccessTest {
 
@@ -48,7 +49,7 @@ class SensitiveColumnAccessTest {
 
     private SensitiveColumnAccess access(SecurityMode mode) {
         return new SensitiveColumnAccess(
-                new TableAccessEvaluator(definitions, claims), resolver(mode));
+                new TableAccessEvaluator(definitions, new GoverningAccess(definitions), claims), resolver(mode));
     }
 
     private static SecurityModeResolver resolver(SecurityMode mode) {
@@ -115,18 +116,28 @@ class SensitiveColumnAccessTest {
     }
 
     @Test
-    @DisplayName("the decision is per owning table")
-    void decidedPerOwningTable() {
-        tableGranting(SOURCE, Privilege.TABLE_SENSITIVE, "pii-readers");
-        tableGranting(ENRICHMENT, Privilege.TABLE_READ, "pii-readers");
-        authenticateWith(EnumSet.noneOf(Privilege.class), "pii-readers");
+    @DisplayName("an enrichment's read and clearance are its source's")
+    void enrichmentFollowsItsSource() {
+        final TableDefinitionEntity source = new TableDefinitionEntity();
+        source.setName(SOURCE);
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("analysts", "pii-readers"));
+        source.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("pii-readers"));
+        when(definitions.findById(SOURCE)).thenReturn(Optional.of(source));
+        final TableDefinitionEntity enrichment = new TableDefinitionEntity();
+        enrichment.setName(ENRICHMENT);
+        enrichment.setType(TableType.ENRICHMENT);
+        enrichment.setSourceTable(SOURCE);
+        when(definitions.findById(ENRICHMENT)).thenReturn(Optional.of(enrichment));
 
+        authenticateWith(EnumSet.noneOf(Privilege.class), "pii-readers");
+        assertThat(access(SecurityMode.OIDC).mayReadSensitive(ENRICHMENT))
+                .as("the source's read and clearance reach an enrichment that grants nothing itself")
+                .isTrue();
+
+        authenticateWith(EnumSet.noneOf(Privilege.class), "analysts");
         final SensitiveColumnAccess access = access(SecurityMode.OIDC);
-        assertThat(access.maySeeSensitive(SOURCE)).isTrue();
-        assertThat(access.maySeeSensitive(ENRICHMENT))
-                .as("the same caller may read the enrichment but not its sensitive columns")
-                .isFalse();
         assertThat(access.mayRead(ENRICHMENT)).isTrue();
+        assertThat(access.maySeeSensitive(ENRICHMENT)).isFalse();
     }
 
     @Test

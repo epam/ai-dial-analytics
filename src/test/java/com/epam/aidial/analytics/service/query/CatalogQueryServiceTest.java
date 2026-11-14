@@ -11,18 +11,24 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
+import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
+import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.SecurityMode;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import org.jooq.DSLContext;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 
@@ -48,7 +54,7 @@ class CatalogQueryServiceTest {
         // security.mode=none → both filters fail open, so these model-assembly tests see every table and
         // every column.
         final SensitiveColumnAccess access = new SensitiveColumnAccess(
-                new TableAccessEvaluator(definitions, new SecurityClaimsExtractor()),
+                new TableAccessEvaluator(definitions, new GoverningAccess(definitions), new SecurityClaimsExtractor()),
                 new SecurityModeResolver(SecurityMode.NONE.code()));
         return new CatalogQueryService(definitions, columns, access);
     }
@@ -451,40 +457,77 @@ class CatalogQueryServiceTest {
         assertThat(service().findModel("events", Privilege.TABLE_READ).orElseThrow().partitionLocal()).isFalse();
     }
 
-    /**
-     * Final-capability is decided at {@code TABLE_READ} on every surface — the bar execution resolves at. A
-     * caller who may list and get an {@code append} source's enrichment but not read it is handed a model
-     * without it at execution, so neither discovery ({@code TABLE_LIST}) nor translation ({@code TABLE_GET})
-     * may call the entity final-capable: {@code FINAL} there would translate and then fail as illegal_final.
-     */
-    @Test
-    void enrichmentTheCallerCannotReadDoesNotMakeTheEntityFinalCapable() {
+    /** The real evaluator in {@code oidc} mode, for a caller carrying {@code roles} and no global privilege. */
+    private CatalogQueryService oidcService(String... roles) {
+        SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
+                "caller", "n/a", CallerAuthorities.build(EnumSet.noneOf(Privilege.class), List.of(roles))));
+        final SensitiveColumnAccess access = new SensitiveColumnAccess(
+                new TableAccessEvaluator(definitions, new GoverningAccess(definitions), new SecurityClaimsExtractor()),
+                new SecurityModeResolver(SecurityMode.OIDC.code()));
+        return new CatalogQueryService(definitions, columns, access);
+    }
+
+    @AfterEach
+    void clearContext() {
+        SecurityContextHolder.clearContext();
+    }
+
+    /** An {@code append} source {@code events} with one enrichment {@code facts}, the source granting {@code key} to {@code role}. */
+    private void appendSourceWithEnrichment(Privilege key, String role) {
         final TableDefinitionEntity source = definition("events", TableType.SOURCE, null, null);
+        source.getAccess().setRolesFor(key, List.of(role));
         final TableDefinitionEntity enrichment = definition("facts", TableType.ENRICHMENT, "events", null);
         enrichment.setGrainKey("widget_id");
-        final SensitiveColumnAccess access = mock(SensitiveColumnAccess.class);
-        lenient().when(access.mayList(anyString())).thenReturn(true);
-        lenient().when(access.mayGet(anyString())).thenReturn(true);
-        lenient().when(access.mayRead("events")).thenReturn(true);
-        lenient().when(access.mayRead("facts")).thenReturn(false);
-        final CatalogQueryService service = new CatalogQueryService(definitions, columns, access);
-
-        given(definitions.findByTypeAndStatus(TableType.SOURCE, TableStatus.ACTIVE)).willReturn(List.of(source));
-        given(definitions.findById("events")).willReturn(Optional.of(source));
-        given(definitions.findBySourceTable("events")).willReturn(List.of(enrichment));
+        lenient().when(definitions.findByTypeAndStatus(TableType.SOURCE, TableStatus.ACTIVE)).thenReturn(List.of(source));
+        lenient().when(definitions.findById("events")).thenReturn(Optional.of(source));
+        lenient().when(definitions.findById("facts")).thenReturn(Optional.of(enrichment));
+        lenient().when(definitions.findBySourceTable("events")).thenReturn(List.of(enrichment));
         lenient().when(columns.findByTableNameOrderByOrdinal("events")).thenReturn(List.of(
                 column("events", "widget_id", QueryFieldType.STRING, 0)));
         lenient().when(columns.findByTableNameOrderByOrdinal("facts")).thenReturn(List.of(
                 column("facts", "label", QueryFieldType.STRING, 0)));
+    }
+
+    /**
+     * Final-capability is decided at {@code TABLE_READ} on every surface — the bar execution resolves at. A
+     * caller who may get an {@code append} source, and so its enrichment, but not read it, is handed no model at
+     * execution, so neither discovery ({@code TABLE_LIST}) nor translation ({@code TABLE_GET}) may call the entity
+     * final-capable: {@code FINAL} there would translate and then fail.
+     */
+    @Test
+    void enrichmentTheCallerCannotReadDoesNotMakeTheEntityFinalCapable() {
+        appendSourceWithEnrichment(Privilege.TABLE_GET, "viewers");
+        final CatalogQueryService service = oidcService("viewers");
 
         assertThat(service.listEntities()).singleElement()
                 .satisfies(dto -> assertThat(dto.supportsFinal()).isFalse());
         final QueryEntityModel translated = service.findModel("events", Privilege.TABLE_GET).orElseThrow();
         assertThat(translated.enrichments()).hasSize(1);
         assertThat(FinalDecision.finalCapable(translated)).isFalse();
+        assertThat(service.findModel("events", Privilege.TABLE_READ)).isEmpty();
+    }
+
+    /** A per-table reader of the source reads its enrichment, which it holds nothing on, so the entity reads final. */
+    @Test
+    void sourceReaderMakesTheEntityFinalCapableThroughItsEnrichment() {
+        appendSourceWithEnrichment(Privilege.TABLE_READ, "analysts");
+        final CatalogQueryService service = oidcService("analysts");
+
+        assertThat(service.listEntities()).singleElement()
+                .satisfies(dto -> assertThat(dto.supportsFinal()).isTrue());
         final QueryEntityModel executed = service.findModel("events", Privilege.TABLE_READ).orElseThrow();
-        assertThat(executed.enrichments()).isEmpty();
-        assertThat(FinalDecision.finalCapable(executed)).isFalse();
+        assertThat(executed.enrichments()).hasSize(1);
+        assertThat(FinalDecision.readsFinal(executed, null, false)).as("an absent final reads final").isTrue();
+    }
+
+    /** A {@code modify} holder on the source gets its enrichment, so the enrichment's columns are in the base schema. */
+    @Test
+    void sourceModifyHolderSeesTheEnrichmentColumns() {
+        appendSourceWithEnrichment(Privilege.TABLE_MODIFY, "editors");
+
+        assertThat(oidcService("editors").getBaseSchema("events").fields())
+                .extracting(QuerySchemaFieldDto::name)
+                .containsExactly("widget_id", "facts.label");
     }
 
     /** The same shape with the enrichment readable is final-capable on every surface. */

@@ -28,11 +28,13 @@ import java.util.Set;
  *       {@code dial_usage_log};</li>
  *   <li>in {@code none} mode nothing is enforced, so every non-system flag is true;</li>
  *   <li>otherwise each flag is true when the caller holds the privilege globally, or when one of its raw
- *       provider roles appears in a list that grants or <b>implies</b> it.</li>
+ *       provider roles appears in a list that grants or <b>implies</b> it — for an enrichment, the lists
+ *       {@link GoverningAccess} composes from its source's read side and its own {@code write}/{@code modify}.</li>
  * </ul>
  *
  * <p>{@code rowsRestricted} is answered by {@link RowPolicyFilter#isConfined}, the evaluation enforcement
- * uses, on system and non-system tables alike; it is false whenever security is not enforced.
+ * uses, on system and non-system tables alike — for an enrichment, on its source or on the enrichment itself;
+ * it is false whenever security is not enforced.
  *
  * <p>{@link #isGranted} is the single matcher, shared with {@link TableAccessEvaluator}, so reporting and
  * enforcement cannot diverge. There is no role-name bypass: a caller holding every privilege is reported
@@ -44,12 +46,14 @@ public class TableCallerPermissions {
     private final SecurityClaimsExtractor claimsExtractor;
     private final SecurityModeResolver securityMode;
     private final RowPolicyFilter rowPolicies;
+    private final GoverningAccess governing;
 
-    public TableCallerPermissions(
-            SecurityClaimsExtractor claimsExtractor, SecurityModeResolver securityMode, RowPolicyFilter rowPolicies) {
+    public TableCallerPermissions(SecurityClaimsExtractor claimsExtractor, SecurityModeResolver securityMode,
+            RowPolicyFilter rowPolicies, GoverningAccess governing) {
         this.claimsExtractor = claimsExtractor;
         this.securityMode = securityMode;
         this.rowPolicies = rowPolicies;
+        this.governing = governing;
     }
 
     /** The caller's effective permissions for {@code definition}. */
@@ -59,13 +63,17 @@ public class TableCallerPermissions {
         }
         final Set<Privilege> held = claimsExtractor.getPrivileges();
         final Set<String> callerRoles = claimsExtractor.getProviderRoles();
+        final TableDefinitionEntity source = governing.sourceOf(definition);
+        final TableAccess access = GoverningAccess.compose(definition, source);
         final Map<Privilege, Boolean> flags = new EnumMap<>(Privilege.class);
         for (final Privilege privilege : PrivilegeScope.TABLE_SCOPED) {
             final boolean allowed = !(definition.isSystem() && PrivilegeScope.isModifying(privilege))
-                    && (held.contains(privilege) || isGranted(definition.getAccess(), privilege, callerRoles));
+                    && (held.contains(privilege) || isGranted(access, privilege, callerRoles));
             flags.put(privilege, allowed);
         }
-        return EffectivePermissions.of(flags, rowPolicies.isConfined(definition));
+        // An enrichment's rows are its source's; its own term is true only for a policy an earlier build left there.
+        final boolean confined = rowPolicies.isConfined(definition) || source != null && rowPolicies.isConfined(source);
+        return EffectivePermissions.of(flags, confined);
     }
 
     /**

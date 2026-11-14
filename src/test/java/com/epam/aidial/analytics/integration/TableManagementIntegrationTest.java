@@ -609,6 +609,19 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[0].heavy").value(true));
     }
 
+    /** The refusal constrains what may be stored, so it holds in none mode, where nothing else is enforced. */
+    @Test
+    void noneModeStillRefusesReadGrantOrRowPolicyOnEnrichment() throws Exception {
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"read\":[\"analytics-viewers\"]}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"where\":\"trace_id = 'x'\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+    }
+
     @Test
     void seededPayloadColumnsAreHeavyOnTheReadSurface() throws Exception {
         // The migration's seed, visible unfiltered to an operator (V18, extended by V29 and re-keyed

@@ -477,9 +477,7 @@ the name is taken, and it is the accepted limit of hiding (see `authentication`)
 limit SHALL count hidden columns too. A `ttl.column` SHALL resolve against the visible columns only, so
 naming a hidden column fails as naming an undeclared one. Such a caller SHALL be refused
 `403 forbidden` for any `ttl` member (set, replace or remove) while the stored TTL is on a hidden column. A
-caller holding the clearance resolves against every column and MAY make any of these changes. Marking a
-column sensitive — by patching one or adding one already flagged — on an enrichment SHALL be subject to
-the laundering subset rule (see `enrichment-runtime`). The system SHALL reject: a type-change of an existing column (422); a drop or rename
+caller holding the clearance resolves against every column and MAY make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
 of a system column (reserved `_`-prefix), the grain key, or an ordering-key column (422); a `drop`
 of the column the table's stored TTL references (422 — remove or repoint the TTL in a prior
 request first, even if the same request also carries a `ttl` member); an `update` of a column that
@@ -3668,3 +3666,4 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 - **WHEN** a query projects a held enrichment's columns
 - **THEN** it succeeds
+

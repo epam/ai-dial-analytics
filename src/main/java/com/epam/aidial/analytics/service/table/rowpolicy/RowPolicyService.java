@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.table.rowpolicy;
 
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.exception.EnrichmentFollowsSourceException;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
@@ -8,6 +9,7 @@ import com.epam.aidial.analytics.service.query.RowPolicyPredicates;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RoleBundle;
 import lombok.RequiredArgsConstructor;
@@ -44,6 +46,24 @@ public class RowPolicyService {
     @Transactional(readOnly = true)
     public Map<String, RowPolicy> list(String table) {
         return codec.read(require(table).getRowPolicies());
+    }
+
+    /**
+     * Refuses a policy {@code PUT} before its body is checked or translated: {@code 404} for an unknown table, then
+     * {@code 409 enrichment_follows_source} for an enrichment, whose rows are its source's. {@code GET} and
+     * {@code DELETE} skip it, so a policy an earlier build left on an enrichment can be read and removed.
+     *
+     * @throws TableNotFoundException            if the table does not exist (404)
+     * @throws EnrichmentFollowsSourceException if the table is an enrichment (409)
+     */
+    @Transactional(readOnly = true)
+    public void requireAcceptsPolicies(String table) {
+        final TableDefinitionEntity definition = require(table);
+        if (definition.getType() == TableType.ENRICHMENT) {
+            throw new EnrichmentFollowsSourceException("table '" + table + "' is an enrichment; the rows a caller reads "
+                    + "through it are its source's, so it takes no row policy. Write the policy on its source '"
+                    + definition.getSourceTable() + "' instead");
+        }
     }
 
     /**

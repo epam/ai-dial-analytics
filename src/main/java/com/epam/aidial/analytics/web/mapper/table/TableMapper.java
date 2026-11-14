@@ -331,15 +331,21 @@ public class TableMapper {
                 tagOrder == null ? null : List.copyOf(tagOrder),
                 null,
                 summary.columnCount(),
-                permissions(entity),
+                permissions(summary.permissions()),
                 null,
                 null,
                 null);
     }
 
-    /** The caller's effective permissions, resolved from the definition already in hand (no queries). */
+    /**
+     * The caller's effective permissions on {@code entity}. An enrichment's read-side flags come from its source's
+     * current lists, which costs one source lookup — on a revision snapshot too, whatever the lists were then.
+     */
     private PermissionsDto permissions(TableDefinitionEntity entity) {
-        final EffectivePermissions effective = callerPermissions.resolve(entity);
+        return permissions(callerPermissions.resolve(entity));
+    }
+
+    private static PermissionsDto permissions(EffectivePermissions effective) {
         return new PermissionsDto(
                 effective.get(), effective.read(),
                 effective.sensitive(), effective.write(), effective.modify(), effective.rowsRestricted());

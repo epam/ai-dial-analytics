@@ -47,7 +47,8 @@ public class TableRowPolicyController {
     @RequiresPrivilege(Privilege.TABLE_GRANT)
     @Operation(summary = "List a table's row policies",
             description = "Returns every role's row policy on the table, keyed by raw provider role. Requires "
-                    + "TABLE_GRANT, because the policies disclose which roles exist and what each may see.")
+                    + "TABLE_GRANT, because the policies disclose which roles exist and what each may see. On an "
+                    + "enrichment it lists only policies an earlier build stored; they can be removed with DELETE.")
     public RowPoliciesDto list(@Parameter(description = "Table name") @PathVariable String name) {
         final Map<String, RowPolicyDto> policies = new LinkedHashMap<>();
         service.list(name).forEach((role, policy) -> policies.put(role, RowPolicyDto.of(policy)));
@@ -62,11 +63,15 @@ public class TableRowPolicyController {
                     + "by — including a global read privilege. A caller is not confined when another of its roles "
                     + "may read the table and has no policy on it. Validated against the table's own columns "
                     + "(422 otherwise). The policy may instead be given as `where`, the SQL condition that would "
-                    + "follow WHERE; it is translated to a `filter`, which is what is stored and returned.")
+                    + "follow WHERE; it is translated to a `filter`, which is what is stored and returned. An enrichment "
+                    + "takes no policy, its rows being its source's: a PUT naming one is refused 409 "
+                    + "enrichment_follows_source, after 404 for an unknown table and before any check of the body.")
     public RowPolicyDto put(
             @Parameter(description = "Table name") @PathVariable String name,
             @Parameter(description = "Raw provider role name") @PathVariable String role,
             @RequestBody RowPolicyDto request) {
+        // Before the body is checked or a `where` translated: a missing table is 404 and an enrichment 409 whatever it carries.
+        service.requireAcceptsPolicies(name);
         if (request.where() != null && request.filter() != null) {
             throw new TableValidationException("a row policy takes 'filter' or 'where', not both");
         }

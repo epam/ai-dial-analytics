@@ -26,7 +26,6 @@ stopped pipeline stays on it marked `enabled: false`, of which the runner execut
 carrying its authored `transform` block, the resolved `response_schema` the model is held to, its
 derived grain key and version column, and a `generation` value for change detection.
 ## Requirements
-
 ### Requirement: No evaluator surface remains
 
 The system SHALL expose no route under `/v1/evaluators` and SHALL store no evaluator definition: an
@@ -474,7 +473,9 @@ once the two references that joined the gate's reference set unexamined, and bot
 target: the grain key is read by every derivation and stored as the target's key, so a sensitive one is
 copied into the target on every row. A column flagged `sensitive` SHALL be usable in a pipeline only by a caller
 entitled to see it — that is, one holding `TABLE_READ` and `TABLE_SENSITIVE` **on the table that owns
-the column**, each globally or granted on that table, or any caller when `security.mode` is `none` — mirroring the filter
+the column**, each globally or granted on that table — for an enrichment's column, on its source (see
+`table-access-control`, "An enrichment's read-side access is its source's") — or any caller when `security.mode` is
+`none` — mirroring the filter
 applied on the query surface, which is likewise decided per owning table. A pipeline
 referencing a `sensitive` column by a caller not so entitled SHALL be rejected with HTTP 403
 `sensitive_column_not_entitled`.
@@ -516,18 +517,29 @@ the pipelines that read it; enabling one again runs the gate against whoever ena
 - **WHEN** a pipeline's filter and bound bindings reference only non-`sensitive` source columns
 - **THEN** the entitlement check passes
 
+#### Scenario: Editing a transform re-runs the full gate
+
+- **GIVEN** an enabled `sql` pipeline whose target carries no `sensitive` column
+- **WHEN** a caller holding `REGISTRY_ADMIN` but not both `TABLE_READ` and `TABLE_SENSITIVE` on the
+  read source
+  patches its `transform` so an output expression reads a `sensitive` column of the read source
+- **THEN** the patch is rejected `403 sensitive_column_not_entitled`, and the stored declaration is
+  unchanged — the expression lives on the pipeline row, so there is no way to change what a stored
+  pipeline reads that bypasses this gate
+
 ### Requirement: Sensitive-column entitlement crosses the grain join
 
 The sensitive-column rule SHALL apply to an enrichment column exactly as it applies to a read-source
 column. A `sensitive` column of an `ACTIVE` enrichment of the pipeline's read source SHALL be
-referenceable only by a caller holding `TABLE_READ` and `TABLE_SENSITIVE` **on that enrichment** —
-each globally or granted on it — and a reference by any other caller SHALL be rejected with HTTP 403
+referenceable only by a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on that enrichment — which are the
+privileges it holds on the enrichment's **source** (see `table-access-control`, "An enrichment's read-side access is
+its source's"), each globally or granted there — and a reference by any other caller SHALL be rejected with HTTP 403
 `sensitive_column_not_entitled`.
 
-Per owning table is what makes this a real rule rather than a restatement. Entitlement to the read
-source's sensitive columns no longer implies entitlement to its enrichments': within one flattened entity
-a caller may be entitled to the source's and not an enrichment's, or the reverse, and each column is
-judged against the table it belongs to.
+Every enrichment of the read source therefore shares the read source's entitlement: a caller entitled to the read
+source's sensitive columns is entitled to those of each of its enrichments, and one that is not is entitled to none.
+The rule is kept as its own requirement because an enrichment column's entitlement is still decided on the table the
+enrichment hangs off, which, for an enrichment reached through the read source's grain join, is the read source.
 
 Because such a column is **hidden** from a non-entitled caller's schema view rather than forbidden
 to it, a governed fragment naming one fails to parse for that caller. That failure SHALL be
@@ -544,7 +556,7 @@ decision, taken by declaring that target column `sensitive`.
 
 #### Scenario: A sensitive enrichment column is accepted for an entitled author
 
-- **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on that enrichment (or any caller in
+- **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on that enrichment's source (or any caller in
   `none` mode)
   registers a pipeline referencing a `sensitive` column of an `ACTIVE` enrichment of its read source
 - **THEN** the pipeline is accepted
@@ -562,6 +574,15 @@ decision, taken by declaring that target column `sensitive`.
 - **THEN** the pipeline is accepted and the target column's `sensitive` flag is left as the table
   author declared it, exactly as for a `sensitive` column of the read source — an enrichment column
   reached through the grain join is governed no differently from one the source declares
+
+#### Scenario: An enrichment's sensitive column is referenceable with the source's entitlement
+
+- **GIVEN** a read source with an `ACTIVE` enrichment carrying a `sensitive` column
+- **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on the read source registers a pipeline whose filter
+  references `"<enrichment>.<column>"`
+- **THEN** the entitlement check passes
+- **AND WHEN** a caller holding `TABLE_READ` on the read source without the clearance registers the same pipeline
+- **THEN** the request is rejected with HTTP 403 and error code `sensitive_column_not_entitled`
 
 ### Requirement: Runner identity and derived-column sensitivity posture
 
@@ -3092,3 +3113,4 @@ statement reads in the field's place.
   is, and an author without `TABLE_SENSITIVE` on `dial_usage_log_payload` binds
   `dial_usage_log_payload.request_body_full`
 - **THEN** the request is rejected with HTTP 403 `sensitive_column_not_entitled`
+

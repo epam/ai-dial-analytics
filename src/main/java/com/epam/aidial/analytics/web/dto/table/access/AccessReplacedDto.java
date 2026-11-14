@@ -23,15 +23,16 @@ import java.util.List;
  *
  * <p>{@code ineffective_grants} reports rather than refuses. A grant can legitimately change nothing in
  * two ways, neither of which is an error: the role already holds the privilege globally, so effective
- * access was already a union that included it; or the grant is a {@code read} on an enrichment whose
- * source the role cannot read, and an enrichment is not a queryable entity, so no statement can reach its
- * rows. Refusing either would block a deployment mid-migration; saying nothing would leave the operator to
- * discover it.
+ * access was already a union that included it; or the grant is a {@code sensitive} clearance for a role
+ * holding no verb it could extend. Refusing either would block a deployment mid-migration; saying nothing
+ * would leave the operator to discover it.
  */
 public record AccessReplacedDto(
-        @Schema(description = "Roles that may see this table and read its definition and columns") List<String> get,
-        @Schema(description = "Roles that may read this table's non-sensitive values") List<String> read,
-        @Schema(description = "Roles cleared for this table's sensitive columns, for the get/read/modify they also hold")
+        @Schema(description = "Roles that may see this table and read its definition and columns"
+                + AccessDto.ENRICHMENT_NOTE) List<String> get,
+        @Schema(description = "Roles that may read this table's non-sensitive values" + AccessDto.ENRICHMENT_NOTE) List<String> read,
+        @Schema(description = "Roles cleared for this table's sensitive columns, for the get/read/modify they also hold"
+                + AccessDto.ENRICHMENT_NOTE)
         List<String> sensitive,
         @Schema(description = "Roles that may insert rows into this table") List<String> write,
         @Schema(description = "Roles that may change this table's schema or description") List<String> modify,
@@ -55,8 +56,8 @@ public record AccessReplacedDto(
      *
      * @param role      the granted provider role name
      * @param key       the grant key it was granted under ({@code get}, {@code read}, …)
-     * @param reason    a stable machine code: {@code already_global}, {@code enrichment_read_inert},
-     *                  {@code sensitive_without_verb} or {@code lifts_row_policies}
+     * @param reason    a stable machine code: {@code already_global}, {@code sensitive_without_verb} or
+     *                  {@code lifts_row_policies}
      * @param message   the human-readable explanation
      */
     public record IneffectiveGrantDto(

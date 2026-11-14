@@ -104,7 +104,9 @@ class SensitiveProjectionGuardTest {
 
         assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_full"), "scan"))
                 .isInstanceOf(SensitiveColumnNotEntitledException.class)
-                .hasMessageContaining(payload + ".request_body_full");
+                .hasMessageContaining(payload + ".request_body_full")
+                .as("the refusal names the source, whose grants the enrichment follows")
+                .hasMessageContaining("its source '" + SOURCE + "'");
         assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_rebuild"), "group-rows"))
                 .isInstanceOf(SensitiveColumnNotEntitledException.class);
     }

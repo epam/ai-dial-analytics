@@ -16,9 +16,7 @@ import com.epam.aidial.analytics.service.query.sql.SqlConditionStatement;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
 import com.epam.aidial.analytics.service.security.SystemIdentity;
-import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
-import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
@@ -66,12 +64,7 @@ public class RowPolicyConditions {
      * @throws TableValidationException if the condition cannot be a policy filter (422)
      */
     public FilterNode toFilter(String table, String condition) {
-        final TableDefinitionEntity definition = definitions.findById(table)
-                .orElseThrow(() -> new TableNotFoundException("table '" + table + "' not found"));
-        if (definition.getType() == TableType.ENRICHMENT) {
-            throw new TableValidationException("'where' is not available on table '" + table + "': an enrichment "
-                    + "is not queryable on its own, so its row policies are written as 'filter'");
-        }
+        definitions.findById(table).orElseThrow(() -> new TableNotFoundException("table '" + table + "' not found"));
         if (StringUtils.isBlank(condition)) {
             throw new TableValidationException("'where' must not be blank");
         }

@@ -26,7 +26,9 @@ NOT be listed as queryable entities — enrichments are surfaced only as flatten
 source (see the base-schema requirement). Each catalog item SHALL carry the entity wire `name` and a
 boolean `supports_final`: `true` when the entity is final-capable — its source is `upsert_by_key`, or it has
 an active enrichment the caller may read (`TABLE_READ`, the bar execution resolves the entity at, whatever
-bar the listing itself filters at) — and `false` otherwise, so a caller can tell where a structured
+bar the listing itself filters at; an enrichment's read is its source's, see
+[table-access-control](../table-access-control/spec.md), so a caller that may read the source may read each of its
+active enrichments) — and `false` otherwise, so a caller can tell where a structured
 query's `"final": true` and a SQL `FINAL` are legal and where they are rejected with `illegal_final` (see
 [structured-query](../structured-query/spec.md) "Read result deduplication"). `supports_final` is also what
 an absent `final` resolves to. It SHALL NOT reveal an enrichment the caller cannot read, and an enrichment
@@ -54,10 +56,16 @@ Entities SHALL be listed in stable alphabetical order by name.
 
 #### Scenario: An enrichment the caller cannot read does not make the entity final-capable
 
-- **WHEN** a caller holds `list` and `get` but not `read` on the only enrichment of an `append` source it may
-  read, and calls `GET /v1/queries/entities`
-- **THEN** that source's item carries `"supports_final": false`, matching execution, where the enrichment is
-  not joined and `"final": true` is rejected with `illegal_final`
+- **WHEN** a caller holds `list` and `get` but not `read` on an `append` source whose only enrichment is active, and
+  so may not read that enrichment either, and calls `GET /v1/queries/entities`
+- **THEN** that source's item carries `"supports_final": false`, matching translation, where `"final": true` is
+  rejected with `illegal_final`
+
+#### Scenario: A reader of the source makes an enriched append source final-capable
+
+- **WHEN** a caller holding `read` on an `append` source and nothing on its active enrichment calls
+  `GET /v1/queries/entities`
+- **THEN** that source's item carries `"supports_final": true`
 
 ### Requirement: Instance-independent base schema
 

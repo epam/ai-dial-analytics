@@ -5,9 +5,7 @@ Change tracking for the ADAS catalog and declaration registries: every mutation 
 definition, a table column, a pipeline of either kind, or a saved query is preserved as a full
 historical snapshot attributed to the identity that made it, and is exposed as a filtered activity
 feed plus point-in-time reads of any tracked resource as it stood at any past revision.
-
 ## Requirements
-
 ### Requirement: Audited resources
 
 The system SHALL track every insert, update, and delete of the catalog state backing tables, and of
@@ -661,7 +659,14 @@ at the end of the given revision, in the same response shape as the current-stat
 belonged to the table at that revision, and SHALL exclude a column that had been dropped by then.
 
 Every member of that response describes the table **as of the requested revision**, including the
-caller's effective permissions, which are resolved from the access lists the table had then. A snapshot
+caller's effective permissions, which are resolved from the access lists the table had then. An enrichment is the
+one exception: its read-side access is its source's (see `table-access-control`), and the source's lists at that
+revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive` SHALL be
+resolved from its source's current state, its `rows_restricted` from the source's current state or a policy the
+enrichment had at that revision, its `write` and `modify` from the lists the
+enrichment had then, and its `get` from either: the source's current state, or the `modify` list the enrichment had
+then. For an enrichment whose source no longer exists, the source's lists SHALL be taken as empty, so only a global
+privilege — or, for `get`, the enrichment's `modify` list at that revision — sets a read-side flag. A snapshot
 therefore answers "what could this caller have done then", not "what may they do now", and SHALL NOT be
 used to decide whether an action is currently permitted — the live read answers that.
 
@@ -748,6 +753,14 @@ is correct where answering with a partial one would assert that the missing colu
   revision in which only its definition row was changed
 - **THEN** the system returns HTTP 404 with error code `revision_not_found`, rather than a state whose
   column list is empty because those columns have no recorded history
+
+#### Scenario: An enrichment snapshot reports its source's current read-side flags
+
+- **GIVEN** an enrichment snapshot recorded when the enrichment's own `read` list named the caller's role, and a source
+  that does not grant that role now
+- **WHEN** the caller, holding `TABLE_GET` globally, requests the snapshot
+- **THEN** the snapshot's `permissions.read` is `false`, and its `permissions.write` reflects the enrichment's `write`
+  list at that revision
 
 ### Requirement: Point-in-time reads for pipeline and saved query
 
@@ -1073,3 +1086,26 @@ no snapshot endpoint for `Setting` is exposed.
 
 - **WHEN** a caller holding `AUDIT_READ` requests the feed filtering `resourceType` `eq` `Setting`
 - **THEN** only setting activities are returned
+
+### Requirement: The enrichment access clean-up records no revision
+
+In addition to the limitations stated under "Audited resources", the catalog migration that removes the `get`, `read`
+and `sensitive` lists and the row policies stored on enrichments (see `table-access-control`, "An enrichment's
+read-side access is its source's") records **no revision**, and this SHALL be stated as a known limitation. It rewrites the rows in raw SQL, outside
+the persistence context, so an enrichment's latest revision snapshot keeps showing the removed lists and policies until
+the next change that rewrites its table definition (its description, grants or row policies, not a column-only
+schema change) records a new one. The history of earlier revisions SHALL be left as it was,
+because it records what was stored then. A snapshot carrying such lists does not describe access that was in force
+after the upgrade: from then on an enrichment's read-side access is its source's whatever its stored lists say. The
+next such change of an enrichment, whatever it is for, records the emptied lists, so its diff against the previous
+revision shows them removed under that change's author.
+
+#### Scenario: The snapshot lags the clean-up
+
+- **GIVEN** an enrichment whose stored `read` list named a role before the upgrade
+- **WHEN** a caller holding `TABLE_GRANT`, and `TABLE_GET` on the enrichment, reads the enrichment's latest revision snapshot after the upgrade, before any
+  later change of the table
+- **THEN** the snapshot still carries that `read` list, while `GET /v1/tables/{name}/access` returns it empty
+- **AND WHEN** the enrichment's description is then updated
+- **THEN** the new revision's snapshot carries empty `get`, `read` and `sensitive` lists and no row policies
+

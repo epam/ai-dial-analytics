@@ -1,12 +1,12 @@
 package com.epam.aidial.analytics.service.table;
 
+import com.epam.aidial.analytics.exception.EnrichmentFollowsSourceException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
@@ -39,6 +39,9 @@ import java.util.Set;
  * blanket refusal made per-table read grants inapplicable to {@code dial_usage_log}, the primary
  * analytics table and the motivating case for having them.
  *
+ * <p>An enrichment takes no read-side list: its read side is its source's, so a non-empty {@code get}, {@code read}
+ * or {@code sensitive} is refused {@code 409 enrichment_follows_source} (see {@code GoverningAccess}).
+ *
  * <p>The target table must exist (404 otherwise) and role names must be non-blank (422). Authorization
  * sits at the web layer ({@code TABLE_GRANT} on both the read and the write); this service carries none.
  */
@@ -49,7 +52,6 @@ public class TableAccessService {
     private final TableDefinitionRepository definitions;
     private final TableCallerPermissions callerPermissions;
     private final ProviderRolePrivileges providerRolePrivileges;
-    private final SensitiveGrantInvariant sensitiveGrants;
     private final RowPolicyCodec rowPolicyCodec;
 
     /** Why a grant in the request changes nothing. */
@@ -57,9 +59,6 @@ public class TableAccessService {
 
         /** The role already holds the privilege over every table, so the grant adds nothing. */
         ALREADY_GLOBAL("already_global"),
-
-        /** A read grant on an enrichment, which is not a queryable entity — no statement reaches its rows. */
-        ENRICHMENT_READ_INERT("enrichment_read_inert"),
 
         /** A clearance for a role holding no verb it could extend on the table — it confers nothing alone. */
         SENSITIVE_WITHOUT_VERB("sensitive_without_verb"),
@@ -100,6 +99,7 @@ public class TableAccessService {
     @Transactional
     public AccessReplacement replaceAccess(String tableName, Map<Privilege, List<String>> requested) {
         final TableDefinitionEntity definition = require(tableName);
+        requireNoReadSideOnEnrichment(definition, requested);
         final TableAccess stored = definition.getAccess() == null ? new TableAccess() : definition.getAccess();
         final TableAccess merged = new TableAccess();
         for (final Privilege privilege : PrivilegeScope.GRANTABLE) {
@@ -124,11 +124,6 @@ public class TableAccessService {
             }
             merged.setRolesFor(privilege, effective);
         }
-        // Checked against the merged document BEFORE it is applied, deliberately. Applying it first
-        // dirties a managed, @Audited entity, and the invariant's own query then force-flushes that UPDATE —
-        // opening an Envers revision — before the rule has decided. The transaction rollback covers it
-        // today, but a refused grant must not depend on that: validate, then mutate.
-        sensitiveGrants.requireNotWidened(definition, merged);
         // A list's order carries no meaning, but TableAccess equality — what the dirty check compares — is
         // order-sensitive, so the same roles in another order would record an Update whose snapshots differ
         // in nothing anyone can act on. Grants that change no role set are therefore not written at all.
@@ -143,22 +138,38 @@ public class TableAccessService {
     }
 
     /**
+     * Refuses a {@code get}, {@code read} or {@code sensitive} list that is non-empty as sent — before trimming, so
+     * {@code [" "]} counts — on an enrichment, whose read side is its source's. An empty one is accepted, so a body
+     * echoed from {@code GET} succeeds and a list left by an earlier build can be cleared. Applies in {@code none}
+     * mode too: it constrains what may be stored, and a document written then goes live under {@code oidc}.
+     */
+    private static void requireNoReadSideOnEnrichment(TableDefinitionEntity definition, Map<Privilege, List<String>> requested) {
+        if (definition.getType() != TableType.ENRICHMENT) {
+            return;
+        }
+        for (final Privilege privilege : List.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_SENSITIVE)) {
+            final List<String> roles = requested.get(privilege);
+            if (roles != null && !roles.isEmpty()) {
+                throw new EnrichmentFollowsSourceException("table '" + definition.getName() + "' is an enrichment; its "
+                        + "read-side access is its source's, so it takes no '" + PrivilegeScope.grantKey(privilege)
+                        + "' list. Grant it on its source '" + definition.getSourceTable() + "' instead");
+            }
+        }
+    }
+
+    /**
      * Reports, without failing, each grant in the request that changes nothing: a role that already holds
-     * the privilege globally, a read grant on an enrichment whose source the same role cannot read, and a
-     * {@code sensitive} clearance for a role holding no verb on the table for it to extend.
+     * the privilege globally, and a {@code sensitive} clearance for a role holding no verb on the table for it
+     * to extend.
      *
-     * <p>All are reported rather than refused because all are legitimate states to pass through — an
-     * operator granting a whole team by hand before narrowing its provider-role mapping, granting the
-     * enrichment ahead of the source, or granting the clearance ahead of the verb. Refusing would block that; saying nothing would leave the operator to
+     * <p>Both are reported rather than refused because both are legitimate states to pass through — an
+     * operator granting a whole team by hand before narrowing its provider-role mapping, or granting the
+     * clearance ahead of the verb. Refusing would block that; saying nothing would leave the operator to
      * discover it from an empty query result.
      */
     private List<IneffectiveGrant> reportIneffective(
             TableDefinitionEntity definition, Map<Privilege, List<String>> requested) {
         final List<IneffectiveGrant> report = new ArrayList<>();
-        final boolean enrichment = definition.getType() == TableType.ENRICHMENT;
-        final TableDefinitionEntity source = enrichment && definition.getSourceTable() != null
-                ? definitions.findById(definition.getSourceTable()).orElse(null)
-                : null;
         final Set<String> policyRoles = rowPolicyCodec.read(definition.getRowPolicies()).keySet();
         requested.forEach((privilege, roles) -> {
             if (roles == null) {
@@ -175,11 +186,6 @@ public class TableAccessService {
                     report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.ALREADY_GLOBAL,
                             "role '" + role + "' already holds " + privilege + " over every table, so this grant "
                                     + "changes nothing for it"));
-                } else if (enrichment && privilege == Privilege.TABLE_READ && !canReadSource(role, source)) {
-                    report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.ENRICHMENT_READ_INERT,
-                            "table '" + definition.getName() + "' is an enrichment and is not a queryable entity on "
-                                    + "its own; role '" + role + "' cannot read its source '"
-                                    + definition.getSourceTable() + "', so no statement can reach these rows"));
                 } else if (privilege == Privilege.TABLE_SENSITIVE && !holdsAnyVerb(role, definition)) {
                     report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.SENSITIVE_WITHOUT_VERB,
                             "role '" + role + "' holds no get, read or modify on table '" + definition.getName()
@@ -190,20 +196,12 @@ public class TableAccessService {
         return List.copyOf(report);
     }
 
-    /** Whether {@code role} could read {@code source}, globally or by a grant on it. */
-    private boolean canReadSource(String role, TableDefinitionEntity source) {
-        if (providerRolePrivileges.holdsGlobally(role, Privilege.TABLE_READ)) {
-            return true;
-        }
-        return source != null
-                && TableCallerPermissions.isGranted(source.getAccess(), Privilege.TABLE_READ,
-                        SecurityClaimsExtractor.carriedWith(role));
-    }
-
     /**
      * Whether {@code role} holds a verb the clearance extends on {@code definition}, globally or by a list.
      * {@code TABLE_GET} is implied by both {@code READ} and {@code MODIFY}, so one grant-side check covers
-     * all three lists; the global side is checked per verb because a mapping names what it names.
+     * all three lists; the global side is checked per verb because a mapping names what it names. {@code modify}
+     * on any enrichment of the table counts too: this clearance is that enrichment's, and extends that
+     * {@code modify} to its sensitive columns.
      */
     private boolean holdsAnyVerb(String role, TableDefinitionEntity definition) {
         for (final Privilege verb : List.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_MODIFY)) {
@@ -211,8 +209,10 @@ public class TableAccessService {
                 return true;
             }
         }
-        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET,
-                SecurityClaimsExtractor.carriedWith(role));
+        final Set<String> carried = SecurityClaimsExtractor.carriedWith(role);
+        return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET, carried)
+                || definitions.findBySourceTable(definition.getName()).stream()
+                        .anyMatch(enrichment -> TableCallerPermissions.isGranted(enrichment.getAccess(), Privilege.TABLE_MODIFY, carried));
     }
 
     private TableDefinitionEntity require(String tableName) {

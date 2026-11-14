@@ -54,28 +54,6 @@ public interface PipelineInputDependents {
     List<String> pipelinesReadingSourceColumn(String source, String column);
 
     /**
-     * The <b>targets</b> of the pipelines that reference a column of {@code enrichment} through the grain
-     * join, empty when none — the tables derived from it by reading it, as opposed to the tables derived
-     * from it by parentage.
-     *
-     * <p>{@link #pipelinesReadingEnrichment} answers the same question one step earlier, in pipeline names,
-     * which is what a delete guard wants. The laundering invariant wants the tables those pipelines write,
-     * because that is the side of the pair whose grants it constrains.
-     */
-    List<String> targetsReadingEnrichment(String enrichment);
-
-    /**
-     * The enrichments the pipeline writing {@code target} reads through its read source's grain join,
-     * empty when none — the inverse of {@link #targetsReadingEnrichment}.
-     *
-     * <p>The laundering invariant needs both directions and cannot get either from a repository lookup: an
-     * enrichment column is reached by its qualified flat name in a declaration's field references, so the
-     * reading pipeline's own {@code input_table} is a different table entirely, and the edge exists only
-     * in the parsed declaration.
-     */
-    List<String> enrichmentsReadByPipelineTargeting(String target);
-
-    /**
      * The names of the pipelines that <b>write</b> the column physically named {@code column} of
      * {@code enrichment} — i.e. whose derived output mapping binds it — empty when none.
      *

@@ -144,7 +144,10 @@ A catalog column MAY be marked `sensitive`. Sensitivity SHALL be governed by one
 SHALL confer nothing. A verb SHALL reach a table's sensitive columns only when the caller holds
 **both that verb and `TABLE_SENSITIVE` on the table that owns the column**. Each SHALL be resolved
 independently as the union of what the caller holds globally and what that table grants it, so a
-global verb combined with a per-table clearance qualifies, and so does the reverse.
+global verb combined with a per-table clearance qualifies, and so does the reverse. For a column of an enrichment,
+`TABLE_READ` and `TABLE_SENSITIVE` SHALL be resolved on the enrichment's source, `TABLE_GET` on the source or by
+implication from `modify` held on the enrichment, and `TABLE_MODIFY` on the enrichment itself (see
+`table-access-control`, "An enrichment's read-side access is its source's").
 
 The clearance SHALL modify exactly three verbs:
 
@@ -162,8 +165,8 @@ columns SHALL be filtered out of the resolved query model before it is used. The
 absent from schema discovery and SHALL NOT be referenceable in any clause of a structured or SQL query
 (`select`, `filter`, `group_by`, `having`, `sort`). They SHALL also be absent from the catalog read
 surface and from the column set a schema mutation resolves against (see `table-management`).
-Ownership SHALL be decided per physical table, so within one flattened entity a caller MAY see the
-source's sensitive columns and not an enrichment's, or the reverse.
+Because an enrichment's clearance is its source's, one flattened entity SHALL have one clearance: a caller that sees
+the source's sensitive columns SHALL see every enrichment's, and one that does not SHALL see none.
 
 A caller lacking the clearance SHALL NOT be able to distinguish a sensitive column from a non-existent
 one on the query surface or the catalog read surface. Referencing it in a query SHALL fail as an
@@ -219,9 +222,11 @@ surface SHALL apply the same per-table predicate.
 
 #### Scenario: The privilege is evaluated per owning table
 
-- **WHEN** a caller holds `TABLE_READ` and `TABLE_SENSITIVE` on a source table and only `TABLE_READ`
-  on one of its enrichments, and both carry sensitive columns
-- **THEN** the flattened entity exposes the source's sensitive columns and omits the enrichment's
+- **GIVEN** a source and one of its enrichments that both carry sensitive columns
+- **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on the source queries the flattened entity
+- **THEN** both the source's and the enrichment's sensitive columns resolve
+- **AND WHEN** a caller holding `TABLE_READ` on the source without the clearance queries it
+- **THEN** neither table's sensitive columns resolve
 
 #### Scenario: Security disabled shows sensitive columns
 
@@ -789,8 +794,8 @@ A request by a caller lacking the clearance that attempts it SHALL be rejected w
 visible non-sensitive one), so the refusal discloses nothing. A request that names a column **hidden**
 from the caller is instead rejected as naming an unknown column (see `table-management`).
 
-The subset rule on derived tables (see `enrichment-runtime`) and the restriction that a cursor column
-may not be made sensitive (see `table-management`) SHALL continue to apply on top of this.
+The restriction that a cursor column may not be made sensitive (see `table-management`) SHALL continue to apply on
+top of this.
 
 #### Scenario: A modify grantee without the clearance cannot declassify a column
 - **WHEN** a caller holding `TABLE_MODIFY` but not `TABLE_SENSITIVE` on a table submits a schema patch
@@ -806,8 +811,7 @@ may not be made sensitive (see `table-management`) SHALL continue to apply on to
 #### Scenario: A delegated owner changes the flag in both directions
 - **WHEN** a caller whose provider role is in a table's `modify` and `sensitive` lists, holding no
   global privilege, sets `sensitive` on one column and clears it on another
-- **THEN** both changes are applied, subject to the cursor-column restriction and the derived-table
-  subset rule
+- **THEN** both changes are applied, subject to the cursor-column restriction
 
 #### Scenario: A grant holder alone may not change the flag
 - **WHEN** a caller holding `TABLE_GRANT` but neither `TABLE_MODIFY` nor `TABLE_SENSITIVE` on the

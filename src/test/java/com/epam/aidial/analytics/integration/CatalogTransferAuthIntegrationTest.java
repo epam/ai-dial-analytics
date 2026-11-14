@@ -37,6 +37,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     private static final String PLAIN = "cxa_plain";
     private static final String SECRET = "cxa_secret";
     private static final String HIDDEN = "cxa_hidden";
+    private static final String LABELS = "cxa_plain_labels";
     private static final String EXPORTER = "exporter";
 
     @BeforeEach
@@ -54,7 +55,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
 
     @AfterEach
     void dropTables() throws Exception {
-        for (final String table : List.of(PLAIN, SECRET, HIDDEN)) {
+        for (final String table : List.of(LABELS, PLAIN, SECRET, HIDDEN)) {
             mockMvc.perform(delete("/v1/tables/" + table).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
         }
     }
@@ -126,6 +127,53 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         assertThat(secretColumns).contains("k").doesNotContain("s");
         final JsonNode hidden = entries.get(HIDDEN).path("prev");
         assertThat(hidden.isMissingNode() || hidden.isNull()).isTrue();
+    }
+
+    /** An enrichment of {@code PLAIN} carrying one sensitive column; it takes no read-side grant of its own. */
+    private void labels() throws Exception {
+        send(post("/v1/tables"), fullAdmin(), "{\"name\":\"" + LABELS + "\",\"type\":\"enrichment\",\"source_table\":\"" + PLAIN + "\"}")
+                .andExpect(status().isCreated());
+        send(post("/v1/tables/" + LABELS + "/schema"), fullAdmin(), "{\"grain_key\":\"k\",\"columns\":["
+                + "{\"source_name\":\"note\",\"name\":\"note\",\"type\":\"string\",\"sensitive\":true}]}")
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void exportOfEverythingIncludesEnrichmentsOfGettableSourcesUnderTheirClearance() throws Exception {
+        labels();
+        send(put("/v1/tables/" + SECRET + "/access"), fullAdmin(), "{\"get\":[]}").andExpect(status().isOk());
+
+        // The exporter may get PLAIN, so it gets PLAIN's enrichment too, whose sensitive column needs PLAIN's clearance.
+        send(post("/v1/catalog/export"), caller(EXPORTER), "{}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("sensitive_column_not_entitled"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(LABELS)));
+
+        send(put("/v1/tables/" + PLAIN + "/access"), fullAdmin(), "{\"read\":[\"" + EXPORTER + "\"],\"sensitive\":[\"" + EXPORTER + "\"]}")
+                .andExpect(status().isOk());
+        send(post("/v1/catalog/export"), caller(EXPORTER), "{}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[*].table.name").value(org.hamcrest.Matchers.hasItems(PLAIN, LABELS)));
+    }
+
+    @Test
+    void importedEnrichmentOfGrantedSourceIsReadableAtOnce() throws Exception {
+        labels();
+        send(put("/v1/tables/" + PLAIN + "/access"), fullAdmin(), "{\"read\":[\"readers\"]}").andExpect(status().isOk());
+        final String bundle = export(fullAdmin(), LABELS).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        mockMvc.perform(delete("/v1/tables/" + LABELS).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(multipart("/v1/catalog/import")
+                        .file(new MockMultipartFile("file", "b.json", MediaType.APPLICATION_JSON_VALUE,
+                                bundle.getBytes(StandardCharsets.UTF_8)))
+                        .param("resolution_policy", "SKIP_IF_EXISTS")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/v1/tables/" + LABELS).header(HttpHeaders.AUTHORIZATION, bearer(caller("readers"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions.read").value(true));
     }
 
     private void table(String name, String columns) throws Exception {

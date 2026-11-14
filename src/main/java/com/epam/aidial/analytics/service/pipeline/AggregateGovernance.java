@@ -2,7 +2,6 @@ package com.epam.aidial.analytics.service.pipeline;
 
 import com.epam.aidial.analytics.exception.PipelineConflictException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
-import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFields;
 import com.epam.aidial.analytics.service.enrichment.support.SensitiveProjectionGuard;
@@ -12,7 +11,6 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionReturnType;
 import org.apache.commons.lang3.StringUtils;
@@ -60,15 +58,13 @@ final class AggregateGovernance {
     private final PipelineRepository pipelines;
     private final EnrichmentFreshness freshness;
     private final SensitiveProjectionGuard sensitiveGuard;
-    private final SensitiveGrantInvariant sensitiveGrants;
 
     AggregateGovernance(TableDefinitionRepository definitions, PipelineRepository pipelines,
-            EnrichmentFreshness freshness, SensitiveProjectionGuard sensitiveGuard, SensitiveGrantInvariant sensitiveGrants) {
+            EnrichmentFreshness freshness, SensitiveProjectionGuard sensitiveGuard) {
         this.definitions = definitions;
         this.pipelines = pipelines;
         this.freshness = freshness;
         this.sensitiveGuard = sensitiveGuard;
-        this.sensitiveGrants = sensitiveGrants;
     }
 
     // --- measures ----------------------------------------------------------------------------------
@@ -277,45 +273,6 @@ final class AggregateGovernance {
             throw new PipelineValidationException("target column '" + targetColumn + "' derives from sensitive "
                     + "input column '" + inputColumn + "', so it must itself be declared sensitive on target '"
                     + target + "'; otherwise the rollup would expose protected values to every caller");
-        }
-    }
-
-    /**
-     * The grants half of the laundering rule for a <b>rollup</b> target, on the same terms as the enrich
-     * path. Distinct from {@link #requireSensitivityPropagated}, which requires the derived column to carry
-     * the flag: carrying it stops the column being served to an unentitled caller, but says nothing about
-     * <em>who</em> is entitled, and the target is a {@code SOURCE} with its own {@code sensitive}
-     * list. Without this, a rollup of a protected column into a target granted more widely was readable by
-     * a caller with no grant at all on the input — and more directly than through an enrichment, because a
-     * rollup is addressable on its own.
-     *
-     * <p>Checked against {@code inputTable} explicitly rather than left to the invariant's stored-edge walk,
-     * because a registration in progress has no pipeline row yet for that walk to find.
-     *
-     * <p>Re-thrown as a validation failure for the reason the enrich path gives: a governance violation on
-     * register or enable is this capability's {@code 422 pipeline_validation_failed}, and one condition
-     * must not be reported under two codes.
-     */
-    void requireSensitiveGrantsNotWidened(TableDefinitionEntity target, String inputTable) {
-        try {
-            sensitiveGrants.requireNotWidenedAgainst(target, inputTable);
-        } catch (SensitiveGrantWidensException widens) {
-            throw new PipelineValidationException(widens.getMessage());
-        }
-    }
-
-    /**
-     * The same rule against every enrichment the declaration reaches through the grain join. Separate from
-     * the input-table call because the two edges are found differently: the input is on the pipeline row,
-     * while an enrichment column is addressed as {@code "<enrichment>.<column>"} and exists only in the
-     * resolved reference set — which is why a rollup of a protected enrichment column into a widely-granted
-     * target went unchecked while the input edge was covered.
-     */
-    void requireSensitiveGrantsNotWidened(TableDefinitionEntity target, Set<String> enrichments) {
-        try {
-            sensitiveGrants.requireNotWidenedAgainst(target, enrichments);
-        } catch (SensitiveGrantWidensException widens) {
-            throw new PipelineValidationException(widens.getMessage());
         }
     }
 

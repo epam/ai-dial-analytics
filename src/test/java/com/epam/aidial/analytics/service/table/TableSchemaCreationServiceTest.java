@@ -2,11 +2,9 @@ package com.epam.aidial.analytics.service.table;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
-import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableValidationException;
-import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,10 +51,6 @@ class TableSchemaCreationServiceTest {
     @Mock
     private ClickHouseTypeMapper typeMapper;
     @Mock
-    private PipelineRepository pipelines;
-    @Mock
-    private PipelineInputDependents pipelineReads;
-    @Mock
     private com.epam.aidial.analytics.service.security.SensitiveColumnAccess sensitiveAccess;
     @Mock
     private com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector inspector;
@@ -66,10 +60,7 @@ class TableSchemaCreationServiceTest {
     @BeforeEach
     void setUp() {
         service = new TableSchemaCreationService(definitions, columns, writer, catalogService,
-                ddlExecutor, ddlRenderer, typeMapper,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(
-                        definitions, columns, pipelines, pipelineReads, org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
-                sensitiveAccess, inspector);
+                ddlExecutor, ddlRenderer, typeMapper, sensitiveAccess, inspector);
         org.mockito.Mockito.lenient().when(sensitiveAccess.maySeeSensitive(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(true);
     }
@@ -144,27 +135,22 @@ class TableSchemaCreationServiceTest {
     }
 
     @Test
-    @DisplayName("defining a sensitive column is refused while the grants already launder it")
-    void defineSchemaWithSensitiveColumnHonoursTheSubsetRule() {
-        // The third way a table first comes to carry a sensitive column, and the one that left the whole
-        // invariant bypassable through the front door: grant sensitive on a PENDING enrichment while
-        // it has no columns at all (accepted, because the pair has nothing to protect), then define a
-        // schema that declares one. Nothing downstream would have refused it, and the next pipeline
-        // registration would fail over a grant edit made days earlier.
-        final TableDefinitionEntity enrichment = enrichment("usage_pii", TableStatus.PENDING, "dial_usage_log");
-        enrichment.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("analysts"));
-        given(definitions.findById("usage_pii")).willReturn(Optional.of(enrichment));
-        given(definitions.findById("dial_usage_log"))
-                .willReturn(Optional.of(source("dial_usage_log", TableStatus.ACTIVE, List.of("id"))));
+    @DisplayName("defining a sensitive column is not bounded by what the table derives from")
+    void defineSchemaWithSensitiveColumnIsNotBoundedByItsInputs() {
+        // A source cleared for a role that nothing it is filled from clears: its own clearance decides who reads it.
+        final TableDefinitionEntity rollup = source("usage_by_claims", TableStatus.PENDING, List.of("user_id"));
+        rollup.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("analysts"));
+        given(definitions.findById("usage_by_claims")).willReturn(Optional.of(rollup));
+        final ColumnMappingEntity claims = column("usage_by_claims", "claims", QueryFieldType.STRING);
+        claims.setSensitive(true);
+        given(columns.findByTableNameOrderByOrdinal("usage_by_claims"))
+                .willReturn(List.of(column("usage_by_claims", "user_id", QueryFieldType.STRING), claims));
 
-        assertThatThrownBy(() -> service.defineSchema("usage_pii", enrichmentInput(
-                List.of(col("user_id", QueryFieldType.STRING),
-                        sensitiveCol("claims", QueryFieldType.STRING)),
-                "user_id")))
-                .isInstanceOf(SensitiveGrantWidensException.class)
-                .hasMessageContaining("dial_usage_log");
-        verify(writer, never()).persistSchema(any(), any());
-        verify(ddlExecutor, never()).execute(any());
+        service.defineSchema("usage_by_claims", sourceInput(
+                List.of(col("user_id", QueryFieldType.STRING), sensitiveCol("claims", QueryFieldType.STRING)),
+                List.of("user_id")));
+
+        verify(writer).persistSchema(eq("usage_by_claims"), any());
     }
 
     @Test

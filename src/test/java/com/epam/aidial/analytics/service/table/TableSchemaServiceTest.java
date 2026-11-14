@@ -6,7 +6,6 @@ import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableValidationException;
-import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.table.PatchInput.Rename;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,10 +56,6 @@ class TableSchemaServiceTest {
     @Mock
     private PipelineInputDependents pipelineReads;
     @Mock
-    private PipelineRepository pipelines;
-    @Mock
-    private PipelineInputDependents pipelineDeclarationReads;
-    @Mock
     private com.epam.aidial.analytics.service.security.SensitiveColumnAccess sensitiveAccess;
     @Mock
     private com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector inspector;
@@ -76,10 +71,7 @@ class TableSchemaServiceTest {
         // the tests of the clearance rule itself withdraw it.
         org.mockito.Mockito.lenient().when(sensitiveAccess.maySeeSensitive(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(true);
-        service = new TableSchemaService(definitions, columns, sensitiveAccess,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(
-                        definitions, columns, pipelines, pipelineDeclarationReads, org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
-                writer, catalogService,
+        service = new TableSchemaService(definitions, columns, sensitiveAccess, writer, catalogService,
                 ddlExecutor, ddlRenderer, typeMapper, new TableLimitsProperties(256, 1000, 10000), pipelineReads,
                 org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts);
     }
@@ -678,11 +670,7 @@ class TableSchemaServiceTest {
     void withoutTheClearanceTheColumnLimitStillCountsHiddenColumns() {
         givenWidgetMetricsWithDivergentSensitiveName();
         withdrawClearance();
-        service = new TableSchemaService(definitions, columns, sensitiveAccess,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(definitions, columns,
-                        pipelines, pipelineDeclarationReads,
-                        org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
-                writer, catalogService, ddlExecutor, ddlRenderer, typeMapper,
+        service = new TableSchemaService(definitions, columns, sensitiveAccess, writer, catalogService, ddlExecutor, ddlRenderer, typeMapper,
                 new TableLimitsProperties(3, 1000, 10000), pipelineReads,
                 org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts);
 
@@ -800,6 +788,20 @@ class TableSchemaServiceTest {
     @Test
     void markingNonCursorColumnSensitiveIsAllowed() {
         givenScannableWidgetMetrics();
+        given(catalogService.get("widget_metrics")).willReturn(
+                new TableView(scannableWidgetMetrics(), List.of()));
+
+        service.patchSchema("widget_metrics", sensitiveUpdate("widget_id", true));
+
+        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+    }
+
+    /** No derived-table subset rule: a table cleared for a role nothing it is filled from clears may still flag a column. */
+    @Test
+    void markingColumnSensitiveIsNotBoundedByWhatTheTableDerivesFrom() {
+        givenScannableWidgetMetrics();
+        definitions.findById("widget_metrics").orElseThrow().getAccess()
+                .setRolesFor(com.epam.aidial.analytics.web.security.Privilege.TABLE_SENSITIVE, List.of("analysts"));
         given(catalogService.get("widget_metrics")).willReturn(
                 new TableView(scannableWidgetMetrics(), List.of()));
 

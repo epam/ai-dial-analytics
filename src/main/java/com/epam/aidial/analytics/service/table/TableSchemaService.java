@@ -12,7 +12,6 @@ import com.epam.aidial.analytics.service.enrichment.support.ProvenanceColumns;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.PatchInput.Rename;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.DdlColumn;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.service.table.relayout.RelayoutStateStore;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.security.Privilege;
@@ -74,7 +73,6 @@ public class TableSchemaService {
     private final TableDefinitionRepository definitions;
     private final ColumnMappingRepository columns;
     private final SensitiveColumnAccess sensitiveAccess;
-    private final SensitiveGrantInvariant sensitiveGrants;
     private final CatalogSchemaWriter writer;
     private final TableCatalogService catalogService;
     private final ClickHouseDdlExecutor ddlExecutor;
@@ -239,7 +237,6 @@ public class TableSchemaService {
 
         int nextOrdinal = current.stream().mapToInt(ColumnMappingEntity::getOrdinal).max().orElse(-1) + 1;
         final List<ResolvedAdd> adds = new ArrayList<>();
-        boolean addsSensitiveColumn = false;
         for (final ColumnInput declared : patch.add()) {
             TableColumnRules.requireValidUserColumn(declared);
             if (Boolean.TRUE.equals(declared.sensitive()) && !cleared) {
@@ -267,19 +264,9 @@ public class TableSchemaService {
                     pendingAlignment.sourceColumn())) {
                 throw pendingAlignment.collision();
             }
-            addsSensitiveColumn |= Boolean.TRUE.equals(add.sensitive());
             adds.add(new ResolvedAdd(add,
                     typeMapper.toDdlType(add.type(), add.elementType(), add.enumValues(), nullable), nextOrdinal++));
         }
-        if (addsSensitiveColumn) {
-            // An `add` that declares the column sensitive is the other way an enrichment first comes to
-            // carry a derived sensitive column, so the subset rule has to run here too. Missing it left the
-            // whole invariant bypassable: grant `sensitive` on an enrichment while it has no sensitive
-            // column (accepted, nothing to protect), then add one.
-            // (Declaring the column sensitive at all needed the clearance, checked in the loop above.)
-            sensitiveGrants.requireNotWidenedWithNewSensitiveColumn(definition);
-        }
-
         if (exposed.size() > limits.maxColumnsPerTable()) {
             throw new TableValidationException(
                     "a table may declare at most " + limits.maxColumnsPerTable() + " columns");
@@ -305,7 +292,6 @@ public class TableSchemaService {
         // exception: `sensitive` on a cursor column, which the scan reads (see ScanMetadataRules).
         final List<ResolvedMetadataUpdate> updates = new ArrayList<>();
         final Set<String> updated = new LinkedHashSet<>();
-        boolean marksColumnSensitive = false;
         for (final PatchInput.ColumnMetadataUpdate update : patch.update()) {
             if (!exposed.contains(update.name()) || hidden.contains(update.name())) {
                 throw new TableValidationException("unknown column '" + update.name() + "'");
@@ -329,13 +315,6 @@ public class TableSchemaService {
                 if (Boolean.TRUE.equals(update.sensitive().value())) {
                     ScanMetadataRules.requireNotSensitive(
                             identityColumn, versionColumn, physicalByExposed.get(update.name()));
-                    // Marking an enrichment column sensitive is one of the moments its grants first have
-                    // something to launder, so the subset rule is checked here as well as on a grant edit.
-                    // Accumulated rather than checked inline, like the `add` branch above: the rule's
-                    // verdict is a property of the pair, not of the column, and it parses every stored
-                    // declaration to find the grain-join edge — running it once per patched column would
-                    // multiply that scan for an answer that cannot differ.
-                    marksColumnSensitive = true;
                 }
             }
             updates.add(new ResolvedMetadataUpdate(
@@ -346,12 +325,6 @@ public class TableSchemaService {
                     update.sensitive(),
                     update.heavy()));
         }
-        if (marksColumnSensitive && !addsSensitiveColumn) {
-            // Once for the whole patch, and skipped when the `add` branch above already ran it: both ask
-            // the same question of the same pair.
-            sensitiveGrants.requireNotWidenedWithNewSensitiveColumn(definition);
-        }
-
         // Resolve the TTL merge-patch against the post-op physical columns (type + nullability), so a
         // just-added or just-renamed column is referenceable. A removal when no TTL is stored is an
         // idempotent no-op (no REMOVE TTL command is emitted).
@@ -535,8 +508,7 @@ public class TableSchemaService {
      * wrong.</b> A rename preserves the {@code sensitive} flag and changes only the name, so on a source a
      * holder of {@code TABLE_MODIFY} and the {@code TABLE_SENSITIVE} clearance — which together confer no
      * {@code TABLE_READ} — could free the name an expression reads and move a protected column into it. The
-     * declaration is untouched, the flag is untouched, so neither the clearance rule on the flag nor the
-     * grant subset rule fires; the
+     * declaration is untouched and the flag is untouched, so the clearance rule on the flag does not fire; the
      * pipeline's elevated runner then copies the protected values into an unflagged enrichment column that
      * plain {@code TABLE_READ} can read. Before privileges existed this was unreachable because
      * {@code PATCH .../schema} required the full administrative role, which conferred global sensitive

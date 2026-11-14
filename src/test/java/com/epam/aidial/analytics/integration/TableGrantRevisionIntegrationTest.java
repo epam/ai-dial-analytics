@@ -5,8 +5,10 @@ import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
@@ -36,6 +38,9 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     private static final String BASE = "/v1/tables";
     private static final String SOURCE = "grant_rev_source";
     private static final String ENRICHMENT = "grant_rev_enrichment";
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @BeforeEach
     void createTables() throws Exception {
@@ -139,16 +144,100 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
                 .andExpect(status().isOk());
 
         perform(put(BASE + "/" + ENRICHMENT + "/access"), fullAdmin(),
-                "{\"write\":[\"team-b\",\"team-a\"],\"get\":[\"team-c\"]}")
+                "{\"write\":[\"team-b\",\"team-a\"],\"modify\":[\"team-c\"]}")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.get[0]").value("team-c"))
+                .andExpect(jsonPath("$.modify[0]").value("team-c"))
                 .andExpect(jsonPath("$.write[0]").value("team-a"))
                 .andExpect(jsonPath("$.write[1]").value("team-b"));
 
         final List<Integer> updates = tableUpdates(ENRICHMENT);
         snapshot(ENRICHMENT, updates.getFirst(), fullAdmin())
                 .andExpect(jsonPath("$.access.write[0]").value("team-a"))
-                .andExpect(jsonPath("$.access.get[0]").value("team-c"));
+                .andExpect(jsonPath("$.access.modify[0]").value("team-c"));
+    }
+
+    // --- an enrichment's read side is its source's -----------------------------------------------------
+
+    @Test
+    void enrichmentSnapshotReportsReadSideFromItsSourcesCurrentLists() throws Exception {
+        perform(put(BASE + "/" + ENRICHMENT + "/access"), fullAdmin(), "{\"write\":[\"team-a\"]}")
+                .andExpect(status().isOk());
+        final int revision = tableUpdates(ENRICHMENT).getFirst();
+        perform(put(BASE + "/" + SOURCE + "/access"), fullAdmin(), "{\"read\":[\"team-r\"]}").andExpect(status().isOk());
+
+        snapshot(ENRICHMENT, revision, caller("team-r"))
+                .andExpect(jsonPath("$.permissions.get").value(true))
+                .andExpect(jsonPath("$.permissions.read").value(true))
+                .andExpect(jsonPath("$.permissions.write").value(false));
+    }
+
+    @Test
+    void listsAndPoliciesLeftOnAnEnrichmentWidenNothing() throws Exception {
+        leaveOnEnrichment();
+
+        perform(post("/v1/queries/execute"), caller("team-r"), "{\"entity\":\"" + SOURCE + "\",\"mode\":\"row\","
+                + "\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"k\"}}],\"page\":{\"type\":\"offset\",\"limit\":1}}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(SOURCE)));
+        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.read[0]").value("team-r"));
+        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/row-policies").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.policies['team-x'].filter.op").value("in"));
+        perform(delete(BASE + "/" + ENRICHMENT + "/row-policies/team-x"), fullAdmin(), "")
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    void theCatalogMigrationClearsAnEnrichmentsReadSideAndPoliciesAndTheSnapshotLags() throws Exception {
+        perform(put(BASE + "/" + SOURCE + "/access"), fullAdmin(), "{\"read\":[\"team-s\"],\"modify\":[\"team-s\"]}")
+                .andExpect(status().isOk());
+        perform(put(BASE + "/" + SOURCE + "/row-policies/team-s"), fullAdmin(), projectIn("P2")).andExpect(status().isOk());
+        leaveOnEnrichment();
+        final int latest = jdbc.queryForObject("SELECT max(rev) FROM table_definition_aud WHERE name = ?", Integer.class, ENRICHMENT);
+
+        jdbc.execute(new String(new org.springframework.core.io.ClassPathResource(
+                "db/migration/postgres/V55__enrichment_access_follows_source.sql").getContentAsByteArray(),
+                java.nio.charset.StandardCharsets.UTF_8));
+
+        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(jsonPath("$.get").isEmpty())
+                .andExpect(jsonPath("$.read").isEmpty())
+                .andExpect(jsonPath("$.sensitive").isEmpty())
+                .andExpect(jsonPath("$.write[0]").value("team-w"))
+                .andExpect(jsonPath("$.modify[0]").value("team-m"));
+        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/row-policies").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(jsonPath("$.policies").isEmpty());
+        mockMvc.perform(get(BASE + "/" + SOURCE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(jsonPath("$.read[0]").value("team-s"))
+                .andExpect(jsonPath("$.modify[0]").value("team-s"));
+        mockMvc.perform(get(BASE + "/" + SOURCE + "/row-policies").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(jsonPath("$.policies['team-s'].filter.op").value("in"));
+
+        // The migration writes no revision: the latest snapshot still shows what it removed, until the next change.
+        snapshot(ENRICHMENT, latest, fullAdmin())
+                .andExpect(jsonPath("$.access.read[0]").value("team-r"))
+                .andExpect(jsonPath("$.row_policies['team-x'].filter.op").value("in"));
+        perform(put(BASE + "/" + ENRICHMENT + "/access"), fullAdmin(), "{\"write\":[\"team-w2\"]}").andExpect(status().isOk());
+        snapshot(ENRICHMENT, tableUpdates(ENRICHMENT).getFirst(), fullAdmin())
+                .andExpect(jsonPath("$.access.read").isEmpty())
+                .andExpect(jsonPath("$.row_policies").isEmpty());
+    }
+
+    /**
+     * Stores, as an earlier build could, read-side lists and a row policy on the enrichment, in the catalog row and in
+     * its latest audit row. Raw SQL: the API refuses both, and the clean-up migration has already run.
+     */
+    private void leaveOnEnrichment() throws Exception {
+        perform(put(BASE + "/" + ENRICHMENT + "/access"), fullAdmin(), "{\"write\":[\"team-w\"],\"modify\":[\"team-m\"]}")
+                .andExpect(status().isOk());
+        final String access = "{\"get\":[\"team-r\"],\"read\":[\"team-r\"],\"sensitive\":[\"team-r\"],"
+                + "\"write\":[\"team-w\"],\"modify\":[\"team-m\"]}";
+        final String policies = "{\"team-x\":" + projectIn("P1").replace("\"project\"", "\"label\"") + "}";
+        jdbc.update("UPDATE table_definition SET access = ?::jsonb, row_policies = ?::jsonb WHERE name = ?", access, policies, ENRICHMENT);
+        jdbc.update("UPDATE table_definition_aud SET access = ?::jsonb, row_policies = ?::jsonb WHERE name = ?"
+                + " AND rev = (SELECT max(rev) FROM table_definition_aud WHERE name = ?)", access, policies, ENRICHMENT, ENRICHMENT);
     }
 
     @Test
@@ -171,7 +260,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final String feed = mockMvc.perform(post("/v1/activities")
                         .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"filters\":["
+                        .content("{\"pageSize\":1000,\"filters\":["
                                 + "{\"column\":\"resourceId\",\"operator\":\"eq\",\"value\":\"" + table + "\"},"
                                 + "{\"column\":\"resourceType\",\"operator\":\"eq\",\"value\":\"Table\"},"
                                 + "{\"column\":\"activityType\",\"operator\":\"eq\",\"value\":\"Update\"}],"
@@ -198,6 +287,12 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         return "{\"filter\":{\"op\":\"in\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
                 + "{\"type\":\"array\",\"items\":[{\"type\":\"value\",\"value_type\":\"string\",\"value\":\""
                 + project + "\"}]}]}}";
+    }
+
+    /** A caller carrying only the unmapped provider role {@code role}: whatever it holds, a grant gave it. */
+    private static String caller(String role) {
+        return JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
+                Map.of("sub", role + "-user", "roles", List.of(role), "email", role + "@test"));
     }
 
     private static String fullAdmin() {

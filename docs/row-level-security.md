@@ -35,8 +35,10 @@ curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/team-x" \
 
 The text is an input format. It is translated to a `filter`, and that filter is what is stored, returned
 and enforced, so the response shows the tree and not your SQL. Everything a `filter` may not hold is
-refused in SQL too: subqueries, other tables, aggregates. A table that cannot be queried on its own, such
-as an enrichment, takes `filter` only.
+refused in SQL too: subqueries, other tables, aggregates.
+
+An enrichment takes no policy in either form: a `PUT .../row-policies/{role}` naming one is refused
+`409 enrichment_follows_source`, and the message names its source. Its rows are its source's (see below).
 
 ## The rules, briefly
 
@@ -56,11 +58,20 @@ as an enrichment, takes `filter` only.
   never lift a confinement, whether or not they have a policy.
 - **Writes are not narrowed.** A confined role holding `write` may insert any row.
 
-## Derived tables are not covered — set their policies too
+## Enrichments follow their source; aggregate targets need their own policies
 
-Enrichment and aggregate targets are populated by pipelines that read the whole source. **A policy on the
-source does not propagate**: a role confined on `dial_usage_log` that can read an aggregate of it sees every
-project's totals there. For each derived table a confined role may read, either:
+An enrichment is only ever read through its source, so **the source's policies decide its rows**: a caller
+confined on `dial_usage_log` reads the values of `dial_usage_log_payload` on exactly the usage-log rows it
+reads. Nothing needs to be set on the enrichment.
+
+One caveat: a value a pipeline derives from **another table**, or from **other source rows** (a group
+trigger, or any enrichment coarser than one source row), is not narrowed by the policies that hide those
+rows. A confined caller reads, on each row it may read, a value that may summarise rows it may not. Either
+confine the whole group with the source's policy, or keep such a value off the enrichment.
+
+Aggregate targets are populated by pipelines that read the whole source. **A policy on the source does not
+propagate**: a role confined on `dial_usage_log` that can read an aggregate of it sees every project's totals
+there. For each aggregate target a confined role may read, either:
 
 - store a policy for the role on that table (e.g. `project_id IN (...)` on an aggregate grouped by
   `project_id`), or

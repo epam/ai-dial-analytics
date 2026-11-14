@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.query.sql.InformationSchema;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +17,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -65,10 +67,15 @@ public class TableCatalogService {
     public List<TableSummary> list() {
         final Map<String, ColumnMappingRepository.TableColumnCount> counts = columns.countByTable().stream()
                 .collect(Collectors.toMap(ColumnMappingRepository.TableColumnCount::getTableName, count -> count));
-        return definitions.findAll(Sort.by("name")).stream()
-                .filter(definition -> callerPermissions.resolve(definition).list())
-                .map(definition -> new TableSummary(definition, visibleColumnCount(definition, counts)))
-                .toList();
+        // Every definition is loaded here, so an enrichment's source lookup is served by the persistence context.
+        final List<TableSummary> visible = new ArrayList<>();
+        for (final TableDefinitionEntity definition : definitions.findAll(Sort.by("name"))) {
+            final EffectivePermissions permissions = callerPermissions.resolve(definition);
+            if (permissions.list()) {
+                visible.add(new TableSummary(definition, visibleColumnCount(definition, counts), permissions));
+            }
+        }
+        return visible;
     }
 
     private int visibleColumnCount(

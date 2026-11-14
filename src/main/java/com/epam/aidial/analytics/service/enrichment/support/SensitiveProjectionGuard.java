@@ -76,7 +76,8 @@ public class SensitiveProjectionGuard {
             if (sensitive.contains(name)) {
                 throw new SensitiveColumnNotEntitledException(operation + " of " + kind + " '" + source
                         + "' reads sensitive column '" + name
-                        + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on '" + source + "'");
+                        + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on '" + source + "'"
+                        + ("enrichment".equals(kind) ? ", which an enrichment takes from its source's grants" : ""));
             }
         }
     }
@@ -129,7 +130,7 @@ public class SensitiveProjectionGuard {
         }
         return new SensitiveColumnNotEntitledException(operation + " of source '" + source
                 + "' could not be validated for a caller who may not read its sensitive columns;"
-                + " reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table");
+                + " reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table (for an enrichment column, on '" + source + "')");
     }
 
     /**
@@ -208,7 +209,8 @@ public class SensitiveProjectionGuard {
                 if (qualified.contains(name)) {
                     throw new SensitiveColumnNotEntitledException(operation + " projects sensitive column '"
                             + name + "' on enrichment '" + owner
-                            + "'; reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table");
+                            + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on its source '" + source
+                            + "', whose grants an enrichment follows");
                 }
             }
         }

@@ -296,8 +296,6 @@ public final class AggregateSqlValidator {
             }
         }
 
-        governance.requireSensitiveGrantsNotWidened(target, inputTable);
-        governance.requireSensitiveGrantsNotWidened(target, AggregateGovernance.referencedEnrichmentsOf(input, referenced));
         governance.requireAggregatableEnrichments(inputTable, input, referenced);
         return new Analysis(plan, keys, bucket);
     }

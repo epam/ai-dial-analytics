@@ -384,6 +384,130 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isForbidden());
     }
 
+    // --- an enrichment's read side is its source's -------------------------------------------------
+
+    private static final String ENRICHMENT = "access_probe_labels";
+
+    /** An ACTIVE enrichment of the probe, with one plain and one sensitive column. */
+    private void createEnrichment() throws Exception {
+        mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + ENRICHMENT + "\",\"type\":\"enrichment\",\"source_table\":\"" + PROBE + "\"}"))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post(BASE + "/" + ENRICHMENT + "/schema").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"grain_key\":\"k\",\"columns\":[{\"source_name\":\"label\",\"name\":\"label\",\"type\":\"string\"},"
+                                + "{\"source_name\":\"secret\",\"name\":\"secret\",\"type\":\"string\",\"sensitive\":true}]}"))
+                .andExpect(status().isOk());
+    }
+
+    private void dropEnrichment() throws Exception {
+        mockMvc.perform(delete(BASE + "/" + ENRICHMENT).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())));
+    }
+
+    private org.springframework.test.web.servlet.ResultActions putAs(String token, String path, String body) throws Exception {
+        return mockMvc.perform(put(path).header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    @Test
+    void readSideGrantsAndRowPoliciesOnAnEnrichmentAreRefused() throws Exception {
+        createEnrichment();
+        try {
+            final String access = BASE + "/" + ENRICHMENT + "/access";
+            for (final String body : List.of("{\"get\":[\"x\"]}", "{\"read\":[\"x\"]}", "{\"sensitive\":[\"x\"]}",
+                    "{\"read\":[\" \"]}", "{\"read\":[\"x\"],\"modify\":[\" \"]}")) {
+                putAs(fullAdminToken(), access, body)
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error").value("enrichment_follows_source"))
+                        .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(PROBE)));
+            }
+            putAs(fullAdminToken(), BASE + "/dial_usage_log_payload/access", "{\"read\":[\"x\"],\"write\":[\"ingest-bot\"]}")
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+            putAs(fullAdminToken(), access, "{\"get\":[],\"read\":[],\"sensitive\":[],\"write\":[\"labeler\"],\"modify\":[]}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.write[0]").value("labeler"))
+                    .andExpect(jsonPath("$.read").isEmpty());
+
+            final String filter = "{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"label\"},"
+                    + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"x\"}]}";
+            final String policies = BASE + "/" + ENRICHMENT + "/row-policies/";
+            for (final String[] put : List.of(
+                    new String[] {"team-x", "{\"filter\":" + filter + "}"},
+                    new String[] {"team-x", "{\"where\":\"no_such_column = 'x'\"}"},
+                    new String[] {"READ_ONLY_ANALYTIC", "{\"filter\":" + filter + "}"},
+                    new String[] {"team-x", "{\"filter\":" + filter + ",\"where\":\"label = 'x'\"}"})) {
+                putAs(fullAdminToken(), policies + put[0], put[1])
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+            }
+            mockMvc.perform(delete(policies + "team-x").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNotFound());
+            putAs(fullAdminToken(), BASE + "/no_such_table/row-policies/team-x", "{\"filter\":" + filter + ",\"where\":\"a = 1\"}")
+                    .andExpect(status().isNotFound());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void sourceReaderQueriesAnEnrichmentItHoldsNothingOn() throws Exception {
+        createEnrichment();
+        try {
+            putAccess("{\"read\":[\"" + WRITER_ROLE + "\"]}");
+
+            mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.tables[?(@.name == '" + ENRICHMENT + "')].permissions.read").value(true))
+                    .andExpect(jsonPath("$.tables[?(@.name == '" + ENRICHMENT + "')].permissions.sensitive").value(false));
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT k, \\\"" + ENRICHMENT + ".label\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isOk());
+            mockMvc.perform(post("/v1/queries/execute").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"entity\":\"" + PROBE + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\","
+                                    + "\"name\":\"" + ENRICHMENT + ".label\"}}],\"page\":{\"type\":\"offset\",\"limit\":1}}"))
+                    .andExpect(status().isOk());
+            // The sensitive column follows the source's clearance, which this caller lacks.
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT \\\"" + ENRICHMENT + ".secret\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isBadRequest());
+
+            putAccess("{\"sensitive\":[\"" + WRITER_ROLE + "\"]}");
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT \\\"" + ENRICHMENT + ".secret\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isOk());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void enrichmentMaintainerGetsTheDefinitionButNotTheSource() throws Exception {
+        createEnrichment();
+        try {
+            putAs(fullAdminToken(), BASE + "/" + ENRICHMENT + "/access", "{\"modify\":[\"" + WRITER_ROLE + "\"]}")
+                    .andExpect(status().isOk());
+            // A source clearance for the maintainer extends its modify to the sensitive columns: not ineffective.
+            putAs(fullAdminToken(), BASE + "/" + PROBE + "/access", "{\"sensitive\":[\"" + WRITER_ROLE + "\"]}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+            mockMvc.perform(get(BASE + "/" + ENRICHMENT).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.get").value(true))
+                    .andExpect(jsonPath("$.permissions.read").value(false));
+            mockMvc.perform(get(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isNotFound());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
     // --- caller-effective permissions reporting ---------------------------------------------------
 
     @Test

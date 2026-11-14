@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table.grant;
 
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.Test;
@@ -30,6 +31,19 @@ class WildcardGranteeReportTest {
 
         assertThat(report.describe(List.of(open, confined, plain)))
                 .containsExactly("open [read, write]", "confined [row policy]");
+    }
+
+    @Test
+    void skipsAnEnrichmentsReadSideListsButNotItsRowPolicy() {
+        final TableDefinitionEntity enrichment = table("labels");
+        enrichment.setType(TableType.ENRICHMENT);
+        enrichment.getAccess().setRolesFor(Privilege.TABLE_GET, List.of("*"));
+        enrichment.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("*"));
+        enrichment.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("*"));
+        enrichment.setRowPolicies("{\"*\":{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"a\"},"
+                + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"x\"}]}}}");
+
+        assertThat(report.describe(List.of(enrichment))).containsExactly("labels [row policy]");
     }
 
     private static TableDefinitionEntity table(String name) {

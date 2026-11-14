@@ -1,8 +1,12 @@
 package com.epam.aidial.analytics.service.table.grant;
 
+import com.epam.aidial.analytics.service.security.RowPolicyFilter;
+import com.epam.aidial.analytics.service.security.RowPolicyFilterStubs;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
+import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.SecurityMode;
@@ -16,9 +20,12 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Truth table for {@link TableCallerPermissions}, the six reported flags.
@@ -31,12 +38,87 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class TableCallerPermissionsTest {
 
+    private final TableDefinitionRepository definitions = mock(TableDefinitionRepository.class);
+    private final RowPolicyFilter rowPolicies = RowPolicyFilterStubs.inert();
     private final TableCallerPermissions oidc = permissions(SecurityMode.OIDC);
     private final TableCallerPermissions none = permissions(SecurityMode.NONE);
 
-    private static TableCallerPermissions permissions(SecurityMode mode) {
-        return new TableCallerPermissions(
-                new SecurityClaimsExtractor(), new SecurityModeResolver(mode.code()), com.epam.aidial.analytics.service.security.RowPolicyFilterStubs.inert());
+    private TableCallerPermissions permissions(SecurityMode mode) {
+        return new TableCallerPermissions(new SecurityClaimsExtractor(), new SecurityModeResolver(mode.code()), rowPolicies,
+                new GoverningAccess(definitions));
+    }
+
+    /** An enrichment {@code e} storing exactly {@code grants}, of a source {@code src} storing {@code sourceGrants}. */
+    private TableDefinitionEntity enrichment(Map<Privilege, List<String>> grants, Map<Privilege, List<String>> sourceGrants) {
+        final TableDefinitionEntity source = table(sourceGrants);
+        source.setName("src");
+        when(definitions.findById("src")).thenReturn(Optional.of(source));
+        final TableDefinitionEntity enrichment = table(grants);
+        enrichment.setName("e");
+        enrichment.setType(TableType.ENRICHMENT);
+        enrichment.setSourceTable("src");
+        return enrichment;
+    }
+
+    @Test
+    @DisplayName("an enrichment reports its source's read side and its own write and modify")
+    void enrichmentReportsItsSourcesReadSide() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "x");
+        final TableDefinitionEntity e = enrichment(Map.of(Privilege.TABLE_WRITE, List.of("x")),
+                Map.of(Privilege.TABLE_READ, List.of("x"), Privilege.TABLE_SENSITIVE, List.of("x")));
+        final TableDefinitionEntity source = definitions.findById("src").orElseThrow();
+        when(rowPolicies.isConfined(source)).thenReturn(true);
+
+        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, true, false, true));
+    }
+
+    @Test
+    @DisplayName("a source modify holder is reported get on the enrichment, the enrichment's own modify likewise")
+    void modifyOnEitherSideReportsGet() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "editor");
+        assertThat(oidc.resolve(enrichment(Map.of(), Map.of(Privilege.TABLE_MODIFY, List.of("editor")))))
+                .isEqualTo(new EffectivePermissions(true, true, false, false, false, false));
+        assertThat(oidc.resolve(enrichment(Map.of(Privilege.TABLE_MODIFY, List.of("editor")), Map.of())))
+                .isEqualTo(new EffectivePermissions(true, true, false, false, false, true));
+    }
+
+    @Test
+    @DisplayName("a leftover read-side list on an enrichment reports nothing; a leftover policy reports row-restricted")
+    void leftoverStateOnAnEnrichment() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "r");
+        final TableDefinitionEntity e = enrichment(Map.of(Privilege.TABLE_READ, List.of("r"), Privilege.TABLE_SENSITIVE, List.of("r")),
+                Map.of());
+        assertThat(oidc.resolve(e)).isEqualTo(EffectivePermissions.uniform(false));
+
+        final TableDefinitionEntity readable = enrichment(Map.of(), Map.of(Privilege.TABLE_READ, List.of("r")));
+        when(rowPolicies.isConfined(readable)).thenReturn(true);
+        assertThat(oidc.resolve(readable)).isEqualTo(new EffectivePermissions(true, true, true, false, false, false, true));
+    }
+
+    @Test
+    @DisplayName("a '*' in the source's modify reports no get on its enrichment")
+    void wildcardInSourceModifyReportsNothing() {
+        authenticateWith(EnumSet.noneOf(Privilege.class));
+        assertThat(oidc.resolve(enrichment(Map.of(), Map.of(Privilege.TABLE_MODIFY, List.of(SecurityClaimsExtractor.ANYONE)))))
+                .isEqualTo(EffectivePermissions.uniform(false));
+    }
+
+    @Test
+    @DisplayName("an enrichment whose source is missing reports no read side")
+    void missingSourceReportsNoReadSide() {
+        authenticateWith(EnumSet.of(Privilege.TABLE_GET), "x");
+        final TableDefinitionEntity e = enrichment(Map.of(Privilege.TABLE_READ, List.of("x")), Map.of(Privilege.TABLE_READ, List.of("x")));
+        when(definitions.findById("src")).thenReturn(Optional.empty());
+        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(false, true, false, false, false, false));
+    }
+
+    @Test
+    @DisplayName("a system enrichment keeps its own write and modify hard false")
+    void systemEnrichmentRefusesWrites() {
+        authenticateWith(EnumSet.allOf(Privilege.class));
+        final TableDefinitionEntity e = enrichment(Map.of(), Map.of());
+        e.setSystem(true);
+        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, false, false));
     }
 
     @AfterEach

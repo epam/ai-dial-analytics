@@ -9,9 +9,7 @@ preview twin, and the API shape mirrors deployment manager's config export/impor
 existing object: system tables travel by name as required system tables that are checked, never written, and pipelines
 always land disabled. Both import calls share one validation pass, which runs the real create services in a
 rolled-back transaction. The surrounding operator sequence is in `docs/catalog-promotion.md`.
-
 ## Requirements
-
 ### Requirement: Catalog export endpoint
 
 `POST /v1/catalog/export` SHALL return a catalog bundle of the components named in its `ExportRequest` body, as `application/json`
@@ -124,7 +122,10 @@ Export SHALL require `REGISTRY_READ` at the endpoint, and SHALL check each selec
 A selected table, or one its closure reaches, that the caller may not get SHALL be `404` with `error` `not_found`; with no selection
 such tables, and every object that needs one, SHALL be silently left out. A bundle table with a sensitive column the caller may not
 see SHALL refuse the export with `403` and `error` `sensitive_column_not_entitled`, whether it was selected, reached by the closure or
-exported as part of everything; columns are never silently dropped. The bundle SHALL NOT carry grants: no table's `access` lists
+exported as part of everything; columns are never silently dropped. An enrichment is gettable exactly when its source is, or through its own
+`modify` (see [table-access-control](../table-access-control/spec.md)), so exporting everything includes the enrichments
+of every source the caller may get, and one carrying a sensitive column the caller may not see — because it lacks the
+source's clearance — refuses the export as above. The bundle SHALL NOT carry grants: no table's `access` lists
 are exported, whatever the caller holds, because grants are each environment's own policy. When security is not enforced, every
 check in this requirement SHALL be skipped.
 
@@ -147,6 +148,13 @@ check in this requirement SHALL be skipped.
 
 - **WHEN** security mode is `none` and a caller with no claims exports everything
 - **THEN** the response is `200`
+
+#### Scenario: An enrichment of a gettable source joins the export
+
+- **GIVEN** a caller holding `REGISTRY_READ` and `get` on a source with no sensitive column, without the source's
+  clearance, and an enrichment of that source with a sensitive column, on which the caller holds nothing
+- **WHEN** the caller exports everything
+- **THEN** the response is `403` with `error` `sensitive_column_not_entitled`, naming the enrichment
 
 ### Requirement: Bundle format and version compatibility
 
@@ -401,12 +409,21 @@ the validation pass's `armable: false` and `arm_problems`. Import SHALL NOT writ
 
 Import SHALL apply objects in dependency order: source tables, then enrichment tables, then `enrich` pipelines, then `aggregate`
 pipelines. Import SHALL write no grants: every table it creates has empty `access` lists, so until an operator grants access with
-`PUT /v1/tables/{name}/access` only callers holding the global privileges can see or read it.
+`PUT /v1/tables/{name}/access` only callers holding the global privileges can see or read a created source. A created enrichment has no read-side
+access of its own: it is readable at once by every caller that may read its source, which may be a table the target
+already had and had granted (see [table-access-control](../table-access-control/spec.md)).
 
 #### Scenario: Imported table has no grants
 
 - **WHEN** a table that has grants on the source is exported and imported
 - **THEN** `GET /v1/tables/{name}/access` on the target returns five empty lists
+
+#### Scenario: An imported enrichment of an existing source follows its grants
+
+- **GIVEN** a target whose `dial_usage_log` grants `read` to `analytics-viewers`
+- **WHEN** a bundle creating an enrichment of `dial_usage_log` is imported
+- **THEN** a caller carrying only `analytics-viewers` reads the new enrichment's non-sensitive columns at once, and
+  `GET /v1/tables/{name}/access` on the enrichment returns five empty lists
 
 ### Requirement: Import authorization
 
@@ -585,3 +602,4 @@ because the SQL front end resolves names case-insensitively: `FROM "Dial_Usage_L
 - **WHEN** a bundle's SQL-mode aggregate pipeline carries an `sql` that does not parse, and every table its tokens reference is
   importable
 - **THEN** the pipeline entry is `CREATE`, it is imported disabled with its `sql` verbatim, and its `armable` is `false`
+

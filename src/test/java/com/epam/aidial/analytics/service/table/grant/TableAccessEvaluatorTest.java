@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.AfterEach;
@@ -35,7 +36,8 @@ import static org.mockito.Mockito.when;
 class TableAccessEvaluatorTest {
 
     private final TableDefinitionRepository definitions = mock(TableDefinitionRepository.class);
-    private final TableAccessEvaluator evaluator = new TableAccessEvaluator(definitions, new SecurityClaimsExtractor());
+    private final TableAccessEvaluator evaluator =
+            new TableAccessEvaluator(definitions, new GoverningAccess(definitions), new SecurityClaimsExtractor());
 
     @AfterEach
     void clearContext() {
@@ -48,13 +50,106 @@ class TableAccessEvaluatorTest {
     }
 
     /** A table whose grant lists are exactly {@code grants}. */
-    private void stubTable(String name, Map<Privilege, List<String>> grants) {
+    private TableDefinitionEntity stubTable(String name, Map<Privilege, List<String>> grants) {
         final TableDefinitionEntity def = new TableDefinitionEntity();
         def.setName(name);
+        def.setType(TableType.SOURCE);
         final TableAccess access = new TableAccess();
         grants.forEach(access::setRolesFor);
         def.setAccess(access);
         when(definitions.findById(name)).thenReturn(Optional.of(def));
+        return def;
+    }
+
+    /** An enrichment {@code e} of {@code src} storing exactly {@code grants}, and {@code src} storing {@code sourceGrants}. */
+    private void stubEnrichment(Map<Privilege, List<String>> grants, Map<Privilege, List<String>> sourceGrants) {
+        stubTable("src", sourceGrants);
+        final TableDefinitionEntity enrichment = stubTable("e", grants);
+        enrichment.setType(TableType.ENRICHMENT);
+        enrichment.setSourceTable("src");
+    }
+
+    @Test
+    @DisplayName("a reader of the source reads an enrichment it holds nothing on")
+    void sourceReaderReadsTheEnrichment() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "viewer");
+        stubEnrichment(Map.of(), Map.of(Privilege.TABLE_READ, List.of("viewer")));
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_READ)).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_SENSITIVE)).isFalse();
+        assertThat(evaluator.canWrite("e")).isFalse();
+    }
+
+    @Test
+    @DisplayName("the source's clearance is the enrichment's")
+    void sourceClearanceReachesTheEnrichment() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "pii");
+        stubEnrichment(Map.of(), Map.of(Privilege.TABLE_READ, List.of("pii"), Privilege.TABLE_SENSITIVE, List.of("pii")));
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_SENSITIVE)).isTrue();
+    }
+
+    @Test
+    @DisplayName("a modify holder on the source gets the enrichment, without reading it")
+    void sourceModifyConfersGetOnTheEnrichment() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "editor");
+        stubEnrichment(Map.of(), Map.of(Privilege.TABLE_MODIFY, List.of("editor")));
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_READ)).isFalse();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_MODIFY))
+                .as("modify on the source is not modify on the enrichment")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("the enrichment's own modify confers get on it, not a read of its source")
+    void enrichmentModifyConfersGetOnItOnly() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "maintainer");
+        stubEnrichment(Map.of(Privilege.TABLE_MODIFY, List.of("maintainer")), Map.of());
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_MODIFY)).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_READ)).isFalse();
+        assertThat(evaluator.isAllowed("src", Privilege.TABLE_GET)).isFalse();
+    }
+
+    @Test
+    @DisplayName("an enrichment's write grant lists neither table")
+    void enrichmentWriteListsNeitherTable() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "labeler");
+        stubEnrichment(Map.of(Privilege.TABLE_WRITE, List.of("labeler")), Map.of());
+        assertThat(evaluator.canWrite("e")).isTrue();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_LIST)).isFalse();
+        assertThat(evaluator.isAllowed("src", Privilege.TABLE_LIST)).isFalse();
+    }
+
+    @Test
+    @DisplayName("a read-side list left on an enrichment confers nothing")
+    void leftoverReadSideListConfersNothing() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "r");
+        stubEnrichment(Map.of(Privilege.TABLE_GET, List.of("r"), Privilege.TABLE_READ, List.of("r"),
+                Privilege.TABLE_SENSITIVE, List.of("r")), Map.of());
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isFalse();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_READ)).isFalse();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_SENSITIVE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("a '*' stored in the source's modify confers no get on its enrichment")
+    void wildcardInSourceModifyConfersNoGet() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "anyone-else");
+        stubEnrichment(Map.of(), Map.of(Privilege.TABLE_MODIFY, List.of(SecurityClaimsExtractor.ANYONE)));
+        assertThat(evaluator.isAllowed("src", Privilege.TABLE_GET)).isFalse();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isFalse();
+    }
+
+    @Test
+    @DisplayName("an enrichment whose source is missing grants no read side")
+    void missingSourceFailsClosed() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "viewer", "labeler");
+        stubEnrichment(Map.of(Privilege.TABLE_READ, List.of("viewer"), Privilege.TABLE_WRITE, List.of("labeler")), Map.of());
+        when(definitions.findById("src")).thenReturn(Optional.empty());
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_READ)).isFalse();
+        assertThat(evaluator.isAllowed("e", Privilege.TABLE_GET)).isFalse();
+        assertThat(evaluator.canWrite("e")).isTrue();
     }
 
     @Test

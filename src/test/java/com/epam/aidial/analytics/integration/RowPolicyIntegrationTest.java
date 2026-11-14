@@ -392,7 +392,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     @Test
     void ownRowsPolicyOnTheUsageLogCoversItsPayloadEnrichment() throws Exception {
         // The payload table has no user column and needs none: it is only ever joined from the usage log, so
-        // the usage log's policy decides which payload rows a caller can reach.
+        // the usage log's policy decides which payload rows a caller can reach, and its grants who reads them.
         final String usage = "dial_usage_log";
         final String payload = "dial_usage_log_payload";
         final String time = "'" + java.time.LocalDate.now(java.time.ZoneOffset.UTC) + " 00:00:00.000'";
@@ -408,10 +408,8 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                         + " request_body) VALUES (toUUID('" + row[0] + "')," + time + ",'rls-own','" + row[0].substring(28)
                         + "','" + row[2] + "')");
             }
-            // The payload columns are sensitive, and a clearance on a table is bounded by the one it reads.
+            // The payload columns are sensitive; the usage log's read and clearance are the payload's.
             asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
-            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON)
                     .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
             asAdmin(put(BASE + "/" + usage + "/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
                     .content("{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
@@ -441,11 +439,9 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
             execute(adminToken(), query).andExpect(jsonPath("$.rows", hasSize(2)));
         } finally {
             asAdmin(delete(BASE + "/" + usage + "/row-policies/team-x"));
-            // The derived table first: the source's clearance cannot be withdrawn from under it.
             // An absent key leaves its list untouched, so each is cleared by name.
-            final String none = "{\"read\":[],\"sensitive\":[]}";
-            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
-            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
+            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"read\":[],\"sensitive\":[]}"));
             try (com.clickhouse.client.api.Client writer = clickHouseWriter()) {
                 writer.queryAll("ALTER TABLE " + usage + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
                 writer.queryAll("ALTER TABLE " + payload + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
@@ -604,11 +600,12 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         }
         asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
 
-        // An enrichment is never a statement's FROM, so its policies are written as a filter.
+        // An enrichment takes no policy at all: its rows are its source's, so the refusal names the source.
         asAdmin(put(BASE + "/dial_usage_log_payload/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"where\":\"trace_id = 'x'\"}"))
-                .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.message").value(containsString("enrichment")));
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"))
+                .andExpect(jsonPath("$.message").value(containsString("dial_usage_log'")));
         asAdmin(put(BASE + "/no_such_table/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"where\":\"a = 1\"}"))
                 .andExpect(status().isNotFound());

@@ -6,40 +6,12 @@ This capability defines per-table access control for ADAS. Each catalog table de
 lists — one set of raw provider role names per grantable table privilege (`get`, `read`, `sensitive`,
 `write`, `modify`) — which authorize a role on that table in addition to what it holds globally, and a
 set of per-role **row policies** that narrow which of the table's rows a role reads, enforced by the
-data store on every user read. Both are matched against the caller's provider roles, managed through
+data store on every user read. An enrichment's grant lists hold only `write` and `modify`, and it stores no row
+policy: its read-side access and its rows are its source's. Both are matched against the caller's provider roles, managed through
 `TABLE_GRANT`-gated APIs and evaluated at request time, complementing the method-level authorization
 defined by [authentication](../authentication/spec.md) and governing the per-table endpoints of
 [table-management](../table-management/spec.md).
 ## Requirements
-### Requirement: Grant evaluation is inert in none mode
-
-In `none` security mode the per-table authorization checks SHALL NOT be enforced; all per-table
-operations remain open, reads included. One rule is deliberately **not** inert: the laundering subset
-rule on `sensitive` grants (see `enrichment-runtime`). It is not an authorization check — it never
-asks who the caller is — but a constraint on what stored state may exist, and a grant document written
-while security was off goes live the moment a deployment switches to `oidc`, when refusing it would be
-too late. So a `PUT .../access` or a sensitive-flag schema change MAY be refused
-`422 sensitive_grant_widens` in `none` mode.
-
-Every other table SHALL be visible, gettable, readable and
-writable, and sensitive columns SHALL be served, exactly as before this capability gained read-side
-keys. The mode SHALL be resolved from the single component specified in `authentication`, so this
-behaviour cannot diverge between the HTTP and Flight surfaces.
-
-#### Scenario: none mode does not evaluate access
-
-- **WHEN** the service runs in `none` mode
-- **THEN** per-table operations are reachable without any grant check, and no table is hidden from a
-  listing, discovery or query
-
-#### Scenario: A laundering grant is refused even in none mode
-
-- **GIVEN** the service runs in `none` mode
-- **WHEN** a `PUT .../access` would give `sensitive` on an enrichment carrying a `sensitive`
-  column to a role its source does not list under both `read` and `sensitive`
-- **THEN** the request is refused `422 sensitive_grant_widens`, because the stored document would be
-  invalid the moment the deployment switches to `oidc`
-
 ### Requirement: Per-table privilege grants
 
 The system SHALL store, for each catalog table, a grant list co-located on the table definition with
@@ -51,6 +23,9 @@ non-sensitive columns. `sensitive` is the clearance (see `authentication`). It a
 its own, and it extends whichever of `get`, `read` and `modify` the same role holds on that table,
 globally or by grant, to the table's sensitive columns and to the `sensitive` flag. There SHALL be no
 `read_sensitive` key: a request carrying it SHALL be refused `400` naming the field.
+
+An enrichment SHALL accept no `get`, `read` or `sensitive` grant: its read-side access is its source's (see "An
+enrichment's read-side access is its source's"), and only its `write` and `modify` lists confer anything on it.
 
 There SHALL be **no `list` key**. `TABLE_LIST` is a global privilege — held, it lists every table — and
 on a single table it SHALL be conferred only by implication, by any key that already shows the table.
@@ -77,14 +52,16 @@ already stored in `write` or `modify` (written while `*` was an ordinary grantee
 nothing, so evaluation fails closed without a data migration, and SHALL NOT make a replacement that omits
 that list fail. It SHALL
 behave as a provider role every such caller carries, in grant evaluation, in permission reporting, in
-row-policy evaluation, in the sensitive-grant invariant and in the ineffective-grant report alike. The
+row-policy evaluation and in the ineffective-grant report alike. The
 system identity that background work runs under SHALL NOT carry it. A
 mapping in an identity provider's `roles-mapping` is unaffected: `*` confers no global privilege. At
 startup the system SHALL log every table that names `*` in a grant list or as a row-policy role, and where,
-so a `*` stored while it was an ordinary grantee name is visible to the operator.
+so a `*` stored while it was an ordinary grantee name is visible to the operator. An enrichment's leftover `get`,
+`read` or `sensitive` list SHALL NOT be reported, because it confers nothing.
 
 Grant lists on a `system` table SHALL be restricted by **key**, not refused wholesale: the read-side
-keys (`get`, `read`, `sensitive`) SHALL be storable on a `system` table like any other,
+keys (`get`, `read`, `sensitive`) SHALL be storable on a `system` table like any other — except on a `system`
+enrichment, which, like every enrichment, accepts none —
 while `write` and `modify` SHALL remain empty, because a `system` table is materialized and fed out
 of band and every modifying operation on it is refused regardless of any list. Deleting a table SHALL
 remove its grant lists.
@@ -103,6 +80,12 @@ remove its grant lists.
   and a caller carrying `X` reads every row
 - **AND** once a row policy is stored for `*`, the same replacement reports nothing and that caller reads
   the rows of either policy
+
+#### Scenario: The startup report skips an enrichment's leftover read-side lists
+
+- **GIVEN** an enrichment that still stores `*` in its `read` list and as a row-policy role, written by an earlier build
+- **WHEN** the service starts
+- **THEN** the startup log names the enrichment for its row policy only
 
 #### Scenario: Everyone cannot be granted a write
 
@@ -175,6 +158,11 @@ remove its grant lists.
 - **WHEN** a caller carrying only that role lists the catalog or queries the table
 - **THEN** the table is absent from the listing and the query fails as though the table did not exist
 
+#### Scenario: An enrichment stores only write and modify
+
+- **WHEN** a caller holding `TABLE_GRANT` reads the access of an enrichment created through the API
+- **THEN** the response is `200` with `get`, `read` and `sensitive` empty, and `write` and `modify` as stored
+
 ### Requirement: Grant-management API
 
 The system SHALL expose an API to read and update a table's grant lists at
@@ -189,24 +177,38 @@ response SHALL carry the stored lists **and** the caller-effective permission fl
 an operator can see immediately when a grant has no effect.
 
 `PUT` SHALL additionally report, without failing, each listed role that already holds the
-corresponding privilege globally, each `read` grant on an enrichment table whose source the same
-role cannot read, and each `sensitive` grant to a role that holds none of `TABLE_GET`, `TABLE_READ`
-or `TABLE_MODIFY` on the table, globally or by any list. All three are grants that change nothing
-(see `structured-query` for the second). It SHALL report in the same array, with reason
-`lifts_row_policies`, a `read` grant to `*` on a table that stores row policies and none for `*`: every
-caller then carries a role that reads with no policy, so by the evaluation rule those policies confine no
+corresponding privilege globally, and each `sensitive` grant to a role that holds none of `TABLE_GET`, `TABLE_READ`
+or `TABLE_MODIFY` on the table, globally or by any list, nor `modify` on any enrichment of it. Both are grants that
+change nothing; a source's clearance does change something for a role holding an enrichment's `modify`, because it
+extends that `modify` to the enrichment's sensitive columns. It SHALL report in the
+same array, with reason `lifts_row_policies`, a `read` grant to `*` on a table that stores row policies and none for
+`*`: every caller then carries a role that reads with no policy, so by the evaluation rule those policies confine no
 one. The grant SHALL still be accepted.
 
 The response SHALL carry the five lists at the **top level**, exactly where `GET` carries them, so the
 two share one shape and a client reading `write` keeps working. It SHALL additionally carry
 `permissions` (the five effective flags) and `ineffective_grants`, an array whose entries carry the
-`role`, the grant `key`, a stable `reason` code — `already_global`, `enrichment_read_inert`,
-`sensitive_without_verb` or `lifts_row_policies` — and a human-readable `message`. Both members are additive; nothing moves.
+`role`, the grant `key`, a stable `reason` code — `already_global`, `sensitive_without_verb` or `lifts_row_policies`
+— and a human-readable `message`. Both members are additive; nothing moves.
 
-A `PUT` against a `system` table SHALL be accepted for the read-side keys. It SHALL be refused with
-`409` and machine code `table_is_system` only when it carries a **non-empty** `write` or `modify`
-list; an empty `write` or `modify` SHALL be accepted, so a five-key body succeeds. A request against a
-non-existent table SHALL return `404 not_found`; a request with a blank role name SHALL return
+A `PUT` against a `system` table other than an enrichment SHALL be accepted for the read-side keys. A `PUT` against
+any `system` table SHALL be refused with `409` and machine code `table_is_system` only when it carries a **non-empty**
+`write` or `modify` list; an empty `write` or `modify` SHALL be accepted, so a five-key body succeeds.
+
+A `PUT` against an enrichment SHALL be refused with `409` and machine code `enrichment_follows_source` when it carries a
+`get`, `read` or `sensitive` list that is **non-empty as sent**, before role names are trimmed — so `{"read":[" "]}` is
+`409`, not `422` — naming the enrichment's source as the table to grant instead, and no
+list SHALL change. An empty `get`, `read` or `sensitive` SHALL be accepted, so a body echoed from `GET` succeeds for an
+enrichment that stores no leftover read-side list; one that does is cleared by sending those lists empty.
+
+The checks SHALL run in this order, the first failing one deciding the response: a body that does not bind (`400`); a
+caller without `TABLE_GRANT` (`403 forbidden`); an unknown table (`404`); a non-empty read-side list on an enrichment (`409 enrichment_follows_source`); then, list by
+list in the order `get`, `read`, `sensitive`, `write`, `modify`: a blank role name (`422 validation_error`), the
+`table_is_system` refusal of a non-empty `write` or `modify`, and `*` in `write` or `modify` (`422`). So a
+body carrying both a non-empty `read` and a non-empty `write` for the `system` enrichment `dial_usage_log_payload`
+answers `409 enrichment_follows_source`.
+
+A request against a non-existent table SHALL return `404 not_found`; a request with a blank role name SHALL return
 `422 validation_error`.
 
 #### Scenario: A grant admin reads and updates grants
@@ -242,13 +244,49 @@ non-existent table SHALL return `404 not_found`; a request with a blank role nam
 #### Scenario: Read grants on a system table are accepted
 
 - **WHEN** a caller holding `TABLE_GRANT` `PUT`s
-  `{"read":["analytics-viewers"],"write":[],"modify":[]}` for a `system` table
+  `{"read":["analytics-viewers"],"write":[],"modify":[]}` for a `system` table that is not an enrichment, such as
+  `dial_usage_log`
 - **THEN** the response is `200` and the `read` list is stored
 
 #### Scenario: A write grant on a system table is refused
 
 - **WHEN** the same caller `PUT`s `{"write":["ingest-bot"]}` for a `system` table
 - **THEN** the response is `409` with machine code `table_is_system` and no list is changed
+
+#### Scenario: A blank role is reported before a system table's write refusal
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"get":[" "],"write":["ingest-bot"]}` for `dial_usage_log`
+- **THEN** the response is `422 validation_error` and no list is changed
+
+#### Scenario: A read grant on an enrichment is refused
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"read":["analytics-viewers"]}`, or a non-empty `get` or
+  `sensitive`, for an enrichment
+- **THEN** the response is `409` with machine code `enrichment_follows_source`, the message names the enrichment's
+  source, and no list is changed
+
+#### Scenario: A blank read-side role on an enrichment counts as non-empty
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"read":[" "]}` for an enrichment
+- **THEN** the response is `409` with machine code `enrichment_follows_source`, not `422`, and no list is changed
+
+#### Scenario: The enrichment refusal comes first
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"read":["analytics-viewers"],"write":["ingest-bot"]}` for the
+  `system` enrichment `dial_usage_log_payload`, or `{"read":["analytics-viewers"],"modify":[" "]}` for any enrichment
+- **THEN** the response is `409` with machine code `enrichment_follows_source`, and no list is changed
+
+#### Scenario: A source clearance used by an enrichment maintainer is not reported
+
+- **GIVEN** a role holding nothing on a source and `modify` on one of its enrichments
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"sensitive":["<that role>"]}` for the source
+- **THEN** the response is `200` and `ineffective_grants` carries no `sensitive_without_verb` entry for the role
+
+#### Scenario: An enrichment's write and modify are still granted
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"get":[],"read":[],"sensitive":[],"write":["labeler"],"modify":[]}`
+  for an enrichment
+- **THEN** the response is `200` and `write = ["labeler"]`
 
 #### Scenario: An ineffective grant is reported
 
@@ -270,6 +308,10 @@ list for that privilege or for any list that confers it by implication. Otherwis
 be denied. There SHALL be no separate bypass for any role name: a caller holding every privilege is
 authorized because it holds them globally, and the evaluator SHALL contain no check on a role or
 bundle name.
+
+For an enrichment, "the table's grant list" SHALL be its source's for `TABLE_GET`, `TABLE_READ` and
+`TABLE_SENSITIVE`, and its own for `TABLE_WRITE` and `TABLE_MODIFY`; `TABLE_GET` SHALL also be conferred by the
+enrichment's own `modify` list (see "An enrichment's read-side access is its source's").
 
 A table with entirely empty grant lists SHALL deny every caller that does not hold the privilege
 globally, for read as well as for write.
@@ -318,6 +360,13 @@ table as absent, a missing write privilege is `403 forbidden`.
 - **THEN** the query resolves and executes, and the table appears in its catalog listing and
   discovery
 
+#### Scenario: An enrichment's write grant does not confer its source's read
+
+- **GIVEN** a caller with no global privilege whose provider role is in an enrichment's `write` list and in no list of
+  its source
+- **WHEN** it lists the catalog and queries the source's entity
+- **THEN** neither the source nor the enrichment is listed, and the query reports an unknown entity
+
 ### Requirement: Caller-effective privilege reporting
 
 The system SHALL report, on every table read surface (`GET /v1/tables` list items and
@@ -330,11 +379,14 @@ system-table protection would decide for that caller, **after** implication is a
 - a `system` table SHALL report `write=false, modify=false` for every caller, including one holding
   every privilege (all modifying operations are refused on system tables), while its read-side flags
   SHALL be evaluated from the grant lists like any other table's;
+- an enrichment SHALL report its source's `read` and `sensitive`, a `rows_restricted` that is `true` when the caller
+  is confined on the source or by a policy an earlier build left on the enrichment, and a `get` that is its source's
+  or implied by its own `modify`; its `write` and `modify` SHALL be evaluated from its own lists;
 - otherwise each of `get`, `read`, `sensitive`, `write` and `modify` SHALL be `true` if the caller holds
   the corresponding privilege globally, or if one of its raw provider roles appears in a list that
   grants or implies it;
-- `rows_restricted` SHALL be `true` exactly when row-policy evaluation confines the caller on the table
-  (see "Row-policy evaluation"), on `system` and non-`system` tables alike;
+- `rows_restricted` SHALL be `true` exactly when row-policy evaluation confines the caller on the table (see
+  "Row-policy evaluation by caller role", and the enrichment bullet above), on `system` and non-`system` tables alike;
 - in `none` security mode every flag but `rows_restricted` SHALL be `true` for non-`system` tables, the
   read-side flags SHALL be `true` for `system` tables, and `rows_restricted` SHALL be `false` (no
   authorization is enforced).
@@ -400,6 +452,28 @@ used for enforcement so the two cannot diverge. Reporting SHALL NOT change enfor
 - **AND WHEN** the caller also carries another role that may read the table and has no policy on it
 - **THEN** the table carries `permissions.rows_restricted = false`
 
+#### Scenario: An enrichment reports its source's read-side flags
+
+- **GIVEN** a source whose `read` list and a row policy both name role `X`, and an enrichment of it whose `write` list
+  names `X`
+- **WHEN** a caller carrying `X` and no global privilege reads the enrichment's definition
+- **THEN** the enrichment carries `permissions.read = true`, `permissions.rows_restricted = true`,
+  `permissions.write = true` and `permissions.modify = false`
+
+#### Scenario: A policy left on an enrichment is reported as row-restricted
+
+- **GIVEN** a source whose `read` list names role `X` and which has no row policy, and an enrichment of it that still
+  stores a row policy for `X`, written by an earlier build
+- **WHEN** a caller carrying only `X` and no global privilege reads the enrichment's definition
+- **THEN** the enrichment carries `permissions.read = true` and `permissions.rows_restricted = true`
+
+#### Scenario: An enrichment whose source is missing grants no read
+
+- **GIVEN** a revision snapshot of an enrichment whose source table no longer exists
+- **WHEN** a caller holding `TABLE_GET` globally and no other global privilege reads it
+- **THEN** the read answers `200`, not an error, and the snapshot carries `permissions.get = true`,
+  `permissions.read = false` and `permissions.sensitive = false`
+
 #### Scenario: none mode reports full permissions
 
 - **WHEN** the service runs in `none` security mode and any caller reads a non-`system` table
@@ -408,13 +482,14 @@ used for enforcement so the two cannot diverge. Reporting SHALL NOT change enfor
 
 ### Requirement: Per-role row policies
 
-The system SHALL store, for each catalog table, a set of **row policies** co-located on the table
-definition, at most one per raw provider role. A policy SHALL be `{"filter": <filter node>}` — a predicate
+The system SHALL accept and store, for each catalog table other than an enrichment, a set of **row policies** co-located on the
+table definition, at most one per raw provider role. A policy SHALL be `{"filter": <filter node>}` — a predicate
 in the structured query's filter grammar (see [structured-query](../structured-query/spec.md), "Filter
-sub-grammar (CQL2-JSON)" and "Expression grammar") over that table's own columns.
+sub-grammar (CQL2-JSON)" and "Expression grammar") over that table's own columns. An enrichment SHALL accept none: the
+rows a caller reads through it are its source's (see "An enrichment's read-side access is its source's").
 
 There SHALL be no unrestricted policy shape: a role that may read the table and has no policy there already
-reads every row (see "Row-policy evaluation"). A body without a `filter` SHALL be refused
+reads every row (see "Row-policy evaluation by caller role"). A body without a `filter` SHALL be refused
 `422 validation_error`; a member other than `filter`, like any body that does not bind to the request type,
 SHALL be refused by the strict request mapper as `400 bad_request` (see "Row-policy management API").
 
@@ -424,14 +499,14 @@ role that has no read path to the table SHALL confer nothing.
 
 A role name SHALL follow the grantee rules of the grant lists: a raw provider role name, trimmed,
 non-blank, and not a bundle or privilege name. The grantee `*` SHALL be a valid policy subject, with the
-meaning it has in a grant list: its policy is one every authenticated caller carries. Row policies SHALL be storable on `system` tables, which
-carry the shared data a policy most often narrows. Deleting a table SHALL remove its row policies.
+meaning it has in a grant list: its policy is one every authenticated caller carries. Row policies SHALL be storable on
+`system` tables other than enrichments, which carry the shared data a policy most often narrows. Deleting a table SHALL remove its row policies.
 
 The filter SHALL be validated against the table's **own** stored columns — every one of them, sensitive
 columns included, independent of what the writing caller may see — and SHALL be refused when it:
 
 - references a column the table does not store, including a dotted enrichment field (a policy narrows
-  the table it is stored on; an enrichment is narrowed by a policy of its own);
+  the table it is stored on);
 - uses a `param` expression other than a caller value (see "Caller values in row policies");
 - calls a function outside the function catalog's scalar group, or one the catalog declares as calling a
   service outside the data store;
@@ -495,7 +570,15 @@ requiring `TABLE_GRANT`, because a policy discloses which provider roles exist a
 - `DELETE /v1/tables/{name}/row-policies/{role}` SHALL remove that role's policy and answer `204`.
 
 A caller without `TABLE_GRANT` SHALL receive `403 forbidden`. An unknown table SHALL be `404 not_found`,
-and so SHALL a `DELETE` naming a role that has no policy on the table. A body that does not bind to the
+and so SHALL a `DELETE` naming a role that has no policy on the table. A `PUT` naming an enrichment SHALL be refused
+`409 enrichment_follows_source`, naming the enrichment's source as the table to write the policy on, and nothing SHALL
+be stored. `GET` and `DELETE` naming an enrichment SHALL behave as on any table, so a policy an earlier build stored
+there can be read and removed. For a `PUT` the checks SHALL run in this order, on every table: a body that does not
+bind (`400`); a caller without `TABLE_GRANT` (`403 forbidden`); an unknown table (`404`); an enrichment (`409 enrichment_follows_source`); then the remaining checks,
+each `422 validation_error` and in no specified order among themselves: a body carrying both or neither of `filter`
+and `where`, the translation of a `where`, the role, and the policy's own validation. So a `where` on an
+enrichment is refused `409` before it is translated, a body that would otherwise fail validation likewise, and a body
+carrying both forms for a table that does not exist answers `404`. A body that does not bind to the
 request type — malformed JSON, or a member other than `filter` and `where` — SHALL be `400 bad_request`, as
 on every endpoint behind the strict request mapper. A
 body that binds but whose shape or meaning is invalid, and an invalid role, SHALL be `422 validation_error`
@@ -531,121 +614,26 @@ holding `TABLE_GRANT` (see [audit-trail](../audit-trail/spec.md), "Historical ta
 - **WHEN** a caller holding `TABLE_GRANT` `PUT`s a policy for role `READ_ONLY_ANALYTIC`
 - **THEN** the request is refused `422 validation_error`
 
-### Requirement: Row-policy evaluation
+#### Scenario: A policy on an enrichment is refused
 
-In `oidc` mode, for every table a caller reads through a user read surface, the rows it sees SHALL be
-decided from the policies whose role is among the caller's raw provider roles:
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s a policy, written as `filter` or as `where`, for any role on an
+  enrichment
+- **THEN** the response is `409` with machine code `enrichment_follows_source`, the message names the enrichment's
+  source, and nothing is stored
 
-- **none of the caller's roles has a policy on the table** — the caller SHALL see every row it may
-  read;
-- **another of the caller's roles may read the table and has no policy on it** — the caller SHALL see
-  every row it may read: that role's unrestricted read stands on its own;
-- **otherwise** — the caller SHALL see exactly the rows satisfying **at least one** of its policies'
-  filters.
+#### Scenario: The enrichment refusal precedes the policy's own validation
 
-A role **may read the table**, for the second case, when the table's `read` grant list names it, or when a
-configured `roles-mapping` maps it to `TABLE_READ` globally **and** the caller holds `TABLE_READ` globally
-on the request. Only such a role counts: the caller's other provider roles — IdP groups, Core roles that
-confer nothing on the table — SHALL NOT lift a confinement, policy or not, because nearly every caller
-carries some, and counting them would make a policy on a widely-held role meaningless. The second half of
-the global condition keeps a role name mapped differently by two providers from being credited with a read
-the caller's own provider does not give it.
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s, on an enrichment, a policy for role `READ_ONLY_ANALYTIC`, a body
+  carrying both `filter` and `where`, or a `where` naming a column the enrichment does not store
+- **THEN** each response is `409` with machine code `enrichment_follows_source`
+- **AND WHEN** it `DELETE`s the policy of a role that has none on the enrichment
+- **THEN** the response is `404 not_found`
 
-`*` SHALL take part in this rule as a role every authenticated caller carries. A table whose `read` list
-names `*` and that stores a policy for `*` therefore gives every caller the rows of that policy, plus the
-rows of the policies on its other roles; and a caller one of whose own roles may read the table with no
-policy SHALL still see every row, by the second case. A caller meant to be confined by the `*` policy
-SHALL therefore have no other read path to the table without a policy.
+#### Scenario: An unknown table is reported before an invalid body
 
-A policy SHALL apply to its **role** whatever path that role reads the table by: a role holding
-`TABLE_READ` globally, through a bundle or a privilege mapping, SHALL be confined by its own policy exactly
-as a role reading through a per-table `read` grant. Confining a broadly-entitled role therefore takes a
-policy on that role; one on a narrower role the same caller also carries does not reach it.
-
-The user read surfaces are structured query execution, SQL execution, both CSV exports, the Flight SQL
-surface, the totals a response reports, and every composite shape of those — joins, subqueries, derived
-tables and set operations. A confined caller SHALL observe filtered rows as absent: counts, aggregates
-and distinct values SHALL agree with the filtered rows, and no response SHALL indicate that rows were
-withheld.
-
-A policy SHALL narrow the rows **of the table it is stored on**. Within a flattened entity a policy on an
-enrichment SHALL withhold that enrichment's rows only: the source rows they would have joined to remain,
-with the enrichment's columns reading as absent values, as for a source row that has no enrichment row.
-
-#### Scenario: A global reader is confined by its role's policy
-
-- **GIVEN** provider role `X` mapped to `READ_ONLY_ANALYTIC`, and a policy for `X` on `dial_usage_log`
-  admitting project `X-PRJ-1` only
-- **WHEN** a caller carrying `X` queries `dial_usage_log` through the structured query surface, the SQL
-  surface, a CSV export or Flight SQL
-- **THEN** every response contains only rows of `X-PRJ-1`, and a count reports their number alone
-
-#### Scenario: One policy for everyone, every row for an unpolicied reader
-
-- **GIVEN** a table whose `read` list is `["*"]`, a policy for `*` of `user_hash = caller.user_hash`, and
-  provider role `A` mapped to a global read with no policy on the table
-- **WHEN** a caller carrying no role named on the table, and a caller carrying `A`, each query the table
-- **THEN** the first sees only the rows whose `user_hash` is its own, and the second sees every row
-
-#### Scenario: A role policy adds to the policy for everyone
-
-- **GIVEN** the same table, and a policy for role `X` admitting project `X-PRJ-1`
-- **WHEN** a caller carrying `X` queries the table
-- **THEN** it sees its own rows and the rows of `X-PRJ-1`
-
-#### Scenario: Two roles' policies are combined
-
-- **GIVEN** policies for `X` admitting `X-PRJ-1` and for `Y` admitting `Y-PRJ-7`
-- **WHEN** a caller carrying both roles queries the table
-- **THEN** it sees the rows of both projects
-
-#### Scenario: A reading role without a policy lifts the confinement
-
-- **GIVEN** a policy for `X` admitting `X-PRJ-1`, and role `Y`, mapped to `TABLE_READ` globally, with no
-  policy on the table
-- **WHEN** a caller carrying both `X` and `Y` queries the table
-- **THEN** it sees every row
-- **AND WHEN** a policy for `Y` admitting `Y-PRJ-7` is stored
-- **THEN** the same caller sees the rows of `X-PRJ-1` and `Y-PRJ-7` only
-
-#### Scenario: A role that cannot read the table does not lift the confinement
-
-- **GIVEN** a policy for `X` admitting `X-PRJ-1`, and role `G` with no policy and no read on the table — an
-  unrelated IdP group
-- **WHEN** a caller carrying both `X` and `G` queries the table
-- **THEN** it sees only rows of `X-PRJ-1`
-
-#### Scenario: A caller none of whose roles has a policy is unconfined
-
-- **WHEN** a caller holding `TABLE_READ`, none of whose roles has a policy on the table, queries it
-- **THEN** it sees every row
-
-#### Scenario: A policy does not grant a read
-
-- **GIVEN** a policy for role `Z` on a table, and no global or per-table read privilege for `Z`
-- **WHEN** a caller carrying only `Z` queries the table
-- **THEN** the query fails as though the table did not exist
-
-#### Scenario: Every composite reference is filtered
-
-- **GIVEN** a caller confined to `X-PRJ-1` on a table
-- **WHEN** it submits a SQL query that reads the table in a join, an `IN` subquery and both arms of a
-  `UNION ALL`
-- **THEN** every reference contributes only rows of `X-PRJ-1`
-
-#### Scenario: An enrichment policy withholds enrichment values, not source rows
-
-- **GIVEN** a caller unconfined on a source and confined by a policy on one of its enrichments
-- **WHEN** it queries the flattened entity
-- **THEN** every source row it may read is returned, and the enrichment's columns are absent values on
-  the rows whose enrichment row the policy withholds
-
-#### Scenario: A superseded row version is not resurrected
-
-- **GIVEN** a deduplicated table on which a row's newer version no longer satisfies the caller's policy
-  while its superseded version did
-- **WHEN** the caller queries the table
-- **THEN** the row is absent, because the policy is applied to the latest version only
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s a body carrying both `filter` and `where` for a table that does not
+  exist
+- **THEN** the response is `404 not_found`
 
 ### Requirement: Row policies are enforced by the data store on every reference
 
@@ -707,14 +695,19 @@ applied after `FINAL`, or is not applied to every reference, SHALL NOT be adopte
 
 ### Requirement: Row policies do not propagate to derived tables
 
-A policy SHALL govern only the table it is stored on. A table derived from it — an enrichment target or
-an aggregate target, populated under the system identity from unfiltered reads — SHALL be governed only
-by its **own** policies and grant lists. The system SHALL NOT infer, copy or require a policy on a
-derived table from its source's.
+A policy SHALL govern only the table it is stored on. An aggregate target — a source populated under the system
+identity from unfiltered reads of another table — SHALL be governed only by its **own** policies and grant lists. The
+system SHALL NOT infer, copy or require a policy on an aggregate target from its input's. An enrichment is not such a
+table: it is read only through its source, whose policies decide its rows (see "An enrichment's read-side access is its
+source's"). The values a pipeline derives into an enrichment from **another** table, or from **other
+source rows** — a group-trigger pipeline, or any enrichment whose grain is coarser than one source row — are not
+narrowed by the policies that hide those rows: a caller confined on the source reads, on each row it may read, a value
+that may summarise rows it may not. This is the same accepted risk as for aggregate targets. The remedy is a
+policy on the source that confines the whole group, or keeping such a value off the enrichment.
 
 This is an accepted risk, not an oversight: a role confined on a source and able to read an aggregate of
 it reads that aggregate unconfined unless the aggregate carries a policy for the role. The operator
-closes it by storing policies on the derived tables a confined role may read.
+closes it by storing policies on the aggregate targets a confined role may read.
 
 #### Scenario: An aggregate of a confined source is not confined
 
@@ -750,7 +743,8 @@ be too late.
 A catalog import SHALL write no grant list on any table: a created table starts with empty `access` lists and a `system` table's
 lists are never touched, as defined by [catalog-export-import](../catalog-export-import/spec.md) ("Import order and no grants").
 Grants are each environment's own policy, so granting access on an imported table stays an operator action through
-`PUT /v1/tables/{name}/access`.
+`PUT /v1/tables/{name}/access`, on the table itself for a source and on its source for an enrichment, whose read-side
+access is its source's.
 
 #### Scenario: Imported table starts ungranted
 
@@ -884,9 +878,8 @@ cannot express as a single filter SHALL be refused `422 validation_error` with t
 holds a subquery or a sequence value, names an enrichment's column by its dotted name, or closes itself to add another clause,
 SHALL be refused on its text, before any name in
 it is resolved, with one message whatever it names: the refusal SHALL NOT tell whether a table or column
-outside the policy's own table exists. A table that is
-not a queryable entity on its own, such as an enrichment, SHALL refuse `where` with `422 validation_error`;
-its policies are written as `filter`.
+outside the policy's own table exists. An enrichment accepts no policy in either form (see "Row-policy management
+API").
 
 #### Scenario: A condition is stored as its filter
 
@@ -917,4 +910,242 @@ its policies are written as `filter`.
 - **WHEN** a policy is written as `{"where": "project_id IN (SELECT project_id FROM other_table)"}`
 - **THEN** the request is refused `422 validation_error` and no policy is stored
 - **AND** the message is the same whether or not `other_table` exists
+
+### Requirement: An enrichment's read-side access is its source's
+
+An enrichment SHALL carry no read-side access of its own. For a table of type `enrichment`, `TABLE_GET`, `TABLE_READ`
+and `TABLE_SENSITIVE` SHALL be decided as for its `source_table`: a caller holds `TABLE_READ` or `TABLE_SENSITIVE` on
+the enrichment when, and only when, it holds it on the source, globally or by the source's grant lists; and it holds
+`TABLE_GET` on the enrichment when it holds it on the source — by any list that confers it there, the source's `modify`
+included — or holds `modify` on the enrichment itself. A `*` stored in the source's `modify` list, which confers nothing
+on the source, SHALL confer nothing on its enrichments either. This SHALL hold on every
+surface that evaluates a per-table privilege — the catalog listing and read, schema discovery, query resolution on
+every user read surface, the schema mutation surface, catalog export, pipeline authorization and the reported
+`permissions` — because they share one evaluation.
+
+`write` and `modify` SHALL remain the enrichment's own lists, evaluated on the enrichment. `modify` held on the
+enrichment SHALL still confer `get` on it by implication, so a role that maintains an enrichment's schema can read its
+definition without reading the source. Because the clearance on an enrichment is the source's, such a role changes an
+enrichment's sensitive columns, or any column's `sensitive` flag, only when it also holds the source's clearance.
+
+An enrichment SHALL accept no `get`, `read` or `sensitive` grant and no row policy, in `none` security mode as in
+`oidc`, because the refusal constrains what state may be stored rather than who may act. Which rows a caller reads
+through an entity SHALL be decided by the source's row policies, and an enrichment's values SHALL reach a caller only on the
+source rows it reads.
+
+State an earlier build stores on an enrichment — an old replica during a rolling upgrade, or one rolled back to — SHALL NOT widen
+anything. A `get`, `read` or `sensitive` list stored there SHALL confer nothing, SHALL be returned as stored, and MAY be
+cleared by a `PUT .../access` that sends it empty. A row policy stored there SHALL keep narrowing as it did — it only
+ever withholds the enrichment's values on rows the source returns — SHALL be returned as stored, and MAY be removed with
+`DELETE .../row-policies/{role}`. Whether another of the caller's roles lifts such a leftover policy SHALL be decided
+by the same rule as on any table, against the enrichment's own stored lists, as when the policy was written.
+
+The reason is that an enrichment is not a queryable entity: every statement that reaches its rows has its source as
+`FROM`. Lists of its own could therefore only narrow what the source allows, and only for a caller reading the source
+through a per-table grant — never for one holding `TABLE_READ` globally — which nothing in the API made visible. The
+way to keep an enrichment column from some readers of its source is to mark it `sensitive`, which reserves it for the
+source's clearance holders.
+
+#### Scenario: A reader of the source sees the enrichment's columns
+
+- **GIVEN** a caller with no global privilege whose provider role is in a source's `read` list and in no list of its
+  enrichment
+- **WHEN** it requests the entity's schema and queries an enrichment column
+- **THEN** the enrichment's non-sensitive columns are present and the query resolves
+
+#### Scenario: The source's clearance reaches the enrichment's sensitive columns
+
+- **GIVEN** a caller whose provider role is in a source's `read` and `sensitive` lists, and an enrichment of it
+  carrying a `sensitive` column
+- **WHEN** the caller queries that column
+- **THEN** the query resolves
+- **AND WHEN** the role is removed from the source's `sensitive` list
+- **THEN** the column is absent from the schema and referencing it fails as an unknown field
+
+#### Scenario: The enrichment is listed with its source
+
+- **GIVEN** a caller that may list a source and holds nothing on its enrichment
+- **WHEN** it lists the catalog with `GET /v1/tables`
+- **THEN** the enrichment appears, with the `get`, `read` and `sensitive` flags of its source
+
+#### Scenario: An enrichment maintainer sees the definition it maintains
+
+- **GIVEN** a caller with no global privilege whose provider role is in an enrichment's `modify` list and in no list of
+  its source
+- **WHEN** it reads `GET /v1/tables/{enrichment}`, and then queries the source's entity
+- **THEN** the read is `200` with the enrichment's non-sensitive columns, and the query reports an unknown entity
+
+#### Scenario: A source modify holder sees the enrichment's columns
+
+- **GIVEN** a caller with no global privilege whose provider role is in a source's `modify` list only
+- **WHEN** it requests the source entity's schema and reads `GET /v1/tables/{enrichment}`
+- **THEN** the enrichment's non-sensitive columns are present in both
+
+#### Scenario: A legacy everyone modify grant on the source shows no enrichment
+
+- **GIVEN** a source whose stored `modify` list is `["*"]` and whose other lists do not name the caller's roles
+- **WHEN** an authenticated caller with no global privilege lists the catalog and reads `GET /v1/tables/{enrichment}`
+- **THEN** neither the source nor its enrichment is listed, and the read reports the enrichment as absent
+
+#### Scenario: A list or policy left on an enrichment widens nothing
+
+- **GIVEN** an enrichment that still stores a `read` list naming role `R` and a row policy for role `X`, written by an
+  earlier build
+- **WHEN** a caller carrying only `R` queries the source's entity, and a caller holding `TABLE_GRANT` reads the
+  enrichment's access and row policies and then deletes `X`'s policy
+- **THEN** the query reports an unknown entity, the reads return the `read` list and the policy as stored, and the
+  delete answers `204`
+
+#### Scenario: The catalog migration clears an existing enrichment's read-side lists and policies
+
+- **GIVEN** an enrichment whose `read`, `sensitive`, `write` and `modify` lists and a row policy were stored by an
+  earlier build, and a source with lists and policies of its own
+- **WHEN** the catalog migration has run and a caller holding `TABLE_GRANT` reads both tables' access and row policies
+- **THEN** the enrichment's `get`, `read` and `sensitive` are empty, its `write` and `modify` are as stored, and it
+  has no row policy; the source's lists and policies are as stored
+
+### Requirement: Row-policy evaluation by caller role
+
+In `oidc` mode, for every table a caller reads through a user read surface, the rows it sees SHALL be
+decided from the policies whose role is among the caller's raw provider roles:
+
+- **none of the caller's roles has a policy on the table** — the caller SHALL see every row it may
+  read;
+- **another of the caller's roles may read the table and has no policy on it** — the caller SHALL see
+  every row it may read: that role's unrestricted read stands on its own;
+- **otherwise** — the caller SHALL see exactly the rows satisfying **at least one** of its policies'
+  filters.
+
+A role **may read the table**, for the second case, when the table's `read` grant list names it (for a policy an
+earlier build left on an enrichment, the enrichment's own stored `read` list), or when a
+configured `roles-mapping` maps it to `TABLE_READ` globally **and** the caller holds `TABLE_READ` globally
+on the request. Only such a role counts: the caller's other provider roles — IdP groups, Core roles that
+confer nothing on the table — SHALL NOT lift a confinement, policy or not, because nearly every caller
+carries some, and counting them would make a policy on a widely-held role meaningless. The second half of
+the global condition keeps a role name mapped differently by two providers from being credited with a read
+the caller's own provider does not give it.
+
+`*` SHALL take part in this rule as a role every authenticated caller carries. A table whose `read` list
+names `*` and that stores a policy for `*` therefore gives every caller the rows of that policy, plus the
+rows of the policies on its other roles; and a caller one of whose own roles may read the table with no
+policy SHALL still see every row, by the second case. A caller meant to be confined by the `*` policy
+SHALL therefore have no other read path to the table without a policy.
+
+A policy SHALL apply to its **role** whatever path that role reads the table by: a role holding
+`TABLE_READ` globally, through a bundle or a privilege mapping, SHALL be confined by its own policy exactly
+as a role reading through a per-table `read` grant. Confining a broadly-entitled role therefore takes a
+policy on that role; one on a narrower role the same caller also carries does not reach it.
+
+The user read surfaces are structured query execution, SQL execution, both CSV exports, the Flight SQL
+surface, the totals a response reports, and every composite shape of those — joins, subqueries, derived
+tables and set operations. A confined caller SHALL observe filtered rows as absent: counts, aggregates
+and distinct values SHALL agree with the filtered rows, and no response SHALL indicate that rows were
+withheld.
+
+A policy SHALL narrow the rows **of the table it is stored on**. Within a flattened entity the source's policies SHALL
+decide the rows, and each enrichment's values SHALL be returned for exactly the source rows returned, since an
+enrichment accepts no policy of its own; a policy an earlier build left on an enrichment can only withhold that
+enrichment's values on some of those rows (see "An enrichment's read-side access is its source's").
+
+#### Scenario: A global reader is confined by its role's policy
+
+- **GIVEN** provider role `X` mapped to `READ_ONLY_ANALYTIC`, and a policy for `X` on `dial_usage_log`
+  admitting project `X-PRJ-1` only
+- **WHEN** a caller carrying `X` queries `dial_usage_log` through the structured query surface, the SQL
+  surface, a CSV export or Flight SQL
+- **THEN** every response contains only rows of `X-PRJ-1`, and a count reports their number alone
+
+#### Scenario: One policy for everyone, every row for an unpolicied reader
+
+- **GIVEN** a table whose `read` list is `["*"]`, a policy for `*` of `user_hash = caller.user_hash`, and
+  provider role `A` mapped to a global read with no policy on the table
+- **WHEN** a caller carrying no role named on the table, and a caller carrying `A`, each query the table
+- **THEN** the first sees only the rows whose `user_hash` is its own, and the second sees every row
+
+#### Scenario: A role policy adds to the policy for everyone
+
+- **GIVEN** the same table, and a policy for role `X` admitting project `X-PRJ-1`
+- **WHEN** a caller carrying `X` queries the table
+- **THEN** it sees its own rows and the rows of `X-PRJ-1`
+
+#### Scenario: Two roles' policies are combined
+
+- **GIVEN** policies for `X` admitting `X-PRJ-1` and for `Y` admitting `Y-PRJ-7`
+- **WHEN** a caller carrying both roles queries the table
+- **THEN** it sees the rows of both projects
+
+#### Scenario: A reading role without a policy lifts the confinement
+
+- **GIVEN** a policy for `X` admitting `X-PRJ-1`, and role `Y`, mapped to `TABLE_READ` globally, with no
+  policy on the table
+- **WHEN** a caller carrying both `X` and `Y` queries the table
+- **THEN** it sees every row
+- **AND WHEN** a policy for `Y` admitting `Y-PRJ-7` is stored
+- **THEN** the same caller sees the rows of `X-PRJ-1` and `Y-PRJ-7` only
+
+#### Scenario: A role that cannot read the table does not lift the confinement
+
+- **GIVEN** a policy for `X` admitting `X-PRJ-1`, and role `G` with no policy and no read on the table — an
+  unrelated IdP group
+- **WHEN** a caller carrying both `X` and `G` queries the table
+- **THEN** it sees only rows of `X-PRJ-1`
+
+#### Scenario: A caller none of whose roles has a policy is unconfined
+
+- **WHEN** a caller holding `TABLE_READ`, none of whose roles has a policy on the table, queries it
+- **THEN** it sees every row
+
+#### Scenario: A policy does not grant a read
+
+- **GIVEN** a policy for role `Z` on a table, and no global or per-table read privilege for `Z`
+- **WHEN** a caller carrying only `Z` queries the table
+- **THEN** the query fails as though the table did not exist
+
+#### Scenario: Every composite reference is filtered
+
+- **GIVEN** a caller confined to `X-PRJ-1` on a table
+- **WHEN** it submits a SQL query that reads the table in a join, an `IN` subquery and both arms of a
+  `UNION ALL`
+- **THEN** every reference contributes only rows of `X-PRJ-1`
+
+#### Scenario: Enrichment values follow the source's rows
+
+- **GIVEN** a caller confined by a policy on a source to project `X-PRJ-1`, and an enrichment of it holding a value for
+  source rows of several projects
+- **WHEN** it queries the flattened entity, naming the enrichment's column
+- **THEN** the returned rows are the source rows of `X-PRJ-1`, each with its enrichment value, and a count or aggregate
+  over the enrichment's column agrees with those rows alone
+
+#### Scenario: A superseded row version is not resurrected
+
+- **GIVEN** a deduplicated table on which a row's newer version no longer satisfies the caller's policy
+  while its superseded version did
+- **WHEN** the caller queries the table
+- **THEN** the row is absent, because the policy is applied to the latest version only
+
+### Requirement: Per-table authorization is inert in none mode
+
+In `none` security mode the per-table authorization checks SHALL NOT be enforced; all per-table operations remain
+open, reads included. Every non-`system` table SHALL be visible, gettable, readable and writable, every `system`
+table visible, gettable and readable, and sensitive columns SHALL be served, exactly as before this capability gained
+read-side keys. The mode SHALL be resolved from the single component
+specified in `authentication`, so this behaviour cannot diverge between the HTTP and Flight surfaces.
+
+Rules that constrain what state may be stored, rather than who may act, SHALL still apply in `none` mode, because a
+document written while security was off goes live the moment a deployment switches to `oidc`. They include the refusal
+of a read-side grant or row policy on an enrichment (see "An enrichment's read-side access is its source's"), the
+validation of row policies (see "Row policies are inert in none mode"), and the grant-list validation of the
+grant-management API (`table_is_system`, blank role names, `*` in `write` or `modify`).
+
+#### Scenario: none mode does not evaluate access
+
+- **WHEN** the service runs in `none` mode
+- **THEN** per-table operations are reachable without any grant check, and no table is hidden from a
+  listing, discovery or query
+
+#### Scenario: none mode still refuses a read grant or a row policy on an enrichment
+
+- **WHEN** the service runs in `none` mode and a `PUT .../access` carries a non-empty `read` list for an enrichment,
+  or a `PUT .../row-policies/{role}` targets an enrichment
+- **THEN** each request is refused `409 enrichment_follows_source`
 
