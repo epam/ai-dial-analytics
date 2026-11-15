@@ -6,7 +6,7 @@ import java.util.Map;
 
 /**
  * The calling identity's effective per-table permissions, as reported on the table read surfaces
- * (list/get) and in the response to a grant replacement. One flag per table-scoped {@link Privilege},
+ * (list/get). One flag per table-scoped {@link Privilege},
  * computed <b>after</b> implication — so a role listed only under {@code read} reports {@code read},
  * {@code get} and {@code list} all true.
  *
@@ -17,7 +17,8 @@ import java.util.Map;
  * {@code read && sensitive}, as seeing sensitive columns is {@code get && sensitive}.
  *
  * <p>{@code rowsRestricted} is not a privilege: it reports whether row policies confine the caller's reads
- * of the table to some of its rows. It never discloses the policy itself.
+ * of the table to some of its rows, and {@code columnsRestricted} whether column policies hide one of its columns from
+ * the caller. Neither discloses the policies themselves.
  *
  * <p>Computed by {@link TableCallerPermissions}, which shares its role-matching with the enforcement path
  * so reporting and enforcement cannot disagree.
@@ -29,11 +30,18 @@ public record EffectivePermissions(
         boolean sensitive,
         boolean write,
         boolean modify,
-        boolean rowsRestricted) {
+        boolean rowsRestricted,
+        boolean columnsRestricted) {
 
-    /** The six privilege flags, with no row confinement. */
+    /** The six privilege flags, with no row or column restriction. */
     public EffectivePermissions(boolean list, boolean get, boolean read, boolean sensitive, boolean write, boolean modify) {
-        this(list, get, read, sensitive, write, modify, false);
+        this(list, get, read, sensitive, write, modify, false, false);
+    }
+
+    /** The six privilege flags and the row confinement, with no column restriction. */
+    public EffectivePermissions(boolean list, boolean get, boolean read, boolean sensitive, boolean write, boolean modify,
+            boolean rowsRestricted) {
+        this(list, get, read, sensitive, write, modify, rowsRestricted, false);
     }
 
     /** Every privilege flag {@code value}, with no row confinement. */
@@ -46,8 +54,8 @@ public record EffectivePermissions(
         return new EffectivePermissions(readSide, readSide, readSide, readSide, false, false);
     }
 
-    /** Builds from a per-privilege decision and the row-confinement answer. */
-    public static EffectivePermissions of(Map<Privilege, Boolean> flags, boolean rowsRestricted) {
+    /** Builds from a per-privilege decision and the row-confinement and column-restriction answers. */
+    public static EffectivePermissions of(Map<Privilege, Boolean> flags, boolean rowsRestricted, boolean columnsRestricted) {
         return new EffectivePermissions(
                 Boolean.TRUE.equals(flags.get(Privilege.TABLE_LIST)),
                 Boolean.TRUE.equals(flags.get(Privilege.TABLE_GET)),
@@ -55,7 +63,8 @@ public record EffectivePermissions(
                 Boolean.TRUE.equals(flags.get(Privilege.TABLE_SENSITIVE)),
                 Boolean.TRUE.equals(flags.get(Privilege.TABLE_WRITE)),
                 Boolean.TRUE.equals(flags.get(Privilege.TABLE_MODIFY)),
-                rowsRestricted);
+                rowsRestricted,
+                columnsRestricted);
     }
 
 }

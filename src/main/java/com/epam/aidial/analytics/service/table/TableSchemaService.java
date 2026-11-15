@@ -4,12 +4,14 @@ import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.enrichment.support.ProvenanceColumns;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.PatchInput.Rename;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.DdlColumn;
 import com.epam.aidial.analytics.service.table.relayout.RelayoutStateStore;
@@ -17,6 +19,8 @@ import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -83,6 +87,8 @@ public class TableSchemaService {
     private final RowPolicyService rowPolicies;
     private final ClickHouseTableInspector inspector;
     private final RelayoutStateStore relayouts;
+    private final ColumnPolicyRewriter columnPolicyRewriter;
+    private final PlatformTransactionManager transactionManager;
 
     /** A resolved add: the declared column, its rendered DDL type, and its target ordinal. */
     private record ResolvedAdd(ColumnInput column, String ddlType, int ordinal) {}
@@ -98,9 +104,24 @@ public class TableSchemaService {
             String exposedName, Change<String> tag, Change<String> displayName,
             Change<String> description, Change<Boolean> sensitive, Change<Boolean> heavy) {}
 
+    /**
+     * Applies {@code patch} in one transaction, from the row lock of the table (and, for an enrichment, then of its
+     * source, before anything else loads it) through every validation, the ClickHouse {@code ALTER} and the catalog
+     * writes, so the column policies it decides on before the {@code ALTER} are the ones it commits against. The
+     * response is read after the commit.
+     */
     public TableView patchSchema(String name, PatchInput patch) {
-        final TableDefinitionEntity definition = definitions.findById(name)
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch));
+        return catalogService.get(name);
+    }
+
+    private void patchLocked(String name, PatchInput patch) {
+        final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // The source's lists name an enrichment's columns, so its row is locked too, enrichment first.
+        final TableDefinitionEntity policyOwner = definition.getType() == TableType.ENRICHMENT
+                ? definitions.findForUpdate(definition.getSourceTable()).orElse(null)
+                : definition;
         definition.requireModifiable();
         // PATCH is the live-schema surface: it emits immediate ClickHouse ALTERs, so it applies only to a
         // materialized table. A not-yet-materialized table's schema is defined and materialized via
@@ -126,8 +147,15 @@ public class TableSchemaService {
         final Map<String, ColumnMappingEntity> byExposed = new LinkedHashMap<>();
         final Set<String> hidden = new LinkedHashSet<>();
         final Set<String> hiddenPhysical = new LinkedHashSet<>();
+        // A column a column policy hides from the caller is unknown to it exactly like an unentitled sensitive one.
+        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(definition);
+        final Map<String, String> policyHiddenPhysical = new LinkedHashMap<>();
         for (final ColumnMappingEntity col : current) {
-            if (col.isSensitive() && !cleared) {
+            final boolean policyHidden = !visibility.allows(col.getName());
+            if (policyHidden) {
+                policyHiddenPhysical.put(col.getSourceName(), col.getName());
+            }
+            if (col.isSensitive() && !cleared || policyHidden) {
                 hidden.add(col.getName());
                 hiddenPhysical.add(col.getSourceName());
             } else {
@@ -170,6 +198,8 @@ public class TableSchemaService {
         final Map<String, Set<String>> policyColumns = rowPolicies.referencedColumns(definition);
 
         final List<String> drops = new ArrayList<>();
+        final List<String> droppedExposed = new ArrayList<>();
+        final List<ColumnPolicyRewriter.Rename> renamedExposed = new ArrayList<>();
         for (final String drop : patch.drop()) {
             final ColumnMappingEntity col = requireColumn(byExposed, drop);
             requireNoRowPolicy(name, col.getName(), policyColumns, "dropped");
@@ -189,6 +219,7 @@ public class TableSchemaService {
             physical.remove(col.getSourceName());
             physicalByExposed.remove(drop);
             drops.add(col.getSourceName());
+            droppedExposed.add(col.getName());
         }
 
         final List<ResolvedRename> renames = new ArrayList<>();
@@ -233,6 +264,7 @@ public class TableSchemaService {
             physicalByExposed.remove(rename.from());
             physicalByExposed.put(rename.to(), rename.to());
             renames.add(new ResolvedRename(col.getSourceName(), rename.to()));
+            renamedExposed.add(new ColumnPolicyRewriter.Rename(col.getName(), rename.to()));
         }
 
         int nextOrdinal = current.stream().mapToInt(ColumnMappingEntity::getOrdinal).max().orElse(-1) + 1;
@@ -333,6 +365,11 @@ public class TableSchemaService {
         // column would let its validation errors reveal the column's type and nullability, and an accepted one
         // would expire rows by sensitive values — observable afterwards through row counts. For the same reason
         // such a caller may not change a stored TTL that is on a hidden column, in either direction.
+        if (patch.ttl().present() && policyHiddenPhysical.containsKey(definition.getTtlColumn())) {
+            throw new ColumnNotEntitledException("the TTL of table '" + name + "' is on column '"
+                    + policyHiddenPhysical.get(definition.getTtlColumn()) + "', which a column policy hides from the "
+                    + "caller, so the caller may not change it");
+        }
         if (patch.ttl().present() && !cleared && hiddenPhysical.contains(definition.getTtlColumn())) {
             throw clearanceRequired(name, "changing a TTL that is on a sensitive column");
         }
@@ -369,6 +406,11 @@ public class TableSchemaService {
             }
         }
 
+        // Decided on the locked lists before any DDL: drops prune, renames rewrite the pruned lists, and a list the prune
+        // would empty refuses the whole request. Written after the ALTER, in this transaction and revision.
+        final Map<String, List<String>> columnPolicies = policyOwner == null ? null : columnPolicyRewriter.plan(policyOwner,
+                policyOwner == definition ? "" : name + ".", name, droppedExposed, renamedExposed);
+
         // All valid — apply: one multi-command ALTER (validated by ClickHouse as a whole, so it is
         // rejected or applied in its entirety), then all catalog changes in one transaction.
         final List<String> commands = new ArrayList<>();
@@ -395,7 +437,7 @@ public class TableSchemaService {
             ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
         }
 
-        writer.applyPatch(name,
+        writer.applyPatch(definition,
                 drops,
                 renames.stream().map(r -> new CatalogSchemaWriter.RenameWrite(r.fromSourceName(), r.to())).toList(),
                 adds.stream().map(a -> new CatalogSchemaWriter.AppendWrite(a.column(),
@@ -403,7 +445,9 @@ public class TableSchemaService {
                 updates.stream().map(u -> new CatalogSchemaWriter.MetadataWrite(u.exposedName(),
                         u.tag(), u.displayName(), u.description(), u.sensitive(), u.heavy())).toList(),
                 ttlChange);
-        return catalogService.get(name);
+        if (policyOwner != null) {
+            columnPolicyRewriter.apply(policyOwner, columnPolicies);
+        }
     }
 
     /**

@@ -1,14 +1,20 @@
 package com.epam.aidial.analytics.service.table.grant;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.service.security.RowPolicyFilterStubs;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.ProviderRolePrivileges;
 import com.epam.aidial.analytics.web.security.SecurityMode;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import org.junit.jupiter.api.AfterEach;
@@ -16,6 +22,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -40,12 +47,46 @@ class TableCallerPermissionsTest {
 
     private final TableDefinitionRepository definitions = mock(TableDefinitionRepository.class);
     private final RowPolicyFilter rowPolicies = RowPolicyFilterStubs.inert();
+    private final ColumnMappingRepository columns = mock(ColumnMappingRepository.class);
     private final TableCallerPermissions oidc = permissions(SecurityMode.OIDC);
     private final TableCallerPermissions none = permissions(SecurityMode.NONE);
 
     private TableCallerPermissions permissions(SecurityMode mode) {
-        return new TableCallerPermissions(new SecurityClaimsExtractor(), new SecurityModeResolver(mode.code()), rowPolicies,
-                new GoverningAccess(definitions));
+        final SecurityClaimsExtractor claims = new SecurityClaimsExtractor();
+        final SecurityModeResolver resolver = new SecurityModeResolver(mode.code());
+        final GoverningAccess governing = new GoverningAccess(definitions);
+        final JsonMapper jsonMapper = new JsonMapperConfiguration().jsonMapper();
+        final SensitiveColumnAccess columnAccess = new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims),
+                resolver, definitions, governing, claims, mock(ProviderRolePrivileges.class), new RowPolicyCodec(jsonMapper),
+                new ColumnPolicyCodec(jsonMapper));
+        return new TableCallerPermissions(claims, resolver, rowPolicies, governing, columnAccess, columns);
+    }
+
+    @Test
+    @DisplayName("columns_restricted is true exactly when the visibility decision hides one of the table's own columns")
+    void columnsRestrictedFollowsTheVisibilityDecision() {
+        final TableDefinitionEntity t = table(Map.of(Privilege.TABLE_READ, List.of("X")));
+        t.setName("t");
+        when(columns.findByTableNameOrderByOrdinal("t")).thenReturn(List.of(column("a"), column("b")));
+        t.setColumnPolicies("{\"X\": [\"a\"]}");
+        authenticateWith(EnumSet.noneOf(Privilege.class), "X");
+        assertThat(oidc.resolve(t).columnsRestricted()).isTrue();
+        assertThat(none.resolve(t).columnsRestricted()).as("none mode").isFalse();
+
+        t.setColumnPolicies("{\"X\": [\"a\", \"b\"]}");
+        assertThat(oidc.resolve(t).columnsRestricted()).as("a list naming every column").isFalse();
+
+        t.setColumnPolicies("{\"X\": [\"a\"]}");
+        authenticateWith(EnumSet.of(Privilege.TABLE_LIST), "other");
+        assertThat(oidc.resolve(t).columnsRestricted()).as("no governing role").isFalse();
+    }
+
+    private static ColumnMappingEntity column(String name) {
+        final ColumnMappingEntity column = new ColumnMappingEntity();
+        column.setTableName("t");
+        column.setName(name);
+        column.setSourceName(name);
+        return column;
     }
 
     /** An enrichment {@code e} storing exactly {@code grants}, of a source {@code src} storing {@code sourceGrants}. */

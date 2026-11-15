@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.query.sql.InformationSchema;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
 import com.epam.aidial.analytics.web.security.Privilege;
@@ -49,10 +50,12 @@ public class TableCatalogService {
     private final PipelineRepository pipelines;
     private final PipelineInputDependents pipelineReads;
     private final PipelineTargetCascade pipelineTargetCascade;
+    private final ColumnPolicyRewriter columnPolicyRewriter;
 
     /**
      * The definitions the caller may see, ordered by name, each with its exposed-column count (one
-     * aggregate query, no N+1).
+     * aggregate query, plus one column read per table a column policy restricts the caller on, shared by the count
+     * and {@code columns_restricted}).
      *
      * <p>Filtered at {@link Privilege#TABLE_LIST}, the lowest read rung, so a table the caller holds no
      * read-side privilege on is <b>absent</b> rather than present-but-forbidden. An empty result is a
@@ -60,8 +63,9 @@ public class TableCatalogService {
      * a caller happened to be entitled to nothing would disclose exactly that, and would make the empty
      * case behave differently from the one-entry case for no reason a client could act on.
      *
-     * <p>The count is the caller's: sensitive columns are counted only where the caller holds the clearance,
-     * so it equals the length of the {@code columns} array the same caller gets from the single read.
+     * <p>The count is the caller's: sensitive columns are counted only where the caller holds the clearance, and columns
+     * a column policy hides not at all, so it equals the length of the {@code columns} array the same caller gets from
+     * the single read.
      */
     @Transactional(readOnly = true)
     public List<TableSummary> list() {
@@ -70,21 +74,32 @@ public class TableCatalogService {
         // Every definition is loaded here, so an enrichment's source lookup is served by the persistence context.
         final List<TableSummary> visible = new ArrayList<>();
         for (final TableDefinitionEntity definition : definitions.findAll(Sort.by("name"))) {
-            final EffectivePermissions permissions = callerPermissions.resolve(definition);
+            // Visibility decided once per table, and its columns read only when a column policy restricts the caller.
+            final ColumnVisibility visibility = sensitiveAccess.visibleColumns(definition);
+            final List<ColumnMappingEntity> restricted =
+                    visibility.isAll() ? List.of() : columns.findByTableNameOrderByOrdinal(definition.getName());
+            final EffectivePermissions permissions = callerPermissions.resolve(definition, visibility, restricted);
             if (permissions.list()) {
-                visible.add(new TableSummary(definition, visibleColumnCount(definition, counts), permissions));
+                visible.add(new TableSummary(definition, visibleColumnCount(definition, counts, visibility, restricted), permissions));
             }
         }
         return visible;
     }
 
-    private int visibleColumnCount(
-            TableDefinitionEntity definition, Map<String, ColumnMappingRepository.TableColumnCount> counts) {
+    private int visibleColumnCount(TableDefinitionEntity definition, Map<String, ColumnMappingRepository.TableColumnCount> counts,
+            ColumnVisibility visibility, List<ColumnMappingEntity> restricted) {
         final ColumnMappingRepository.TableColumnCount count = counts.get(definition.getName());
         if (count == null) {
             return 0;
         }
-        final long hidden = sensitiveAccess.maySeeSensitive(definition.getName()) ? 0 : count.getSensitiveCount();
+        final boolean cleared = sensitiveAccess.maySeeSensitive(definition.getName());
+        if (!visibility.isAll()) {
+            // A column hidden both ways is counted once: only a column passing both filters is counted at all.
+            return (int) restricted.stream()
+                    .filter(column -> (cleared || !column.isSensitive()) && visibility.allows(column.getName()))
+                    .count();
+        }
+        final long hidden = cleared ? 0 : count.getSensitiveCount();
         return (int) (count.getColumnCount() - hidden);
     }
 
@@ -173,7 +188,8 @@ public class TableCatalogService {
      */
     @Transactional
     public TableView updateMetadata(String name, String description, Change<List<String>> tagOrder) {
-        final TableDefinitionEntity entity = definitions.findById(name)
+        // Locked as the first load, like every definition writer, so it never writes back stale access state.
+        final TableDefinitionEntity entity = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
         entity.requireModifiable();
         if (description != null) {
@@ -187,8 +203,12 @@ public class TableCatalogService {
 
     @Transactional
     public void delete(String name) {
-        final TableDefinitionEntity entity = definitions.findById(name)
+        final TableDefinitionEntity entity = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // The source's column policies name an enrichment's columns, so its row is locked next, before anything loads it.
+        final TableDefinitionEntity source = entity.getType() == TableType.ENRICHMENT && entity.getSourceTable() != null
+                ? definitions.findForUpdate(entity.getSourceTable()).orElse(null)
+                : null;
         entity.requireModifiable();
         if (entity.getType() == TableType.SOURCE) {
             final List<TableDefinitionEntity> dependents = definitions.findBySourceTable(name);
@@ -224,6 +244,11 @@ public class TableCatalogService {
             throw new TableConflictException("table '" + name + "' is the input of pipeline(s) "
                     + readers.stream().map(PipelineEntity::getName).toList() + "; delete them first");
         }
+        // The source's lists drop the enrichment's qualified names; a list that would empty refuses the delete before
+        // anything is dropped.
+        final Map<String, List<String>> sourcePolicies = !columnPolicyRewriter.hasPolicies(source) ? null
+                : columnPolicyRewriter.plan(source, name + ".", name,
+                        columns.findByTableNameOrderByOrdinal(name).stream().map(ColumnMappingEntity::getName).toList(), List.of());
         // The pipeline whose TARGET this is is removed through the registry's own repository rather than
         // left to pipeline.target's ON DELETE CASCADE, for the same reason the columns below are: a
         // database cascade fires no Hibernate event, so the pipeline's deletion would be silently absent
@@ -251,6 +276,9 @@ public class TableCatalogService {
         columns.deleteByTableName(name);
         columns.flush();
         definitions.delete(entity);
+        if (source != null) {
+            columnPolicyRewriter.apply(source, sourcePolicies);
+        }
     }
 
     private TableView view(TableDefinitionEntity definition) {

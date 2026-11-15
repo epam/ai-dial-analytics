@@ -1,10 +1,28 @@
 package com.epam.aidial.analytics.service.security;
 
+import com.epam.aidial.analytics.service.query.ComputedFields;
+import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.TableAccess;
+import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
+import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
+import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicy;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.ProviderRolePrivileges;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Decides, <b>per owning table</b>, whether the current caller may read that table's values at all and
@@ -48,6 +66,12 @@ public class SensitiveColumnAccess {
 
     private final TableAccessEvaluator tableAccess;
     private final SecurityModeResolver securityMode;
+    private final TableDefinitionRepository definitions;
+    private final GoverningAccess governing;
+    private final SecurityClaimsExtractor claims;
+    private final ProviderRolePrivileges rolePrivileges;
+    private final RowPolicyCodec rowPolicyCodec;
+    private final ColumnPolicyCodec columnPolicyCodec;
 
     /** Whether the caller may see that {@code table} exists. */
     public boolean mayList(String table) {
@@ -80,4 +104,137 @@ public class SensitiveColumnAccess {
         return !securityMode.isEnforced() || tableAccess.isAllowed(owningTable, Privilege.TABLE_GET);
     }
 
+    /** {@link #visibleColumns(TableDefinitionEntity)} for {@code owningTable} as stored; every column when it does not exist. */
+    @Transactional(readOnly = true)
+    public ColumnVisibility visibleColumns(String owningTable) {
+        if (!securityMode.isEnforced()) {
+            return ColumnVisibility.ALL;
+        }
+        return definitions.findById(owningTable).map(this::visibleColumns).orElse(ColumnVisibility.ALL);
+    }
+
+    /**
+     * Which of {@code definition}'s own columns the caller sees as far as column policies go (the clearance is
+     * separate and stacks on top), from the column policies of its <b>governing roles</b> on the table — for an
+     * enrichment, on its source, naming the enrichment's columns {@code <enrichment>.<column>}:
+     *
+     * <ul>
+     *   <li>when the caller may read the table, the roles that by themselves confer the read ({@link
+     *       RowPolicyFilter#readsTable}, {@code *} included); otherwise the roles through which it holds
+     *       {@code TABLE_GET};</li>
+     *   <li>a column is visible when some governing role with no row policy allows it, or every governing role allows
+     *       it ("allows": no column policy, or one listing it) — so one role's columns are never shown on rows only
+     *       another role admits;</li>
+     *   <li>a caller with no governing role is not narrowed, nor is one in {@code none} mode or the system identity
+     *       (which carries no provider role); an enrichment maintainer that may not read the source sees every column
+     *       of the enrichment.</li>
+     * </ul>
+     *
+     * <p>Computed per call and never memoised beyond it: Flight and scheduler threads have no request scope, so a
+     * table-keyed cache would serve one caller's set to another.
+     */
+    public ColumnVisibility visibleColumns(TableDefinitionEntity definition) {
+        if (!securityMode.isEnforced()) {
+            return ColumnVisibility.ALL;
+        }
+        final Set<String> roles = claims.getProviderRoles();
+        if (roles.isEmpty()) {
+            return ColumnVisibility.ALL;
+        }
+        final boolean enrichment = definition.getType() == TableType.ENRICHMENT;
+        final TableDefinitionEntity governed = enrichment ? governing.sourceOf(definition) : definition;
+        if (governed == null) {
+            return ColumnVisibility.ALL;
+        }
+        final Set<Privilege> held = claims.getPrivileges();
+        final TableAccess access = governed.getAccess();
+        final boolean globalRead = held.contains(Privilege.TABLE_READ);
+        final boolean mayRead = globalRead || TableCallerPermissions.isGranted(access, Privilege.TABLE_READ, roles);
+        if (enrichment && !mayRead && TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_MODIFY, roles)) {
+            return ColumnVisibility.ALL;
+        }
+        final boolean globalGet = held.contains(Privilege.TABLE_GET);
+        final Map<String, RowPolicy> rowPolicies = rowPolicyCodec.read(governed.getRowPolicies());
+        final Map<String, List<String>> columnPolicies = columnPolicyCodec.read(governed.getColumnPolicies());
+        final Set<String> union = new HashSet<>();
+        Set<String> intersection = null;
+        boolean anyGoverning = false;
+        for (final String role : roles) {
+            final boolean governs = mayRead
+                    ? RowPolicyFilter.readsTable(role, access, globalRead, rolePrivileges)
+                    : TableCallerPermissions.isGranted(access, Privilege.TABLE_GET, Set.of(role))
+                            || globalGet && rolePrivileges.holdsGlobally(role, Privilege.TABLE_GET);
+            if (!governs) {
+                continue;
+            }
+            anyGoverning = true;
+            final List<String> allowed = columnPolicies.get(role);
+            final boolean rowUnrestricted = !rowPolicies.containsKey(role);
+            if (allowed == null) {
+                if (rowUnrestricted) {
+                    return ColumnVisibility.ALL;
+                }
+                continue;
+            }
+            if (rowUnrestricted) {
+                union.addAll(allowed);
+            }
+            if (intersection == null) {
+                intersection = new HashSet<>(allowed);
+            } else {
+                intersection.retainAll(allowed);
+            }
+        }
+        if (!anyGoverning || intersection == null) {
+            return ColumnVisibility.ALL;
+        }
+        union.addAll(intersection);
+        if (!enrichment) {
+            return new ColumnVisibility(Set.copyOf(union));
+        }
+        final String prefix = definition.getName() + ".";
+        final Set<String> own = new HashSet<>();
+        union.stream().filter(name -> name.startsWith(prefix)).forEach(name -> own.add(name.substring(prefix.length())));
+        return new ColumnVisibility(Set.copyOf(own));
+    }
+
+    /**
+     * One caller's visible columns of one table, by exposed name (an enrichment's bare, not qualified); {@link #ALL}
+     * places no restriction.
+     *
+     * @param visible the visible names, or {@code null} for every column
+     */
+    public record ColumnVisibility(Set<String> visible) {
+
+        /** No column hidden by a column policy. */
+        public static final ColumnVisibility ALL = new ColumnVisibility(null);
+
+        /** Whether the column exposed as {@code column} is visible. */
+        public boolean allows(String column) {
+            return visible == null || visible.contains(column);
+        }
+
+        /**
+         * Whether {@code column} — a catalog column or a computed field's transient descriptor ({@link ComputedFields})
+         * among {@code columns} — is visible. A computed field is visible exactly when every catalog column whose values
+         * it returns is.
+         */
+        public boolean allows(ColumnMappingEntity column, List<ColumnMappingEntity> columns) {
+            if (visible == null) {
+                return true;
+            }
+            if (!ComputedFields.isComputed(column.getTableName() + "." + column.getName())) {
+                return allows(column.getName());
+            }
+            return columns.stream()
+                    .filter(candidate -> ComputedFields.ANCHOR.equals(candidate.getSourceName())
+                            || ComputedFields.MARKERS.equals(candidate.getSourceName()))
+                    .allMatch(candidate -> allows(candidate.getName()));
+        }
+
+        /** Whether no column policy restricts the caller here. */
+        public boolean isAll() {
+            return visible == null;
+        }
+    }
 }

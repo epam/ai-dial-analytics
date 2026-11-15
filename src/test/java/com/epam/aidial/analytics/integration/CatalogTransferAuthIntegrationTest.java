@@ -38,6 +38,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     private static final String SECRET = "cxa_secret";
     private static final String HIDDEN = "cxa_hidden";
     private static final String LABELS = "cxa_plain_labels";
+    private static final String COLUMNS = "cxa_columns";
     private static final String EXPORTER = "exporter";
 
     @BeforeEach
@@ -48,14 +49,13 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
                 + "{\"source_name\":\"s\",\"name\":\"s\",\"type\":\"string\",\"sensitive\":true}]");
         table(HIDDEN, "[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"}]");
         for (final String table : List.of(PLAIN, SECRET)) {
-            send(put("/v1/tables/" + table + "/access"), fullAdmin(), "{\"get\":[\"" + EXPORTER + "\"]}")
-                    .andExpect(status().isOk());
+            grant(table, EXPORTER, "get");
         }
     }
 
     @AfterEach
     void dropTables() throws Exception {
-        for (final String table : List.of(LABELS, PLAIN, SECRET, HIDDEN)) {
+        for (final String table : List.of(LABELS, PLAIN, SECRET, HIDDEN, COLUMNS)) {
             mockMvc.perform(delete("/v1/tables/" + table).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
         }
     }
@@ -78,6 +78,32 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     }
 
     @Test
+    void exportRefusesPolicyHiddenColumnBeforeUnentitledSensitiveOne() throws Exception {
+        table(COLUMNS, "[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},{\"source_name\":\"c\",\"name\":\"c\",\"type\":\"string\"},"
+                + "{\"source_name\":\"s\",\"name\":\"s\",\"type\":\"string\",\"sensitive\":true}]");
+        entry(COLUMNS, EXPORTER, "\"privileges\":[\"get\"],\"columns\":[\"k\",\"s\"]");
+        export(caller(EXPORTER), COLUMNS)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("column_not_entitled"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("'c'")));
+
+        // A column both hidden and unentitled-sensitive is column_not_entitled; so is a bundle mixing a table whose
+        // sensitive column is unentitled with one whose column is hidden, whichever is selected first.
+        entry(COLUMNS, EXPORTER, "\"privileges\":[\"get\"],\"columns\":[\"k\"]");
+        export(caller(EXPORTER), COLUMNS).andExpect(jsonPath("$.error").value("column_not_entitled"));
+        for (final List<String> order : List.of(List.of(SECRET, COLUMNS), List.of(COLUMNS, SECRET))) {
+            send(post("/v1/catalog/export"), caller(EXPORTER), "{\"components\":[{\"type\":\"table\",\"name\":\"" + order.get(0) + "\"},"
+                    + "{\"type\":\"table\",\"name\":\"" + order.get(1) + "\"}]}")
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("column_not_entitled"));
+        }
+
+        // The bundle never carries access entries, row policies or column policies.
+        final String bundle = export(fullAdmin(), COLUMNS).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        assertThat(bundle).doesNotContain("column_policies").doesNotContain("row_policies").doesNotContain(EXPORTER);
+    }
+
+    @Test
     void importRepeatsTheDefineSchemaGate() throws Exception {
         final String bundle = export(fullAdmin(), PLAIN).andReturn().getResponse().getContentAsString();
         mockMvc.perform(delete("/v1/tables/" + PLAIN).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
@@ -97,8 +123,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     @Test
     void importPrevFollowsTheCallersVisibility() throws Exception {
         for (final String table : List.of(PLAIN, SECRET)) {
-            send(put("/v1/tables/" + table + "/access"), fullAdmin(), "{\"get\":[\"importer\"]}")
-                    .andExpect(status().isOk());
+            grant(table, "importer", "get");
         }
         final String bundle = send(post("/v1/catalog/export"), fullAdmin(), "{\"components\":["
                 + "{\"type\":\"table\",\"name\":\"" + PLAIN + "\"},{\"type\":\"table\",\"name\":\"" + SECRET + "\"},"
@@ -129,6 +154,30 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         assertThat(hidden.isMissingNode() || hidden.isNull()).isTrue();
     }
 
+    @Test
+    void importPrevOmitsPolicyHiddenColumn() throws Exception {
+        table(COLUMNS, "[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},{\"source_name\":\"a\",\"name\":\"a\",\"type\":\"string\"},"
+                + "{\"source_name\":\"c\",\"name\":\"c\",\"type\":\"string\"}]");
+        entry(COLUMNS, "importer", "\"privileges\":[\"get\"],\"columns\":[\"a\",\"k\"]");
+        final String bundle = export(fullAdmin(), COLUMNS).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        final String preview = mockMvc.perform(multipart("/v1/catalog/import/preview")
+                        .file(new MockMultipartFile("file", "b.json", MediaType.APPLICATION_JSON_VALUE,
+                                bundle.getBytes(StandardCharsets.UTF_8)))
+                        .param("resolution_policy", "SKIP_IF_EXISTS")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(caller("importer"))))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        final JsonNode entry = JsonMapper.builder().build().readTree(preview).get("tables").get(0);
+        assertThat(entry.get("name").asString()).isEqualTo(COLUMNS);
+        // differs compares the full objects, so the hidden column does not make the table differ.
+        assertThat(entry.get("differs").asBoolean()).isFalse();
+        final List<String> columns = new ArrayList<>();
+        entry.get("prev").get("schema").get("columns").forEach(col -> columns.add(col.get("name").asString()));
+        assertThat(columns).contains("a", "k").doesNotContain("c");
+    }
+
     /** An enrichment of {@code PLAIN} carrying one sensitive column; it takes no read-side grant of its own. */
     private void labels() throws Exception {
         send(post("/v1/tables"), fullAdmin(), "{\"name\":\"" + LABELS + "\",\"type\":\"enrichment\",\"source_table\":\"" + PLAIN + "\"}")
@@ -141,7 +190,8 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     @Test
     void exportOfEverythingIncludesEnrichmentsOfGettableSourcesUnderTheirClearance() throws Exception {
         labels();
-        send(put("/v1/tables/" + SECRET + "/access"), fullAdmin(), "{\"get\":[]}").andExpect(status().isOk());
+        mockMvc.perform(delete("/v1/tables/" + SECRET + "/access/" + EXPORTER).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
 
         // The exporter may get PLAIN, so it gets PLAIN's enrichment too, whose sensitive column needs PLAIN's clearance.
         send(post("/v1/catalog/export"), caller(EXPORTER), "{}")
@@ -149,8 +199,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
                 .andExpect(jsonPath("$.error").value("sensitive_column_not_entitled"))
                 .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(LABELS)));
 
-        send(put("/v1/tables/" + PLAIN + "/access"), fullAdmin(), "{\"read\":[\"" + EXPORTER + "\"],\"sensitive\":[\"" + EXPORTER + "\"]}")
-                .andExpect(status().isOk());
+        grant(PLAIN, EXPORTER, "get", "read", "sensitive");
         send(post("/v1/catalog/export"), caller(EXPORTER), "{}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tables[*].table.name").value(org.hamcrest.Matchers.hasItems(PLAIN, LABELS)));
@@ -159,7 +208,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     @Test
     void importedEnrichmentOfGrantedSourceIsReadableAtOnce() throws Exception {
         labels();
-        send(put("/v1/tables/" + PLAIN + "/access"), fullAdmin(), "{\"read\":[\"readers\"]}").andExpect(status().isOk());
+        grant(PLAIN, "readers", "read");
         final String bundle = export(fullAdmin(), LABELS).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         mockMvc.perform(delete("/v1/tables/" + LABELS).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isNoContent());
@@ -180,6 +229,25 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         send(post("/v1/tables"), fullAdmin(), "{\"name\":\"" + name + "\",\"type\":\"source\"}")
                 .andExpect(status().isCreated());
         send(post("/v1/tables/" + name + "/schema"), fullAdmin(), "{\"columns\":" + columns + ",\"ordering_key\":[\"k\"]}")
+                .andExpect(status().isOk());
+    }
+
+    /** Replaces {@code role}'s entry on {@code table} with {@code privileges}, at the table's current generation. */
+    private void grant(String table, String role, String... privileges) throws Exception {
+        final String access = mockMvc.perform(get("/v1/tables/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        send(put("/v1/tables/" + table + "/access/" + role), fullAdmin(),
+                "{\"generation\":" + JsonMapper.builder().build().readTree(access).get("generation").asLong()
+                        + ",\"privileges\":[\"" + String.join("\",\"", privileges) + "\"]}")
+                .andExpect(status().isOk());
+    }
+
+    /** Replaces {@code role}'s whole entry on {@code table} with {@code members}, at the table's current generation. */
+    private void entry(String table, String role, String members) throws Exception {
+        final String access = mockMvc.perform(get("/v1/tables/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        send(put("/v1/tables/" + table + "/access/" + role), fullAdmin(),
+                "{\"generation\":" + JsonMapper.builder().build().readTree(access).get("generation").asLong() + "," + members + "}")
                 .andExpect(status().isOk());
     }
 

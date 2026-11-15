@@ -48,7 +48,7 @@ public enum Privilege {
     /** Delete a catalog table. Global-only, deliberately not delegable by a grant. */
     TABLE_DELETE,
 
-    /** Read and replace a table's grant lists. Global-only. */
+    /** Read and replace a table's access entries (privileges, row and column policies per role). Global-only. */
     TABLE_GRANT,
 
     /** Read the pipeline and sink control planes, and data-sync run status. */

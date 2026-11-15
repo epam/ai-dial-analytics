@@ -120,6 +120,10 @@ class AggregateSqlValidatorTest {
                 nullable(column(ENRICHMENT, "client_ts", QueryFieldType.TIMESTAMP))));
         given(sensitiveAccess.mayReadSensitive(anyString())).willReturn(true);
         given(sensitiveAccess.maySeeSensitive(anyString())).willReturn(true);
+        org.mockito.Mockito.lenient().when(sensitiveAccess.visibleColumns(anyString()))
+                .thenReturn(com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility.ALL);
+        org.mockito.Mockito.lenient().when(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .thenReturn(com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility.ALL);
 
         // The baseline target: (deployment, day) → call_count, tokens.
         target(TARGET, List.of("deployment", "day"),
@@ -725,6 +729,29 @@ class AggregateSqlValidatorTest {
         assertThatThrownBy(() -> validate(HEAD + KEYS + "FROM dial_usage_log WHERE user_email = 'x' GROUP BY 1, 2"))
                 .isInstanceOf(SensitiveColumnNotEntitledException.class)
                 .hasMessageContaining("user_email");
+    }
+
+    @Test
+    void unplannableStatementMentioningPolicyHiddenColumnIsColumnNotEntitled() {
+        given(frontEndCatalog.findModel(eq(INPUT), any())).willReturn(Optional.of(DialUsageLogTestModel.model()));
+        given(columns.findByTableNameOrderByOrdinal(INPUT)).willReturn(List.of(
+                column(INPUT, "deployment", QueryFieldType.STRING),
+                column(INPUT, "secret_note", QueryFieldType.STRING),
+                sensitive(column(INPUT, "user_email", QueryFieldType.STRING))));
+        given(sensitiveAccess.mayReadSensitive(anyString())).willReturn(false);
+        given(sensitiveAccess.maySeeSensitive(anyString())).willReturn(false);
+        org.mockito.Mockito.lenient().when(sensitiveAccess.visibleColumns(INPUT)).thenReturn(
+                new com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility(java.util.Set.of("deployment", "user_email")));
+
+        assertThatThrownBy(() -> validate(HEAD + KEYS + "FROM dial_usage_log WHERE secret_note = 'x' GROUP BY 1, 2"))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("secret_note");
+        assertThatThrownBy(() -> validate(HEAD + KEYS + "FROM dial_usage_log WHERE user_email = 'x' AND secret_note = 'y' GROUP BY 1, 2"))
+                .as("a policy-hidden mention is reported before an unentitled sensitive one")
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class);
+        assertThatThrownBy(() -> validate(HEAD + KEYS + "FROM dial_usage_log WHERE no_such_column = 'x' GROUP BY 1, 2"))
+                .as("a planning failure mentioning neither stays the 422")
+                .isInstanceOf(PipelineValidationException.class);
     }
 
     @Test

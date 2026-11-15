@@ -1,5 +1,8 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
@@ -28,6 +31,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.databind.node.LongNode;
 
 import java.io.ByteArrayInputStream;
 import java.nio.channels.Channels;
@@ -122,6 +126,9 @@ class FlightMetadataAuthIntegrationTest {
     @Autowired
     private FlightSqlServerLifecycle lifecycle;
 
+    @Autowired
+    private TableAccessService tableAccess;
+
     private BufferAllocator clientAllocator;
     private FlightSqlClient sqlClient;
 
@@ -196,6 +203,32 @@ class FlightMetadataAuthIntegrationTest {
             throw new AssertionError(e);
         }
         return names;
+    }
+
+    /**
+     * A column policy hides a column on every Flight channel exactly as the clearance does: the {@code GetTables}
+     * schema, {@code INFORMATION_SCHEMA.COLUMNS} and a star query's result schema. {@code viewer} reads globally, so an
+     * entry on it with no privileges and a column list confines it.
+     */
+    @Test
+    void columnPolicyHidesColumnsOnEveryFlightChannel() throws Exception {
+        final AccessEntries before = tableAccess.list("dial_usage_log");
+        assertThat(before.roles()).doesNotContainKey("viewer");
+        tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(), null,
+                List.of("event_id", "project_id", "request_time")));
+        try {
+            final CallOption readOnly = bearer(readOnlyToken());
+            assertThat(tableSchemaFields("dial_usage_log", readOnly)).contains("project_id").doesNotContain("deployment");
+            assertThat(catalogSqlColumnNames(readOnly)).containsExactlyInAnyOrder("event_id", "project_id", "request_time");
+            final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1", readOnly);
+            assertThat(info.getSchemaOptional().orElseThrow().getFields().stream().map(Field::getName).toList())
+                    .containsExactlyInAnyOrder("event_id", "project_id", "request_time");
+            assertThatThrownBy(() -> drain("SELECT deployment FROM dial_usage_log LIMIT 1", readOnly)).hasMessageContaining("deployment");
+
+            assertThat(tableSchemaFields("dial_usage_log", bearer(fullAdminToken()))).contains("deployment");
+        } finally {
+            tableAccess.delete("dial_usage_log", "viewer");
+        }
     }
 
     @Test

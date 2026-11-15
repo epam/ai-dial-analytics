@@ -12,8 +12,9 @@ The system SHALL track every insert, update, and delete of the catalog state bac
 the pipeline registry, the saved query registry and the dashboard registry:
 
 - the **table definition** row in its entirety — its type, status, write discipline, scan metadata,
-  partitioning, TTL, ordering key, an enrichment's grain key, its role-based `access` lists, and its
-  per-role `row_policies`;
+  partitioning, TTL, ordering key, an enrichment's grain key, and its per-role access entries: each role's
+  privileges, row policy and column policy. Its access `generation`, the optimistic-locking token of its access
+  entries, SHALL NOT be part of the preserved state;
 - every **column** of a table — its type, element type, nullability, description, display name, tag,
   ordinal, and its `sensitive` and `heavy` flags;
 - every **pipeline**, of either kind — its name, kind, target, input table, filter, transform
@@ -86,11 +87,25 @@ mean; run state is carried by `last_run_at` and `next_run_at`, which are not aud
 
 #### Scenario: Access-list change is tracked
 
-- **WHEN** an administrator replaces a table's role-based access lists through
-  `PUT /v1/tables/{name}/access`
-- **THEN** an `Update` activity for that table is recorded, and the snapshot read by a caller holding
-  `TABLE_GRANT` carries the new lists under `access` while the preceding revision's snapshot carries the
-  old ones
+- **WHEN** a caller holding `TABLE_GRANT` creates, replaces or removes a role's entry through
+  `PUT` or `DELETE /v1/tables/{name}/access/{role}`
+- **THEN** one `Update` activity for that table is recorded, and the snapshot read by a caller holding
+  `TABLE_GRANT` carries the resulting entries under `roles` while the preceding revision's snapshot carries the
+  previous ones
+
+#### Scenario: Row-policy change is tracked
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s for role `X` an entry whose `rows` differs from the stored one, or
+  `null` where one was stored
+- **THEN** one `Update` activity for that table is recorded, and the snapshot read by a caller holding
+  `TABLE_GRANT` carries the resulting policy under `roles.X.rows` while the preceding revision's snapshot carries the
+  previous one
+
+#### Scenario: A PUT for one role leaves other entries unchanged in the revision
+
+- **WHEN** a caller `PUT`s a changed entry for role `X` on a table that also has entries for other roles
+- **THEN** one `Update` activity is recorded, and the new revision's `roles` differs from the previous revision's
+  only in `X`'s entry
 
 #### Scenario: Sensitivity change is tracked
 
@@ -99,33 +114,35 @@ mean; run state is carried by `last_run_at` and `next_run_at`, which are not aud
   caller cleared to see that sensitive column; for any other caller the column is absent from both the
   before and after snapshots
 
-#### Scenario: Row-policy change is tracked
+#### Scenario: Re-ordering an entry's privileges or columns records nothing
 
-- **WHEN** a caller holding `TABLE_GRANT` creates, replaces or removes a role's policy through
-  `PUT` or `DELETE /v1/tables/{name}/row-policies/{role}`
-- **THEN** an `Update` activity for that table is recorded, and the snapshot read by a caller holding
-  `TABLE_GRANT` carries the resulting policy map under `row_policies` while the preceding revision's
-  snapshot carries the previous one
-
-#### Scenario: Reordering roles in an access list records nothing
-
-- **WHEN** a caller `PUT`s `/v1/tables/{name}/access` with the same roles in each list as stored, in a
-  different order
-- **THEN** no revision and no activity are recorded, and both the `PUT` response and
-  `GET /v1/tables/{name}/access` keep the stored order
-
-#### Scenario: A save that changes one list keeps a reordered list's stored order
-
-- **WHEN** a caller `PUT`s `/v1/tables/{name}/access` changing the roles of one list and sending another
-  list's stored roles in a different order
-- **THEN** one `Update` activity is recorded, and in its snapshot, the `PUT` response and
-  `GET /v1/tables/{name}/access` the reordered list keeps its stored order, so the before/after differs only
-  in the changed list
+- **WHEN** a caller `PUT`s for a role the privileges and columns its entry already has, in a different order
+- **THEN** no revision and no activity are recorded, and both the `PUT` response and `GET /v1/tables/{name}/access`
+  carry the entry in its stored order
 
 #### Scenario: Re-saving an identical row policy records nothing
 
-- **WHEN** a caller `PUT`s for a role exactly the policy that role already has on the table
-- **THEN** the policy is returned as on any `PUT`, and no revision and no activity are recorded
+- **WHEN** a caller `PUT`s for a role exactly the entry, row policy included, that role already has on the table
+- **THEN** the entry is returned as on any `PUT`, and no revision and no activity are recorded
+
+#### Scenario: A concurrent edit records the committed access entries
+
+- **WHEN** a description update of a table runs while a `PUT .../access/{role}` on it commits
+- **THEN** whichever commits second records a revision whose `roles` carry the entries the `PUT` stored, and the
+  description of the description update; neither revision restores the other's previous state
+
+#### Scenario: A rename that rewrites a column policy is one revision
+
+- **WHEN** a schema patch renames a column that a role's `columns` lists
+- **THEN** the table's `Update` activity recorded for the patch carries the rewritten entry in its snapshot, and no
+  separate activity is recorded for it
+
+#### Scenario: An enrichment column rename records an update of its source
+
+- **GIVEN** a source on which role `X`'s `columns` lists `e.label`, a column of its enrichment `e`
+- **WHEN** a schema patch of `e` renames `label` to `title`
+- **THEN** the patch's revision records, besides `e`'s own activities, an `Update` activity for the source, whose
+  snapshot read by a caller holding `TABLE_GRANT` carries `roles.X.columns` naming `e.title`
 
 #### Scenario: Deletion preserves final state
 
@@ -655,35 +672,37 @@ identifier is rejected with `invalid_filter_value`, and `ne` matches activities 
 
 The system SHALL expose `GET /v1/tables/{name}/revision/{revision}` returning the table as it stood
 at the end of the given revision, in the same response shape as the current-state read
-(`GET /v1/tables/{name}`) plus the two grant members below. The snapshot SHALL include the columns, ordering key, and grain that
+(`GET /v1/tables/{name}`) plus the access member below. The snapshot SHALL include the columns, ordering key, and grain that
 belonged to the table at that revision, and SHALL exclude a column that had been dropped by then.
 
 Every member of that response describes the table **as of the requested revision**, including the
-caller's effective permissions, which are resolved from the access lists the table had then. An enrichment is the
-one exception: its read-side access is its source's (see `table-access-control`), and the source's lists at that
-revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive` SHALL be
-resolved from its source's current state, its `rows_restricted` from the source's current state or a policy the
-enrichment had at that revision, its `write` and `modify` from the lists the
-enrichment had then, and its `get` from either: the source's current state, or the `modify` list the enrichment had
-then. For an enrichment whose source no longer exists, the source's lists SHALL be taken as empty, so only a global
-privilege — or, for `get`, the enrichment's `modify` list at that revision — sets a read-side flag. A snapshot
+caller's effective permissions, which are resolved from the access entries the table had then, and the columns it
+shows, which are filtered by the column policies the table had then. An enrichment is the
+one exception: its read-side access is its source's (see `table-access-control`), and the source's entries at that
+revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive`, and which of its
+columns it shows, SHALL be resolved from its source's current state, its `rows_restricted` from the source's current
+state or a policy the enrichment had at that revision, its `write` and `modify` from the grants the
+enrichment had then, and its `get` from either: the source's current state, or the `modify` grants the enrichment had
+then. For an enrichment whose source no longer exists, the source's entries SHALL be taken as empty, so only a global
+privilege — or, for `get`, the enrichment's `modify` grants at that revision — sets a read-side flag. A snapshot
 therefore answers "what could this caller have done then", not "what may they do now", and SHALL NOT be
-used to decide whether an action is currently permitted — the live read answers that.
+used to decide whether an action is currently permitted — the live read answers that. In particular, a snapshot at a
+revision older than a column policy shows that column's metadata to a caller the revision's policies did not
+restrict, although the live read now hides it; this is the same as for a column's `sensitive` flag, which a snapshot
+also resolves as of its revision, and it discloses metadata the caller could see then, never values.
 
-The snapshot SHALL additionally carry the table's grants as of the revision — `access`, in the shape of
-`GET /v1/tables/{name}/access`, and `row_policies`, in the shape of the `policies` member of
-`GET /v1/tables/{name}/row-policies` — to a caller holding `TABLE_GRANT`, and in `none` security mode.
-That is exactly what reading them live requires, so a past grant is never more visible than the present
-one. For every other caller both members SHALL be absent, not empty: an empty list or map would assert
-that the table had no grants. When served, both are always present, an empty `row_policies` being `{}`
-and each `access` list `[]`, including at a revision recorded before row policies existed. The live
-read, the table list and every mutation response SHALL NOT carry either member, so in `none` mode the
-snapshot is a superset of the live shape.
+The snapshot SHALL additionally carry the table's access entries as of the revision as `roles`, in the shape of the
+`roles` member of `GET /v1/tables/{name}/access` — each role's `privileges`, `rows` and `columns` — to a caller holding
+`TABLE_GRANT`, and in `none` security mode. That is exactly what reading them live requires, so a past grant is never
+more visible than the present one. For every other caller the member SHALL be absent, not empty: an empty object would
+assert that the table had no entries. When served, it is always present, an empty one being `{}`, including at a
+revision recorded before row or column policies existed, where `rows` and `columns` read `null`. The snapshot SHALL
+NOT carry the access `generation`. The live read, the table list and every mutation response SHALL NOT carry `roles`,
+so in `none` mode the snapshot is a superset of the live shape.
 
-Because both members are read from the recorded state, an access or row-policy revision recorded before
-they were served becomes readable too. A write that changes no role set and no policy — an access save
-that only reorders roles, an identical row-policy re-save — SHALL record no revision; such revisions
-recorded before this rule remain in the trail unchanged.
+Because the member is read from the recorded state, an access revision recorded before it was served becomes readable
+too. A write that changes no entry — a re-save of an identical entry — SHALL record no revision; revisions recorded
+before this rule that changed nothing remain in the trail unchanged.
 
 A request for a revision at which the table did not exist — before its creation or at or after its
 deletion — SHALL be answered with HTTP 404 and the error code `revision_not_found`, as SHALL a
@@ -705,25 +724,36 @@ is correct where answering with a partial one would assert that the missing colu
 #### Scenario: Grant members are served to a TABLE_GRANT holder
 
 - **WHEN** a caller holding `TABLE_GRANT` and `TABLE_GET` requests a table snapshot in `oidc` mode
-- **THEN** the snapshot carries `access` and `row_policies` as they stood at that revision, each present
-  even when empty
+- **THEN** the snapshot carries `roles` as it stood at that revision, present even when empty, and no `generation`
 
 #### Scenario: Grant members are omitted without TABLE_GRANT
 
 - **WHEN** a caller holding `TABLE_GET` but not `TABLE_GRANT` — such as the `READ_ONLY_ADMIN` bundle —
-  requests the snapshot at an access or row-policy change in `oidc` mode
-- **THEN** the snapshot carries neither `access` nor `row_policies`, and its other members are those it
-  would carry without this requirement
+  requests the snapshot at an access change in `oidc` mode
+- **THEN** the snapshot carries no `roles`, and its other members are those it would carry without this requirement
 
 #### Scenario: Grant members are served in none mode
 
 - **WHEN** any caller requests a table snapshot in `none` security mode
-- **THEN** the snapshot carries `access` and `row_policies`
+- **THEN** the snapshot carries `roles`
 
 #### Scenario: The live read carries no grant members
 
 - **WHEN** any caller, in either security mode, reads `GET /v1/tables/{name}` or lists tables
-- **THEN** neither `access` nor `row_policies` is present in the response
+- **THEN** no `roles` member is present in the response
+
+#### Scenario: A revision before column policies existed
+
+- **WHEN** a caller holding `TABLE_GRANT` requests the snapshot at a revision recorded before column policies existed,
+  at which role `X` held `read` and a row policy
+- **THEN** `roles.X` carries `["read"]`, that `rows`, and `columns` `null`
+
+#### Scenario: A snapshot hides columns by the policies of its revision
+
+- **GIVEN** a revision at which the caller's only role had `columns` `["a"]` on the table, and a later change that
+  removed that restriction
+- **WHEN** the caller requests the snapshot at that revision
+- **THEN** it shows column `a` only and `permissions.columns_restricted = true`
 
 #### Scenario: Snapshot reflects the columns of that revision
 
@@ -756,11 +786,11 @@ is correct where answering with a partial one would assert that the missing colu
 
 #### Scenario: An enrichment snapshot reports its source's current read-side flags
 
-- **GIVEN** an enrichment snapshot recorded when the enrichment's own `read` list named the caller's role, and a source
+- **GIVEN** an enrichment snapshot recorded when the enrichment's own `read` grant named the caller's role, and a source
   that does not grant that role now
 - **WHEN** the caller, holding `TABLE_GET` globally, requests the snapshot
 - **THEN** the snapshot's `permissions.read` is `false`, and its `permissions.write` reflects the enrichment's `write`
-  list at that revision
+  grants at that revision
 
 ### Requirement: Point-in-time reads for pipeline and saved query
 
@@ -1090,22 +1120,22 @@ no snapshot endpoint for `Setting` is exposed.
 ### Requirement: The enrichment access clean-up records no revision
 
 In addition to the limitations stated under "Audited resources", the catalog migration that removes the `get`, `read`
-and `sensitive` lists and the row policies stored on enrichments (see `table-access-control`, "An enrichment's
+and `sensitive` grants and the row policies stored on enrichments (see `table-access-control`, "An enrichment's
 read-side access is its source's") records **no revision**, and this SHALL be stated as a known limitation. It rewrites the rows in raw SQL, outside
-the persistence context, so an enrichment's latest revision snapshot keeps showing the removed lists and policies until
-the next change that rewrites its table definition (its description, grants or row policies, not a column-only
+the persistence context, so an enrichment's latest revision snapshot keeps showing the removed grants and policies until
+the next change that rewrites its table definition (its description or access entries, not a column-only
 schema change) records a new one. The history of earlier revisions SHALL be left as it was,
-because it records what was stored then. A snapshot carrying such lists does not describe access that was in force
-after the upgrade: from then on an enrichment's read-side access is its source's whatever its stored lists say. The
-next such change of an enrichment, whatever it is for, records the emptied lists, so its diff against the previous
+because it records what was stored then. A snapshot carrying such grants does not describe access that was in force
+after the upgrade: from then on an enrichment's read-side access is its source's whatever its stored entries say. The
+next such change of an enrichment, whatever it is for, records the emptied grants, so its diff against the previous
 revision shows them removed under that change's author.
 
 #### Scenario: The snapshot lags the clean-up
 
-- **GIVEN** an enrichment whose stored `read` list named a role before the upgrade
+- **GIVEN** an enrichment whose stored `read` grant named role `R` before the upgrade
 - **WHEN** a caller holding `TABLE_GRANT`, and `TABLE_GET` on the enrichment, reads the enrichment's latest revision snapshot after the upgrade, before any
   later change of the table
-- **THEN** the snapshot still carries that `read` list, while `GET /v1/tables/{name}/access` returns it empty
+- **THEN** the snapshot's `roles.R` still carries `read`, while `GET /v1/tables/{name}/access` shows no `read` for `R`
 - **AND WHEN** the enrichment's description is then updated
-- **THEN** the new revision's snapshot carries empty `get`, `read` and `sensitive` lists and no row policies
+- **THEN** the new revision's snapshot carries no `get`, `read`, `sensitive` or `rows` in any entry
 

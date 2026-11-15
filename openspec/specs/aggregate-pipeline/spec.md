@@ -3008,13 +3008,24 @@ an SQL declaration over **every** column its block references, in the select lis
 
 - The statement SHALL be resolved at the declaring caller's read entitlement. A column the caller cannot
   see because it is `sensitive` and the caller is not cleared SHALL be refused with HTTP 403
-  `sensitive_column_not_entitled`, not reported as an unknown column. The system identity a scheduled
+  `sensitive_column_not_entitled`, not reported as an unknown column. A column a column policy hides
+  from the caller (see [table-access-control](../table-access-control/spec.md), "Column visibility by caller
+  role") SHALL be refused with HTTP 403 `column_not_entitled` in the same way, and a column both hidden and
+  sensitive without the clearance SHALL be refused `column_not_entitled`. The system identity a scheduled
   refresh runs under sees every column, so the remaining rules bite for it and for a cleared caller.
-- When the statement cannot be planned at all, and its text mentions a `sensitive` column of the source
-  the caller may not read, the refusal SHALL be HTTP 403 `sensitive_column_not_entitled` rather than the
-  422 for the planning failure. The mention SHALL be found by an over-approximating token scan of the
-  text, so the check fails closed: a protected name anywhere in an unplannable statement answers 403. With
-  no declared `inputs`, the check SHALL run against every source table the text names.
+- When the statement cannot be planned at all, its text SHALL be checked for **protected** columns it
+  mentions: a column of the source, or a qualified column of one of its active enrichments, that is hidden
+  from the caller by a column policy, or is `sensitive` and the caller may not read it. A mentioned column
+  hidden by a column policy SHALL be refused HTTP 403 `column_not_entitled`; otherwise a mentioned
+  `sensitive` column the caller may not read SHALL be refused HTTP 403 `sensitive_column_not_entitled`;
+  either rather than the 422 for the planning failure. Every table the check covers SHALL be checked for
+  policy-hidden columns before any is checked for the clearance, so the code does not depend on the order
+  the tables are visited in. The mention SHALL be found by an over-approximating token scan of the text,
+  so the check fails closed: a protected name anywhere in an unplannable statement answers 403. A planning
+  failure whose text mentions no protected column SHALL stay the 422 for the planning failure, for a
+  column-restricted or uncleared caller too: this path does not re-attribute every failure the way a
+  pipeline-scoped `filter` parse does (see table-access-control, "Pipeline and export paths refuse a hidden
+  column"). With no declared `inputs`, the check SHALL run against every source table the text names.
 - A target column whose select expression reads a `sensitive` column, of the input or of an enrichment,
   SHALL itself be declared `sensitive`, or the declaration SHALL be rejected with HTTP 422
   `pipeline_validation_failed` naming both columns (see **Sensitive-column governance on the aggregate
@@ -3061,6 +3072,15 @@ an SQL declaration over **every** column its block references, in the select lis
 - **WHEN** a caller not cleared for `sensitive` columns submits an SQL declaration that fails to parse and
   whose text mentions the `sensitive` source column `jwt_claims`
 - **THEN** the response is HTTP 403 `sensitive_column_not_entitled`, not the 422 for the parse failure
+
+#### Scenario: An unplannable statement naming a policy-hidden column is refused with 403
+
+- **GIVEN** a caller from which a column policy hides source column `user_hash`, and which is not cleared for the
+  `sensitive` source column `jwt_claims`
+- **WHEN** it submits an SQL declaration that fails to parse and whose text mentions both `jwt_claims` and `user_hash`
+- **THEN** the response is HTTP 403 `column_not_entitled`, naming `user_hash`
+- **AND WHEN** it submits an SQL declaration that fails to parse and whose text mentions no protected column
+- **THEN** the response is the 422 for the parse failure, not a 403
 
 #### Scenario: A non-clampable enrichment is refused
 

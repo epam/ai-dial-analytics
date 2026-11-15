@@ -153,22 +153,29 @@ public class EnrichSpecValidator {
         // actually reaches can be collected in one place for the dependency rules at the end.
         EntityFields entity = entityFields.enrichEntityOf(source);
         Set<String> referenced = new LinkedHashSet<>();
+        // Each fragment's column-policy check runs where it is resolved; the clearance checks are queued here and run
+        // once at the end, so a column a policy hides anywhere in the request answers column_not_entitled.
+        Map<String, String> clearance = new LinkedHashMap<>();
 
-        Set<String> filterColumns = filterValidator.validateAndCollectColumns(source, declaration.filterSql(), true);
+        // Reattributed like the output expressions (see validateSqlExpressions): a column hidden from the author's
+        // model fails the parse, and the refusal is a 403, not a malformed filter.
+        Set<String> filterColumns = sensitiveGuard.reattributing(source, "filter",
+                () -> filterValidator.validateAndCollectColumns(source, declaration.filterSql(), true), true);
         referenced.addAll(filterColumns);
-        checkEntitlement(filterColumns, entity, source, "filter");
-        validateGroupTrigger(declaration, transform, source, entity, grainKey, referenced);
+        checkEntitlement(filterColumns, source, "filter", clearance);
+        validateGroupTrigger(declaration, transform, source, entity, grainKey, referenced, clearance);
         if (transform.getType() == TransformType.SQL) {
-            validateSqlExpressions(declaration, transform, source, entity, grainKey, referenced, outputColumns);
+            validateSqlExpressions(declaration, transform, source, entity, grainKey, referenced, outputColumns, clearance);
         } else {
-            checkBoundBindings(declaration, entity, source, referenced);
+            checkBoundBindings(declaration, entity, source, referenced, clearance);
             parseJsonata(declaration, transform);
             validateTemplatePlaceholders(declaration, transform);
         }
         requireSoundEnrichmentReads(declaration, source, entity, referenced);
         // The grain key is read by every derivation and stored as the target's key, so a sensitive one is
         // copied into the target on every row, and its author must be entitled to it like any reference.
-        checkEntitlement(Set.of(grainKey), entity, source, "grain key");
+        checkEntitlement(Set.of(grainKey), source, "grain key", clearance);
+        checkClearance(clearance, entity, source);
     }
 
     /**
@@ -696,7 +703,7 @@ public class EnrichSpecValidator {
      * </ol>
      */
     private void validateGroupTrigger(EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
-            String source, EntityFields entity, String grainKey, Set<String> referenced) {
+            String source, EntityFields entity, String grainKey, Set<String> referenced, Map<String, String> clearance) {
         boolean group = declaration.triggerKind() == TriggerKind.GROUP;
         if (!group) {
             if (StringUtils.isNotBlank(declaration.triggerGroupBy())) {
@@ -719,8 +726,8 @@ public class EnrichSpecValidator {
         referenced.add(declaration.triggerGroupBy());
         // Entitlement-checked like every other reference: the group key is copied into the target as its
         // grain, so an author who may not read a sensitive one may not declare it.
-        checkEntitlement(Set.of(declaration.triggerGroupBy()), entity, source, "trigger.group_by");
-        validateMemberSelect(declaration, source, entity, referenced);
+        checkEntitlement(Set.of(declaration.triggerGroupBy()), source, "trigger.group_by", clearance);
+        validateMemberSelect(declaration, source, entity, referenced, clearance);
         ReadyWhen readyWhen = declaration.readyWhen();
         if (readyWhen == null) {
             throw new PipelineValidationException("a group pipeline requires ready_when");
@@ -734,11 +741,11 @@ public class EnrichSpecValidator {
                             + " a group with no readiness condition would never be evaluated");
         }
         if (StringUtils.isNotBlank(readyWhen.getSignal())) {
-            Set<String> signalColumns = filterValidator
-                    .analyze(source, readyWhen.getSignal(), "ready_when.signal", true)
+            Set<String> signalColumns = sensitiveGuard.reattributing(source, "ready_when.signal",
+                    () -> filterValidator.analyze(source, readyWhen.getSignal(), "ready_when.signal", true), true)
                     .columns();
             referenced.addAll(signalColumns);
-            checkEntitlement(signalColumns, entity, source, "ready_when.signal");
+            checkEntitlement(signalColumns, source, "ready_when.signal", clearance);
         }
         requireDuration(readyWhen.getIdle(), "ready_when.idle");
         requireDuration(readyWhen.getMaxStaleness(), "ready_when.max_staleness");
@@ -767,17 +774,17 @@ public class EnrichSpecValidator {
      * own, and the source's total order descending is appended as the tiebreak in every case.
      */
     private void validateMemberSelect(
-            EnrichDeclaration declaration, String source, EntityFields entity, Set<String> referenced) {
+            EnrichDeclaration declaration, String source, EntityFields entity, Set<String> referenced, Map<String, String> clearance) {
         MemberSelect select = declaration.memberSelect();
         if (select == null) {
             return;
         }
         if (StringUtils.isNotBlank(select.getPreferSql())) {
-            Set<String> preferColumns = filterValidator
-                    .analyze(source, select.getPreferSql(), "member_select.prefer_sql", true)
+            Set<String> preferColumns = sensitiveGuard.reattributing(source, "member_select.prefer_sql",
+                    () -> filterValidator.analyze(source, select.getPreferSql(), "member_select.prefer_sql", true), true)
                     .columns();
             referenced.addAll(preferColumns);
-            checkEntitlement(preferColumns, entity, source, "member_select.prefer_sql");
+            checkEntitlement(preferColumns, source, "member_select.prefer_sql", clearance);
         }
         List<MemberOrder> orderBy = select.getOrderBy() == null ? List.of() : select.getOrderBy();
         Set<String> orderColumns = new LinkedHashSet<>();
@@ -793,7 +800,7 @@ public class EnrichSpecValidator {
             orderColumns.add(order.getColumn());
         }
         referenced.addAll(orderColumns);
-        checkEntitlement(orderColumns, entity, source, "member_select.order_by");
+        checkEntitlement(orderColumns, source, "member_select.order_by", clearance);
         Integer limit = select.getLimit();
         if (limit == null) {
             throw new PipelineValidationException("member_select requires a limit; a selection policy that does "
@@ -834,7 +841,7 @@ public class EnrichSpecValidator {
      */
     private void validateSqlExpressions(EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
             String source, EntityFields entity, String grainKey, Set<String> referenced,
-            Map<String, ColumnMappingEntity> outputColumns) {
+            Map<String, ColumnMappingEntity> outputColumns, Map<String, String> clearance) {
         if (!declaration.inputBindings().isEmpty()) {
             throw new PipelineValidationException("a sql pipeline must not declare transform.inputs"
                     + " (there is no request to render)");
@@ -856,7 +863,7 @@ public class EnrichSpecValidator {
             ExprSqlValidator.ExprAnalysis analysis = sensitiveGuard.reattributing(
                     source, what, () -> exprValidator.analyze(source, var.getSql(), what, true), true);
             referenced.addAll(analysis.columns());
-            checkEntitlement(analysis.columns(), entity, source, "expression for " + what);
+            checkEntitlement(analysis.columns(), source, "expression for " + what, clearance);
             // A Class-1 expression writes its result into a target column, so every enrichment column it
             // reads is a value-producing reference and must be able to represent its own absence.
             analysis.columns().forEach(column -> requireAbsenceRepresentable(what, column, entity));
@@ -1351,19 +1358,29 @@ public class EnrichSpecValidator {
     }
 
     /**
+     * The column-policy half of the entitlement gate, run where a fragment is resolved: a column a column policy hides
+     * from the author, across the whole entity, is refused now. Its clearance check is queued in {@code clearance} for
+     * {@link #checkClearance}, so the stricter refusal wins over the whole request whichever fragment names what.
+     */
+    private void checkEntitlement(Set<String> referenced, String source, String what, Map<String, String> clearance) {
+        sensitiveGuard.enforceVisibleEntity(source, referenced, what);
+        referenced.forEach(column -> clearance.putIfAbsent(column, what));
+    }
+
+    /**
      * The sensitive-column gate, resolved through the read source's entity so an enrichment column reached
      * through the grain join is governed exactly as one of the source's own. The refusal names the table
      * the column actually belongs to, and for an enrichment column the source whose grants decide it.
      */
-    private void checkEntitlement(Set<String> referenced, EntityFields entity, String source, String what) {
-        for (String column : referenced) {
+    private void checkClearance(Map<String, String> clearance, EntityFields entity, String source) {
+        clearance.forEach((column, what) -> {
             // Asked of the owning table, which the evaluator answers from the source's lists for an enrichment.
             // Read AND clearance: authoring is gated on REGISTRY_ADMIN, not on any read of the table, so the
             // clearance alone would admit an author who could not read the values it is declaring over.
             if (entity.isSensitive(column) && !sensitiveAccess.mayReadSensitive(entity.ownerOf(column))) {
                 throw new SensitiveColumnNotEntitledException(notEntitled(what, column, entity, source));
             }
-        }
+        });
     }
 
     /** The entitlement refusal, naming the table to be granted: for an enrichment column, its source. */
@@ -1375,7 +1392,7 @@ public class EnrichSpecValidator {
     }
 
     private void checkBoundBindings(
-            EnrichDeclaration declaration, EntityFields entity, String source, Set<String> referenced) {
+            EnrichDeclaration declaration, EntityFields entity, String source, Set<String> referenced, Map<String, String> clearance) {
         for (InputBinding binding : declaration.inputBindings()) {
             if (StringUtils.isBlank(binding.getColumn())) {
                 continue;
@@ -1386,9 +1403,7 @@ public class EnrichSpecValidator {
                         unknownField("vars column", column, source, entity));
             }
             referenced.add(column);
-            if (entity.isSensitive(column) && !sensitiveAccess.mayReadSensitive(entity.ownerOf(column))) {
-                throw new SensitiveColumnNotEntitledException(notEntitled("a vars entry", column, entity, source));
-            }
+            checkEntitlement(Set.of(column), source, "a vars entry", clearance);
         }
     }
 

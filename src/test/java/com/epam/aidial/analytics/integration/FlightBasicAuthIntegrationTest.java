@@ -1,8 +1,12 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
+import com.epam.aidial.analytics.service.table.TableAccessService.RowsRequest;
+import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
-import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.arrow.flight.CallHeaders;
@@ -31,6 +35,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.databind.node.LongNode;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -244,12 +249,20 @@ class FlightBasicAuthIntegrationTest {
         assertThat(credential).isPresent();
         assertThat(listedTableNames(credential.orElseThrow())).doesNotContain("dial_usage_log");
 
-        final List<String> storedRead = List.copyOf(tableAccess.getAccess("dial_usage_log").getRead());
-        tableAccess.replaceAccess("dial_usage_log", Map.of(Privilege.TABLE_READ, List.of("*")));
+        final AccessEntries before = tableAccess.list("dial_usage_log");
+        final AccessEntry stored = before.roles().get("*");
+        final long granted = tableAccess.put("dial_usage_log", "*",
+                new EntryRequest(LongNode.valueOf(before.generation()), List.of("read"), null, null)).generation();
         try {
             assertThat(listedTableNames(credential.orElseThrow())).contains("dial_usage_log");
         } finally {
-            tableAccess.replaceAccess("dial_usage_log", Map.of(Privilege.TABLE_READ, storedRead));
+            if (stored == null) {
+                tableAccess.delete("dial_usage_log", "*");
+            } else {
+                tableAccess.put("dial_usage_log", "*", new EntryRequest(LongNode.valueOf(granted),
+                        stored.privileges().stream().map(PrivilegeScope::grantKey).toList(),
+                        stored.rows() == null ? null : new RowsRequest(stored.rows().filter(), null), stored.columns()));
+            }
         }
     }
 

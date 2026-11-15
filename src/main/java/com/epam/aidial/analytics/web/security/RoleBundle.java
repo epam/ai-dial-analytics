@@ -15,8 +15,9 @@ import java.util.Set;
  * expansion time, so implication has one source of truth. {@code FULL_ADMIN} and {@code READ_ONLY_ADMIN}
  * expand to exactly the authority the corresponding application role carried before privileges existed,
  * with two deliberate exceptions, declared in the {@code authentication} capability.
- * {@code GET /v1/tables/{name}/access} now requires {@code TABLE_GRANT}, which {@code READ_ONLY_ADMIN}
- * does not hold, because the grant lists disclose which provider roles exist and what each may do. And
+ * {@code GET /v1/tables/{name}/access} and {@code .../access/{role}} require {@code TABLE_GRANT}, which
+ * {@code READ_ONLY_ADMIN} does not hold, because access entries disclose which provider roles exist and what each may
+ * do. And
  * {@code FULL_ADMIN} no longer sees other users' {@code personal} saved queries anywhere, the revision
  * endpoint and the activity feed included, and never sees their {@code private} dashboards. No endpoint widens:
  * {@code REGISTRY_READ} reproduces the reach the old {@code /v1/**} role rule gave pipeline reads rather
@@ -31,7 +32,7 @@ import java.util.Set;
  * <p>Every bundle reads the instance settings ({@code SETTINGS_READ}); only {@code FULL_ADMIN}, holding every
  * privilege, replaces them.
  *
- * <p>Bundle names are not valid grantees in a table's access lists, which name raw provider roles.
+ * <p>Bundle names are not valid roles of a table's access entries, which name raw provider roles.
  */
 public enum RoleBundle {
 

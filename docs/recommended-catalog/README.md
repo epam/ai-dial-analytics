@@ -46,10 +46,11 @@ Points specific to this bundle:
 - **`dial_usage_log_payload` must be ACTIVE.** Both enrichments read `request_tags` from it.
 - **`env_specific` lists the cron triggers.** Adjust them after the import if the defaults do not suit the
   installation.
-- **Grant access.** The imported tables have no grants. `usage_client_identity` and `sessions` carry personal-data
-  columns marked `sensitive` (user email and display name). `usage_client_identity` is an enrichment: grant
-  `dial_usage_log`, and its sensitive columns follow the usage log's clearance. `sessions` is a rollup target with
-  grants of its own; grant its `sensitive` list only to roles that may see personal data.
+- **Grant access.** The imported tables have no grants. Grant each role with `PUT /v1/tables/{name}/access/{role}`
+  (see [`row-level-security.md`](../row-level-security.md)). `usage_client_identity` and `sessions` carry
+  personal-data columns marked `sensitive` (user email and display name). `usage_client_identity` is an enrichment:
+  grant `dial_usage_log`, and its sensitive columns follow the usage log's clearance. `sessions` is a rollup target
+  with grants of its own; grant `sensitive` on it only to roles that may see personal data.
 - **Arm in order.** Enable `usage-client-identity-live` and `usage-request-baggage-live` first, then
   `sessions_rollup`, whose filter and grouping read `usage_client_identity`.
 - **Expect a first rebuild.** `sessions_rollup` starts with no cursor and rescans `dial_usage_log` on its first runs

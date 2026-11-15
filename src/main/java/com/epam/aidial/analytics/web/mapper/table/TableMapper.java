@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.web.mapper.table;
 
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.Cardinality;
 import com.epam.aidial.analytics.service.table.Change;
 import com.epam.aidial.analytics.service.table.ColumnInput;
@@ -10,6 +11,7 @@ import com.epam.aidial.analytics.service.table.CreateTableInput;
 import com.epam.aidial.analytics.service.table.DefineSchemaInput;
 import com.epam.aidial.analytics.service.table.PatchInput;
 import com.epam.aidial.analytics.service.table.PatchInput.Rename;
+import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableSummary;
 import com.epam.aidial.analytics.service.table.TableType;
@@ -20,7 +22,6 @@ import com.epam.aidial.analytics.service.table.TtlInput;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
 import com.epam.aidial.analytics.service.table.relayout.TableLayouts;
-import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest.ColumnRequest;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest.PartitionByRequest;
@@ -35,8 +36,7 @@ import com.epam.aidial.analytics.web.dto.table.TableDto.TtlDto;
 import com.epam.aidial.analytics.web.dto.table.TableListDto;
 import com.epam.aidial.analytics.web.dto.table.TtlRequest;
 import com.epam.aidial.analytics.web.dto.table.UpdateTableRequest;
-import com.epam.aidial.analytics.web.dto.table.access.AccessDto;
-import com.epam.aidial.analytics.web.dto.table.rowpolicy.RowPolicyDto;
+import com.epam.aidial.analytics.web.dto.table.access.AccessEntryBodyDto;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -56,7 +56,7 @@ public class TableMapper {
 
     private final TableCallerPermissions callerPermissions;
     private final SensitiveColumnAccess sensitiveAccess;
-    private final RowPolicyCodec rowPolicyCodec;
+    private final TableAccessService accessEntries;
     private final TableLayouts layouts;
 
     public CreateTableInput toCreateInput(CreateTableRequest request) {
@@ -240,11 +240,11 @@ public class TableMapper {
     }
 
     /**
-     * The revision read's DTO: as {@link #toDto(TableView)}, additionally carrying the definition's {@code access}
-     * and {@code row_policies} when {@code includeGrants} — the revision read's choice, made against the bar the
-     * live grant reads set. Both are then always present, empty when nothing is granted, so their absence
-     * means withheld and never none. It carries no {@code layout}: that is the table's current state, which the
-     * audit trail does not record, so a past revision cannot report it.
+     * The revision read's DTO: as {@link #toDto(TableView)}, additionally carrying the definition's access entries as
+     * {@code roles} when {@code includeGrants} — the revision read's choice, made against the bar the live access read
+     * sets. It is then always present, empty when nothing is granted, so its absence means withheld and never none. It
+     * carries no {@code layout}: that is the table's current state, which the audit trail does not record, so a past
+     * revision cannot report it.
      */
     public TableDto toDto(TableView view, boolean includeGrants) {
         return toDto(view, includeGrants, null);
@@ -260,9 +260,13 @@ public class TableMapper {
         // the query surface applies. Every TableDto carrying columns is built here — get, the mutation
         // responses and the revision read — so this is the catalog read surface's single chokepoint, and a
         // revision is judged on the flags it carried then, since those are the flags on its snapshot rows.
+        // A column hidden by a column policy is dropped the same way, by the one visibility decision every read surface
+        // applies; a revision is judged by the policies on its snapshot (an enrichment's, by its source's current ones).
         final boolean cleared = sensitiveAccess.maySeeSensitive(entity.getName());
+        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(entity);
         List<ColumnMappingEntity> ordered = view.columns().stream()
                 .filter(col -> cleared || !col.isSensitive())
+                .filter(col -> visibility.allows(col.getName()))
                 .toList();
         if (tagOrder != null && !tagOrder.isEmpty()) {
             ordered = ordered.stream()
@@ -294,16 +298,18 @@ public class TableMapper {
                 tagOrder == null ? null : List.copyOf(tagOrder),
                 columns,
                 null,
-                permissions(entity),
-                includeGrants ? AccessDto.of(entity.getAccess()) : null,
-                includeGrants ? rowPolicies(entity) : null,
+                // columns_restricted over the columns this response is built from: a revision's own, for a snapshot.
+                permissions(callerPermissions.resolve(entity, visibility, view.columns())),
+                includeGrants ? roles(entity) : null,
                 layout);
     }
 
-    private Map<String, RowPolicyDto> rowPolicies(TableDefinitionEntity entity) {
-        final Map<String, RowPolicyDto> policies = new LinkedHashMap<>();
-        rowPolicyCodec.read(entity.getRowPolicies()).forEach((role, policy) -> policies.put(role, RowPolicyDto.of(policy)));
-        return policies;
+    /** The revision's access entries, assembled from its three documents; a {@code column_policies} recorded before it existed reads as none. */
+    private Map<String, AccessEntryBodyDto> roles(TableDefinitionEntity entity) {
+        final Map<String, AccessEntryBodyDto> roles = new LinkedHashMap<>();
+        accessEntries.entries(entity.getAccess(), entity.getRowPolicies(), entity.getColumnPolicies())
+                .forEach((role, entry) -> roles.put(role, AccessEntryBodyDto.of(entry)));
+        return roles;
     }
 
     /** Lean list-item DTO: structural fields plus the exposed-column count (use single-get for columns). */
@@ -333,22 +339,18 @@ public class TableMapper {
                 summary.columnCount(),
                 permissions(summary.permissions()),
                 null,
-                null,
                 null);
     }
 
     /**
-     * The caller's effective permissions on {@code entity}. An enrichment's read-side flags come from its source's
-     * current lists, which costs one source lookup — on a revision snapshot too, whatever the lists were then.
+     * The caller's effective permissions as the DTO. An enrichment's read-side flags come from its source's current
+     * lists, which costs one source lookup — on a revision snapshot too, whatever the lists were then.
      */
-    private PermissionsDto permissions(TableDefinitionEntity entity) {
-        return permissions(callerPermissions.resolve(entity));
-    }
-
     private static PermissionsDto permissions(EffectivePermissions effective) {
         return new PermissionsDto(
                 effective.get(), effective.read(),
-                effective.sensitive(), effective.write(), effective.modify(), effective.rowsRestricted());
+                effective.sensitive(), effective.write(), effective.modify(), effective.rowsRestricted(),
+                effective.columnsRestricted());
     }
 
     private ColumnInput toColumnInput(ColumnRequest col) {

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.web.handler;
 
 import com.clickhouse.client.api.ServerException;
 import com.epam.aidial.analytics.configuration.logging.AccessLogFilter;
+import com.epam.aidial.analytics.exception.AccessConflictException;
 import com.epam.aidial.analytics.exception.ActivityNotFoundException;
 import com.epam.aidial.analytics.exception.BackfillDisabledException;
 import com.epam.aidial.analytics.exception.BackfillInProgressException;
@@ -15,7 +16,9 @@ import com.epam.aidial.analytics.exception.CatalogImportForbiddenException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
+import com.epam.aidial.analytics.exception.ColumnInColumnPolicyException;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.DashboardConflictException;
 import com.epam.aidial.analytics.exception.DashboardNotFoundException;
 import com.epam.aidial.analytics.exception.DashboardValidationException;
@@ -62,6 +65,7 @@ import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -509,6 +513,24 @@ public class DefaultExceptionHandler {
         return new ErrorView(req, HttpStatus.CONFLICT, "column_in_row_policy", ex.getMessage());
     }
 
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(ColumnInColumnPolicyException.class)
+    public ErrorView handleColumnInColumnPolicy(HttpServletRequest req, ColumnInColumnPolicyException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "column_in_column_policy", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(AccessConflictException.class)
+    public ErrorView handleAccessConflict(HttpServletRequest req, AccessConflictException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "access_conflict", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    @ExceptionHandler(ColumnNotEntitledException.class)
+    public ErrorView handleColumnNotEntitled(HttpServletRequest req, ColumnNotEntitledException ex) {
+        return new ErrorView(req, HttpStatus.FORBIDDEN, "column_not_entitled", ex.getMessage());
+    }
+
     @ResponseStatus(HttpStatus.NOT_FOUND)
     @ExceptionHandler(SavedQueryNotFoundException.class)
     public ErrorView handleSavedQueryNotFound(HttpServletRequest req, SavedQueryNotFoundException ex) {
@@ -731,6 +753,20 @@ public class DefaultExceptionHandler {
         // surface here. URL-level denials are handled in the filter chain. Both render the same shape.
         return new ErrorView(req, HttpStatus.FORBIDDEN, "forbidden",
             "You do not have permission to perform this operation");
+    }
+
+    /**
+     * An encoded {@code /} reaches the health endpoint decoded inside its one component segment (the request firewall
+     * accepts {@code %2F}), and the endpoint refuses a multi-segment component with this exception: answered as the
+     * unknown component it names, never as a server fault. Anywhere else it stays the catch-all {@code 500}.
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorView> handleIllegalArgument(HttpServletRequest req, IllegalArgumentException ex) {
+        if (StringUtils.startsWith(req.getRequestURI(), "/actuator/health/")) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(new ErrorView(req, HttpStatus.NOT_FOUND, "not_found", "No such health component"));
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(handleGeneralError(req, ex));
     }
 
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)

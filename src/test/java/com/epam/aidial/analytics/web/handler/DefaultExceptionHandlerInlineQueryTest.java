@@ -75,18 +75,31 @@ class DefaultExceptionHandlerInlineQueryTest {
         assertThat(response.getBody().getMessage()).isEqualTo("widget w3: Internal server error");
     }
 
+    @Test
+    void illegalArgumentIsNotFoundOnlyUnderTheHealthEndpoint() {
+        assertThat(handler.handleInlineQueryRejected(request, new InlineQueryRejectedException("w4", new IllegalArgumentException("x")))
+                .getStatusCode().value()).isEqualTo(500);
+        assertThat(handler.handleIllegalArgument(request, new IllegalArgumentException("x")).getStatusCode().value()).isEqualTo(500);
+        final ResponseEntity<ErrorView> health = handler.handleIllegalArgument(
+                new MockHttpServletRequest("GET", "/actuator/health/%2F..%2Fenv"), new IllegalArgumentException("x"));
+        assertThat(health.getStatusCode().value()).isEqualTo(404);
+        assertThat(health.getBody().getError()).isEqualTo("not_found");
+    }
+
     /**
      * The delegation invokes a handler only when it is shaped {@code (HttpServletRequest, X) -> ErrorView} and
      * {@code X} accepts every exception it is declared for; any other shape falls back to {@code 500
      * internal_error}. So a handler added in another shape would silently turn an inline rejection's
-     * {@code 4xx} into a {@code 500}. This keeps every handler but the delegating one in the shape.
+     * {@code 4xx} into a {@code 500}. This keeps every handler but the delegating one in the shape, and
+     * {@code handleIllegalArgument}, whose status depends on the path: off {@code /actuator/health/} — every inline
+     * query's path — it answers the same {@code 500 internal_error} the fallback gives.
      */
     @Test
     void everyOtherHandlerHasTheShapeTheDelegationInvokes() {
         final List<String> misshapen = new ArrayList<>();
         for (final Method method : DefaultExceptionHandler.class.getDeclaredMethods()) {
             final ExceptionHandler annotation = method.getAnnotation(ExceptionHandler.class);
-            if (annotation == null || method.getName().equals("handleInlineQueryRejected")) {
+            if (annotation == null || List.of("handleInlineQueryRejected", "handleIllegalArgument").contains(method.getName())) {
                 continue;
             }
             final Class<?>[] parameters = method.getParameterTypes();

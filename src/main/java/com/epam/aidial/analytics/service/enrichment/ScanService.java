@@ -340,6 +340,13 @@ public class ScanService {
         statement.addAll(signal.columns());
         Set<String> guarded = new LinkedHashSet<>(statement);
         guarded.addAll(boundColumns);
+        // An aligned target's page returns the source's partition column on every row as __partition_v, so it is read
+        // and judged like the cursor columns, by the exposed name of the catalog column it maps to.
+        String partitionEcho = PartitionEcho.column(definitions, definitions.findById(declaration.target()).orElse(null),
+                declaration.triggerKind(), source);
+        if (partitionEcho != null) {
+            guarded.add(partitionEcho);
+        }
         // A declaration stored before every write refused a computed group key would be grouped by the stand-in this
         // page renders in its place; the fragments are refused by name already, in their parse above. By name, so
         // before the entitlement gate: the refusal is the same whoever reads the declaration.
@@ -356,9 +363,7 @@ public class ScanService {
                 freshness.bound(EnrichmentJoins.referencedEnrichments(model, guarded), source);
         return new ScanPlan(resolved.pipeline().getName(), source, resolved.grainKey(), cursorColumns, model,
                 analysis, signal, projection, statement, boundColumns, groupKeyField,
-                aliasedGroupKey ? resolved.grainKey() : null, bound.orElse(null),
-                PartitionEcho.column(definitions, definitions.findById(declaration.target()).orElse(null),
-                        declaration.triggerKind(), source));
+                aliasedGroupKey ? resolved.grainKey() : null, bound.orElse(null), partitionEcho);
     }
 
     /**

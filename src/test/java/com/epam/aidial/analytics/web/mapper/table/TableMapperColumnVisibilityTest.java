@@ -1,14 +1,15 @@
 package com.epam.aidial.analytics.web.mapper.table;
 
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableView;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
-import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.table.TableDto;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -35,11 +37,12 @@ class TableMapperColumnVisibilityTest {
     private final SensitiveColumnAccess sensitiveAccess = mock(SensitiveColumnAccess.class);
     private final com.epam.aidial.analytics.service.table.relayout.TableLayouts layouts =
             mock(com.epam.aidial.analytics.service.table.relayout.TableLayouts.class);
-    private final TableMapper mapper = new TableMapper(permissions, sensitiveAccess, mock(RowPolicyCodec.class), layouts);
+    private final TableMapper mapper = new TableMapper(permissions, sensitiveAccess, mock(TableAccessService.class), layouts);
 
     @BeforeEach
     void permissionsAreIrrelevantHere() {
-        when(permissions.resolve(any())).thenReturn(EffectivePermissions.uniform(true));
+        when(permissions.resolve(any(), any(), any())).thenReturn(EffectivePermissions.uniform(true));
+        when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
     }
 
     private static TableView view() {
@@ -78,6 +81,15 @@ class TableMapperColumnVisibilityTest {
         final List<TableDto.ColumnDto> columns = mapper.toDto(view()).columns();
         assertThat(columns).extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
         assertThat(columns.get(1).sensitive()).isTrue();
+    }
+
+    @Test
+    @DisplayName("a column hidden by a column policy is omitted like an unentitled sensitive one")
+    void policyHiddenColumnIsOmitted() {
+        when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
+        when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("employee_name")));
+
+        assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("employee_name");
     }
 
     @Test

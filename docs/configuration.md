@@ -563,18 +563,18 @@ earlier release needs these edits:
 
 - a value naming `TABLE_READ_SENSITIVE` becomes `TABLE_READ` plus `TABLE_SENSITIVE` — the old name no longer
   exists and fails startup;
-- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` must also name `TABLE_GRANT`, which
-  the endpoint requires;
+- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` or `GET /v1/tables/{name}/access/{role}`
+  must also name `TABLE_GRANT`, which those endpoints require;
 - a role mapped to `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` or bare verbs that audits or manages sensitivity
   must also name `TABLE_SENSITIVE`: without the clearance, `GET /v1/tables` and `GET /v1/tables/{name}`
   omit sensitive columns, and a schema change can neither see them nor set a `sensitive` flag.
 
-See the `authentication` and `table-access-control` capabilities for why the grant lists are not a catalog
-read and why sensitivity is a clearance.
+See the `authentication` and `table-access-control` capabilities for why a table's access entries are not a
+catalog read and why sensitivity is a clearance.
 
 Six privileges are **table-scoped** — `TABLE_LIST`, `TABLE_GET`, `TABLE_READ`, `TABLE_SENSITIVE`,
-`TABLE_WRITE`, `TABLE_MODIFY` — and may be held globally or granted on a single table at
-`PUT /v1/tables/{name}/access`, with effective access the union of the two. `TABLE_LIST` is the one
+`TABLE_WRITE`, `TABLE_MODIFY` — and may be held globally or granted to a role on a single table at
+`PUT /v1/tables/{name}/access/{role}`, with effective access the union of the two. `TABLE_LIST` is the one
 with no per-table grant: held globally it lists every table, and a `get` grant already lists its own. A
 valid token mapping to no privilege at all is still authenticated and may be authorized for one table by a
 matching grant, which is the intended shape for a BI tool or an exporter.

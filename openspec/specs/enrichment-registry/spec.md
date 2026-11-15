@@ -547,6 +547,16 @@ re-attributed to HTTP 403 `sensitive_column_not_entitled` rather than reported a
 `pipeline_validation_failed`: the pipeline is not malformed, the caller is not entitled, and the
 contract promises the 403.
 
+A column a column policy hides from the caller (see [table-access-control](../table-access-control/spec.md), "Column
+visibility by caller role") — on the read source, or on an enrichment, named in the source's entries as
+`<enrichment>.<column>` — is hidden from its schema view the same way. A reference to one SHALL be refused with HTTP 403
+`column_not_entitled`, and a governed fragment's parse failure SHALL be re-attributed to `column_not_entitled` when the
+read source or one of its active enrichments has a column hidden from the caller by a column policy, before it is
+re-attributed to `sensitive_column_not_entitled` as above. A parse failure SHALL be reported as `422
+pipeline_validation_failed` only to a caller from whom no column of those tables is hidden, by the clearance or by a
+column policy. A caller with no governing role on the read source is not narrowed by its column policies (see
+table-access-control, "Column visibility by caller role").
+
 The pipeline governs **who may reference** the column, and nothing more. A derived enrichment column
 SHALL NOT inherit sensitivity from an enrichment column any more than it does from a source column —
 the existing "Runner identity and derived-column sensitivity posture" requirement applies unchanged,
@@ -583,6 +593,13 @@ decision, taken by declaring that target column `sensitive`.
 - **THEN** the entitlement check passes
 - **AND WHEN** a caller holding `TABLE_READ` on the read source without the clearance registers the same pipeline
 - **THEN** the request is rejected with HTTP 403 and error code `sensitive_column_not_entitled`
+
+#### Scenario: An enrichment column hidden by the source's column policy is refused
+
+- **GIVEN** a read source with an `ACTIVE` enrichment `e`, and a caller holding `TABLE_READ` and the clearance on the
+  read source whose only governing role's `columns` does not name `e.label`
+- **WHEN** it registers a pipeline whose filter references `"e.label"`
+- **THEN** the request is rejected with HTTP 403 and error code `column_not_entitled`, not with HTTP 422
 
 ### Requirement: Runner identity and derived-column sensitivity posture
 
@@ -2922,7 +2939,12 @@ NOT confer `REGISTRY_READ`.
 Registry payloads name columns — a pipeline's `filter_sql`, `group_by`, `member_select` and
 `ready_when`, and the `transform`'s request template — and the service SHALL NOT redact them.
 `REGISTRY_READ` therefore discloses column names, consistent with column names not being secret;
-column **values** remain governed by the table privileges.
+column **values** remain governed by the table privileges, with one registry-level exception: a pipeline's cursor and
+position members (`state.cursor_version`, `state.cursor_identity`, `state.materialized_through_version`,
+`state.materialized_through_identity`, `state.clamp.cursor_version`, `state.clamp.cursor_identity`) carry version and
+identity values of its input and are returned to every `REGISTRY_READ` holder regardless of table privileges, sensitive
+flags and column policies; `REGISTRY_READ` is the privilege that governs them (see
+[table-access-control](../table-access-control/spec.md), "Pipeline and export paths refuse a hidden column").
 
 #### Scenario: Registry read does not confer table read
 

@@ -1,8 +1,10 @@
 package com.epam.aidial.analytics.service.query;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.PartitionGranularity;
@@ -11,12 +13,15 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
+import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
 import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
 import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.ProviderRolePrivileges;
 import com.epam.aidial.analytics.web.security.SecurityMode;
 import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import org.jooq.DSLContext;
@@ -27,6 +32,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -34,6 +40,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.lenient;
@@ -53,10 +60,7 @@ class CatalogQueryServiceTest {
     private CatalogQueryService service() {
         // security.mode=none → both filters fail open, so these model-assembly tests see every table and
         // every column.
-        final SensitiveColumnAccess access = new SensitiveColumnAccess(
-                new TableAccessEvaluator(definitions, new GoverningAccess(definitions), new SecurityClaimsExtractor()),
-                new SecurityModeResolver(SecurityMode.NONE.code()));
-        return new CatalogQueryService(definitions, columns, access);
+        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.NONE));
     }
 
     /** Every table readable, with sensitivity answered uniformly — the pre-per-table-grant policy shape. */
@@ -66,7 +70,18 @@ class CatalogQueryServiceTest {
         lenient().when(access.mayGet(anyString())).thenReturn(true);
         lenient().when(access.mayRead(anyString())).thenReturn(true);
         lenient().when(access.maySeeSensitive(anyString())).thenReturn(maySeeSensitive);
+        lenient().when(access.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
         return new CatalogQueryService(definitions, columns, access);
+    }
+
+    /** The real evaluator and column-visibility decision over the mocked catalog, for the current security context. */
+    private SensitiveColumnAccess realAccess(SecurityMode mode) {
+        final JsonMapper jsonMapper = new JsonMapperConfiguration().jsonMapper();
+        final GoverningAccess governing = new GoverningAccess(definitions);
+        final SecurityClaimsExtractor claims = new SecurityClaimsExtractor();
+        return new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims),
+                new SecurityModeResolver(mode.code()), definitions, governing, claims, mock(ProviderRolePrivileges.class),
+                new RowPolicyCodec(jsonMapper), new ColumnPolicyCodec(jsonMapper));
     }
 
     private static TableDefinitionEntity definition(
@@ -461,10 +476,7 @@ class CatalogQueryServiceTest {
     private CatalogQueryService oidcService(String... roles) {
         SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
                 "caller", "n/a", CallerAuthorities.build(EnumSet.noneOf(Privilege.class), List.of(roles))));
-        final SensitiveColumnAccess access = new SensitiveColumnAccess(
-                new TableAccessEvaluator(definitions, new GoverningAccess(definitions), new SecurityClaimsExtractor()),
-                new SecurityModeResolver(SecurityMode.OIDC.code()));
-        return new CatalogQueryService(definitions, columns, access);
+        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.OIDC));
     }
 
     @AfterEach
@@ -614,6 +626,45 @@ class CatalogQueryServiceTest {
                 .filteredOn(QuerySchemaFieldDto::projectionOnly)
                 .extracting(QuerySchemaFieldDto::sensitive)
                 .containsExactly(true, true);
+    }
+
+    /** A column a column policy hides is absent from bindings and schema, an enrichment's by its qualified name included. */
+    @Test
+    void columnsHiddenByColumnPolicyLeaveTheModel() {
+        appendSourceWithEnrichment(Privilege.TABLE_READ, "X");
+        final TableDefinitionEntity source = definitions.findById("events").orElseThrow();
+        lenient().when(columns.findByTableNameOrderByOrdinal("events")).thenReturn(List.of(
+                column("events", "widget_id", QueryFieldType.STRING, 0), column("events", "secret", QueryFieldType.STRING, 1)));
+        source.setColumnPolicies("{\"X\": [\"widget_id\"]}");
+
+        final QueryEntityModel restricted = oidcService("X").findModel("events", Privilege.TABLE_READ).orElseThrow();
+        assertThat(restricted.bindings().keySet()).containsExactly("widget_id");
+        assertThat(restricted.baseSchema()).extracting(QuerySchemaFieldDto::name).containsExactly("widget_id");
+
+        source.setColumnPolicies("{\"X\": [\"facts.label\", \"widget_id\"]}");
+        assertThat(oidcService("X").findModel("events", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .containsExactly("widget_id", "facts.label");
+        assertThat(service().findModel("events", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .as("none mode shows every column").containsExactly("widget_id", "secret", "facts.label");
+    }
+
+    /** A computed field leaves the model with the payload columns it returns. */
+    @Test
+    void computedFieldsFollowTheColumnPolicyOfTheColumnsTheyReturn() {
+        stubPayloadEntity(column("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0),
+                column("dial_usage_log_payload", "request_cache_control", QueryFieldType.STRING, 1));
+        final TableDefinitionEntity source = definitions.findById("dial_usage_log").orElseThrow();
+        source.getAccess().setRead(List.of("X"));
+        final TableDefinitionEntity payload = definitions.findBySourceTable("dial_usage_log").getFirst();
+        lenient().when(definitions.findById("dial_usage_log_payload")).thenReturn(Optional.of(payload));
+        source.setColumnPolicies("{\"X\": [\"dial_usage_log_payload.request_body\", \"trace_id\"]}");
+
+        assertThat(oidcService("X").findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .containsExactly("trace_id", "dial_usage_log_payload.request_body");
+
+        source.setColumnPolicies("{\"X\": [\"dial_usage_log_payload.request_body\", \"dial_usage_log_payload.request_cache_control\", \"trace_id\"]}");
+        assertThat(oidcService("X").findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
+                .contains("dial_usage_log_payload.request_body_full", "dial_usage_log_payload.request_body_rebuild");
     }
 
     private void stubPayloadEntity(ColumnMappingEntity... payloadColumns) {

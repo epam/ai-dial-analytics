@@ -300,6 +300,9 @@ final class AggregateGovernance {
             byOwner.computeIfAbsent(joined ? input.ownerOf(name) : inputTable, table -> new LinkedHashSet<>())
                     .add(joined ? name.substring(name.indexOf('.') + 1) : name);
         }
+        // Column policies across every owner before the clearance on any, so the code never depends on visiting order.
+        byOwner.forEach((owner, names) -> sensitiveGuard.enforceVisible(
+                owner, names, operation, owner.equals(inputTable) ? "source" : "enrichment"));
         byOwner.forEach((owner, names) -> sensitiveGuard.enforce(
                 owner, names, operation, owner.equals(inputTable) ? "source" : "enrichment"));
     }

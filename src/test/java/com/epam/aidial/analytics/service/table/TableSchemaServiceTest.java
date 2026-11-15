@@ -65,15 +65,32 @@ class TableSchemaServiceTest {
 
     private TableSchemaService service;
 
+    private final com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec policyCodec =
+            new com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec(
+                    new com.epam.aidial.analytics.configuration.JsonMapperConfiguration().jsonMapper());
+
+    private final ColumnPolicyRewriter rewriter = new ColumnPolicyRewriter(policyCodec);
+
+    /** The definition {@code applyPatch} is handed, by name: the locked entity rather than a re-load. */
+    private static TableDefinitionEntity named(String name) {
+        return org.mockito.ArgumentMatchers.argThat(definition -> definition != null && name.equals(definition.getName()));
+    }
+
     @BeforeEach
     void setUp() {
         // Cleared by default, as every caller is in none mode, so these schema tests stay about the schema;
         // the tests of the clearance rule itself withdraw it.
         org.mockito.Mockito.lenient().when(sensitiveAccess.maySeeSensitive(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(true);
+        // Every caller here is narrowed by no column policy unless a test says so; the row is locked as its first load.
+        org.mockito.Mockito.lenient().when(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .thenReturn(com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility.ALL);
+        org.mockito.Mockito.lenient().when(definitions.findForUpdate(org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(inv -> definitions.findById(inv.getArgument(0)));
         service = new TableSchemaService(definitions, columns, sensitiveAccess, writer, catalogService,
                 ddlExecutor, ddlRenderer, typeMapper, new TableLimitsProperties(256, 1000, 10000), pipelineReads,
-                org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts);
+                org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts,
+                rewriter, org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
     }
 
     private static TableDefinitionEntity source(String name, TableStatus status) {
@@ -160,7 +177,7 @@ class TableSchemaServiceTest {
 
         verify(ddlExecutor).execute("ALTER TABLE `widget_metrics` ADD COLUMN `score` Int64");
         verify(ddlRenderer).renderAlter("widget_metrics", List.of("ADD COLUMN `score` Int64"));
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     @Test
@@ -182,7 +199,7 @@ class TableSchemaServiceTest {
 
         verifyNoInteractions(ddlExecutor);
         final ArgumentCaptor<List<CatalogSchemaWriter.MetadataWrite>> updates = ArgumentCaptor.forClass(List.class);
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), updates.capture(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), updates.capture(), any());
         assertThat(updates.getValue()).singleElement().satisfies(update -> {
             assertThat(update.exposedName()).isEqualTo("payload");
             assertThat(update.heavy().present()).isTrue();
@@ -217,7 +234,7 @@ class TableSchemaServiceTest {
         // The mapper is stubbed for the trimmed list only: an un-normalized call would have returned null.
         verify(typeMapper).toDdlType(QueryFieldType.ENUM, null, List.of("high", "low"), false);
         final ArgumentCaptor<List<CatalogSchemaWriter.AppendWrite>> adds = ArgumentCaptor.forClass(List.class);
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), adds.capture(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), adds.capture(), anyList(), any());
         assertThat(adds.getValue()).singleElement().satisfies(add ->
                 assertThat(add.column().enumValues()).containsExactly("high", "low"));
     }
@@ -239,7 +256,7 @@ class TableSchemaServiceTest {
         verify(ddlRenderer).modifyTtlCommand(
                 new TableDdlRenderer.TtlDdl("created_at", 90, TtlUnit.DAY, true));
         verify(ddlExecutor).execute("ALTER ...");
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), eq(ttl));
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), eq(ttl));
     }
 
     @Test
@@ -397,7 +414,7 @@ class TableSchemaServiceTest {
 
         verify(ddlExecutor).execute("ALTER ...");
         final ArgumentCaptor<List<CatalogSchemaWriter.RenameWrite>> renames = renameCaptor();
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), renames.capture(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), renames.capture(), anyList(), anyList(), any());
         assertThat(renames.getValue()).singleElement().satisfies(rename -> {
             assertThat(rename.fromSourceName()).isEqualTo("seen_at");
             assertThat(rename.to()).isEqualTo("ingested_at");
@@ -672,7 +689,8 @@ class TableSchemaServiceTest {
         withdrawClearance();
         service = new TableSchemaService(definitions, columns, sensitiveAccess, writer, catalogService, ddlExecutor, ddlRenderer, typeMapper,
                 new TableLimitsProperties(3, 1000, 10000), pipelineReads,
-                org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts);
+                org.mockito.Mockito.mock(com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService.class), inspector, relayouts,
+                rewriter, org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class));
 
         assertThatThrownBy(() -> service.patchSchema("widget_metrics", addColumn("score", QueryFieldType.LONG)))
                 .as("three columns exist, one of them hidden; a fourth breaks a limit of three for every caller")
@@ -716,6 +734,133 @@ class TableSchemaServiceTest {
         verifyNoInteractions(ddlExecutor);
     }
 
+    private void hideByColumnPolicy(String... visible) {
+        given(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .willReturn(new com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility(java.util.Set.of(visible)));
+    }
+
+    private TableDefinitionEntity widgetMetricsWithTtlOn(ColumnMappingEntity ttlColumn) {
+        final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);
+        def.setTtl(new TtlInput(ttlColumn.getSourceName(), 1, TtlUnit.DAY));
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), ttlColumn));
+        return def;
+    }
+
+    @Test
+    void ttlColumnHiddenByColumnPolicyIsUndeclared() {
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0),
+                column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1));
+        hideByColumnPolicy("widget_id");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("birth_date", 1, TtlUnit.DAY)))))
+                .isInstanceOf(TableValidationException.class)
+                .hasMessageNotContaining("type")
+                .hasMessageNotContaining("nullable");
+        verifyNoInteractions(ddlExecutor);
+    }
+
+    @Test
+    void storedTtlOnPolicyHiddenColumnIsColumnNotEntitledEvenWhenAlsoSensitive() {
+        final ColumnMappingEntity birth = column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1);
+        birth.setSensitive(true);
+        widgetMetricsWithTtlOn(birth);
+        withdrawClearance();
+        hideByColumnPolicy("widget_id");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(null))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("birth_date");
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("widget_id", 1, TtlUnit.DAY)))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class);
+        verifyNoInteractions(ddlExecutor);
+    }
+
+    @Test
+    void storedTtlOnColumnThatIsOnlySensitiveStaysForbidden() {
+        final ColumnMappingEntity birth = column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1);
+        birth.setSensitive(true);
+        widgetMetricsWithTtlOn(birth);
+        withdrawClearance();
+        hideByColumnPolicy("widget_id", "birth_date");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(null))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException.class);
+        verifyNoInteractions(ddlExecutor);
+    }
+
+    @Test
+    void renameRewritesTheListsAndBumpsTheGenerationAndDropPrunesThem() {
+        final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);
+        def.setColumnPolicies(policyCodec.write(java.util.Map.of("X", List.of("a", "b", "c"), "Y", List.of("a"))));
+        def.setAccessGeneration(4);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
+                column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), column("widget_metrics", "a", QueryFieldType.STRING, 1),
+                column("widget_metrics", "b", QueryFieldType.STRING, 2), column("widget_metrics", "c", QueryFieldType.STRING, 3)));
+        given(catalogService.get("widget_metrics")).willReturn(new TableView(def, List.of()));
+
+        service.patchSchema("widget_metrics", new PatchInput(List.of(), List.of("c"),
+                List.of(new PatchInput.Rename("b", "c")), List.of(), Change.leave()));
+
+        assertThat(policyCodec.read(def.getColumnPolicies())).containsEntry("X", List.of("a", "c")).containsEntry("Y", List.of("a"));
+        assertThat(def.getAccessGeneration()).isEqualTo(5);
+    }
+
+    @Test
+    void dropThatWouldEmptyListIsRefusedBeforeTheAlterAndChangesNothing() {
+        final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);
+        def.setColumnPolicies(policyCodec.write(java.util.Map.of("X", List.of("c"))));
+        def.setAccessGeneration(2);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
+                column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), column("widget_metrics", "b", QueryFieldType.STRING, 1),
+                column("widget_metrics", "c", QueryFieldType.STRING, 2)));
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", new PatchInput(List.of(), List.of("c"),
+                List.of(new PatchInput.Rename("b", "c")), List.of(), Change.leave())))
+                .as("a later rename never refills a list the prune emptied")
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnInColumnPolicyException.class)
+                .hasMessageContaining("X");
+        verifyNoInteractions(ddlExecutor);
+        assertThat(def.getAccessGeneration()).isEqualTo(2);
+    }
+
+    @Test
+    void catalogWriteFailingAfterTheAlterPropagatesUnchanged() {
+        // As before column policies: the ALTER has run, the catalog transaction rolls back, and the caller sees the failure.
+        final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);
+        def.setColumnPolicies(policyCodec.write(java.util.Map.of("X", List.of("a", "z"))));
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
+                column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), column("widget_metrics", "a", QueryFieldType.STRING, 1),
+                column("widget_metrics", "z", QueryFieldType.STRING, 2)));
+        given(ddlRenderer.renderAlter(eq("widget_metrics"), anyList())).willReturn("ALTER ...");
+        final RuntimeException failure = new org.springframework.dao.DataIntegrityViolationException("duplicate key");
+        willThrow(failure).given(writer).applyPatch(any(), any(), any(), any(), any(), any());
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", new PatchInput(List.of(), List.of("z"), List.of(), List.of(),
+                Change.leave()))).isSameAs(failure);
+        verify(ddlExecutor).execute("ALTER ...");
+    }
+
+    @Test
+    void schemaChangeTouchingNoListLeavesTheGeneration() {
+        final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);
+        def.setColumnPolicies(policyCodec.write(java.util.Map.of("X", List.of("a"))));
+        def.setAccessGeneration(2);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
+                column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), column("widget_metrics", "a", QueryFieldType.STRING, 1),
+                column("widget_metrics", "z", QueryFieldType.STRING, 2)));
+        given(catalogService.get("widget_metrics")).willReturn(new TableView(def, List.of()));
+
+        service.patchSchema("widget_metrics", new PatchInput(List.of(), List.of("z"), List.of(), List.of(), Change.leave()));
+
+        assertThat(def.getAccessGeneration()).isEqualTo(2);
+    }
+
     @Test
     void withoutTheClearanceNonSensitiveMetadataStaysEditable() {
         givenWidgetMetricsWithSensitiveName();
@@ -729,7 +874,7 @@ class TableSchemaServiceTest {
 
         service.patchSchema("widget_metrics", describe);
 
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     @Test
@@ -740,7 +885,7 @@ class TableSchemaServiceTest {
 
         service.patchSchema("widget_metrics", sensitiveUpdate("employee_name", false));
 
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     // --- update: sensitive on a cursor column ------------------------------------------------------
@@ -782,7 +927,7 @@ class TableSchemaServiceTest {
         service.patchSchema("widget_metrics", sensitiveUpdate("seen_at", false));
 
         verifyNoInteractions(ddlExecutor);
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     @Test
@@ -793,7 +938,7 @@ class TableSchemaServiceTest {
 
         service.patchSchema("widget_metrics", sensitiveUpdate("widget_id", true));
 
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     /** No derived-table subset rule: a table cleared for a role nothing it is filled from clears may still flag a column. */
@@ -807,7 +952,7 @@ class TableSchemaServiceTest {
 
         service.patchSchema("widget_metrics", sensitiveUpdate("widget_id", true));
 
-        verify(writer).applyPatch(eq("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
+        verify(writer).applyPatch(named("widget_metrics"), anyList(), anyList(), anyList(), anyList(), any());
     }
 
     /**

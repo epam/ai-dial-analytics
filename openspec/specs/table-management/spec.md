@@ -185,8 +185,11 @@ as a response object (not a bare array). Listing SHALL use a stable order. Each 
 item SHALL carry a `column_count` field: the number of exposed columns of that table, equal to the
 length of the `columns` array `GET /v1/tables/{name}` returns for the same table (`0` for a
 definition with no exposed columns yet); `column_count` SHALL NOT appear on the single-get response.
-System columns (reserved `_`-prefix) and the hidden grain key SHALL NOT appear in the exposed
-`columns` and SHALL NOT be counted by `column_count`. Each exposed column SHALL carry its optional
+Physical columns the catalog does not register — such as an enrichment's grain key or its alignment
+column — SHALL NOT appear in the
+exposed `columns` and SHALL NOT be counted by `column_count`; a reserved `_`-prefixed column a seeded
+table registers (`dial_usage_log`'s `_ingested_at` and `_source_file`) is exposed and counted like any
+other. Each exposed column SHALL carry its optional
 user-friendly `display_name` (absent/null when unset), its optional identifying `tag` (absent/null
 when unset), its `sensitive` flag (default `false` when unset), its `heavy` flag (default `false`
 when unset — see "Heavy column metadata"), and — for an `array`-typed column —
@@ -199,14 +202,16 @@ absent when the definition has none, so a consumer can tell which column identif
 carries its version, and therefore whether the table is scannable at all.
 
 The table-management read surface SHALL be filtered at column granularity by the same per-table
-clearance as the query surface (see `authentication`). A `sensitive` column SHALL appear in `columns`,
-and SHALL be counted by `column_count`, only for a caller holding `TABLE_SENSITIVE` on that table,
-globally or by grant, or in `none` security mode. For every other caller it SHALL be omitted as if it
-did not exist. There is no redacted placeholder, and `column_count` SHALL still equal the length of the
-`columns` array the same caller receives. An operator auditing or managing sensitivity SHALL therefore
-hold the clearance. The definition's structural fields (`ordering_key`, `partition_by`, `grain_key`,
-`identity_column`, `version_column`, `ttl`) SHALL NOT be filtered: they are returned as stored, even
-where they name a column the caller cannot see.
+clearance and column visibility as the query surface (see `authentication`, and
+[table-access-control](../table-access-control/spec.md), "Column visibility by caller role"). A `sensitive` column
+SHALL appear in `columns`, and SHALL be counted by `column_count`, only for a caller holding `TABLE_SENSITIVE` on that
+table, globally or by grant, or in `none` security mode; a column hidden from the caller by a column policy SHALL
+appear and be counted for no caller it is hidden from. For every other caller such a column SHALL be omitted as if it
+did not exist, and a column that is both sensitive and hidden SHALL be omitted and left uncounted once. There is no
+redacted placeholder, and `column_count` SHALL still equal the length of the `columns` array the same caller receives.
+An operator auditing or managing sensitivity SHALL therefore hold the clearance. The definition's structural fields
+(`ordering_key`, `partition_by`, `grain_key`, `identity_column`, `version_column`, `ttl`) SHALL NOT be filtered: they
+are returned as stored, even where they name a column the caller cannot see.
 
 #### Scenario: Get a definition with its columns
 
@@ -276,6 +281,13 @@ where they name a column the caller cannot see.
   carries `column_count: 2`
 - **AND WHEN** a caller holding both calls the same endpoints
 - **THEN** it sees all three columns and `column_count: 3`
+
+#### Scenario: A column-restricted caller's count matches its columns
+
+- **GIVEN** a table with columns `a`, `b`, `c` and `s`, `s` sensitive, and an entry for role `X` with `read` and
+  `columns` `["a", "s"]` and no clearance
+- **WHEN** a caller carrying only `X` calls `GET /v1/tables/{name}` and `GET /v1/tables`
+- **THEN** the single-get `columns` array lists `a` only, and the list item carries `column_count: 1`
 
 #### Scenario: Column heavy flag declared in the schema is returned
 
@@ -465,19 +477,25 @@ holds data is never reachable by the define-and-materialize `POST .../schema` pa
 partially-applied operations, and the catalog is written only after the `ALTER` succeeds. In
 `oidc` mode this endpoint SHALL require `TABLE_MODIFY` on the table, held globally or granted on it.
 
-For a caller that does not hold `TABLE_SENSITIVE` on the table, the request SHALL be resolved against
-the table's **visible** columns only, the same set `GET /v1/tables/{name}` returns to that caller. A
-`sensitive` column SHALL be treated as not existing: a `drop`, a `rename.from` or an `update` naming it
+The request SHALL be resolved against the columns **visible** to the caller only, the same set
+`GET /v1/tables/{name}` returns to that caller: a column is hidden from it when the column is `sensitive` and the
+caller does not hold `TABLE_SENSITIVE` on the table, or when a column policy hides it from the caller, whatever its
+clearance (see [table-access-control](../table-access-control/spec.md), "Column visibility by caller role"). A
+hidden column SHALL be treated as not existing: a `drop`, a `rename.from` or an `update` naming it
 SHALL be rejected as naming an unknown column (422), with the same message as for a column that does
-not exist at all. Such a caller SHALL also be refused with `403 forbidden` any `update` that supplies a
-`sensitive` member (either value), and any `add` that declares `sensitive: true`. An `add` or
+not exist at all. A caller that does not hold `TABLE_SENSITIVE` on the table SHALL also be refused with
+`403 forbidden` any `update` that supplies a `sensitive` member (either value), and any `add` that declares
+`sensitive: true`. An `add` or
 `rename.to` whose name collides with a hidden column SHALL still be rejected (422, already exists), whether it
 collides on the exposed name or on the physical one, and before any `ALTER` is issued. That discloses that
 the name is taken, and it is the accepted limit of hiding (see `authentication`). The per-table column
 limit SHALL count hidden columns too. A `ttl.column` SHALL resolve against the visible columns only, so
-naming a hidden column fails as naming an undeclared one. Such a caller SHALL be refused
-`403 forbidden` for any `ttl` member (set, replace or remove) while the stored TTL is on a hidden column. A
-caller holding the clearance resolves against every column and MAY make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
+naming a hidden column fails as naming an undeclared one. While the stored TTL is on a column hidden from the
+caller, any `ttl` member (set, replace or remove) SHALL be refused and the TTL left unchanged: with
+`403 column_not_entitled` naming that column when a column policy hides it from the caller, whether or not it is
+also sensitive, and otherwise, where it is sensitive and the caller lacks the clearance, with `403 forbidden`. A
+caller from which neither the clearance nor a column policy hides any column resolves against every column and MAY
+make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
 of a system column (reserved `_`-prefix), the grain key, or an ordering-key column (422); a `drop`
 of the column the table's stored TTL references (422 — remove or repoint the TTL in a prior
 request first, even if the same request also carries a `ttl` member); an `update` of a column that
@@ -872,6 +890,16 @@ materialization what declaration enforces.
 - **THEN** the request is rejected with 422 as naming an undeclared column, and no `ALTER` is issued
 - **AND WHEN** the table's stored TTL is on `birth_date` and the same caller sends `{"ttl":{}}`
 - **THEN** the response is `403 forbidden` and the TTL is unchanged
+
+#### Scenario: A TTL on a policy-hidden column is refused column_not_entitled
+
+- **GIVEN** an `ACTIVE` table whose stored TTL is on a `timestamp` column `c` that a column policy hides from a
+  caller holding `TABLE_MODIFY` and `TABLE_SENSITIVE` on the table
+- **WHEN** the caller sends `{"ttl":{}}`, and separately a full `ttl` object naming a visible `timestamp` column
+- **THEN** each response is `403 column_not_entitled` naming `c`, no `ALTER` is issued, and the TTL is unchanged
+- **AND WHEN** `c` is also sensitive and a caller holding `TABLE_MODIFY` but not `TABLE_SENSITIVE`, from which the
+  same policy hides `c`, sends `{"ttl":{}}`
+- **THEN** the response is still `403 column_not_entitled`, not `403 forbidden`
 
 ### Requirement: Grain-based enrichment join with enforced cardinality
 
@@ -2215,13 +2243,14 @@ creating a column it could not then see.
 ### Requirement: Table responses carry caller-effective permissions
 
 Each table returned by `GET /v1/tables` (every list item) and `GET /v1/tables/{name}` SHALL carry a
-`permissions` object with boolean `get`, `read`, `sensitive`, `write`, `modify` and `rows_restricted`
-fields describing what the calling identity may do with that table, computed per the
+`permissions` object with boolean `get`, `read`, `sensitive`, `write`, `modify`, `rows_restricted` and
+`columns_restricted` fields describing what the calling identity may do with that table, computed per the
 caller-effective permissions rules of
-[table-access-control](../table-access-control/spec.md). All six fields SHALL always be present
-booleans (never null/absent). The object grew from two flags to five with the per-table grants, and to
-six with row policies; the earlier names keep their spelling and meaning, so a client reading only those
-is unaffected. `rows_restricted` reports whether row policies confine the caller's reads of the table.
+[table-access-control](../table-access-control/spec.md). All seven fields SHALL always be present
+booleans (never null/absent). The object grew from two flags to five with the per-table grants, to
+six with row policies, and to seven with column policies; the earlier names keep their spelling and meaning, so a
+client reading only those is unaffected. `rows_restricted` reports whether row policies confine the caller's reads of
+the table, and `columns_restricted` whether column policies hide any of its columns from the caller.
 `sensitive` reports the clearance (see `table-access-control`) and replaces the former `read_sensitive`
 flag, which SHALL NOT be emitted.
 Mutation responses that return the table representation (create, description update, schema PATCH)
@@ -2230,12 +2259,12 @@ SHALL carry the same object.
 #### Scenario: List items carry permissions
 
 - **WHEN** `GET /v1/tables` is called
-- **THEN** every list item carries a `permissions` object with all six boolean fields
+- **THEN** every list item carries a `permissions` object with all seven boolean fields
 
 #### Scenario: Single get carries permissions
 
 - **WHEN** `GET /v1/tables/{name}` is called for an existing definition
-- **THEN** the response carries a `permissions` object with all six boolean fields
+- **THEN** the response carries a `permissions` object with all seven boolean fields
 
 #### Scenario: Create response reports the creator's permissions
 
@@ -2243,7 +2272,7 @@ SHALL carry the same object.
 - **THEN** the 201 response reports the creator's own effective permissions on the new table — `get`,
   `read`, `sensitive`, `write` and `modify` all `true` for a caller holding every table-scoped
   privilege, and `false` for any the caller does not hold, since `TABLE_CREATE` alone confers none of
-  them — and `rows_restricted = false`, because a new table carries no row policy
+  them — and `rows_restricted = false` and `columns_restricted = false`, because a new table carries no entry
 
 ### Requirement: Seeded column sensitivity on the built-in source tables
 
@@ -3115,12 +3144,15 @@ listing does not disclose the existence of tables the caller may not see.
 A table the caller holds no read-side privilege on SHALL be absent from the listing rather than
 present-but-forbidden, and an empty listing SHALL be `200` with no entries rather than `403`.
 
-The read surface SHALL be **filtered at column granularity** by the clearance, as specified in "Read
-and list table definitions": `TABLE_GET` alone exposes the non-sensitive column inventory, and
-`TABLE_GET` with `TABLE_SENSITIVE` exposes every column with its `sensitive` flag. A revision read
-(`GET /v1/tables/{name}/revision/{revision}`) SHALL apply the same filter. It uses the flag each column
-carried **at that revision** and the caller's clearance **now**, so a column that was sensitive then
-stays hidden from an uncleared caller even if it has since been declassified.
+The read surface SHALL be **filtered at column granularity** by the clearance and by column visibility, as
+specified in "Read and list table definitions": `TABLE_GET` alone exposes the non-sensitive column inventory, and
+`TABLE_GET` with `TABLE_SENSITIVE` exposes every column with its `sensitive` flag, in each case less the columns a
+column policy hides from the caller (see [table-access-control](../table-access-control/spec.md), "Hidden columns
+are absent from every read surface"). A revision read (`GET /v1/tables/{name}/revision/{revision}`) SHALL apply the
+same filter. It uses the flag each column carried **at that revision** and the caller's clearance **now**, so a
+column that was sensitive then stays hidden from an uncleared caller even if it has since been declassified; and it
+hides the columns the column policies the table had **at that revision** hide from the caller, an enrichment's
+revision by its source's current column policies (see [audit-trail](../audit-trail/spec.md)).
 
 #### Scenario: The listing is caller-filtered
 
@@ -3140,18 +3172,25 @@ stays hidden from an uncleared caller even if it has since been declassified.
 
 #### Scenario: A caller with no grants sees an empty listing
 
-- **WHEN** a caller holding no global read privilege and named in no access list lists the catalog
+- **WHEN** a caller holding no global read privilege and carrying no role with an access entry lists the catalog
 - **THEN** the response is `200` with no entries
 
 #### Scenario: A gettable table still shows sensitive column names
 
-- **GIVEN** a table whose `get` and `sensitive` lists contain the caller's provider role and which has
-  a sensitive column
+- **GIVEN** a table on which the access entry for the caller's provider role carries `get` and `sensitive`, and
+  which has a sensitive column
 - **WHEN** the caller reads that table's definition, and a revision of it at which the column was
   already sensitive
 - **THEN** both responses carry the column with `sensitive: true`
-- **AND WHEN** the caller's role is removed from the table's `sensitive` list
+- **AND WHEN** `sensitive` is removed from that role's entry
 - **THEN** the sensitive column is absent from both responses
+
+#### Scenario: A revision read hides the columns that revision's column policies hide
+
+- **GIVEN** a table with columns `a` and `b`, on which the caller's role gained an entry carrying `get` and
+  `columns` `["a"]` at revision 2, and whose entry at revision 1 carried `get` and no `columns`
+- **WHEN** the caller reads revision 2 and revision 1
+- **THEN** revision 2 carries `a` only and revision 1 carries `a` and `b`
 
 ### Requirement: Service-internal table names are reserved
 
@@ -3666,4 +3705,138 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 - **WHEN** a query projects a held enrichment's columns
 - **THEN** it succeeds
+
+### Requirement: Column policies follow a rename and refuse an emptying drop
+
+A column policy (see [table-access-control](../table-access-control/spec.md), "Per-role column policies") names
+columns, so a schema change SHALL keep every stored policy pointing at the columns it meant and SHALL never widen one.
+
+**Rename.** A `PATCH /v1/tables/{name}/schema` that renames a column SHALL rewrite every entry on the table whose
+`columns` lists it to the new name, in the same transaction and the same audit revision as the rename. Renaming a
+column of an enrichment SHALL rewrite `<enrichment>.<old>` to `<enrichment>.<new>` in the entries of its source.
+
+**Drop.** A column dropped by `PATCH /v1/tables/{name}/schema`, a column a re-defined schema of a `PENDING` or `FAILED`
+table no longer declares (`POST /v1/tables/{name}/schema`), and every column of an enrichment removed by
+`DELETE /v1/tables/{enrichment}` SHALL be removed from every `columns` list that names it (as `<enrichment>.<column>`
+in the source's entries for an enrichment's column). When removing them would leave any list **empty**, the request
+SHALL instead be refused with HTTP 409 and machine code `column_in_column_policy`, naming the columns and the roles
+whose lists they would empty, before any DDL is issued or any catalog row changes. A list SHALL never become `null`
+through a schema change, because that would show the role every column, and SHALL never become empty, because that
+is not a valid policy. Editing or removing those entries first SHALL make the operation possible. A re-defined schema
+that omits a column the caller cannot see drops it like any other omitted column, as for an unentitled sensitive
+column; the rules above still protect every list that names it.
+
+**Order within one `PATCH`.** A `PATCH` that combines operations SHALL rewrite the lists in the request's canonical
+order, against the lists as they stood before the request: first every `drop` prunes the dropped column's name, then
+every `rename` rewrites `from` to `to` in the pruned lists. A column `add`ed in the same request is never listed by an
+existing entry, even when it reuses a dropped column's name, because the drop already pruned that name. The emptying
+refusal SHALL be evaluated on the lists after the prune; a rename only rewrites names a list still holds, so it never
+refills a list the prune emptied, and such a request is refused.
+
+These guarantees SHALL hold against a concurrent `PUT /v1/tables/{name}/access/{role}`: the refusal and the rewrite
+SHALL be decided on the entries as they stand when the schema change commits, and a `PUT` committed after a rename or
+drop SHALL be validated against the columns as they stand then. No interleaving SHALL leave a list empty or naming a
+column the table (or, for a qualified name, the enrichment) no longer has, and none SHALL make the refusal arrive
+after the `ALTER`: a schema `PATCH` SHALL hold the definition's row lock (and, for an enrichment, its source's) from
+before it reads any policy until its catalog changes commit, so the entries it decides on before issuing the `ALTER`
+are the entries it commits against.
+
+These rules SHALL hold whoever the caller is, and in `none` mode too, because a policy over a missing column would
+be invalid the moment it is enforced. A rename or drop that rewrites any entry SHALL increment, by one, the access
+`generation` of the table whose entries it rewrites — the source's for a column of an enrichment or an enrichment's
+delete, never the enrichment's (see table-access-control, "Access configuration generation"); one that rewrites none
+SHALL leave every generation as it was. The refusal of a column a row policy references (see "A column a row policy
+references is protected against drop and rename") SHALL be checked first, so a column referenced by both is refused
+`409 column_in_row_policy`. Apart from that, `409 column_in_column_policy` SHALL be checked in no specified order
+against the request's other refusals — a schema `PATCH`'s other `422` and `409` checks, a re-define's validation, and
+an enrichment delete's `409` for a pipeline that reads it — so a request failing more than one of them may
+receive any of their codes; every one of them is decided before any DDL is issued or any catalog row changes.
+
+**Audit.** Every rewrite of a stored list — by a rename, a drop, a re-define or an enrichment delete — SHALL be
+recorded in the revision of the operation that caused it, as an `Update` activity of the table **whose entries
+changed**: the table itself for its own column, the source for an enrichment's column or an enrichment's delete. That
+activity's snapshot carries the rewritten entries. A table whose entries the operation does not change records no
+activity for them.
+
+A migration that removes or renames a catalog column outside the API (in raw SQL) SHALL prune or rewrite the
+`column_policies` entries that name it in the same migration, so a name left behind never re-attaches to a column
+added later under it.
+
+#### Scenario: A rename rewrites the lists that name the column
+
+- **GIVEN** a table at access `generation` 4 on which role `X`'s entry carries `columns` `["a", "b"]`
+- **WHEN** a caller holding `TABLE_MODIFY` renames `b` to `c`
+- **THEN** `X`'s entry carries `["a", "c"]`, a caller carrying only `X` still sees the renamed column, and the access
+  `generation` is 5
+
+#### Scenario: Renaming an enrichment column rewrites the source's lists
+
+- **GIVEN** a source table `usage` created through the API, with an enrichment `deployment_ref`, and an entry on
+  `usage` whose `columns` names `deployment_ref.display_name`
+- **WHEN** `deployment_ref`'s column `display_name` is renamed to `label`
+- **THEN** the entry names `deployment_ref.label`, `usage`'s access `generation` has moved by one, and
+  `deployment_ref`'s has not
+- **AND** the rename's revision records an `Update` activity for `usage` whose snapshot carries the rewritten
+  entry, besides the activities it records for `deployment_ref`
+
+#### Scenario: A drop prunes a list that keeps other columns
+
+- **GIVEN** role `X`'s entry carries `columns` `["a", "b"]`
+- **WHEN** a caller holding `TABLE_MODIFY` drops `b`
+- **THEN** the drop is applied and `X`'s entry carries `["a"]`
+
+#### Scenario: Dropping a column and adding a new one under its name in one PATCH
+
+- **GIVEN** role `X`'s entry carries `columns` `["a", "c"]`
+- **WHEN** a caller holding `TABLE_MODIFY` sends one `PATCH` that drops `c` and adds a new column `c`
+- **THEN** the request is applied and `X`'s entry carries `["a"]`, so a caller carrying only `X` does not see the new
+  `c`
+
+#### Scenario: Dropping a column and renaming another to its name in one PATCH
+
+- **GIVEN** role `X`'s entry carries `columns` `["a", "b", "c"]`
+- **WHEN** a caller holding `TABLE_MODIFY` sends one `PATCH` that drops `c` and renames `b` to `c`
+- **THEN** the request is applied and `X`'s entry carries `["a", "c"]`, where `c` is the renamed `b`
+
+#### Scenario: A drop that would empty a list is refused
+
+- **GIVEN** role `X`'s entry carries `columns` `["b"]`
+- **WHEN** a caller drops `b`
+- **THEN** the request is refused `409 column_in_column_policy` naming `b` and `X`, no `ALTER` is issued, and `X`'s
+  entry is unchanged
+
+#### Scenario: Deleting an enrichment that a list depends on is refused
+
+- **GIVEN** an entry on a source whose `columns` names only columns of its enrichment `e`
+- **WHEN** a caller deletes `e`
+- **THEN** the request is refused `409 column_in_column_policy` and `e` is not dropped
+- **AND WHEN** the list also names a column of the source
+- **THEN** `e` is deleted and the list keeps only the source's column
+
+#### Scenario: Re-defining a failed table without a listed column
+
+- **GIVEN** a `FAILED` table with columns `a` and `b` and an entry whose `columns` is `["b"]`
+- **WHEN** a caller posts the table's schema again without `b`
+- **THEN** the request is refused `409 column_in_column_policy`, the stored columns are unchanged, and no `CREATE` is
+  issued
+
+#### Scenario: A column referenced by a row policy and a column policy
+
+- **GIVEN** column `project_id`, referenced by role `X`'s row policy and listed alone in role `Y`'s `columns`
+- **WHEN** a caller drops `project_id`
+- **THEN** the request is refused `409 column_in_row_policy`
+
+#### Scenario: A schema change that touches no list leaves the generation
+
+- **GIVEN** a table at access `generation` 2 whose entries list only `a`
+- **WHEN** column `z` is dropped
+- **THEN** the access `generation` is still 2
+
+#### Scenario: A drop racing an access PUT never empties a list
+
+- **GIVEN** role `Y` has no entry, and a table has columns `a` and `b`
+- **WHEN** a `PUT` storing `columns` `["b"]` for `Y` and a `PATCH` dropping `b` run concurrently
+- **THEN** either the `PUT` commits first and the drop is refused `409 column_in_column_policy`, or the drop commits
+  first and the `PUT` is refused `422 validation_error` naming `b`; `Y` never holds `[]` or a list naming `b` once `b`
+  is gone
 

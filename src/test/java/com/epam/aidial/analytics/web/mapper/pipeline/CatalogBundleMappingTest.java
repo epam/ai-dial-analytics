@@ -23,7 +23,6 @@ import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
-import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest;
@@ -50,7 +49,8 @@ class CatalogBundleMappingTest {
     private final JsonMapper strict = lenient.rebuild().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
     private final PipelineSpecCodec specCodec = new PipelineSpecCodec(lenient);
     private final TableMapper tableMapper = new TableMapper(mock(TableCallerPermissions.class),
-            mock(SensitiveColumnAccess.class), new RowPolicyCodec(lenient), mock(com.epam.aidial.analytics.service.table.relayout.TableLayouts.class));
+            mock(SensitiveColumnAccess.class), mock(com.epam.aidial.analytics.service.table.TableAccessService.class),
+            mock(com.epam.aidial.analytics.service.table.relayout.TableLayouts.class));
     private final PipelineMapper pipelineMapper = pipelineMapper();
 
     private PipelineMapper pipelineMapper() {
