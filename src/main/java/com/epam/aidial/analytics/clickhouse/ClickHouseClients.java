@@ -21,7 +21,7 @@ import com.epam.aidial.analytics.configuration.ClickHouseProperties;
  *
  * @see ClickHouseFailures#transportFaults() the retry policy applied to every client
  */
-final class ClickHouseClients {
+public final class ClickHouseClients {
 
     private ClickHouseClients() {
     }
@@ -33,9 +33,18 @@ final class ClickHouseClients {
      * <p>The credential is passed in rather than read from {@code connection} because the read and write
      * paths deliberately use different ones — the split is a security boundary, not a convenience.
      */
-    static Client.Builder builder(ClickHouseProperties connection, String user, String password) {
+    public static Client.Builder builder(ClickHouseProperties connection, String user, String password) {
+        return builder(connection, connection.host(), connection.port(), user, password);
+    }
+
+    /**
+     * {@link #builder(ClickHouseProperties, String, String)} pointed at {@code host:port} instead of
+     * {@code clickhouse.host}: how a discovered replica is reached. Everything else — credential handling,
+     * default database, transport policy — is the primary's, so the shared policy holds for every replica.
+     */
+    public static Client.Builder builder(ClickHouseProperties connection, String host, int port, String user, String password) {
         return new Client.Builder()
-                .addEndpoint("http://" + connection.host() + ":" + connection.port() + "/")
+                .addEndpoint("http://" + host + ":" + port + "/")
                 // Null means "unset, fall back to ClickHouse's own default account"; an explicitly empty
                 // value is a real (if odd) credential and is passed through as written.
                 .setUsername(user == null ? "default" : user)

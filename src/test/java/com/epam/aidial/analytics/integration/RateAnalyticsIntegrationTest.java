@@ -82,7 +82,7 @@ class RateAnalyticsIntegrationTest extends AbstractClickHouseIntegrationTest {
         // comment, and a negative rating with no comment. This exercises what only surfaces against real
         // ClickHouse — the signed Int8 `rate` and the AES_256_GCM_SIV `comment` codec — then reads them
         // back through the production query path (catalog -> executor -> ClickHouse).
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics "
                 + "(request_time, project_id, trace_id, core_span_id, deployment, user_hash, chat_id, "
                 + "response_id, rate, comment) VALUES "
@@ -126,7 +126,7 @@ class RateAnalyticsIntegrationTest extends AbstractClickHouseIntegrationTest {
         // Also the only place the physical LowCardinality(Nullable(String)) declaration is exercised:
         // SchemaValidator reconciles the mapping against it at context startup, so a wrapper it could
         // not see through would fail every test in this class rather than just this one.
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics "
                 + "(request_time, project_id, trace_id, core_span_id, deployment, user_hash, chat_id, "
                 + "response_id, rate, rate_raw) VALUES "
@@ -168,7 +168,7 @@ class RateAnalyticsIntegrationTest extends AbstractClickHouseIntegrationTest {
         // The published counting expression, run for real: rate_raw = 'false' OR (rate_raw IS NOT NULL
         // AND rate < 0). The numeric half reads `rate`, not rate_raw, because rate_raw is text and has
         // no ordering — matching it against '-1' would miss the -2 row seeded below.
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics "
                 + "(request_time, project_id, trace_id, core_span_id, deployment, user_hash, chat_id, "
                 + "response_id, rate, rate_raw) VALUES "
@@ -197,7 +197,7 @@ class RateAnalyticsIntegrationTest extends AbstractClickHouseIntegrationTest {
         // and lets the V5 DEFAULT expression derive it. Two of the rows share (trace_id, core_span_id)
         // and two more have neither, the cases a trace/span-only hash would collapse onto one identity
         // and make the keyset scan skip rows.
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics "
                 + "(request_time, project_id, trace_id, core_span_id, deployment, user_hash, chat_id, "
                 + "response_id, rate, comment) VALUES "

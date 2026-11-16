@@ -380,6 +380,8 @@ def arrowJvmArgs = [
         '--enable-native-access=ALL-UNNAMED',
 ]
 
+def MULTI_REPLICA_TESTS = '*.MultiReplica*IntegrationTest'
+
 tasks.named('test') {
     useJUnitPlatform()
     jvmArgs arrowJvmArgs
@@ -394,6 +396,30 @@ tasks.named('test') {
             .withPropertyName('openspecSpecs')
             .withPathSensitivity(PathSensitivity.RELATIVE)
             .optional()
+    // The ClickHouse server version the integration tests run against (ClickHouseContainerSupport): an input, so a
+    // run against another version is never reported UP-TO-DATE from one against the default.
+    inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
+    // The multi-replica classes start a Keeper and three ClickHouse servers; they run in multiReplicaTest instead.
+    filter {
+        excludeTestsMatching MULTI_REPLICA_TESTS
+    }
+}
+
+// The replication tests on a three-replica cluster: replica discovery, pipeline home replicas, DDL and pipelines with a
+// replica or Keeper down, and the continuous-ingest disruption test. Opt-in, because each class costs minutes; run it
+// for a change to replication, routing or migrations, and with CLICKHOUSE_TEST_VERSION across the supported range.
+tasks.register('multiReplicaTest', Test) {
+    description = 'Runs the replication tests against a three-replica ClickHouse cluster.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    jvmArgs arrowJvmArgs
+    inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
+    filter {
+        includeTestsMatching MULTI_REPLICA_TESTS
+    }
+    shouldRunAfter tasks.named('test')
 }
 
 tasks.named('bootRun') {

@@ -1,8 +1,11 @@
 package com.epam.aidial.analytics.integration;
 
+import com.clickhouse.client.api.query.QuerySettings;
+import com.epam.aidial.analytics.clickhouse.ClickHouseWriterClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Duration;
 import java.util.function.BooleanSupplier;
@@ -30,6 +33,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Requires a running Docker daemon.
  */
 class PayloadForceMergeIntegrationTest extends AbstractClickHouseIntegrationTest {
+
+    @Autowired
+    private ClickHouseWriterClient writer;
 
     private static final String COLLAPSE_TABLE = "force_merge_probe_collapse";
 
@@ -74,7 +80,7 @@ class PayloadForceMergeIntegrationTest extends AbstractClickHouseIntegrationTest
 
     @Test
     void settledPartitionCollapsesToOneRowPerKeyWhilePartitionWithYoungPartIsLeftAlone() throws InterruptedException {
-        execute(createScratch(COLLAPSE_TABLE));
+        createPlain(createScratch(COLLAPSE_TABLE));
         final String original = showCreateTable(COLLAPSE_TABLE);
         execute("SYSTEM STOP MERGES " + COLLAPSE_TABLE);
 
@@ -123,7 +129,7 @@ class PayloadForceMergeIntegrationTest extends AbstractClickHouseIntegrationTest
 
     @Test
     void reapplyingTheSettingsIsHarmless() {
-        execute(createScratch(REAPPLY_TABLE));
+        createPlain(createScratch(REAPPLY_TABLE));
         final String modify = "ALTER TABLE " + REAPPLY_TABLE
                 + " MODIFY SETTING min_age_to_force_merge_seconds = 172800, min_age_to_force_merge_on_partition_only = 1, " + VERTICAL;
 
@@ -143,12 +149,22 @@ class PayloadForceMergeIntegrationTest extends AbstractClickHouseIntegrationTest
      * TTL: the fixed past dates the partitions use would be expired on arrival. {@code min_bytes_for_wide_part = 0}
      * stands in for the payload table's size: ClickHouse merges vertically only into a wide part, which a real
      * payload partition always is and these few MiB of rows otherwise would not be.
+     *
+     * <p>Plain, unlike the payload table itself: this pins what the force-merge settings do, and on a replicated
+     * table ClickHouse's regular merge selection also merges the open day's two parts, which would leave the negative
+     * case nothing to observe. The settings apply alike to both engines.
      */
     private static String createScratch(String table) {
         return "CREATE TABLE " + table + " (event_id UUID, request_time DateTime64(3, 'UTC'), "
                 + "_updated_at DateTime64(3) DEFAULT now64(3), body String) "
                 + "ENGINE = ReplacingMergeTree(_updated_at) PARTITION BY toYYYYMMDD(request_time) ORDER BY event_id "
                 + "SETTINGS ttl_only_drop_parts = 1, min_bytes_for_wide_part = 0";
+    }
+
+    /** The scratch table is plain, which the suite's server refuses in its Replicated database unless lifted. */
+    private void createPlain(String ddl) {
+        writer.primaryClient().queryAll(ddl,
+                new QuerySettings().serverSetting("database_replicated_allow_only_replicated_engine", "0"));
     }
 
     /**

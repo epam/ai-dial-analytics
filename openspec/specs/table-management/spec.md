@@ -2071,11 +2071,16 @@ materialize as ClickHouse `Array(<element>)`. A `type=timestamp` column SHALL ma
 `DateTime64(3, 'UTC')` — the zone SHALL be declared rather than left to the ClickHouse server's, because
 the read path converts the zoneless value the driver surfaces to epoch milliseconds at UTC, and a time
 bucket materialized into such a column would otherwise re-bucket on read in the server's zone rather than
-the one it was computed in. If the `CREATE TABLE` fails or its outcome is ambiguous
-(e.g. a timeout under which ClickHouse may still create the table), the system SHALL issue a
-best-effort `DROP TABLE IF EXISTS`, set the definition to `status=FAILED`, and return an error using
-the `ErrorView` contract without leaking ClickHouse internals; a `FAILED` table MAY be re-posted
-(with its full schema) to retry. In `oidc` mode the endpoint SHALL require `TABLE_MODIFY`, held
+the one it was computed in. If the `CREATE TABLE` reports a failure but the table did not exist before
+it and exists on the primary afterwards with every declared column at its declared type, the primary executed it: the definition SHALL be set to
+`status=ACTIVE` and no `DROP` issued, because the other replicas apply it from the database log (see
+[clickhouse-replication](../clickhouse-replication/spec.md)). If it reports that the table already exists
+when it did not before, with another schema, a concurrent call created it: the error SHALL be returned with no
+`DROP` and no status change. Otherwise, if the `CREATE TABLE` fails or
+its outcome is ambiguous (e.g. a timeout under which ClickHouse may still create the table), the system
+SHALL issue a best-effort `DROP TABLE IF EXISTS`, set the definition to `status=FAILED`, and return an
+error using the `ErrorView` contract without leaking ClickHouse internals; a `FAILED` table MAY be
+re-posted (with its full schema) to retry. In `oidc` mode the endpoint SHALL require `TABLE_MODIFY`, held
 globally or granted on the table, and a `system`-owned table SHALL reject it with HTTP 409 whatever the
 caller holds. Declaring any column `sensitive` here SHALL additionally require `TABLE_SENSITIVE` on the
 table, globally or granted on the `PENDING` table. Otherwise the request SHALL be rejected with
@@ -2209,10 +2214,19 @@ creating a column it could not then see.
 
 #### Scenario: ClickHouse failure marks the table FAILED
 
-- **WHEN** the ClickHouse `CREATE TABLE` fails during the define-and-materialize call
+- **WHEN** the ClickHouse `CREATE TABLE` fails during the define-and-materialize call, and the table
+  does not exist on the primary afterwards
 - **THEN** the system issues a best-effort `DROP TABLE IF EXISTS`, sets the definition to
   `status=FAILED`, and the response is an error using the `ErrorView` contract with no raw ClickHouse
   internals
+
+#### Scenario: A CREATE the primary executed is kept although it reported a failure
+
+- **GIVEN** a replica that is slow to apply DDL
+- **WHEN** the `CREATE TABLE` of the define-and-materialize call reports a failure after the primary
+  created the table
+- **THEN** no `DROP` is issued, the definition is `status=ACTIVE`, and the lagging replica creates the
+  table from the database log
 
 ### Requirement: Table responses carry caller-effective permissions
 
@@ -3668,3 +3682,65 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 - **WHEN** a query projects a held enrichment's columns
 - **THEN** it succeeds
+
+### Requirement: Every materialized table uses the replicated engine variant
+
+The engine this specification names for a table the catalog materializes SHALL be read as an engine family. The
+`CREATE TABLE` the service issues SHALL use that family's `Replicated` counterpart:
+
+- `ReplicatedMergeTree` for an `append` source;
+- `ReplicatedReplacingMergeTree(_updated_at)` for an `upsert_by_key` source and for an enrichment.
+
+The engine SHALL carry no Keeper path or replica arguments, so ClickHouse places the table under the
+`Replicated` database's defaults. The table's settings SHALL include `replicated_deduplication_window = 0` and
+`replicated_deduplication_window_for_async_inserts = 0`, alongside any setting the definition already renders,
+such as `ttl_only_drop_parts = 1`. Everything else this specification states about the rendered DDL is
+unchanged: columns, system columns, `ORDER BY`, `PARTITION BY`, `TTL` and lookup indexes.
+
+The same rendering SHALL apply on every path that creates a catalog table:
+
+- `POST /v1/tables/{name}/schema` and `POST /v1/tables` with a schema;
+- catalog import;
+- OTel sink creation;
+- the enrichment relayout's aligned copy.
+
+The write discipline is unchanged. A table's `write` facet still selects the engine family, and the
+agreement this specification requires between a hand-written table's engine and its declared facet holds within
+the replicated family:
+
+- a `ReplicatedReplacingMergeTree` source is declared `upsert_by_key`;
+- a `ReplicatedMergeTree` source is declared `append`.
+
+A table registered over hand-written DDL SHALL use a replicated engine, or the service refuses to start (see the
+`clickhouse-replication` spec).
+
+#### Scenario: An append source is created replicated
+
+- **WHEN** an `append` source with `ordering_key: ["service_name", "event_time"]` is defined and materialized
+- **THEN** a single `CREATE TABLE … ENGINE = ReplicatedMergeTree ORDER BY (service_name, event_time)` is issued,
+  with `replicated_deduplication_window = 0` and `replicated_deduplication_window_for_async_inserts = 0` among
+  its settings
+
+#### Scenario: An upsert-by-key source is created replicated
+
+- **WHEN** an `upsert_by_key` source keyed on `ticket_id` is defined and materialized
+- **THEN** the issued `CREATE TABLE` uses `ENGINE = ReplicatedReplacingMergeTree(_updated_at) ORDER BY
+  (ticket_id)` with the `_updated_at DateTime64(3) DEFAULT now64(3)` column and the two deduplication settings
+
+#### Scenario: An enrichment with a retention keeps its existing settings
+
+- **WHEN** an aligned enrichment with a `ttl` is defined and materialized
+- **THEN** its `CREATE TABLE` uses `ReplicatedReplacingMergeTree(_updated_at)` and its settings carry
+  `ttl_only_drop_parts = 1` together with the two deduplication settings
+
+#### Scenario: A created table exists on every replica
+
+- **GIVEN** a `Replicated` database with three replicas
+- **WHEN** a table is defined and materialized through any of the paths above
+- **THEN** the table exists on all three replicas, and rows written to it on one replica are readable on the
+  others once fetched
+
+#### Scenario: The write facet still reflects the engine family
+
+- **WHEN** a materialized `upsert_by_key` source is read back
+- **THEN** it reports `write: "upsert_by_key"`, matching its `ReplicatedReplacingMergeTree(_updated_at)` engine

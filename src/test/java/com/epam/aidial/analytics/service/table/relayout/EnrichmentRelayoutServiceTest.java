@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table.relayout;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.service.pipeline.LookupIndexService;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
@@ -55,7 +56,7 @@ class EnrichmentRelayoutServiceTest {
     private final EnrichmentRelayoutService service = new EnrichmentRelayoutService(definitions, columns, pipelines,
             specCodec, mock(TableSchemaCreationService.class), new TableDdlRenderer(), ddl, inspector,
             mock(LookupIndexService.class), states, mock(DataSource.class), mock(TransactionTemplate.class),
-            new PipelineBudgetProperties(Duration.ofSeconds(120), DataSize.ofGigabytes(2)));
+            new PipelineBudgetProperties(Duration.ofSeconds(120), DataSize.ofGigabytes(2)), ReplicaRouterStubs.inPlace());
 
     @Test
     void databaseEngineThatCannotExchangeTablesIsSkippedAndReportedUnsupported() {

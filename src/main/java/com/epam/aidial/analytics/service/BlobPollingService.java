@@ -157,6 +157,8 @@ public class BlobPollingService {
         // They stay in the seen-set like any blob read this cycle, so the overlap window does not refuse them again.
         List<RefusedBlob> refused = new ArrayList<>();
         try {
+            // The ledgers first, so a new primary skips every blob already recorded; a failed sync is a failed cycle.
+            ledger.sync();
             // One sink per cycle so rows batch across blobs (a cycle of many tiny blobs → a few inserts). Built
             // inside the try so a failed catalog read behind it is a failed cycle, with its metrics recorded.
             // Each blob is recorded in the ledger as soon as its rows are all written (usually at the final flush).

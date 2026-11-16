@@ -177,9 +177,42 @@ supported range; 26.8.15.10 still defaults `async_insert` to `1`, so the pin sti
 pin. The Flyway path is insulated by the JDBC driver, which pins the same setting
 itself — **do not bump `clickhouse-java` alongside the server** (see the note in `build.gradle`).
 
-`deduplicate_insert` also defaults to `enable` from 26.2 but does not reach ADAS: for a
-non-replicated table, insert deduplication is gated by `non_replicated_deduplication_window`, still
-`0` on 26.8.
+## Replicated tables, insert deduplication off
+
+Every ADAS table is a `Replicated*MergeTree` in a `Replicated` database, and every table sets
+`replicated_deduplication_window = 0` and `replicated_deduplication_window_for_async_inserts = 0`.
+Topology, Keeper and the other server requirements are in
+[`clickhouse-replication.md`](clickhouse-replication.md).
+
+By default a replicated table drops an inserted block identical to a recent one. From 26.x the block
+hash ignores the server-filled `DEFAULT` column, so an upsert `open → closed → open` would end on
+`closed`. On 25.3, a rebuild that reproduces its previous output would be dropped. The table setting is
+the only spelling honoured across the supported range: the query-level `insert_deduplicate` is ignored
+from 26.x, and `deduplicate_insert` does not exist on 25.3. The startup table check refuses a table
+without it, and the startup conversion adds it to a replicated table that lacks it.
+
+With deduplication off, a replayed or retried insert stores its rows again:
+
+- **`upsert_by_key` tables and enrichments** collapse the copies.
+- **`append` tables and OTel sink tables** are **at-least-once**. A `POST …/rows` or OTel write that
+  failed with `503` after its commit may have been stored, so its retry can store the rows twice.
+  ClickHouse reports that case as `UNKNOWN_STATUS_OF_INSERT`.
+
+## Keeper and replication failures
+
+With Keeper unavailable, reads keep working. Inserts, `INSERT … SELECT`, DDL and replica syncs fail.
+ADAS reports these codes as `503 clickhouse_unavailable` on every path, and data-sync retries the blob:
+
+| Code | Name                       | Seen when                                          |
+|------|----------------------------|----------------------------------------------------|
+| 242  | `TABLE_IS_READ_ONLY`       | an insert or sync on a replica without a Keeper session |
+| 225  | `NO_ZOOKEEPER`             | no Keeper reachable                                |
+| 999  | `KEEPER_EXCEPTION`         | a DDL while Keeper is down, or an expired session  |
+| 319  | `UNKNOWN_STATUS_OF_INSERT` | an insert whose commit could not be confirmed      |
+
+A replica whose Keeper metadata was lost stays `TABLE_IS_READ_ONLY` until an operator runs
+`SYSTEM RESTORE REPLICA`. ADAS still answers `503` for it, and the log line names the replica and
+the code.
 
 ## Settled ingest days are force-merged
 
@@ -301,6 +334,8 @@ aggregate `INSERT … SELECT` statements. Which grants it needs depends on which
 | Table catalog schema evolution (`PATCH …/schema`)         | `ALTER TABLE … ADD/DROP/RENAME COLUMN`                                                                                                                               | `ALTER`                                                   |
 | Table catalog delete (`DELETE /v1/tables/{name}`)         | `DROP TABLE`                                                                                                                                                         | `DROP TABLE`                                              |
 | Class-1 materialize and aggregate refresh                 | `INSERT … SELECT` reading the input source **and** every enrichment table the declaration references                                                                 | `INSERT`, `SELECT` on both                                |
+| Startup table conversion (plain tables in a `Replicated` database, migrations enabled) | `CREATE TABLE`, `ALTER TABLE … ATTACH PARTITION ALL FROM` / `MODIFY SETTING`, `EXCHANGE TABLES`, `DROP TABLE`, `SELECT count()`, `SYSTEM STOP MERGES` / `START MERGES` | `CREATE TABLE`, `INSERT`, `ALTER`, `SELECT`, `DROP TABLE`, `SYSTEM MERGES` |
+| Replica discovery and syncs (pipeline runs, ingest cycles, relayout) | `SELECT … FROM system.clusters`, `SYSTEM SYNC DATABASE REPLICA`, `SYSTEM SYNC REPLICA … LIGHTWEIGHT` | `SELECT ON system.clusters`, `SYSTEM SYNC REPLICA`, `SYSTEM SYNC DATABASE REPLICA` |
 | Enrichment relayout (once per table, after startup)       | `CREATE TABLE`, `INSERT … SELECT`, `EXCHANGE TABLES`, `ALTER TABLE … DROP PARTITION` / `MODIFY TTL` / `MODIFY SETTING` / `RESET SETTING` / `ADD INDEX`, `DROP TABLE` | `CREATE TABLE`, `INSERT`, `SELECT`, `ALTER`, `DROP TABLE` |
 
 For the full functional surface:
@@ -309,9 +344,20 @@ For the full functional surface:
 GRANT SELECT, INSERT, CREATE TABLE, ALTER, DROP TABLE ON <database>.* TO <writer>
 GRANT SELECT ON system.parts TO <writer>
 GRANT SELECT ON system.data_skipping_indices TO <writer>
+GRANT SELECT ON system.clusters TO <writer>
+GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>
+GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>
+GRANT SYSTEM MERGES ON <database>.* TO <writer>
 ```
 
-The two system-table grants are not covered by `<database>.*`: without them the relayout fails with
+Without the two `SYSTEM SYNC` grants every pipeline run and every ingest cycle would be refused with `503`,
+because each first brings its replica up to date, so startup issues both once and fails naming the missing grant. Without `SELECT ON system.clusters` replica discovery
+fails, ADAS logs a WARN, and every statement runs on the primary. `SYSTEM MERGES` is used only by the startup
+table conversion, which stops merges on a table and its replicated copy while it compares their row counts; without
+it the conversion logs a WARN and compares with merges running, so a merge that collapses rows between the two reads
+can make it give a table up and fail startup, which a restart retries.
+
+The `system.parts` and `system.data_skipping_indices` grants are not covered by `<database>.*` either: without them the relayout fails with
 `ACCESS_DENIED … SELECT ON system.parts` before its exchange and retries on every start, a lookup index is
 never added (one WARN), and a schema `PATCH` that drops a column fails. Both tables hold part and index
 metadata only, no row data. Grant them by name, never `system.*`, which would expose `system.query_log` and
@@ -337,7 +383,8 @@ aliases, used by `V9__ttl_only_drop_parts` on `dial_usage_log` and `rate_analyti
 `V12__force_merge_settled_partitions` on `dial_usage_log_payload` and `dial_usage_log` and by
 `V14__force_merge_settled_rate_analytics` on `rate_analytics`), plus
 `ALTER DROP COLUMN` for `V11__drop_dial_usage_log_payload_columns`. Each may be narrowed to the three ingest tables instead of
-`<database>.*`. The retention reconciliation after the migrations needs an eighth, `ALTER TTL` (alias
+`<database>.*`. The startup conversion's `MODIFY SETTING` (a replicated table that still deduplicates inserts)
+needs `ALTER SETTINGS` on every table it converts, catalog tables included. The retention reconciliation after the migrations needs an eighth, `ALTER TTL` (alias
 `ALTER MODIFY TTL`), on `dial_usage_log` and `dial_usage_log_payload`, but only on a start where
 `SYNC_USAGE_LOG_TTL_DAYS` or `SYNC_PAYLOAD_TTL_DAYS` is set and differs from the live `TTL`; it covers both `MODIFY TTL`,
 including the materialization that follows, and `REMOVE TTL` (verified against 26.8.34.13). The `dial_usage_log_payload` line below is **required**, not optional: V12 is the first

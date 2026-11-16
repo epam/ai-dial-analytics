@@ -14,6 +14,8 @@ import org.springframework.test.context.DynamicPropertySource;
 // wired in via @DynamicPropertySource.
 @SpringBootTest(properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false"
 })
