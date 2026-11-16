@@ -52,13 +52,25 @@ public final class TemplatePlaceholderRule {
     public static final List<String> MEMBER_BUILT_INS =
             List.of(MEMBERS, "members_truncated", "members_included", "members_omitted", "members_notice");
 
+    /** The one suffix a placeholder may carry: {@code {{name:json}}} renders the value as a JSON literal. */
+    public static final String JSON_SUFFIX = "json";
+
     /**
-     * A {@code {{name}}} placeholder. Whitespace inside the braces is tolerated and the name is the
-     * trimmed token, so a template written {@code {{ members }}} is read as the same variable rather than
-     * as an unknown one — the renderer substitutes on the key, and refusing a spacing variant here would
-     * refuse a template that renders correctly.
+     * A {@code {{name}}} or {@code {{name:suffix}}} placeholder. Whitespace inside the braces is tolerated and the
+     * name is the trimmed token, so a template written {@code {{ members }}} is read as the same variable rather
+     * than as an unknown one — the renderer substitutes on the key, and refusing a spacing variant here would
+     * refuse a template that renders correctly. The suffix is captured separately so the rules below judge the
+     * name alone, and so a suffix other than {@link #JSON_SUFFIX} can be refused before the runner fails on it.
      */
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)\\s*}}");
+    private static final Pattern PLACEHOLDER =
+            Pattern.compile("\\{\\{\\s*([A-Za-z0-9_]+)(?::([A-Za-z0-9_]*))?\\s*}}");
+
+    /**
+     * Every {@code {{...}}} token, well-formed or not: the pattern the runner's renderer scans with. A token it finds
+     * that is not a {@link #PLACEHOLDER} binds to nothing there and fails every unit it renders, so it is refused here
+     * rather than ignored.
+     */
+    private static final Pattern TOKEN = Pattern.compile("\\{\\{([^{}]*)}}");
 
     private TemplatePlaceholderRule() {
     }
@@ -80,6 +92,8 @@ public final class TemplatePlaceholderRule {
         if (StringUtils.isBlank(template)) {
             return;
         }
+        requireWellFormedTokens(template);
+        requireKnownSuffixes(template);
         final Set<String> placeholders = placeholdersOf(template);
         if (triggerKind == TriggerKind.GROUP) {
             validateGroupGrain(placeholders);
@@ -116,8 +130,9 @@ public final class TemplatePlaceholderRule {
      * <b>no</b> built-ins — the row-grain render supplies only the declared bindings.
      *
      * <p>The placeholder direction matters for a sharper reason than a typo rendering blank: the runner's
-     * renderer replaces only keys <em>present in the inputs map</em>, so an unmatched {@code {{requeest}}}
-     * is left in the prompt <b>literally</b>. (Empty is what a bound var with a null value renders as.)
+     * renderer reads every {@code {{...}}} token as a placeholder and fails the unit when no input binds it, so
+     * an unmatched {@code {{requeest}}} would fail every unit the pipeline renders. (Empty is what a bound var
+     * with a null value renders as.)
      * The reverse direction catches a var that projects a column — possibly a heavy one — for nothing.
      *
      * <p>A declared var <b>wins over the built-in name</b>, and the order of the two checks below is what
@@ -137,8 +152,8 @@ public final class TemplatePlaceholderRule {
                         + " only the declared vars; use a group trigger, or bind a var of that name");
             }
             throw new PipelineValidationException("request_template references '{{" + placeholder
-                    + "}}', which no var declares; an unmatched placeholder is left in the prompt"
-                    + " literally rather than rendered empty, so declare the var or fix the spelling");
+                    + "}}', which no var declares; the runner binds nothing to it and fails every unit it"
+                    + " renders, so declare the var or fix the spelling");
         }
         for (final String var : varNames) {
             if (!placeholders.contains(var)) {
@@ -149,7 +164,43 @@ public final class TemplatePlaceholderRule {
         }
     }
 
-    /** The distinct placeholder names a template references, in first-appearance order. */
+    /**
+     * Refuses a {@code {{...}}} token that is not a placeholder, such as {@code {{a:b:json}}}, {@code {{members :json}}}
+     * or {@code {{a-b}}}. The runner reads every such token as a placeholder and finds no variable for it, so a
+     * template carrying one fails at every render.
+     */
+    private static void requireWellFormedTokens(String template) {
+        final Matcher matcher = TOKEN.matcher(template);
+        while (matcher.find()) {
+            if (!PLACEHOLDER.matcher(matcher.group()).matches()) {
+                throw new PipelineValidationException("request_template token '" + matcher.group() + "' is not a"
+                        + " placeholder: one is {{name}} or {{name:json}}, where the name is letters, digits and"
+                        + " underscores, with optional whitespace inside the braces; the runner would find no"
+                        + " variable for it and fail every unit it renders");
+            }
+        }
+    }
+
+    /**
+     * Refuses a placeholder whose suffix is not {@link #JSON_SUFFIX}. Read as a name, {@code {{members:yaml}}} binds
+     * to nothing, and the runner would fail every unit it renders.
+     */
+    private static void requireKnownSuffixes(String template) {
+        final Matcher matcher = PLACEHOLDER.matcher(template);
+        while (matcher.find()) {
+            final String suffix = matcher.group(2);
+            if (suffix != null && !suffix.equals(JSON_SUFFIX)) {
+                throw new PipelineValidationException("request_template placeholder '{{" + matcher.group(1) + ":"
+                        + suffix + "}}' carries an unknown suffix; the only one is ':" + JSON_SUFFIX
+                        + "', which renders the value as a JSON literal");
+            }
+        }
+    }
+
+    /**
+     * The distinct placeholder names a template references, in first-appearance order. A suffixed placeholder
+     * contributes its name, so {@code {{members:json}}} is a use of {@code members}.
+     */
     public static Set<String> placeholdersOf(String template) {
         final Set<String> names = new LinkedHashSet<>();
         final Matcher matcher = PLACEHOLDER.matcher(template);

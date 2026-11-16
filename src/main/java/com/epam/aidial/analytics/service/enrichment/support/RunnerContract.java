@@ -31,7 +31,7 @@ public final class RunnerContract {
      * rendering of {@link #VERSION} because it is used in an annotation, which needs a compile-time
      * constant.
      */
-    public static final String VERSION_VALUE = "4";
+    public static final String VERSION_VALUE = "5";
 
     /**
      * The same version as a number, for comparisons and messages. Compared for equality and nothing else;
