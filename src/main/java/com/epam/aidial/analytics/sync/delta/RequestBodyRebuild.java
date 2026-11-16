@@ -22,6 +22,10 @@ import java.util.UUID;
  * array, the system keys and {@code tools} of the root its chain ends at (every row on a chain has the same ones; the
  * system values are the first history elements), and its own cache markers.
  *
+ * <p>One kind of row is not a chat request ("A large request body equal to an earlier one is stored once"): a
+ * <b>copy</b> stores an empty body and names, as its parent, the body hash of the row that holds its body. Its rebuild is
+ * that row's body as stored, never parsed or re-written.
+ *
  * <p>No I/O: the reader that found the ancestors ({@code ComputedFieldCompleter}) owns how they were read. The walk is
  * iterative and bounded by the number of ancestors it was handed, so a cycle — impossible for rows ingest wrote, since
  * a parent's history is strictly shorter than its child's — ends as {@link Reason#INVALID} rather than as a loop.
@@ -131,6 +135,11 @@ public final class RequestBodyRebuild {
             }
             chain.add(ancestor);
             next = ancestor.parent();
+        }
+        if (body.isEmpty()) {
+            // A copy: the one row its parent hash names holds its body, which is not JSON and is returned as it is.
+            final String carried = chain.size() == 1 ? chain.getFirst().body() : null;
+            return carried == null || carried.isEmpty() ? Result.partial(Reason.INVALID, body) : new Result(Outcome.REBUILT, null, carried);
         }
         try {
             return new Result(Outcome.REBUILT, null, assemble(body, markers, chain));

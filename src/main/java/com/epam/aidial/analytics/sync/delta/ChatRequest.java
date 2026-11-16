@@ -82,7 +82,8 @@ public final class ChatRequest {
 
     /**
      * Splits a request body, or returns {@code null} when it is not a chat request — not JSON (a body truncated at
-     * 4 MiB included), not an object, or carrying no message array — and is therefore stored whole.
+     * 4 MiB included), not an object, or carrying no message array — and is therefore stored whole, or as a copy
+     * of an equal body already stored (see {@link RequestDeltaEncoder}).
      *
      * @param mapper a mapper that reads floats as {@code BigDecimal}, so canonical numbers are exact
      * @param body   the request body as ingest is about to store it

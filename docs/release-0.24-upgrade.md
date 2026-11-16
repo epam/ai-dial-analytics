@@ -185,6 +185,25 @@ A deployment that already registered the pipeline applies it by hand:
 The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
 so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
 
+## 11. Request-delta storage: a repeated large body is stored once
+
+This applies only under `SYNC_REQUEST_BODY_MODE=delta` or `whole-with-path`.
+
+Under `delta`, a request body of 65,536 characters or more that is not JSON, such as a chat body cut at the 4 MiB
+limit, is now stored once per project, user and UTC day. A later request repeating it exactly is stored with an
+empty `request_body`. Read `dial_usage_log_payload.request_body_full` for the body, as for a later chat turn (see
+[`data-sync`](../openspec/specs/data-sync/spec.md), "A large request body equal to an earlier one is stored once").
+A JSON body is never stored empty, so `json_extract_*` over `request_body` reads as before.
+
+Such an empty row holds nothing of its own, so two rules matter once any exist:
+
+- **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
+  by a 0.23 pod, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
+  `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
+  after it; they read `partial` with an empty body until the day is re-ingested.
+- **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
+  empty body.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -196,3 +215,4 @@ so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may b
 | Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§10) |
+| Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§11) |

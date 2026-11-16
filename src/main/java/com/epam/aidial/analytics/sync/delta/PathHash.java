@@ -22,7 +22,33 @@ final class PathHash {
     /** Seeds every chain; changing it re-roots every conversation once; only whole UTC days may then be re-ingested. */
     private static final byte[] SEED = "adas-request-delta-v1".getBytes(StandardCharsets.UTF_8);
 
+    /**
+     * Seeds every body hash, apart from {@link #SEED}: a system element is hashed as {@code "key":value} text, and a
+     * body with that text under the chain seed would share a chat request's first prefix hash and be taken as its root.
+     */
+    private static final byte[] BODY_SEED = "adas-request-body-v1".getBytes(StandardCharsets.UTF_8);
+
     private PathHash() {
+    }
+
+    /**
+     * The body hash of a request body that is stored once per scope and day ("A large request body equal to an earlier
+     * one is stored once"): {@code H(scope, day, body)} under its own seed, the body as its UTF-16 code units.
+     *
+     * @param scope the row's chain scope (project and user)
+     * @param day   the row's UTC day ({@code yyyy-MM-dd})
+     * @param body  the body text exactly as ingest is about to store it
+     */
+    static UUID body(String scope, String day, String body) {
+        MessageDigest digest = sha256();
+        digest.update(BODY_SEED);
+        digest.update((byte) 0);
+        updateChars(digest, scope);
+        digest.update((byte) 0);
+        digest.update(day.getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) 0);
+        updateChars(digest, body);
+        return truncate(digest.digest());
     }
 
     /**

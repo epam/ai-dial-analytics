@@ -6,6 +6,7 @@ import tools.jackson.databind.JsonNode;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -848,6 +849,274 @@ class RequestDeltaEncoderTest {
         assertThat(nearest).last().isEqualTo(new UUID(3, 299));
     }
 
+    // --- a large body that is not JSON is stored once --------------------------------------------------------------
+
+    @Test
+    void repeatedLargeBodyIsStoredOnce() {
+        Map<String, Object> first = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> second = row("e2", "10:00:05.000", truncated("a"));
+
+        flush(first);
+        flush(second);
+
+        Object hash = first.get("request_hash");
+        assertThat(hash).isNotNull();
+        assertThat(first.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(first).doesNotContainKeys("request_parent_hash", "request_ancestor_hashes", "request_cache_control");
+        assertThat(second.get("request_body")).isEqualTo("");
+        assertThat(second.get("request_parent_hash")).isEqualTo(hash);
+        assertThat(second.get("request_ancestor_hashes")).isEqualTo(List.of(hash));
+        assertThat(second).doesNotContainKey("request_hash").containsEntry("request_cache_control", null);
+        assertThat(outcomes()).containsEntry("carrier", 1.0).containsEntry("copy", 1.0);
+        assertThat(table.lookups).hasValue(0);
+    }
+
+    @Test
+    void equalBodiesInOneFlushAreStoredOnce() {
+        Map<String, Object> later = row("e2", "10:00:05.000", truncated("a"));
+        Map<String, Object> earlier = row("e1", "10:00:00.000", truncated("a"));
+
+        flush(later, earlier);
+
+        assertThat(earlier.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(later.get("request_body")).isEqualTo("");
+        assertThat(later.get("request_parent_hash")).isEqualTo(earlier.get("request_hash"));
+    }
+
+    @Test
+    void bodyIsHashedFromTheSizeBoundUp() {
+        Map<String, Object> atBound = row("e1", "10:00:00.000", "x".repeat(RequestDeltaEncoder.MIN_BODY_LENGTH));
+        Map<String, Object> below = row("e2", "10:00:01.000", "y".repeat(RequestDeltaEncoder.MIN_BODY_LENGTH - 1));
+        Map<String, Object> belowAgain = row("e3", "10:00:02.000", "y".repeat(RequestDeltaEncoder.MIN_BODY_LENGTH - 1));
+
+        flush(atBound, below, belowAgain);
+
+        assertThat(atBound).containsKey("request_hash");
+        assertThat(below).doesNotContainKey("request_hash");
+        assertThat(belowAgain).doesNotContainKeys("request_hash", "request_parent_hash");
+        assertThat(belowAgain.get("request_body")).isEqualTo(below.get("request_body"));
+    }
+
+    /** JSON keeps its body on every row, whatever makes the encoder's own parse refuse it. */
+    @Test
+    void largeJsonBodyIsNeverHashedWhole() {
+        String padding = "p".repeat(70_000);
+        String mcp = "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"doc\":\"" + padding + "\"}}";
+        String duplicateMember = "{\"a\":1,\"a\":\"" + padding + "\"}";
+        String deep = "[".repeat(2_000) + "\"" + padding + "\"" + "]".repeat(2_000);
+        List<Map<String, Object>> rows = new ArrayList<>();
+        int event = 0;
+        for (String body : List.of(mcp, duplicateMember, deep)) {
+            rows.add(row("e" + event, "10:00:0" + event++ + ".000", body));
+            rows.add(row("e" + event, "10:00:0" + event++ + ".000", body));
+        }
+
+        rows.forEach(this::flush);
+
+        assertThat(rows).allSatisfy(row -> {
+            assertThat(row).doesNotContainKeys("request_hash", "request_parent_hash");
+            assertThat((String) row.get("request_body")).hasSizeGreaterThan(70_000);
+        });
+    }
+
+    @Test
+    void jsonValueFollowedByTextIsNotJson() {
+        String body = "{\"a\":1} trailing " + "t".repeat(70_000);
+        Map<String, Object> first = row("e1", "10:00:00.000", body);
+        Map<String, Object> second = row("e2", "10:00:01.000", body);
+
+        flush(first);
+        flush(second);
+
+        assertThat(second.get("request_parent_hash")).isEqualTo(first.get("request_hash"));
+        assertThat(RequestDeltaEncoder.json("{\"a\":1} {\"b\":2}")).isFalse();
+        assertThat(RequestDeltaEncoder.json(" [1, 2] ")).isTrue();
+        assertThat(RequestDeltaEncoder.json("")).isFalse();
+    }
+
+    @Test
+    void equalBodyOfAnotherUserProjectOrDayIsNotCopy() {
+        Map<String, Object> stored = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> otherUser = row("e2", "10:00:01.000", OTHER_SCOPE, DAY, truncated("a"));
+        Map<String, Object> otherProject = row("e3", "10:00:02.000", truncated("a"));
+        otherProject.put("project_id", "project-2");
+        Map<String, Object> otherDay = row("e4", "10:00:03.000", SCOPE, "2026-01-16", truncated("a"));
+
+        flush(stored);
+        flush(otherUser, otherProject, otherDay);
+
+        assertThat(List.of(stored, otherUser, otherProject, otherDay)).extracting(row -> row.get("request_hash"))
+                .doesNotContainNull().doesNotHaveDuplicates();
+        assertThat(otherDay.get("request_body")).isEqualTo(truncated("a"));
+    }
+
+    @Test
+    void reingestedCarrierStaysCarrierAndItsCopyStaysCopy() {
+        Map<String, Object> carrier = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> copy = row("e2", "10:00:05.000", truncated("a"));
+        flush(carrier);
+        flush(copy);
+
+        Map<String, Object> carrierAgain = copy(carrier);
+        Map<String, Object> copyAgain = row("e2", "10:00:05.000", truncated("a"));
+        flush(copyAgain, carrierAgain);
+
+        assertThat(carrierAgain.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(carrierAgain.get("request_hash")).isEqualTo(carrier.get("request_hash"));
+        assertThat(copyAgain.get("request_body")).isEqualTo("");
+    }
+
+    /** A stored row of an event in the batch is about to be replaced, so it never makes a copy, whatever time it shows. */
+    @Test
+    void storedRowOfAnEventInTheBatchIsNotCarrier() {
+        RequestDeltaEncoder reporting = new RequestDeltaEncoder(new ParentLookup() {
+            @Override
+            public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+                return Map.of();
+            }
+
+            @Override
+            public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+                List<Carrier> found = new ArrayList<>();
+                hashes.forEach(hash -> found.add(new Carrier(hash, "e1", 0L)));
+                hashes.forEach(hash -> found.add(new Carrier(hash, "e2", 0L)));
+                return found;
+            }
+        }, 1000, registry, "dial_usage_log_payload");
+        Map<String, Object> own = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> ineligible = row("e2", "10:00:01.000", "small");
+        Map<String, Object> other = row("e3", "10:00:02.000", truncated("b"));
+
+        reporting.encode(new ArrayList<>(List.of(own, ineligible, other)));
+
+        assertThat(own.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(other.get("request_body")).isEqualTo(truncated("b"));
+        assertThat(other).containsKey("request_hash").doesNotContainKey("request_parent_hash");
+    }
+
+    @Test
+    void equalBodiesAtTheSameInstantAreBothCarriers() {
+        Map<String, Object> first = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> second = row("e2", "10:00:00.000", truncated("a"));
+        Map<String, Object> third = row("e3", "10:00:00.000", truncated("a"));
+
+        flush(first, second);
+        flush(third);
+
+        assertThat(List.of(first, second, third)).allSatisfy(row -> {
+            assertThat(row.get("request_body")).isEqualTo(truncated("a"));
+            assertThat(row).doesNotContainKey("request_parent_hash");
+        });
+    }
+
+    @Test
+    void earlierRequestArrivingLaterIsCarrierToo() {
+        Map<String, Object> later = row("e1", "10:00:05.000", truncated("a"));
+        Map<String, Object> earlier = row("e2", "10:00:00.000", truncated("a"));
+
+        flush(later);
+        flush(earlier);
+
+        assertThat(earlier.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(earlier.get("request_hash")).isEqualTo(later.get("request_hash"));
+    }
+
+    @Test
+    void wholeWithPathStampsTheBodyHashAndDeltaCopiesIt() {
+        encoder = newEncoder(RequestBodyMode.WHOLE_WITH_PATH);
+        Map<String, Object> stamped = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> stampedAgain = row("e2", "10:00:01.000", truncated("a"));
+        flush(stamped, stampedAgain);
+
+        encoder = newEncoder(RequestBodyMode.DELTA);
+        Map<String, Object> copy = row("e3", "10:00:05.000", truncated("a"));
+        flush(copy);
+
+        assertThat(stampedAgain.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(stampedAgain.get("request_hash")).isEqualTo(stamped.get("request_hash"));
+        assertThat(copy.get("request_body")).isEqualTo("");
+        assertThat(copy.get("request_parent_hash")).isEqualTo(stamped.get("request_hash"));
+    }
+
+    @Test
+    void copySplitFromItsCarrierTakesItsBodyBack() {
+        Map<String, Object> carrier = row("e1", "10:00:00.000", truncated("a"));
+        Map<String, Object> copy = row("e2", "10:00:05.000", truncated("a"));
+        Map<String, Object> copyBeside = row("e3", "10:00:06.000", truncated("a"));
+        Map<Map<String, Object>, String> partOf = new IdentityHashMap<>();
+        partOf.put(carrier, "blob-1");
+        partOf.put(copyBeside, "blob-1");
+        partOf.put(copy, "blob-2");
+
+        RequestDeltaEncoder.Encoding encoding = encoder.encode(new ArrayList<>(List.of(carrier, copy, copyBeside)));
+        assertThat(copy.get("request_body")).isEqualTo("");
+        int rerooted = encoding.isolate(partOf::get);
+
+        assertThat(rerooted).isEqualTo(1);
+        assertThat(copy.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(copy.get("request_hash")).isEqualTo(carrier.get("request_hash"));
+        assertThat(copy.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(copy.get("request_ancestor_hashes")).isEqualTo(List.of());
+        assertThat(copyBeside.get("request_body")).isEqualTo("");
+    }
+
+    @Test
+    void failedCarrierLookupKeepsTheBodyAndDoesNotThrow() {
+        RequestDeltaEncoder failing = new RequestDeltaEncoder(new ParentLookup() {
+            @Override
+            public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+                return Map.of();
+            }
+
+            @Override
+            public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+                throw new IllegalStateException("ClickHouse is unreachable");
+            }
+        }, 1000, registry, "dial_usage_log_payload");
+        Map<String, Object> row = row("e1", "10:00:00.000", truncated("a"));
+
+        failing.encode(new ArrayList<>(List.of(row))).written();
+
+        assertThat(row.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(row).containsKey("request_hash");
+        assertThat(registry.get("ingest.request.delta.lookup.failures").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void largeBodyWithoutScopeOrWithAnOffsetIsNotHashed() {
+        Map<String, Object> unscoped = row("e1", "10:00:00.000", "", DAY, truncated("a"));
+        unscoped.put("project_id", "");
+        Map<String, Object> offset = row("e2", "10:00:01.000", truncated("a"));
+        offset.put("request_time", DAY + " 10:00:01.000+02:00");
+
+        flush(unscoped, offset);
+
+        assertThat(List.of(unscoped, offset)).allSatisfy(row -> {
+            assertThat(row).doesNotContainKeys("request_hash", "request_parent_hash");
+            assertThat(row.get("request_body")).isEqualTo(truncated("a"));
+        });
+    }
+
+    /** A system element is hashed as {@code "key":value}; a body with that very text must not become the chat's root. */
+    @Test
+    void chatRequestNeverLinksToBodyHashedWhole() {
+        String prompt = "s".repeat(70_000);
+        Map<String, Object> body = row("e1", "10:00:00.000", "\"system\":\"" + prompt + "\"");
+        Map<String, Object> chat = row("e2", "10:00:05.000", "{\"system\":\"" + prompt + "\",\"messages\":[" + msg("user", "u1") + "]}");
+
+        flush(body);
+        flush(chat);
+
+        assertThat(body).containsKey("request_hash");
+        assertThat(chat.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
+        assertThat(PathHash.body("1:pu", DAY, "h")).isNotEqualTo(PathHash.prefixes("1:pu", DAY, null, List.of("h"))[1]);
+    }
+
+    /** A chat body cut at the size limit: not JSON, and long enough to be hashed whole. */
+    private static String truncated(String seed) {
+        return "{\"messages\":[{\"role\":\"user\",\"content\":\"" + seed + "x".repeat(70_000);
+    }
+
     // --- harness ------------------------------------------------------------------------------------------------
 
     private RequestDeltaEncoder newEncoder() {
@@ -957,6 +1226,20 @@ class RequestDeltaEncoderTest {
                 }
             }
             return ancestorsByPath;
+        }
+
+        @Override
+        public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+            List<Carrier> found = new ArrayList<>();
+            for (Map<String, Object> row : byEvent.values()) {
+                Object hash = row.get("request_hash");
+                String time = (String) row.get("request_time");
+                if (hash != null && hashes.contains(UUID.fromString((String) hash)) && days.contains(time.substring(0, 10))) {
+                    found.add(new Carrier(UUID.fromString((String) hash), (String) row.get("event_id"),
+                            LocalDateTime.parse(time.replace(' ', 'T')).toInstant(ZoneOffset.UTC).toEpochMilli()));
+                }
+            }
+            return found;
         }
     }
 }

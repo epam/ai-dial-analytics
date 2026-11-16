@@ -139,7 +139,9 @@ not stored whole. Every turn of a conversation re-sends the history before it, a
 `request_body` keeps the request with only the history elements this turn added, without the system prompt and the
 tools when the earlier turn it links to already has them, and a hidden link to that turn. The first turn of a
 conversation is stored complete, and every other body (MCP, embeddings, anything that does not parse) is stored
-whole.
+whole, with one exception: a body of 65,536 characters or more that is not JSON, such as a chat body cut at the
+4 MiB limit, is stored once per project, user and UTC day. A later request repeating it exactly has an empty
+`request_body`; `request_body_full` returns the body. A JSON body is never stored empty.
 
 Every chat request is rewritten under `delta`, the first turn of a conversation included: its `request_body` is
 re-serialized with keys sorted and no whitespace, and its history's `cache_control` markers move to
@@ -160,7 +162,7 @@ reads `dial_usage_log_payload.request_body_full` instead: the body rebuilt, afte
 as it was sent (system prompt, tools and cache markers included; key order and whitespace are not kept), with
 `dial_usage_log_payload.request_body_rebuild` saying what it holds — `stored` (the body was stored whole, returned
 byte for byte), `rebuilt`, or `partial` (the chain could not be completed, so this is the stored delta, not the whole
-request). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two
+request; for a repeated body stored empty, the empty string). Both are `NULL` when the event has no payload row or no stored request body. Selected together the two
 always agree. `request_body_rebuild` selected alone reads no body and reports `resolvable` instead of `rebuilt`: the
 row's chain was found, but a body that turns out not to rebuild (its `partial` reason `invalid`) is detected only when
 `request_body_full` is read too. Select both when the status must describe the body you get.
