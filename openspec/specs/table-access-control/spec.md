@@ -1796,11 +1796,20 @@ sensitive column (see [saved-queries](../saved-queries/spec.md), "A sensitive va
 body"), not a new one.
 
 A revision snapshot SHALL hide a column that either the column policies the table had at that revision or the
-table's current column policies hide from the caller, so neither a restriction recorded then nor one added since is
-bypassed by reading an older revision. A revision recorded before column policies existed is judged by the current
-policies alone. A column SHALL be matched by the name it carries in the revision: a current allowlist that lists only a
+column policies the table has **now** hide from the caller, so neither a restriction recorded then nor one added since
+is bypassed by reading an older revision. A revision recorded before column policies existed is judged by the
+policies it has now alone. The table's policies now SHALL be those of the **life** of the table that contains the
+revision, a life running from a creation of the table to its next deletion: the live table's while that life has not
+ended, and otherwise those of its state as recorded at the deletion that ended it. A table deleted since the revision
+therefore keeps judging its revisions by the policies it last had, and a table created again under the same name
+begins a new life whose policies SHALL NOT judge an earlier life's revisions. A column SHALL be matched by the name it carries in the revision: a current allowlist that lists only a
 renamed column's new name hides it in a revision taken before the rename. An enrichment snapshot SHALL be judged by its
-source's current policies, as its read-side flags are resolved. A snapshot's `permissions.columns_restricted` SHALL be
+source's policies now. While the enrichment's own life has not ended, those are the policies of the source's life
+that contains the revision, resolved the same way: the live source while that life has not ended, otherwise its state
+as recorded at the deletion that ended it. Once the enrichment's life has ended, they are the source's policies as
+they stood just before that deletion, so a later enrichment of the same name, granted columns on the source, does not
+judge an earlier life's revisions. When no recorded state of the table or of its source can be found, every column of
+the snapshot SHALL be hidden. A snapshot's `permissions.columns_restricted` SHALL be
 judged over the revision's own columns.
 
 #### Scenario: Every query surface omits a hidden column
@@ -1846,6 +1855,47 @@ judged over the revision's own columns.
 - **THEN** the request is refused `422` as naming an undeclared column, and no `ALTER` is issued
 - **AND WHEN** the table's stored TTL is on `c` and the same caller sends `{"ttl":{}}`
 - **THEN** the response is `403 column_not_entitled` and the TTL is unchanged
+
+#### Scenario: A deleted table's revisions are judged by the policies it last had
+
+- **GIVEN** a revision `R` of table `t` recorded before column policies existed, a later entry for role `X` with
+  `columns` `["k"]`, and then the deletion of `t`
+- **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `t`'s snapshot at `R`
+- **THEN** it shows column `k` only and `permissions.columns_restricted = true`
+
+#### Scenario: A table created again does not judge an earlier life's revisions
+
+- **GIVEN** a revision `R` of table `t` at which role `X` had no column policy, a later entry for `X` with `columns`
+  `["k"]`, the deletion of `t`, and a new table `t` created with no entry
+- **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `t`'s snapshot at `R`
+- **THEN** it shows column `k` only
+- **AND WHEN** the new `t` gains an entry for `X` with `columns` `["m"]` and the caller requests a snapshot of the new
+  `t` recorded after that entry
+- **THEN** that snapshot is judged by `["m"]`, and the snapshot at `R` still shows `k` only
+
+#### Scenario: An enrichment snapshot is judged by its deleted source's last policies
+
+- **GIVEN** an enrichment `e` of source `s`, a revision `R` of `e`, an entry on `s` for role `X` with `read` and
+  `columns` naming `s`'s columns and none of `e`'s, and then the deletion of `e` and of `s`
+- **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `e`'s snapshot at `R`
+- **THEN** it lists no column
+- **AND WHEN** `X`'s entry on `s` instead carried `read` with no `columns` before both deletions
+- **THEN** the snapshot lists every column of `e` at `R`
+
+#### Scenario: An enrichment created again does not judge an earlier life's revisions
+
+- **GIVEN** a revision `R` of enrichment `e` of a live source `s`, at which role `X`'s entry on `s` carries `read` and
+  `columns` `["k"]`; then `e` is deleted, created again with a column `label`, and `X`'s `columns` become
+  `["k", "e.label"]`
+- **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `e`'s snapshot at `R`
+- **THEN** it does not show `label`
+
+#### Scenario: Each life of a table recreated twice is judged by its own deletion
+
+- **GIVEN** table `t` with a revision `R1` in its first life, which ends with role `X`'s `columns` `["k"]`; a second
+  life with a revision `R2`, which ends with `X`'s `columns` `["m"]`; and a third, live life with no entry
+- **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `t`'s snapshots at `R1` and at `R2`
+- **THEN** the snapshot at `R1` is judged by `["k"]` and the one at `R2` by `["m"]`
 
 ### Requirement: Pipeline and export paths refuse a hidden column
 

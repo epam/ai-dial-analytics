@@ -121,7 +121,12 @@ public class TableController {
                     + "or the revision is unknown. Revision ids come from the activity feed. A caller holding "
                     + "TABLE_GRANT (every caller in `none` mode) additionally receives the table's access "
                     + "entries as `roles`, as of that revision. A column is hidden when that revision's column "
-                    + "policies or the table's current ones hide it from the caller.")
+                    + "policies or the current ones of the table's life containing it hide it from the caller: the live "
+                    + "table's while that life runs, otherwise those it had when it was deleted, so a table created again "
+                    + "under the same name never judges an earlier one's revisions. An enrichment's columns are judged "
+                    + "by its source's: the source's own life while the enrichment's runs, otherwise the source as it "
+                    + "stood just before the enrichment was deleted. Every column is hidden when no state of the table "
+                    + "or of its source is recorded.")
     public TableDto snapshot(
             @Parameter(description = "Table name", example = "dial_usage_log") @PathVariable String name,
             @Parameter(description = "Revision id, as carried by an activity") @PathVariable String revision) {

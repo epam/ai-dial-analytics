@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.web.mapper.table;
 
 import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.service.audit.TableSnapshot;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.Cardinality;
@@ -236,7 +237,7 @@ public class TableMapper {
     }
 
     public TableDto toDto(TableView view) {
-        return toDto(view, false, false, layouts.layout(view.definition()));
+        return toDto(view, sensitiveAccess.visibleColumns(view.definition()), false, layouts.layout(view.definition()));
     }
 
     /**
@@ -246,11 +247,13 @@ public class TableMapper {
      * carries no {@code layout}: that is the table's current state, which the audit trail does not record, so a past
      * revision cannot report it.
      */
-    public TableDto toDto(TableView view, boolean includeGrants) {
-        return toDto(view, true, includeGrants, null);
+    public TableDto toDto(TableSnapshot snapshot, boolean includeGrants) {
+        final TableView view = snapshot.view();
+        return toDto(view, sensitiveAccess.visibleColumnsAtRevision(view.definition(), snapshot.life(), snapshot.sourceLife()),
+                includeGrants, null);
     }
 
-    private TableDto toDto(TableView view, boolean revision, boolean includeGrants, String layout) {
+    private TableDto toDto(TableView view, ColumnVisibility visibility, boolean includeGrants, String layout) {
         final TableDefinitionEntity entity = view.definition();
         final List<String> tagOrder = entity.getTagOrder();
         // When an ordering is set, present the columns sorted by it (via the shared comparator, so the
@@ -261,10 +264,10 @@ public class TableMapper {
         // responses and the revision read — so this is the catalog read surface's single chokepoint, and a
         // revision is judged on the flags it carried then, since those are the flags on its snapshot rows.
         // A column hidden by a column policy is dropped the same way, by the one visibility decision every read surface
-        // applies; a revision is judged by the policies on its snapshot and the table's current ones, a column either
-        // hides staying hidden (an enrichment's, by its source's current ones).
+        // applies; a revision is judged by the policies on its snapshot and those of the table's life containing it (the
+        // live table, or its state at the deletion that ended that life), a column either hides staying hidden; an
+        // enrichment's, by the source state that speaks for its life. Every column is hidden when a state is missing.
         final boolean cleared = sensitiveAccess.maySeeSensitive(entity.getName());
-        final ColumnVisibility visibility = revision ? sensitiveAccess.visibleColumnsAtRevision(entity) : sensitiveAccess.visibleColumns(entity);
         List<ColumnMappingEntity> ordered = view.columns().stream()
                 .filter(col -> cleared || !col.isSensitive())
                 .filter(col -> visibility.allows(col.getName()))

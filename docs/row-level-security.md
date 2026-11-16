@@ -188,6 +188,11 @@ EOF
   field, and a schema `PATCH` naming it is `422` unknown column (while the stored TTL is on it, any `ttl` member is
   `403 column_not_entitled`). A saved query or dashboard widget selecting it fails
   for that caller and still works for one who sees it.
+- **A revision snapshot is judged both ways.** A column is hidden when the revision's column policies or the table's
+  policies now hide it. A deleted table's revisions are judged by the policies it last had, and a table created again
+  under the same name does not judge an earlier one's. An enrichment's follow its source's, as it stood just before
+  the enrichment was deleted once it has been. A snapshot shows no column when no state of the table or its source is
+  recorded.
 - **What is not narrowed.** Row inserts (`write`), background work under the system identity (a pipeline's own
   reads see every column), and everything in `none` security mode, where column policies are stored and validated
   but not evaluated.

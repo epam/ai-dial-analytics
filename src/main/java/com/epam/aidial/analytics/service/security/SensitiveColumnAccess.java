@@ -141,11 +141,13 @@ public class SensitiveColumnAccess {
         if (roles.isEmpty()) {
             return ColumnVisibility.ALL;
         }
+        final TableDefinitionEntity governed = definition.getType() == TableType.ENRICHMENT ? governing.sourceOf(definition) : definition;
+        return governed == null ? ColumnVisibility.ALL : visibleColumns(definition, governed, roles);
+    }
+
+    /** {@link #visibleColumns(TableDefinitionEntity)} judged on {@code governed}: the table itself, or an enrichment's source. */
+    private ColumnVisibility visibleColumns(TableDefinitionEntity definition, TableDefinitionEntity governed, Set<String> roles) {
         final boolean enrichment = definition.getType() == TableType.ENRICHMENT;
-        final TableDefinitionEntity governed = enrichment ? governing.sourceOf(definition) : definition;
-        if (governed == null) {
-            return ColumnVisibility.ALL;
-        }
         final Set<Privilege> held = claims.getPrivileges();
         final TableAccess access = governed.getAccess();
         final boolean globalRead = held.contains(Privilege.TABLE_READ);
@@ -199,14 +201,27 @@ public class SensitiveColumnAccess {
     }
 
     /**
-     * Which of a revision snapshot's columns the caller sees: those both the snapshot's column policies and the table's
-     * current ones allow, so a restriction added since the revision, or recorded before column policies existed, still
-     * hides the column. Names are matched as the snapshot spells them; an old name today's allowlist does not list is
-     * hidden.
+     * Which of a revision snapshot's columns the caller sees: those both the snapshot's column policies and those of
+     * {@code life}, the table's state in the life containing the revision, allow, so a restriction added since the
+     * revision, or recorded before column policies existed, still hides the column, and a later table of the same name
+     * has no say. An enrichment's columns are judged on {@code sourceLife}, the source state that speaks for the
+     * enrichment's life. Without a state, every column is hidden. Names are matched as the snapshot spells them; an old
+     * name the life's allowlist does not list is hidden.
      */
-    @Transactional(readOnly = true)
-    public ColumnVisibility visibleColumnsAtRevision(TableDefinitionEntity snapshot) {
-        return visibleColumns(snapshot).and(visibleColumns(snapshot.getName()));
+    public ColumnVisibility visibleColumnsAtRevision(TableDefinitionEntity snapshot, TableDefinitionEntity life, TableDefinitionEntity sourceLife) {
+        if (!securityMode.isEnforced()) {
+            return ColumnVisibility.ALL;
+        }
+        final Set<String> roles = claims.getProviderRoles();
+        if (roles.isEmpty()) {
+            return ColumnVisibility.ALL;
+        }
+        final boolean enrichment = snapshot.getType() == TableType.ENRICHMENT;
+        if (life == null || enrichment && sourceLife == null) {
+            return new ColumnVisibility(Set.of());
+        }
+        return visibleColumns(snapshot, enrichment ? sourceLife : snapshot, roles)
+                .and(visibleColumns(life, enrichment ? sourceLife : life, roles));
     }
 
     /**

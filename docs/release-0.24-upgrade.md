@@ -358,7 +358,10 @@ as an entry, at `generation` 0.
   `row_policies`**. A revision written before `V57` reads every entry with `columns: null`. Snapshots never carry the
   generation. A snapshot hides a column when the revision's column policies **or the table's current ones** hide it
   from the caller, so a restriction added later also hides the column in older revisions, those written before `V57`
-  included; a column is matched by the name it had in the revision.
+  included; a column is matched by the name it had in the revision. A deleted table's revisions are judged by the
+  policies it last had, and a table created again under the same name does not judge an earlier one's; a deleted
+  enrichment's are judged by its source's as they stood just before that deletion. A snapshot shows no column when no
+  state of the table or its source is recorded.
 - **`permissions.columns_restricted`** is added on `GET /v1/tables` and `GET /v1/tables/{name}` (additive).
 - **`permissions.grant`** is added on every surface that carries `permissions`, revision snapshots included
   (additive): `true` exactly when the caller holds `TABLE_GRANT` and so may use the access API, the same on every

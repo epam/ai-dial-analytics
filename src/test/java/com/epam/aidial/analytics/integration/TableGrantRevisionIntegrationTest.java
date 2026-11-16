@@ -40,6 +40,8 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     private static final String BASE = "/v1/tables";
     private static final String SOURCE = "grant_rev_source";
     private static final String ENRICHMENT = "grant_rev_enrichment";
+    /** A provider role holding {@code TABLE_GET} globally, so it reaches a deleted table's revisions. */
+    private static final String DRAFTER = "drafter";
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -338,6 +340,127 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         snapshot(SOURCE, hiding, caller("team-r"))
                 .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.not(hasItem("extra"))))
                 .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+    }
+
+    // --- a revision is judged by the life of the table that contains it ------------------------------
+
+    @Test
+    void deletedTablesRevisionIsJudgedByThePoliciesItLastHad() throws Exception {
+        final String table = "life_rev_deleted";
+        createSource(table, "k", "project");
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final int revision = tableUpdates(table).getFirst();
+        jdbc.update("UPDATE table_definition_aud SET column_policies = NULL WHERE name = ? AND rev = ?", table, revision);
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
+        drop(table);
+
+        snapshot(table, revision, caller(DRAFTER))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("k")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+    }
+
+    @Test
+    void tableCreatedAgainDoesNotJudgeAnEarlierLifesRevisions() throws Exception {
+        final String table = "life_rev_recreated";
+        createSource(table, "k", "project");
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final int earlier = tableUpdates(table).getFirst();
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
+        drop(table);
+        createSource(table, "k", "m");
+        try {
+            snapshot(table, earlier, caller(DRAFTER)).andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("k")));
+
+            putEntry(table, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"m\"]").andExpect(status().isOk());
+            snapshot(table, tableUpdates(table).getFirst(), caller(DRAFTER))
+                    .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("m")));
+            snapshot(table, earlier, caller(DRAFTER)).andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("k")));
+        } finally {
+            drop(table);
+        }
+    }
+
+    @Test
+    void enrichmentSnapshotIsJudgedByItsDeletedSourcesLastPolicies() throws Exception {
+        putEntry(ENRICHMENT, "team-w", "\"privileges\":[\"write\"]").andExpect(status().isOk());
+        final int revision = tableUpdates(ENRICHMENT).getFirst();
+        putEntry(SOURCE, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\",\"project\"]").andExpect(status().isOk());
+        drop(ENRICHMENT);
+        drop(SOURCE);
+
+        snapshot(ENRICHMENT, revision, caller(DRAFTER)).andExpect(jsonPath("$.columns").isEmpty());
+
+        // Read with no columns: every column shows, so the state comes from the trail, not from the fail-closed fallback.
+        final String source = "life_rev_open_source";
+        final String enrichment = "life_rev_open_enrichment";
+        createSource(source, "k", "project");
+        createEnrichment(enrichment, source);
+        putEntry(enrichment, "team-w", "\"privileges\":[\"write\"]").andExpect(status().isOk());
+        final int open = tableUpdates(enrichment).getFirst();
+        putEntry(source, DRAFTER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        drop(enrichment);
+        drop(source);
+
+        snapshot(enrichment, open, caller(DRAFTER))
+                .andExpect(jsonPath("$.columns[*].name", hasItem("label")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(false));
+    }
+
+    @Test
+    void enrichmentCreatedAgainDoesNotJudgeAnEarlierLifesRevisions() throws Exception {
+        putEntry(SOURCE, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
+        putEntry(ENRICHMENT, "team-w", "\"privileges\":[\"write\"]").andExpect(status().isOk());
+        final int revision = tableUpdates(ENRICHMENT).getFirst();
+        drop(ENRICHMENT);
+        createEnrichment(ENRICHMENT, SOURCE);
+        putEntry(SOURCE, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\",\"" + ENRICHMENT + ".label\"]").andExpect(status().isOk());
+
+        live(ENRICHMENT, caller(DRAFTER)).andExpect(jsonPath("$.columns[*].name", hasItem("label")));
+        snapshot(ENRICHMENT, revision, caller(DRAFTER))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.not(hasItem("label"))));
+    }
+
+    @Test
+    void eachLifeOfTableRecreatedTwiceIsJudgedByItsOwnDeletion() throws Exception {
+        final String table = "life_rev_thrice";
+        createSource(table, "k", "m");
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final int first = tableUpdates(table).getFirst();
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
+        drop(table);
+        createSource(table, "k", "m");
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final int second = tableUpdates(table).getFirst();
+        putEntry(table, DRAFTER, "\"privileges\":[\"read\"],\"columns\":[\"m\"]").andExpect(status().isOk());
+        drop(table);
+        createSource(table, "k", "m");
+        try {
+            snapshot(table, first, caller(DRAFTER)).andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("k")));
+            snapshot(table, second, caller(DRAFTER)).andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.contains("m")));
+        } finally {
+            drop(table);
+        }
+    }
+
+    private void createEnrichment(String enrichment, String source) throws Exception {
+        perform(post(BASE), fullAdmin(), "{\"name\":\"" + enrichment + "\",\"type\":\"enrichment\",\"source_table\":\"" + source + "\"}")
+                .andExpect(status().isCreated());
+        perform(post(BASE + "/" + enrichment + "/schema"), fullAdmin(),
+                "{\"grain_key\":\"k\",\"columns\":[{\"source_name\":\"label\",\"name\":\"label\",\"type\":\"string\"}]}")
+                .andExpect(status().isOk());
+    }
+
+    private void createSource(String table, String... columns) throws Exception {
+        perform(post(BASE), fullAdmin(), "{\"name\":\"" + table + "\",\"type\":\"source\"}").andExpect(status().isCreated());
+        perform(post(BASE + "/" + table + "/schema"), fullAdmin(), "{\"columns\":[" + java.util.Arrays.stream(columns)
+                .map(name -> "{\"source_name\":\"" + name + "\",\"name\":\"" + name + "\",\"type\":\"string\"}")
+                .collect(java.util.stream.Collectors.joining(",")) + "],\"ordering_key\":[\"" + columns[0] + "\"]}")
+                .andExpect(status().isOk());
+    }
+
+    private void drop(String table) throws Exception {
+        mockMvc.perform(delete(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
     }
 
     private ResultActions live(String table, String token) throws Exception {

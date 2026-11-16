@@ -679,11 +679,14 @@ belonged to the table at that revision, and SHALL exclude a column that had been
 Every member of that response describes the table **as of the requested revision**, including the
 caller's effective permissions, which are resolved from the access entries the table had then. The columns it shows
 are the exception that fails closed: a column SHALL be hidden when either the column policies the table had then or
-the table's current column policies hide it from the caller, matched by the name the column had at that revision. An
+the column policies it has now hide it from the caller, matched by the name the column had at that revision. "Now"
+means the life of the table that contains the revision: the live table while that life has not ended, otherwise its
+state as recorded at the deletion that ended it, so a later table of the same name never judges it (see
+`table-access-control`, "Hidden columns are absent from every read surface"). An
 enrichment is the
 one exception: its read-side access is its source's (see `table-access-control`), and the source's entries at that
-revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive`, and which of its
-columns it shows, SHALL be resolved from its source's current state, its `rows_restricted` from the source's current
+revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive` SHALL be resolved from its source's current state, which of
+its columns it shows from its source's policies now (its source's life containing the revision, resolved as above), its `rows_restricted` from the source's current
 state or a policy the enrichment had at that revision, its `write` and `modify` from the grants the
 enrichment had then, and its `get` from either: the source's current state, or the `modify` grants the enrichment had
 then. For an enrichment whose source no longer exists, the source's entries SHALL be taken as empty, so only a global
@@ -701,7 +704,7 @@ The snapshot SHALL additionally carry the table's access entries as of the revis
 more visible than the present one. For every other caller the member SHALL be absent, not empty: an empty object would
 assert that the table had no entries. When served, it is always present, an empty one being `{}`, including at a
 revision recorded before row or column policies existed, where `rows` and `columns` read `null` (its columns are
-still filtered by the table's current column policies, as above). The snapshot SHALL
+still filtered by the column policies the table has now, as above). The snapshot SHALL
 NOT carry the access `generation`. The live read, the table list and every mutation response SHALL NOT carry `roles`,
 so in `none` mode the snapshot is a superset of the live shape.
 
@@ -820,6 +823,13 @@ is correct where answering with a partial one would assert that the missing colu
 - **WHEN** the caller, holding `TABLE_GET` globally, requests the snapshot
 - **THEN** the snapshot's `permissions.read` is `false`, and its `permissions.write` reflects the enrichment's `write`
   grants at that revision
+
+#### Scenario: A deleted table's revision is still filtered
+
+- **GIVEN** a table whose revision `R` was recorded before column policies existed, which later gave the caller's only
+  role `columns` `["k"]` and was then deleted
+- **WHEN** the caller, holding `TABLE_GET` globally, requests the snapshot at `R`
+- **THEN** it shows column `k` only, not every column
 
 ### Requirement: Point-in-time reads for pipeline and saved query
 

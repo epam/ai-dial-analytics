@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.web.mapper.table;
 
+import com.epam.aidial.analytics.service.audit.TableSnapshot;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
@@ -22,7 +23,9 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -43,7 +46,11 @@ class TableMapperColumnVisibilityTest {
     void permissionsAreIrrelevantHere() {
         when(permissions.resolve(any(), any(), any())).thenReturn(EffectivePermissions.uniform(true));
         when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
-        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
+        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class), any(), any())).thenReturn(ColumnVisibility.ALL);
+    }
+
+    private static TableSnapshot snapshot() {
+        return new TableSnapshot(view(), null, null);
     }
 
     private static TableView view() {
@@ -97,9 +104,15 @@ class TableMapperColumnVisibilityTest {
     @DisplayName("a revision is judged by the decision that also applies the table's current column policies")
     void revisionUsesTheRevisionDecision() {
         when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
-        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("k")));
+        final TableView view = view();
+        final TableDefinitionEntity life = new TableDefinitionEntity();
+        final TableDefinitionEntity sourceLife = new TableDefinitionEntity();
+        when(sensitiveAccess.visibleColumnsAtRevision(same(view.definition()), same(life), same(sourceLife)))
+                .thenReturn(new ColumnVisibility(Set.of("k")));
 
-        assertThat(mapper.toDto(view(), true).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k");
+        assertThat(mapper.toDto(new TableSnapshot(view, life, sourceLife), true).columns())
+                .extracting(TableDto.ColumnDto::name).containsExactly("k");
+        verify(sensitiveAccess).visibleColumnsAtRevision(same(view.definition()), same(life), same(sourceLife));
         assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
     }
 
@@ -119,6 +132,6 @@ class TableMapperColumnVisibilityTest {
         when(layouts.layout(any())).thenReturn("aligned");
 
         assertThat(mapper.toDto(view()).layout()).isEqualTo("aligned");
-        assertThat(mapper.toDto(view(), true).layout()).isNull();
+        assertThat(mapper.toDto(snapshot(), true).layout()).isNull();
     }
 }
