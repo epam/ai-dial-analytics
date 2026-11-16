@@ -64,11 +64,13 @@ public class TableAccessController {
     @GetMapping(params = "role")
     @RequiresPrivilege(Privilege.TABLE_GRANT)
     @Operation(summary = "List a table's access entries, or read one role's entry",
-            description = "Without `role`, returns `{generation, roles}`: every role's entry on the table, keyed and sorted "
-                    + "by role, and the table's access `generation`; 403 without TABLE_GRANT, then 404 for an unknown table. "
-                    + "With `role`, returns `{generation, role, privileges, rows, columns}`: that role's entry and the "
-                    + "generation; 400 for a blank or repeated role, 403 without TABLE_GRANT, then 404 for an unknown table, "
-                    + "then 404 when the role has no entry.",
+            description = "Without `role`, returns `{generation, roles, ineffective_grants}`: every role's entry on the table, "
+                    + "keyed and sorted by role, the table's access `generation`, and every entry's report grouped by role in "
+                    + "that order; 403 without TABLE_GRANT, then 404 for an unknown table. "
+                    + "With `role`, returns `{generation, role, privileges, rows, columns, ineffective_grants}`: that role's "
+                    + "entry, the generation and that entry's report; 400 for a blank or repeated role, 403 without "
+                    + "TABLE_GRANT, then 404 for an unknown table, then 404 when the role has no entry. `ineffective_grants` "
+                    + "is the report a PUT returns, judged on the entries as stored at the read, and `[]` when empty.",
             parameters = @Parameter(name = "role", in = ParameterIn.QUERY, description = ROLE_OR_LIST))
     @ApiResponse(responseCode = "200", description = "Every entry without `role`, one role's entry with it",
             content = @Content(schema = @Schema(oneOf = {AccessEntriesDto.class, AccessEntryDto.class})))
@@ -97,7 +99,8 @@ public class TableAccessController {
                     + "role (bundle or privilege name), 409 table_is_system (write or modify on a system table), then the "
                     + "remaining 422 checks. 409 table_busy when another change to the table holds it past the lock "
                     + "timeout. `ineffective_grants` reports privileges that change nothing: already_global, "
-                    + "sensitive_without_verb, lifts_row_policies and lifts_column_policies.")
+                    + "sensitive_without_verb, lifts_row_policies and lifts_column_policies; and the standing warning "
+                    + "everyone_reads_all_rows, a read for `*` with no row policy on a table that is not an enrichment.")
     @ApiResponse(responseCode = "409", description = "access_conflict (the role changed since it was read), "
             + "enrichment_follows_source, table_is_system or table_busy")
     public AccessEntryReplacedDto put(

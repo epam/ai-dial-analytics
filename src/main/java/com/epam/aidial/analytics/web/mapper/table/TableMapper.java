@@ -350,7 +350,7 @@ public class TableMapper {
     private static PermissionsDto permissions(EffectivePermissions effective) {
         return new PermissionsDto(
                 effective.get(), effective.read(),
-                effective.sensitive(), effective.write(), effective.modify(), effective.rowsRestricted(),
+                effective.sensitive(), effective.write(), effective.modify(), effective.grant(), effective.rowsRestricted(),
                 effective.columnsRestricted());
     }
 

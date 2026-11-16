@@ -62,7 +62,7 @@ public class TableAccessService {
     private final RowPolicyConditions conditions;
     private final RoleGenerationCodec roleGenerations;
 
-    /** Why a privilege in an entry changes nothing. */
+    /** Why a privilege in an entry changes nothing, or the standing warning it carries. */
     public enum IneffectiveReason {
 
         /** The role already holds the privilege over every table, so the grant adds nothing. */
@@ -75,7 +75,10 @@ public class TableAccessService {
         LIFTS_ROW_POLICIES("lifts_row_policies"),
 
         /** A read for {@code *} with neither rows nor columns on a table where other roles carry columns: it lifts them all. */
-        LIFTS_COLUMN_POLICIES("lifts_column_policies");
+        LIFTS_COLUMN_POLICIES("lifts_column_policies"),
+
+        /** A read for {@code *} with no row policy on a table that is not an enrichment: every caller reads every row. */
+        EVERYONE_READS_ALL_ROWS("everyone_reads_all_rows");
 
         private final String code;
 
@@ -88,7 +91,7 @@ public class TableAccessService {
         }
     }
 
-    /** One privilege that was accepted but changes nothing. */
+    /** One privilege that was accepted but changes nothing, or carries a standing warning. */
     public record IneffectiveGrant(String role, Privilege privilege, IneffectiveReason reason, String message) {}
 
     /**
@@ -103,11 +106,11 @@ public class TableAccessService {
         }
     }
 
-    /** Every role's entry on a table, sorted by role, and the table's access generation. */
-    public record AccessEntries(long generation, Map<String, AccessEntry> roles) {}
+    /** Every role's entry on a table, sorted by role, the table's access generation, and every entry's report in role order. */
+    public record AccessEntries(long generation, Map<String, AccessEntry> roles, List<IneffectiveGrant> ineffectiveGrants) {}
 
-    /** One role's stored entry and the table's access generation. */
-    public record RoleEntry(long generation, String role, AccessEntry entry) {}
+    /** One role's stored entry, the table's access generation, and the entry's report. */
+    public record RoleEntry(long generation, String role, AccessEntry entry, List<IneffectiveGrant> ineffectiveGrants) {}
 
     /** A completed {@code PUT}: the entry as stored, the new generation, and any privilege that changes nothing. */
     public record EntryReplacement(long generation, String role, AccessEntry entry, List<IneffectiveGrant> ineffectiveGrants) {}
@@ -121,11 +124,15 @@ public class TableAccessService {
     /** A {@code rows} member as sent: one of {@code filter} and {@code where}. */
     public record RowsRequest(FilterNode filter, String where) {}
 
-    /** Every role's entry on {@code table}. */
+    /** Every role's entry on {@code table}, each reported on as stored now. */
     @Transactional(readOnly = true)
     public AccessEntries list(String table) {
         final TableDefinitionEntity definition = require(table);
-        return new AccessEntries(definition.getAccessGeneration(), entries(definition));
+        final Map<String, AccessEntry> entries = entries(definition);
+        final List<TableDefinitionEntity> enrichments = definitions.findBySourceTable(definition.getName());
+        final List<IneffectiveGrant> report = new ArrayList<>();
+        entries.forEach((role, entry) -> report.addAll(reportIneffective(definition, entries, enrichments, role, entry)));
+        return new AccessEntries(definition.getAccessGeneration(), entries, List.copyOf(report));
     }
 
     /**
@@ -137,11 +144,12 @@ public class TableAccessService {
     public RoleEntry get(String table, String role) {
         final TableDefinitionEntity definition = require(table);
         final String key = StringUtils.trimToEmpty(role);
-        final AccessEntry entry = entries(definition).get(key);
+        final Map<String, AccessEntry> entries = entries(definition);
+        final AccessEntry entry = entries.get(key);
         if (entry == null) {
             throw noEntry(table, key);
         }
-        return new RoleEntry(definition.getAccessGeneration(), key, entry);
+        return new RoleEntry(definition.getAccessGeneration(), key, entry, reportIneffective(definition, entries, key, entry));
     }
 
     /**
@@ -165,8 +173,9 @@ public class TableAccessService {
         } catch (TableValidationException | SystemTableException ex) {
             refusal = ex;
         }
-        if (entry != null && entry.equals(entries(definition).getOrDefault(key, EMPTY))) {
-            return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, key, entry));
+        final Map<String, AccessEntry> stored = entries(definition);
+        if (entry != null && entry.equals(stored.getOrDefault(key, EMPTY))) {
+            return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, stored, key, entry));
         }
         requireNoConflict(definition, key, generation);
         if (refusal != null) {
@@ -174,7 +183,7 @@ public class TableAccessService {
         }
         write(definition, key, entry);
         bump(definition, key);
-        return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, key, entry));
+        return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, entries(definition), key, entry));
     }
 
     /**
@@ -410,14 +419,22 @@ public class TableAccessService {
         return names;
     }
 
+    /** As {@link #reportIneffective(TableDefinitionEntity, Map, List, String, AccessEntry)}, loading the enrichments. */
+    private List<IneffectiveGrant> reportIneffective(TableDefinitionEntity definition, Map<String, AccessEntry> entries, String role,
+            AccessEntry entry) {
+        return reportIneffective(definition, entries, definitions.findBySourceTable(definition.getName()), role, entry);
+    }
+
     /**
-     * Reports, without failing, each privilege of the stored entry that changes nothing. Refusing would block a
+     * Reports, without failing, each privilege of {@code role}'s stored entry that changes nothing, and each standing
+     * warning, judged against the table's stored {@code entries} and its {@code enrichments}. Refusing would block a
      * legitimate intermediate state; saying nothing would leave the operator to discover it from a query result.
      */
-    private List<IneffectiveGrant> reportIneffective(TableDefinitionEntity definition, String role, AccessEntry entry) {
+    private List<IneffectiveGrant> reportIneffective(TableDefinitionEntity definition, Map<String, AccessEntry> entries,
+            List<TableDefinitionEntity> enrichments, String role, AccessEntry entry) {
         final List<IneffectiveGrant> report = new ArrayList<>();
-        final Set<String> policyRoles = rowPolicyCodec.read(definition.getRowPolicies()).keySet();
-        final Set<String> columnRoles = columnPolicyCodec.read(definition.getColumnPolicies()).keySet();
+        final List<String> policyRoles = entries.entrySet().stream().filter(e -> e.getValue().rows() != null).map(Map.Entry::getKey).toList();
+        final List<String> columnRoles = entries.entrySet().stream().filter(e -> e.getValue().columns() != null).map(Map.Entry::getKey).toList();
         for (final Privilege privilege : entry.privileges()) {
             final boolean everyoneReads = privilege == Privilege.TABLE_READ && SecurityClaimsExtractor.ANYONE.equals(role) && entry.rows() == null;
             if (everyoneReads && !policyRoles.isEmpty()) {
@@ -432,6 +449,12 @@ public class TableAccessService {
                                 + "carries '" + role + "', which now reads with neither a row nor a column restriction, so "
                                 + "those column policies hide nothing. Give '" + role + "' rows or columns to keep them"));
             }
+            if (everyoneReads && definition.getType() != TableType.ENRICHMENT) {
+                report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.EVERYONE_READS_ALL_ROWS,
+                        "every authenticated caller carries '" + role + "', which reads table '" + definition.getName()
+                                + "' with no row policy, so every caller reads every row. Give '" + role + "' a row policy "
+                                + "unless the table is meant to be readable by everyone"));
+            }
             if (everyoneReads && (!policyRoles.isEmpty() || entry.columns() == null && !columnRoles.isEmpty())) {
                 continue;
             }
@@ -439,7 +462,7 @@ public class TableAccessService {
                 report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.ALREADY_GLOBAL,
                         "role '" + role + "' already holds " + privilege + " over every table, so this grant "
                                 + "changes nothing for it"));
-            } else if (privilege == Privilege.TABLE_SENSITIVE && !holdsAnyVerb(role, definition)) {
+            } else if (privilege == Privilege.TABLE_SENSITIVE && !holdsAnyVerb(role, definition, enrichments)) {
                 report.add(new IneffectiveGrant(role, privilege, IneffectiveReason.SENSITIVE_WITHOUT_VERB,
                         "role '" + role + "' holds no get, read or modify on table '" + definition.getName()
                                 + "', so the sensitive clearance changes nothing for it until one is granted"));
@@ -452,7 +475,7 @@ public class TableAccessService {
      * Whether {@code role} holds a verb the clearance extends on {@code definition}, globally or by an entry, or
      * {@code modify} on any of its enrichments, whose sensitive columns this clearance governs.
      */
-    private boolean holdsAnyVerb(String role, TableDefinitionEntity definition) {
+    private boolean holdsAnyVerb(String role, TableDefinitionEntity definition, List<TableDefinitionEntity> enrichments) {
         for (final Privilege verb : List.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_MODIFY)) {
             if (providerRolePrivileges.holdsGlobally(role, verb)) {
                 return true;
@@ -460,7 +483,7 @@ public class TableAccessService {
         }
         final Set<String> carried = SecurityClaimsExtractor.carriedWith(role);
         return TableCallerPermissions.isGranted(definition.getAccess(), Privilege.TABLE_GET, carried)
-                || definitions.findBySourceTable(definition.getName()).stream()
+                || enrichments.stream()
                         .anyMatch(enrichment -> TableCallerPermissions.isGranted(enrichment.getAccess(), Privilege.TABLE_MODIFY, carried));
     }
 

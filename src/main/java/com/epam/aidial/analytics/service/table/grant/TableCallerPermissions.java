@@ -32,6 +32,7 @@ import java.util.function.BooleanSupplier;
  *       this used to, denied the very read grants that make per-table read applicable to
  *       {@code dial_usage_log};</li>
  *   <li>in {@code none} mode nothing is enforced, so every non-system flag is true;</li>
+ *   <li>{@code grant} is the caller's global {@code TABLE_GRANT} (true in {@code none} mode), on every table alike;</li>
  *   <li>otherwise each flag is true when the caller holds the privilege globally, or when one of its raw
  *       provider roles appears in a list that grants or <b>implies</b> it — for an enrichment, the lists
  *       {@link GoverningAccess} composes from its source's read side and its own {@code write}/{@code modify}.</li>
@@ -88,7 +89,9 @@ public class TableCallerPermissions {
 
     private EffectivePermissions resolve(TableDefinitionEntity definition, BooleanSupplier columnsRestricted) {
         if (!securityMode.isEnforced()) {
-            return definition.isSystem() ? EffectivePermissions.readSideOnly(true) : EffectivePermissions.uniform(true);
+            return definition.isSystem()
+                    ? new EffectivePermissions(true, true, true, true, false, false, true, false, false)
+                    : EffectivePermissions.uniform(true);
         }
         final Set<Privilege> held = claimsExtractor.getPrivileges();
         final Set<String> callerRoles = claimsExtractor.getProviderRoles();
@@ -100,6 +103,8 @@ public class TableCallerPermissions {
                     && (held.contains(privilege) || isGranted(access, privilege, callerRoles));
             flags.put(privilege, allowed);
         }
+        // Global only: no entry confers it, and a system table or an enrichment accepts entries, so it is never masked.
+        flags.put(Privilege.TABLE_GRANT, held.contains(Privilege.TABLE_GRANT));
         // An enrichment's rows are its source's; its own term is true only for a policy an earlier build left there.
         final boolean confined = rowPolicies.isConfined(definition) || source != null && rowPolicies.isConfined(source);
         return EffectivePermissions.of(flags, confined, columnsRestricted.getAsBoolean());

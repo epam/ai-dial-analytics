@@ -102,7 +102,7 @@ class TableAccessControllerTest {
 
     @Test
     void anyCharacterInTheRoleArrivesDecodedAndTrimmed() throws Exception {
-        BDDMockito.given(service.get(eq("t"), any())).willReturn(new RoleEntry(2, "x", new AccessEntry(List.of(), null, List.of("a"))));
+        BDDMockito.given(service.get(eq("t"), any())).willReturn(new RoleEntry(2, "x", new AccessEntry(List.of(), null, List.of("a")), List.of()));
         for (final String role : List.of("/analytics/viewers", "team%ops", "a;b", "a\\b", "//x", ".", "..")) {
             mockMvc.perform(get("/v1/tables/t/access").param("role", " " + role + " ")).andExpect(status().isOk());
             org.mockito.Mockito.verify(service).get("t", role);

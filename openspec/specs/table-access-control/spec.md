@@ -235,7 +235,7 @@ table as absent, a missing write privilege is `403 forbidden`.
 
 The system SHALL report, on every table read surface (`GET /v1/tables` list items and `GET /v1/tables/{name}`), the
 calling identity's effective per-table permissions as a `permissions` object with boolean `get`, `read`, `sensitive`,
-`write`, `modify`, `rows_restricted` and `columns_restricted` fields. There SHALL be no `list` flag: a caller that sees
+`write`, `modify`, `grant`, `rows_restricted` and `columns_restricted` fields. There SHALL be no `list` flag: a caller that sees
 a table at all may list it, so the flag could only ever read `true`. The reported flags SHALL agree with what per-table
 evaluation, row-policy evaluation, column-visibility evaluation and system-table protection would decide for that
 caller, **after** implication is applied:
@@ -257,13 +257,20 @@ caller, **after** implication is applied:
   `system` and non-`system` tables alike; a
   column hidden only by the clearance does not set it, and it is `false` for a caller with no governing role on the
   table, as `rows_restricted` is for a caller that may not read it;
-- in `none` security mode every flag but `rows_restricted` and `columns_restricted` SHALL be `true` for non-`system`
+- `grant` SHALL be `true` exactly when the caller holds `TABLE_GRANT`, and so may call the table's access API (see
+  "Role-keyed access API"). `TABLE_GRANT` is held only globally, never through an entry, so `grant` SHALL be the
+  same on every table the caller sees, `system` tables and enrichments included: both accept entries. An entry
+  carrying every privilege SHALL NOT set it. It SHALL agree with the rule that withholds a revision snapshot's
+  entries from a caller without `TABLE_GRANT`;
+- in `none` security mode `grant` SHALL be `true` on every table, every other flag but `rows_restricted` and
+  `columns_restricted` SHALL be `true` for non-`system`
   tables, the read-side flags SHALL be `true` for `system` tables, and `rows_restricted` and `columns_restricted`
   SHALL be `false` (no authorization is enforced).
 
 `sensitive` SHALL report whether the caller holds the clearance on the table, not whether it can read sensitive
 values. It counts among the read-side flags. A consumer SHALL derive "reads sensitive values" as `read && sensitive`,
 "sees sensitive columns" as `get && sensitive`, and "may change them or the flag" as `modify && sensitive`.
+`grant` SHALL NOT change what the caller may do: the access API keeps its own `TABLE_GRANT` check.
 `rows_restricted` and `columns_restricted` SHALL NOT disclose the policies themselves; those are readable only through
 the access API.
 
@@ -363,6 +370,24 @@ evaluation used for enforcement so the two cannot diverge. Reporting SHALL NOT c
 - **WHEN** the service runs in `none` security mode and any caller reads a non-`system` table
 - **THEN** every flag in `permissions` except `rows_restricted` and `columns_restricted` is `true`, and those two are
   `false`
+
+#### Scenario: The grant flag follows TABLE_GRANT
+
+- **WHEN** a caller holding `TABLE_GET` and `TABLE_GRANT` globally, and no other privilege, reads a table
+- **THEN** the table carries `permissions.grant = true` and `permissions.read = false`
+- **AND WHEN** a caller holding only `TABLE_GET` globally reads it
+- **THEN** the table carries `permissions.grant = false`
+
+#### Scenario: An entry does not confer the grant flag
+
+- **GIVEN** a table on which role `X`'s entry carries `get`, `read`, `sensitive`, `write` and `modify`
+- **WHEN** a caller carrying `X` and no global privilege reads the table
+- **THEN** the table carries `permissions.modify = true` and `permissions.grant = false`
+
+#### Scenario: The grant flag is reported on system tables and enrichments
+
+- **WHEN** a caller holding the `FULL_ADMIN` bundle reads a `system` table and an enrichment
+- **THEN** both carry `permissions.grant = true`, the `system` table with `permissions.write = false`
 
 ### Requirement: Per-role row policies
 
@@ -974,10 +999,12 @@ policies"). A stored entry SHALL be returned with `privileges` de-duplicated in 
 `write`, `modify`, `rows` as `{"filter": <filter node>}` or `null`, and `columns` as a sorted list or `null`.
 
 - `GET /v1/tables/{name}/access`, with no `role` parameter, SHALL return `{"generation": <integer>, "roles":
-  {"<role>": <entry>, ...}}`, the members of `roles` sorted by role, with an empty `roles` object when the table has
-  no entry.
-- `GET /v1/tables/{name}/access?role=<role>` SHALL return `{"generation": <integer>, "role": "<role>", ...entry}`, and
-  `404 not_found` when the role has no entry on the table.
+  {"<role>": <entry>, ...}, "ineffective_grants": [...]}`, the members of `roles` sorted by role, with an empty
+  `roles` object when the table has no entry, and the report described below covering every stored entry (see
+  "Ineffective grants are reported on read").
+- `GET /v1/tables/{name}/access?role=<role>` SHALL return `{"generation": <integer>, "role": "<role>", ...entry,
+  "ineffective_grants": [...]}`, the report covering that entry only, and `404 not_found` when the role has no entry
+  on the table.
 - `PUT /v1/tables/{name}/access?role=<role>` SHALL take `{"generation": <integer>, "privileges": [...], "rows": ...,
   "columns": ...}` and SHALL **replace the role's whole entry**: an absent or `null` `privileges` SHALL mean `[]`, and
   an absent `rows` or `columns` SHALL mean `null`. Nothing about another role's entry SHALL change. The response SHALL be `200`
@@ -1012,8 +1039,11 @@ path segment: `/v1/tables/{name}/access/<anything>` is an unknown path (`404 not
 A `rows` member in a request SHALL be `{"filter": <filter node>}` or `{"where": "<condition>"}` (see "A row policy may
 be written as a SQL condition"); it is stored and returned as `{"filter": ...}`.
 
-`ineffective_grants` SHALL report, without failing the request, each privilege in the entry that changes nothing, as
-an object carrying `role`, `key` (the privilege), a stable `reason` and a human-readable `message`:
+`ineffective_grants` SHALL report, without failing the request, each privilege in the entry that changes nothing, and
+each standing warning below, as an object carrying `role`, `key` (the privilege), a stable `reason` and a
+human-readable `message`. It SHALL be an array, empty when nothing is reported. Items SHALL follow the entry's
+`privileges` order, and for one privilege the order `lifts_row_policies`, `lifts_column_policies`,
+`everyone_reads_all_rows`, `already_global`, `sensitive_without_verb`. The reasons are:
 
 - `already_global` — the role already holds that privilege globally;
 - `sensitive_without_verb` — `sensitive` for a role that holds none of `TABLE_GET`, `TABLE_READ` or `TABLE_MODIFY` on
@@ -1025,7 +1055,17 @@ an object carrying `role`, `key` (the privilege), a stable `reason` and a human-
   those policies confine no one;
 - `lifts_column_policies` — `read` in the entry of `*` with `rows` and `columns` both `null`, on a table where another
   role's entry carries `columns`: every caller then carries a reading role with neither a row nor a column
-  restriction, so by "Column visibility by caller role" those restrictions hide nothing.
+  restriction, so by "Column visibility by caller role" those restrictions hide nothing;
+- `everyone_reads_all_rows` — `read` in the entry of `*` with `rows` `null`, on a table that is not an enrichment,
+  whatever the entry's `columns`: every authenticated caller then reads every row of the table. This is a standing
+  warning, not an ineffective grant: it is reported for as long as the configuration stays, a table meant to be
+  readable by everyone keeps carrying it, and it is reported beside `lifts_row_policies` and
+  `lifts_column_policies` when those apply, so this one reason identifies a table open to everyone with no row
+  restriction. It SHALL NOT suppress any other reason.
+
+Stored state no `PUT` can produce any more — a `*` entry carrying `write` or `modify`, or an enrichment's leftover
+`get`, `read` or `sensitive` — SHALL be judged by these same rules only; no reason reports that such a privilege
+confers nothing. The report SHALL be built the same way in `none` security mode.
 
 A `PUT` against a `system` table SHALL be refused `409 table_is_system` when the entry carries `write` or `modify`; its
 other privileges, `rows` and `columns` SHALL be accepted (an enrichment, `system` or not, is governed by the
@@ -2009,3 +2049,70 @@ to every caller the target's own entries let see that target column. This is the
 - **WHEN** a caller carrying `X` and holding `TABLE_READ` globally queries the target
 - **THEN** it sees the count column
 
+### Requirement: Ineffective grants are reported on read
+
+Both reads of the access API SHALL carry `ineffective_grants`, built by the rules of "Role-keyed access API" over the
+entries **as stored now**, so a client shows the same warnings after a reload as after a save. The whole-configuration
+read SHALL report every stored entry, its items grouped by role in the order of `roles`; the one-role read SHALL report
+that entry only. Each item SHALL have the shape a `PUT` reports, and the array SHALL be empty, never absent, when
+nothing is reported.
+
+A reason that depends on state outside the reported entry SHALL be judged against that state as it stands at the
+read: the table's other entries, the `*` entry a role is carried with, the `modify` grants on the table's
+enrichments, and the role mapping in force. A warning SHALL therefore appear once another change makes it true, and
+disappear once another change makes it false, though the reported entry was saved before. The report SHALL NOT change
+any decision of the access API, and the reads keep their `TABLE_GRANT` check and their order of checks.
+
+#### Scenario: A read for everyone over a row policy is reported on read
+
+- **GIVEN** a table on which role `X`'s entry carries `rows`, and the entry of `*` carries `read` with `rows` `null`
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access`
+- **THEN** `ineffective_grants` is `[{"role": "*", "key": "read", "reason": "lifts_row_policies", ...}, {"role": "*",
+  "key": "read", "reason": "everyone_reads_all_rows", ...}]`, in that order
+- **AND** `GET /v1/tables/t/access?role=*` carries both items, and `GET /v1/tables/t/access?role=X` carries
+  `"ineffective_grants": []`
+
+#### Scenario: A warning appears when another role's change makes it true
+
+- **GIVEN** a table on which the entry of `*` carries `read` and no other entry exists
+- **WHEN** an entry carrying `rows` is then stored for role `X`, and a caller reads `GET /v1/tables/t/access`
+- **THEN** `ineffective_grants` carries an item for `*` with reason `lifts_row_policies`
+- **AND WHEN** `X`'s entry is removed
+- **THEN** the read no longer carries a `lifts_row_policies` item, and still carries `everyone_reads_all_rows`
+
+#### Scenario: A clearance warning disappears when the role gains a verb
+
+- **GIVEN** a table on which role `pii-analysts`' entry carries `sensitive` only and the role holds no verb on the table
+- **WHEN** a caller reads `GET /v1/tables/t/access?role=pii-analysts`
+- **THEN** it carries an item with reason `sensitive_without_verb`
+- **AND WHEN** the entry of `*` is then given `get`, or `pii-analysts` is given `modify` on an enrichment of the table
+- **THEN** the same read carries `"ineffective_grants": []`
+
+#### Scenario: A read for everyone with no row policy is reported on save and on read
+
+- **GIVEN** a non-enrichment table with no entry
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": ["read"]}` for `*`
+- **THEN** the response's `ineffective_grants` carries `{"role": "*", "key": "read", "reason":
+  "everyone_reads_all_rows", ...}`, and so does a later `GET /v1/tables/t/access`
+- **AND WHEN** the entry of `*` is replaced by one carrying `read` and `rows`
+- **THEN** neither the response nor a later read carries that item
+- **AND WHEN** it is replaced by one carrying `read`, `columns` and no `rows`
+- **THEN** the item is reported again
+
+#### Scenario: A read for everyone without read is not reported
+
+- **WHEN** the entry of `*` carries `get` only, or carries no privilege and a `rows`
+- **THEN** no `everyone_reads_all_rows` item is reported
+
+#### Scenario: State left on an enrichment is not reported as a read for everyone
+
+- **GIVEN** an enrichment on which an earlier build stored, for `*`, a `read` grant with no row policy
+- **WHEN** a caller holding `TABLE_GRANT` reads the enrichment's access configuration
+- **THEN** no `everyone_reads_all_rows` item is reported, because the enrichment's rows are its source's to grant
+
+#### Scenario: A table with nothing to report
+
+- **GIVEN** a table with no entry, and a table on which role `X`'s entry carries `read` and `rows`, `X` holding no
+  global privilege
+- **WHEN** a caller holding `TABLE_GRANT` reads the access configuration of each
+- **THEN** both carry `"ineffective_grants": []`

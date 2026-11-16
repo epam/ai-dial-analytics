@@ -360,7 +360,7 @@ class TableCatalogServiceTest {
         final ColumnVisibility visibility = new ColumnVisibility(java.util.Set.of("a", "s"));
         given(sensitiveAccess.visibleColumns(t)).willReturn(visibility);
         given(callerPermissions.resolve(t, visibility, own)).willReturn(new com.epam.aidial.analytics.service.table.grant.EffectivePermissions(
-                true, true, true, false, false, false, false, true));
+                true, true, true, false, false, false, false, false, true));
 
         assertThat(service.list()).singleElement().satisfies(summary -> assertThat(summary.columnCount()).isEqualTo(1));
         // One visibility decision and one column read, shared by the count and columns_restricted.

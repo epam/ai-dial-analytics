@@ -138,7 +138,7 @@ public record TableDto(
             boolean heavy) {}
 
     /**
-     * The caller's effective permissions on the table, one flag per grantable privilege, mirroring what
+     * The caller's effective permissions on the table, one flag per grantable privilege plus {@code grant}, mirroring what
      * enforcement would decide and reported <b>after</b> implication — so a role granted only {@code read}
      * reports {@code read} and {@code get} both true. Always present, every flag a boolean. There is no
      * {@code list} flag: a caller seeing the table at all can list it, so it would always read {@code true}.
@@ -147,6 +147,9 @@ public record TableDto(
      * modifying operation on it is refused whatever any grant says, while its read-side flags are
      * evaluated from the grant lists like any other table's. In {@code none} security mode every
      * non-system privilege flag is {@code true}.
+     *
+     * <p>{@code grant} reports the caller's global {@code TABLE_GRANT}, which no entry confers: it is the same on every
+     * table, {@code system} tables and enrichments included, and {@code true} in {@code none} mode.
      *
      * <p>{@code rows_restricted} and {@code columns_restricted} are not privileges: they report whether row policies
      * confine the caller's reads to some of the table's rows and whether column policies hide one of its columns, and
@@ -160,6 +163,9 @@ public record TableDto(
             boolean sensitive,
             @Schema(description = "Whether the caller may insert rows into this table") boolean write,
             @Schema(description = "Whether the caller may change this table's schema or description") boolean modify,
+            @Schema(description = "Whether the caller holds TABLE_GRANT and so may use GET/PUT/DELETE "
+                    + "/v1/tables/{name}/access; held only globally, so the same on every table, and true in `none` mode")
+            boolean grant,
             @Schema(description = "Whether row policies confine the caller's reads of this table to some of its rows; "
                     + "the policy itself is readable only through GET /v1/tables/{name}/access")
             @JsonProperty("rows_restricted") boolean rowsRestricted,

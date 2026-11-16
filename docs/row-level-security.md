@@ -11,8 +11,8 @@ operator's guide.
 
 | Call | Does |
 |---|---|
-| `GET /v1/tables/{name}/access` | Every role's entry, sorted by role, and the table's access `generation` |
-| `GET /v1/tables/{name}/access?role={role}` | One role's entry and the `generation`; `404` when the role has none |
+| `GET /v1/tables/{name}/access` | Every role's entry, sorted by role, the table's access `generation`, and `ineffective_grants` for every entry |
+| `GET /v1/tables/{name}/access?role={role}` | One role's entry, the `generation` and that entry's `ineffective_grants`; `404` when the role has none |
 | `PUT /v1/tables/{name}/access?role={role}` | Replaces the role's **whole** entry; body `{"generation", "privileges", "rows", "columns"}` |
 | `DELETE /v1/tables/{name}/access?role={role}` | Removes the role's entry (`204`), `404` when it has none; optional `&generation=<n>` makes it conditional |
 
@@ -33,7 +33,17 @@ operator's guide.
   changed after `n` or `n` is above the table's, `422` when `n` is not an integer, `404` when the role has no entry.
 - **The response** is the entry as stored, the new `generation` and `ineffective_grants`, which reports a privilege
   that changes nothing (`already_global`, `sensitive_without_verb`, `lifts_row_policies`, `lifts_column_policies`)
-  without failing the request. Your own permissions on the table are on `GET /v1/tables/{name}`.
+  and the standing warning `everyone_reads_all_rows` (see [Everyone](#everyone-the--grantee)), without failing the
+  request. Each item is `{role, key, reason, message}`; for one privilege they come in the order
+  `lifts_row_policies`, `lifts_column_policies`, `everyone_reads_all_rows`, `already_global`,
+  `sensitive_without_verb`. Your own permissions on the table are on `GET /v1/tables/{name}`.
+- **Both reads carry `ineffective_grants` too**, judged on the entries as stored at the read: the whole configuration
+  reports every entry, grouped by role in the order of `roles`, and the one-role read reports that entry only. It is
+  `[]` when nothing is reported. A warning appears on an entry saved earlier once another change makes it true (a
+  `lifts_row_policies` on `*` after another role gains `rows`) and disappears once one makes it false.
+- **Whether you may manage access at all** is `permissions.grant` on `GET /v1/tables` and `GET /v1/tables/{name}`:
+  `true` exactly when you hold `TABLE_GRANT`, which is held only globally, so it is the same on every table (always
+  `true` in `none` mode). A client can hide the access editor when it is `false` instead of waiting for a `403`.
 
 The examples below read the generation first:
 
@@ -184,7 +194,8 @@ EOF
 - **`permissions.columns_restricted`** on `GET /v1/tables` and `GET /v1/tables/{name}` is `true` when column policies
   hide at least one of the table's own columns from the caller (for an enrichment, by its source's policies). A
   column hidden only by the clearance does not set it, and it is `false` for a caller with no governing role. It does
-  not disclose the policies; those are readable through the access API only.
+  not disclose the policies; those are readable through the access API only. Beside it, `permissions.grant` reports
+  whether the caller holds `TABLE_GRANT` and so may read them there.
 
 ### Renames, drops and the generation
 
@@ -328,6 +339,12 @@ Keep the `rows` in that entry. A `read` for `*` with no `rows` lets every caller
 policies of every other role on the table, because every caller then carries a role that reads with no policy.
 The entry is accepted, and its response reports it under `ineffective_grants` with reason `lifts_row_policies`
 (and `lifts_column_policies` when another entry carries `columns` and the `*` entry has none).
+
+Whether or not another role has a policy, a `read` for `*` with no `rows` is also reported with reason
+`everyone_reads_all_rows`, whatever its `columns` (a column list does not narrow rows). It is a standing warning,
+not an ineffective grant: it is reported on the `PUT` and on both reads for as long as the entry stays, so a table
+meant to be readable by everyone keeps carrying it, and it sits beside `lifts_row_policies` and
+`lifts_column_policies` without replacing either. It is not reported on an enrichment, whose rows its source grants.
 
 The rules above apply to `*` as to any role. A caller sees the rows of the `*` policy plus those of the
 policies on its own roles, and a caller one of whose roles reads the table with no policy (an

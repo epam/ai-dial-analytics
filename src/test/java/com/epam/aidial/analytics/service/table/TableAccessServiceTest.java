@@ -41,11 +41,14 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -374,14 +377,74 @@ class TableAccessServiceTest {
 
         service.put("t", "X", request(6, List.of("read"), null, List.of("a")));
         assertThat(reasons(service.put("t", "*", request(7, List.of("read"), null, null))))
-                .containsExactly(IneffectiveReason.LIFTS_COLUMN_POLICIES);
-        assertThat(reasons(service.put("t", "*", request(8, List.of("read"), null, List.of("a"))))).isEmpty();
+                .containsExactly(IneffectiveReason.LIFTS_COLUMN_POLICIES, IneffectiveReason.EVERYONE_READS_ALL_ROWS);
+        assertThat(reasons(service.put("t", "*", request(8, List.of("read"), null, List.of("a")))))
+                .as("a column list does not narrow rows").containsExactly(IneffectiveReason.EVERYONE_READS_ALL_ROWS);
         assertThat(reasons(service.put("t", "*", request(9, List.of("read"), filterRows(), null)))).isEmpty();
 
         service.put("t", "*", request(10, List.of(), null, null));
         service.put("t", "Y", request(11, List.of("read"), filterRows(), null));
         assertThat(reasons(service.put("t", "*", request(12, List.of("read"), null, List.of("a")))))
-                .containsExactly(IneffectiveReason.LIFTS_ROW_POLICIES);
+                .containsExactly(IneffectiveReason.LIFTS_ROW_POLICIES, IneffectiveReason.EVERYONE_READS_ALL_ROWS);
+        assertThat(reasons(service.put("t", "*", request(13, List.of("read"), null, null))))
+                .containsExactly(IneffectiveReason.LIFTS_ROW_POLICIES, IneffectiveReason.LIFTS_COLUMN_POLICIES,
+                        IneffectiveReason.EVERYONE_READS_ALL_ROWS);
+    }
+
+    @Test
+    void everyoneReadsAllRowsNeedsReadForEveryoneWithNoRowsOnNonEnrichment() {
+        assertThat(reasons(service.put("t", "*", request(4, List.of("get"), null, null)))).isEmpty();
+        assertThat(reasons(service.put("t", "*", request(5, List.of(), filterRows(), null)))).isEmpty();
+        assertThat(reasons(service.put("t", "X", request(6, List.of("read"), null, null)))).isEmpty();
+
+        final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
+        enrichment.setSourceTable("t");
+        enrichment.getAccess().setRead(List.of("*"));
+        stored(enrichment);
+        assertThat(service.list("e").ineffectiveGrants()).as("state left on an enrichment").isEmpty();
+        assertThat(service.get("e", "*").ineffectiveGrants()).isEmpty();
+    }
+
+    @Test
+    void readsReportEveryStoredEntryInRoleOrderAndTheOneRoleReadItsEntryOnly() {
+        service.put("t", "X", request(4, List.of("read"), filterRows(), null));
+        when(providerRolePrivileges.holdsGlobally("global-reader", Privilege.TABLE_READ)).thenReturn(true);
+        service.put("t", "global-reader", request(5, List.of("read"), null, null));
+        service.put("t", "*", request(6, List.of("read"), null, null));
+
+        assertThat(service.list("t").ineffectiveGrants()).extracting(IneffectiveGrant::role, IneffectiveGrant::reason).containsExactly(
+                tuple("*", IneffectiveReason.LIFTS_ROW_POLICIES),
+                tuple("*", IneffectiveReason.EVERYONE_READS_ALL_ROWS),
+                tuple("global-reader", IneffectiveReason.ALREADY_GLOBAL));
+        assertThat(service.get("t", "*").ineffectiveGrants()).extracting(IneffectiveGrant::reason)
+                .containsExactly(IneffectiveReason.LIFTS_ROW_POLICIES, IneffectiveReason.EVERYONE_READS_ALL_ROWS);
+        assertThat(service.get("t", "X").ineffectiveGrants()).isEmpty();
+
+        // The whole-configuration read loads the enrichments once, not once per entry.
+        clearInvocations(definitions);
+        service.list("t");
+        verify(definitions, times(1)).findBySourceTable("t");
+    }
+
+    @Test
+    void readsJudgeAlreadyGlobalOnTheRoleMappingInForceAtTheRead() {
+        assertThat(reasons(service.put("t", "R", request(4, List.of("read"), null, null)))).isEmpty();
+
+        when(providerRolePrivileges.holdsGlobally("R", Privilege.TABLE_READ)).thenReturn(true);
+        assertThat(service.get("t", "R").ineffectiveGrants()).extracting(IneffectiveGrant::reason)
+                .containsExactly(IneffectiveReason.ALREADY_GLOBAL);
+        assertThat(service.list("t").ineffectiveGrants()).extracting(IneffectiveGrant::reason)
+                .containsExactly(IneffectiveReason.ALREADY_GLOBAL);
+
+        when(providerRolePrivileges.holdsGlobally("R", Privilege.TABLE_READ)).thenReturn(false);
+        assertThat(service.get("t", "R").ineffectiveGrants()).isEmpty();
+    }
+
+    @Test
+    void readsOfTableWithNothingToReportCarryAnEmptyReport() {
+        assertThat(service.list("t").ineffectiveGrants()).isEmpty();
+        service.put("t", "X", request(4, List.of("read"), filterRows(), null));
+        assertThat(service.list("t").ineffectiveGrants()).isEmpty();
     }
 
     @Test

@@ -5,8 +5,10 @@ import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.List;
@@ -35,6 +37,9 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String BASE = "/v1/tables";
     private static final String PROBE = "access_probe";
     private static final String WRITER_ROLE = "analytics-writer";
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -572,5 +577,159 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.permissions.write").value(false))
                 .andExpect(jsonPath("$.permissions.modify").value(false));
+    }
+
+    @Test
+    void grantFlagFollowsTableGrantOnGetListAndCreate() throws Exception {
+        for (final String table : List.of(PROBE, "dial_usage_log")) {
+            mockMvc.perform(get(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.grant").value(true));
+            mockMvc.perform(get(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.read").value(true))
+                    .andExpect(jsonPath("$.permissions.grant").value(false));
+        }
+        mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name=='" + PROBE + "')].permissions.grant").value(true));
+        mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name=='" + PROBE + "')].permissions.grant").value(false));
+
+        final String created = "access_probe_created";
+        try {
+            mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"name\":\"" + created + "\",\"type\":\"source\"}"))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.permissions.grant").value(true));
+            mockMvc.perform(delete(BASE + "/" + created).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNoContent());
+            // `importer` holds TABLE_CREATE alone.
+            mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
+                                    Map.of("sub", "importer-user", "roles", List.of("importer"), "email", "importer@test"))))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"name\":\"" + created + "\",\"type\":\"source\"}"))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.permissions.grant").value(false));
+        } finally {
+            mockMvc.perform(delete(BASE + "/" + created).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())));
+        }
+    }
+
+    // --- ineffective_grants on the reads ------------------------------------------------------------
+
+    private ResultActions readAccess(String table, String role) throws Exception {
+        return mockMvc.perform(get(BASE + "/" + table + "/access" + (role == null ? "" : "?role=" + role))
+                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void readForEveryoneOverRowPolicyIsReportedOnBothReadsAndFollowsOtherRoles() throws Exception {
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read")).andExpect(status().isOk());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        // Another role's policy makes lifts_row_policies true on the `*` entry saved before it.
+        putEntry(fullAdminToken(), PROBE, "X", "\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(2))
+                .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[0].key").value("read"))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[0].message").isString())
+                .andExpect(jsonPath("$.ineffective_grants[1].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "*")
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(2))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "X")
+                .andExpect(jsonPath("$.ineffective_grants").isArray())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=X").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNoContent());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+    }
+
+    @Test
+    void everyoneReadsAllRowsIsReportedOnSaveAndReadUntilRowsAreGiven() throws Exception {
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[0].key").value("read"))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read") + ",\"rows\":{\"where\":\"k = 'v'\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+        // A column list does not narrow rows.
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read") + ",\"columns\":[\"k\"]")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "*").andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        putEntry(fullAdminToken(), PROBE, "*", privileges("get")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        putEntry(fullAdminToken(), PROBE, "*", privileges() + ",\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+    }
+
+    @Test
+    void clearanceWarningOnReadDisappearsWhenTheRoleGainsVerb() throws Exception {
+        createEnrichment();
+        try {
+            putEntry(fullAdminToken(), PROBE, "pii-analysts", privileges("sensitive")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts")
+                    .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                    .andExpect(jsonPath("$.ineffective_grants[0].reason").value("sensitive_without_verb"));
+
+            putEntry(fullAdminToken(), PROBE, "*", privileges("get")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+            mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=*").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNoContent());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants[0].reason").value("sensitive_without_verb"));
+            putEntry(fullAdminToken(), ENRICHMENT, "pii-analysts", privileges("modify")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void readForEveryoneLeftOnAnEnrichmentIsNotReported() throws Exception {
+        createEnrichment();
+        try {
+            // Raw SQL: the API refuses a read-side entry on an enrichment, and the clean-up migration has already run.
+            jdbc.update("UPDATE table_definition SET access = ?::jsonb WHERE name = ?", "{\"read\":[\"*\"]}", ENRICHMENT);
+            readAccess(ENRICHMENT, null)
+                    .andExpect(jsonPath("$.roles['*'].privileges[0]").value("read"))
+                    .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+            readAccess(ENRICHMENT, "*").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void readsWithNothingToReportCarryAnEmptyReport() throws Exception {
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants").isArray())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges("read") + ",\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, WRITER_ROLE).andExpect(jsonPath("$.ineffective_grants").isEmpty());
     }
 }

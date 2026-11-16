@@ -367,9 +367,10 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         // confinement. The grant is accepted and says so.
         putEntry(PROBE, "*", "\"privileges\":[\"read\"]")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.ineffective_grants", hasSize(1)))
+                .andExpect(jsonPath("$.ineffective_grants", hasSize(2)))
                 .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
-                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"));
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
         sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
 
         // With a policy of its own, `*` confines again and the grant is no longer reported.

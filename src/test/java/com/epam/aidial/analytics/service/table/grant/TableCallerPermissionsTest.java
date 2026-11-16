@@ -35,7 +35,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Truth table for {@link TableCallerPermissions}, the six reported flags.
+ * Truth table for {@link TableCallerPermissions}, the reported flags.
  *
  * <p>Two cases carry the decisions this change made. A {@code system} table now reports its <b>read-side</b>
  * flags honestly instead of all-false — reporting no permissions at all denied the very read grants that
@@ -110,7 +110,7 @@ class TableCallerPermissionsTest {
         final TableDefinitionEntity source = definitions.findById("src").orElseThrow();
         when(rowPolicies.isConfined(source)).thenReturn(true);
 
-        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, true, false, true));
+        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, true, false, false, true, false));
     }
 
     @Test
@@ -133,7 +133,7 @@ class TableCallerPermissionsTest {
 
         final TableDefinitionEntity readable = enrichment(Map.of(), Map.of(Privilege.TABLE_READ, List.of("r")));
         when(rowPolicies.isConfined(readable)).thenReturn(true);
-        assertThat(oidc.resolve(readable)).isEqualTo(new EffectivePermissions(true, true, true, false, false, false, true));
+        assertThat(oidc.resolve(readable)).isEqualTo(new EffectivePermissions(true, true, true, false, false, false, false, true, false));
     }
 
     @Test
@@ -159,7 +159,7 @@ class TableCallerPermissionsTest {
         authenticateWith(EnumSet.allOf(Privilege.class));
         final TableDefinitionEntity e = enrichment(Map.of(), Map.of());
         e.setSystem(true);
-        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, false, false));
+        assertThat(oidc.resolve(e)).isEqualTo(new EffectivePermissions(true, true, true, true, false, false, true, false, false));
     }
 
     @AfterEach
@@ -188,10 +188,10 @@ class TableCallerPermissionsTest {
         final TableDefinitionEntity def = table(Map.of(Privilege.TABLE_READ, List.of("viewer")));
         def.setSystem(true);
 
-        assertThat(oidc.resolve(def)).isEqualTo(new EffectivePermissions(true, true, true, true, false, false));
+        assertThat(oidc.resolve(def)).isEqualTo(new EffectivePermissions(true, true, true, true, false, false, true, false, false));
         assertThat(none.resolve(def))
                 .as("none mode enforces nothing, but a system table's write/modify are still hard false")
-                .isEqualTo(new EffectivePermissions(true, true, true, true, false, false));
+                .isEqualTo(new EffectivePermissions(true, true, true, true, false, false, true, false, false));
     }
 
     @Test
@@ -263,6 +263,42 @@ class TableCallerPermissionsTest {
 
         def.getAccess().setRolesFor(Privilege.TABLE_READ, List.of(SecurityClaimsExtractor.ANYONE));
         assertThat(oidc.resolve(def)).isEqualTo(new EffectivePermissions(true, true, true, false, false, false));
+    }
+
+    @Test
+    @DisplayName("grant follows the caller's global TABLE_GRANT, on system tables and enrichments alike")
+    void grantFollowsGlobalTableGrant() {
+        authenticateWith(EnumSet.of(Privilege.TABLE_GET, Privilege.TABLE_GRANT));
+        final TableDefinitionEntity plain = table(Map.of());
+        final TableDefinitionEntity system = table(Map.of());
+        system.setSystem(true);
+        final TableDefinitionEntity e = enrichment(Map.of(), Map.of());
+        assertThat(oidc.resolve(plain)).isEqualTo(new EffectivePermissions(false, true, false, false, false, false, true, false, false));
+        assertThat(oidc.resolve(system).grant()).as("system table").isTrue();
+        assertThat(oidc.resolve(e).grant()).as("enrichment").isTrue();
+
+        authenticateWith(EnumSet.of(Privilege.TABLE_GET));
+        assertThat(oidc.resolve(plain).grant()).isFalse();
+        assertThat(oidc.resolve(system).grant()).as("system table").isFalse();
+        assertThat(oidc.resolve(e).grant()).as("enrichment").isFalse();
+    }
+
+    @Test
+    @DisplayName("an entry carrying every privilege does not confer grant")
+    void entryDoesNotConferGrant() {
+        authenticateWith(EnumSet.noneOf(Privilege.class), "x");
+        final TableDefinitionEntity def = table(Map.of(Privilege.TABLE_GET, List.of("x"), Privilege.TABLE_READ, List.of("x"),
+                Privilege.TABLE_SENSITIVE, List.of("x"), Privilege.TABLE_WRITE, List.of("x"), Privilege.TABLE_MODIFY, List.of("x")));
+        assertThat(oidc.resolve(def)).isEqualTo(new EffectivePermissions(true, true, true, true, true, true, false, false, false));
+    }
+
+    @Test
+    @DisplayName("none mode reports grant on every table, a system table included")
+    void noneModeReportsGrant() {
+        final TableDefinitionEntity system = table(Map.of());
+        system.setSystem(true);
+        assertThat(none.resolve(table(Map.of())).grant()).isTrue();
+        assertThat(none.resolve(system).grant()).isTrue();
     }
 
     @Test

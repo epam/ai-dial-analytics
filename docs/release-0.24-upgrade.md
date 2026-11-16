@@ -301,7 +301,7 @@ as an entry, at `generation` 0.
 
 | 0.23 call | 0.24 call |
 |---|---|
-| `GET /v1/tables/{name}/access` (five lists `get`, `read`, `sensitive`, `write`, `modify`) | `GET /v1/tables/{name}/access`, returning `{"generation", "roles": {"<role>": {"privileges", "rows", "columns"}}}`; a role's `privileges` are the keys whose lists named it |
+| `GET /v1/tables/{name}/access` (five lists `get`, `read`, `sensitive`, `write`, `modify`) | `GET /v1/tables/{name}/access`, returning `{"generation", "roles": {"<role>": {"privileges", "rows", "columns"}}, "ineffective_grants"}`; a role's `privileges` are the keys whose lists named it |
 | `PUT /v1/tables/{name}/access` with lists to merge | For each role whose privileges change, `PUT /v1/tables/{name}/access?role={role}` with `generation`, the role's full `privileges`, and its `rows` and `columns` as read; a role left with nothing, `DELETE /v1/tables/{name}/access?role={role}` |
 | `GET /v1/tables/{name}/row-policies` | `GET /v1/tables/{name}/access` (each entry's `rows`), or `GET /v1/tables/{name}/access?role={role}` |
 | `PUT /v1/tables/{name}/row-policies/{role}` with `{"filter": ...}` or `{"where": ...}` | `PUT /v1/tables/{name}/access?role={role}` with `generation`, the role's `privileges` and `columns` as read, and `rows` set to the former body |
@@ -335,7 +335,13 @@ as an entry, at `generation` 0.
   `TABLES_LOCK_TIMEOUT` (default `10s`, see [`configuration.md`](configuration.md#table-definition-writes)) for
   another change to the same table is refused `409 table_busy`, changes nothing, and can be retried.
 - **The `permissions` member is gone** from the `PUT` response; read the caller's own permissions from
-  `GET /v1/tables/{name}`. `ineffective_grants` keeps its shape and reasons, and gains `lifts_column_policies`.
+  `GET /v1/tables/{name}`. `ineffective_grants` keeps its item shape and its earlier reasons, and gains
+  `lifts_column_policies` and `everyone_reads_all_rows` (additive). The latter is a standing warning: a `read` for `*`
+  with no `rows` on a table that is not an enrichment, reported beside `lifts_row_policies` and
+  `lifts_column_policies`, so a `PUT` of `read` for `*` without `rows` reports one more item than before.
+- **Both access reads carry `ineffective_grants`** (additive): `GET .../access` reports every entry, grouped by role
+  in the order of `roles`, and `GET .../access?role={role}` reports that entry, judged on the entries as stored at the
+  read; `[]` when nothing is reported.
 - **`list` is now `422`.** A `list` (or `read_sensitive`) privilege is refused `422 validation_error` like any unknown
   privilege, where the old grant API answered `400`.
 - **A bundle-named role is `422` on `PUT`.** A role spelled like a bundle or privilege (`READ_ONLY_ANALYTIC`,
@@ -352,6 +358,9 @@ as an entry, at `generation` 0.
   from the caller, so a restriction added later also hides the column in older revisions, those written before `V57`
   included; a column is matched by the name it had in the revision.
 - **`permissions.columns_restricted`** is added on `GET /v1/tables` and `GET /v1/tables/{name}` (additive).
+- **`permissions.grant`** is added on every surface that carries `permissions`, revision snapshots included
+  (additive): `true` exactly when the caller holds `TABLE_GRANT` and so may use the access API, the same on every
+  table, and always `true` in `none` mode.
 - **Column policies** are new: an entry's `columns` restricts the role to the listed columns, naming an enrichment's
   as `<enrichment>.<column>` on its source. A hidden column is absent from every read surface, and pipeline
   authoring, the runner data plane and export refuse it `403 column_not_entitled`, as does a schema `PATCH` carrying
@@ -412,4 +421,5 @@ as an entry, at `generation` 0.
 | The scan judges an aligned target's source partition column for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `partition_by` column is refused `403 sensitive_column_not_entitled` scanning for a target aligned with it | Grant the runner's role the source's clearance (§11) |
 | Materialize judges the source's version and identity columns for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `version_column` or `identity_column` is refused `403 sensitive_column_not_entitled` on `materialize` | Grant the runner's role the source's clearance (§11) |
 | `enrich` authoring re-attributes a `filter`, `ready_when.signal` or `member_select.prefer_sql` that fails to parse | An author without the source's clearance, where the source or an active enrichment has a `sensitive` column, gets `403 sensitive_column_not_entitled` (a column-restricted author `403 column_not_entitled`) for any malformed fragment, where 0.23 answered `422 pipeline_validation_failed`; no column policy is needed for this | Debug malformed fragments as a cleared author with no column restriction (§11) |
+| `permissions.grant`; `ineffective_grants` on both access reads; reason `everyone_reads_all_rows` (additive) | Clients can tell before a request whether the caller may manage access, and see the access warnings after a reload; a `PUT` or read of `read` for `*` without `rows` on a non-enrichment table reports `everyone_reads_all_rows` | Hide access editing when `permissions.grant` is `false`; show or let operators dismiss the new warning (§11) |
 | New error codes | `409 access_conflict`, `403 column_not_entitled`, `409 column_in_column_policy`, `409 table_busy` | Handle them in clients (§11) |
