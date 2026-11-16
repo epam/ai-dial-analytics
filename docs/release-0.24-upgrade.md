@@ -57,15 +57,14 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 
 1. **Check for a stored `*`** in `get`, `read` and `sensitive` lists and row policies, and remove the ones you did
    not mean to open to every caller (§7).
-2. **Run the two enrichment queries** in §10. Grant each role that would lose access on the source, and decide how
-   to replace each enrichment row policy.
-3. **Save every enrichment's access lists and row policies** with the query in §10, for a rollback.
-4. **Give runner roles the source's clearance** where the source's partition, version or identity column is
+2. **Run the enrichment query** in §10 and grant each role it finds on the source. Decide how to replace each
+   enrichment row policy, and save the lists and policies for a rollback (§10).
+3. **Give runner roles the source's clearance** where the source's partition, version or identity column is
    `sensitive` (§11).
-5. **Update access-API clients**: move from the old `/access` and `/row-policies` calls to
+4. **Update access-API clients**: move from the old `/access` and `/row-policies` calls to
    `/v1/tables/{name}/access?role=`, and read `roles` instead of `access` and `row_policies` in revision snapshots
    (§11).
-6. **Plan a freeze**: no access, table or pipeline edits until every ADAS pod runs 0.24 (§10, §11).
+5. **Plan a freeze**: no access, table or pipeline edits until every ADAS pod runs 0.24 (§10, §11).
 
 ## 2. An `Atomic` database
 
@@ -188,61 +187,21 @@ also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped
 
 ## 10. An enrichment's read-side access is its source's
 
-An enrichment is always read through its source, so its read access now comes from the source (see
-[`table-access-control`](../openspec/specs/table-access-control/spec.md)).
+An enrichment is always read through its source, so its `get`, `read` and `sensitive` access and its rows now come
+from the source (see [`table-access-control`](../openspec/specs/table-access-control/spec.md)). `write` and `modify`
+stay its own.
 
-**What changed**
+- The migration `V56` removes every enrichment's `get`, `read` and `sensitive` lists and its row policies.
+- A `PUT .../access?role=` on an enrichment with anything but `write` and `modify` is
+  `409 enrichment_follows_source`.
+- **Source readers gain** the enrichments' columns (sensitive ones with the source's clearance). **Enrichment-only
+  grantees lose** them: the columns become unknown fields. **Enrichment row policies have no equivalent**: replace
+  each with a row policy on the source, or mark the columns `sensitive`.
+- The sensitive-grant subset rule is gone for every derived table: its clearance holders no longer need clearance on
+  its input. Review who holds each derived table's clearance.
 
-- An enrichment's `get`, `read` and `sensitive` access, and its rows, are its `source_table`'s. `write` and `modify`
-  stay the enrichment's own.
-- The Postgres migration `V56` removes every enrichment's `get`, `read` and `sensitive` lists and its row policies,
-  `dial_usage_log_payload` included.
-- `PUT /v1/tables/{enrichment}/access?role={role}` accepts only `write` and `modify`. An entry with `get`, `read`,
-  `sensitive`, `rows` or `columns` is refused `409 enrichment_follows_source`, and the message names the source.
-- The sensitive-grant subset rule is gone: a derived table's clearance holders no longer need clearance on the table
-  it derives from. `422 sensitive_grant_widens`, and the pipeline refusals it caused, no longer occur. A pipeline's
-  author must still be entitled to every sensitive column the pipeline reads.
-
-**What clients notice**
-
-- **Source readers gain access.** A reader of the source reads its enrichments' columns; a holder of the source's
-  clearance also reads their sensitive ones. Anyone who may get the source gets its enrichments. For example, the
-  payload enrichment and `usage_client_identity` now follow `dial_usage_log`. To keep an enrichment column from some
-  source readers, mark it `sensitive` or leave it out of a column policy on the source (§11).
-- **Enrichment-only grantees lose access.** A role granted on an enrichment but not on its source loses it: its
-  columns become unknown fields (`400`), and pipelines or runner scans that read them get
-  `403 sensitive_column_not_entitled`.
-- **Enrichment row policies have no equivalent.** The values they hid become visible on the source rows the role
-  reads. Replace each one either by marking the enrichment's columns `sensitive` (hidden on every row from callers
-  without the source's clearance) or by a row policy on the source (hides whole rows). A source policy cannot use an
-  enrichment column.
-- **Smaller effects.** `supports_final` can turn `true` for a reader of an `append` source who could not read its
-  enrichment, so `FINAL`, which answered `400 illegal_final`, now works. An export of everything includes the
-  enrichments of the sources the caller may get, and is refused `403 sensitive_column_not_entitled` when the caller
-  lacks the clearance for one. `ineffective_grants` no longer reports `enrichment_read_inert`. An enrichment's latest
-  revision snapshot shows the removed lists until its next change.
-
-**What to do**
-
-Before upgrading, run both queries against the catalog database.
-
-Who gains access: per enrichment, the source's `read` and `sensitive` grantees it does not name, and the policies
-`V56` removes.
-
-```sql
-SELECT e.name AS enrichment, e.source_table,
-       ARRAY(SELECT jsonb_array_elements_text(s.access -> 'read')
-             EXCEPT SELECT jsonb_array_elements_text(e.access -> 'read')) AS gains_read,
-       ARRAY(SELECT jsonb_array_elements_text(s.access -> 'sensitive')
-             EXCEPT SELECT jsonb_array_elements_text(e.access -> 'sensitive')) AS gains_sensitive,
-       e.row_policies AS policies_removed
-  FROM table_definition e
-  JOIN table_definition s ON s.name = e.source_table
- WHERE e.type = 'ENRICHMENT';
-```
-
-Who loses access, per key; expected empty. Grant each role it finds the same key on the source. A role that
-`roles-mapping` maps to the privilege globally keeps it and can be ignored.
+**What to do before upgrading.** Find the roles that would lose access, and grant each the same key on the source.
+The query is expected to return nothing; a role mapped to the privilege globally can be ignored.
 
 ```sql
 WITH pair AS (
@@ -267,101 +226,53 @@ SELECT enrichment, 'get', role
    AND NOT (role <> '*' AND coalesce(ea -> 'modify', '[]'::jsonb) ? role);
 ```
 
-Save every enrichment's lists and policies for a rollback:
+Save the lists and policies for a rollback:
+`SELECT name, access, row_policies FROM table_definition WHERE type = 'ENRICHMENT';`
 
-```sql
-SELECT name, access, row_policies FROM table_definition WHERE type = 'ENRICHMENT';
-```
+**During the rollout**, make no access or pipeline edits until every pod runs 0.24.
 
-**During the rollout**, make no access or pipeline edits. Old pods judge enrichments by their now empty lists, so
-they may refuse enrichment columns to source readers and runners, and fail refreshes of rollups that read them. This
-stops when every pod runs the new build.
-
-**Rollback.** `V56` cannot be undone. An older build reads the cleared lists as empty grants: source readers and
-runners lose the enrichment columns, rollups that read them fail, and the `enrich` pipeline cannot be armed or
-patched. After redeploying the previous release:
-
-1. Restore the saved lists with its `PUT /v1/tables/{enrichment}/access`, sending only `get`, `read` and
-   `sensitive`, and each saved policy with `PUT /v1/tables/{enrichment}/row-policies/{role}`.
-2. If a restore is refused `422 sensitive_grant_widens`, or a rollup still fails, narrow that table's `read` or
-   `sensitive` list, or grant the role on the table it reads.
-3. Grant enrichments created after the upgrade to the source readers who should read them.
-
-Upgrading again does not re-run `V56`. Then reduce each restored role to its `write` and `modify` with
-`PUT /v1/tables/{enrichment}/access?role={role}`, or `DELETE` its entry when it holds neither.
+**Rollback.** `V56` cannot be undone. After redeploying the previous release, restore the saved lists and policies
+through its old `/access` and `/row-policies` endpoints. Upgrading again does not re-run `V56`; then reduce each
+restored enrichment entry to `write` and `modify`.
 
 ## 11. Role-keyed table access
 
-A table's access is now one **entry** per raw provider role, `{"privileges": [...], "rows": ..., "columns": ...}`,
-managed at `/v1/tables/{name}/access?role={role}` (see
-[`table-access-control`](../openspec/specs/table-access-control/spec.md) and
-[`row-level-security.md`](row-level-security.md)).
+A table's access is now one entry per provider role, `{"privileges", "rows", "columns"}`, at
+`/v1/tables/{name}/access?role={role}` (see [`row-level-security.md`](row-level-security.md)). Stored grants and
+policies carry over as entries; `V57` adds the new columns.
 
-**What changed**
-
-- The five-list access API and the row-policy API are removed, with no alias.
-- Column policies are new: an entry's `columns` limits the role to the listed columns.
-- Revision snapshots carry `roles` (the entries) instead of `access` and `row_policies`. **This breaks a client that
-  reads a snapshot's `access` or `row_policies`.**
-- Stored grants and row policies need no data migration. The Postgres migration `V57` adds the new columns, and
-  existing grants and policies read as entries at `generation` 0.
-
-**Moving clients.** Below, `...` stands for `/v1/tables/{name}`.
+**Moving clients** (`...` is `/v1/tables/{name}`):
 
 | 0.23 call | 0.24 call |
 |---|---|
-| `GET .../access` (five lists) | `GET .../access`, returning `{"generation", "roles": {"<role>": <entry>}, "ineffective_grants"}` |
-| `PUT .../access` with lists to merge | `PUT .../access?role={role}` with the whole entry, for each role that changes; `DELETE` a role left with nothing |
+| `GET .../access` (five lists) | `GET .../access`: `{"generation", "roles": {"<role>": <entry>}, "ineffective_grants"}` |
+| `PUT .../access` with lists | `PUT .../access?role={role}` with the whole entry, per role; `DELETE` a role left with nothing |
 | `GET .../row-policies` | `GET .../access` (each entry's `rows`) |
-| `PUT .../row-policies/{role}` | `PUT .../access?role={role}` with `rows` set to the old body and the other parts as read |
-| `DELETE .../row-policies/{role}` | `PUT .../access?role={role}` with `"rows": null`, or `DELETE` when nothing else is left |
+| `PUT` / `DELETE .../row-policies/{role}` | `PUT .../access?role={role}` with `rows` set, or `null` |
 | `permissions` in the `PUT` response | `GET /v1/tables/{name}` |
 
-- **URL-encode the role** as a query value: group `/analytics/viewers` is `?role=%2Fanalytics%2Fviewers`.
-- **A `PUT` replaces the whole entry.** A part you leave out is cleared, so send the parts you do not change as read.
-- **Send the `generation` you read.** A `PUT` is refused `409 access_conflict` only when that same role changed since
-  the read; re-read and reapply. A `PUT` that changes nothing answers `200`, so a retry is safe. A missing or
-  non-integer `generation` is `422`. `DELETE` takes an optional `&generation=`.
-- **Concurrent writes to one table wait** up to `TABLES_LOCK_TIMEOUT` (default `10s`, see
-  [`configuration.md`](configuration.md#table-definition-writes)), then answer `409 table_busy`; retry.
-- **`422` for a `list` privilege or a bundle-named role** (`FULL_ADMIN`, ...), which the old API accepted. An
-  existing entry for such a role still applies and can only be deleted.
-- **Additive:** `permissions.grant` (the caller may manage access) and `permissions.columns_restricted`;
-  `ineffective_grants` on both access reads, with new reasons `lifts_column_policies` and `everyone_reads_all_rows`.
-- **Request-firewall refusals** are an `ErrorView` `400 bad_request` instead of a bare `400`.
+- URL-encode the role. A `PUT` replaces the whole entry and must send the `generation` it read; it gets
+  `409 access_conflict` only when that role changed since. Writes to one table that wait past `TABLES_LOCK_TIMEOUT`
+  get `409 table_busy`.
+- Revision snapshots carry `roles` instead of `access` and `row_policies`.
+- A `list` privilege or a bundle-named role (`FULL_ADMIN`, ...) is `422`. Firewall refusals are an `ErrorView` `400`.
+- Additive: `permissions.grant` and `permissions.columns_restricted`; `ineffective_grants` on both reads, with the new
+  reasons `lifts_column_policies` and `everyone_reads_all_rows`.
 
-**Column policies: what to watch**
+**Column policies** are new. A hidden column is absent from every read surface, and pipeline, runner and export paths
+refuse it with `403 column_not_entitled`. A restricted runner's list must also name `event_id`, `_ingested_at` and, for
+an aligned target, `request_time` on `dial_usage_log`. Gaining a column-restricted role can hide columns (see
+[`row-level-security.md`](row-level-security.md#column-policies)). Revisions hide what the table's policies hide now,
+or, for a deleted table, what they hid when it was deleted.
 
-- A hidden column is absent from every read surface. Pipeline authoring, the runner and export refuse it
-  `403 column_not_entitled`.
-- A restricted runner's list must also name the columns the runner reads back, such as `event_id` and `_ingested_at`
-  on `dial_usage_log`, and `request_time` for an aligned target (see
-  [`row-level-security.md`](row-level-security.md#pipelines-and-export)).
-- Gaining a column-restricted role can hide columns. A caller with role `A` (rows of project `P1`, all columns) who
-  gains role `B` (all rows, `"columns": ["x"]`) sees only `x`. List on `B` the columns `A`'s readers need, or leave
-  `B` unrestricted; a row policy on `B` does not help (see
-  [`row-level-security.md`](row-level-security.md#column-policies)).
-- A revision snapshot hides a column that the revision's or the table's current policies hide, so a restriction
-  added later applies to older revisions too. A deleted table's revisions are judged by the policies it had when it
-  was deleted.
+**Runners and pipeline authors.** A runner needs the source's clearance when the source's partition, version or
+identity column is `sensitive`, or it gets `403 sensitive_column_not_entitled`. A malformed `enrich` fragment over a
+source with sensitive columns answers `403` instead of `422` to an author without the clearance.
 
-**Runner and pipeline authors**
+**During the rollout**, make no access or table edits until every pod runs 0.24: old pods ignore column policies.
 
-- The runner needs the source's clearance (`TABLE_SENSITIVE`) in two more cases: scanning for an aligned target
-  when the source's `partition_by` column is `sensitive`, and materializing when the source's `version_column` or
-  `identity_column` is `sensitive`. Otherwise it gets `403 sensitive_column_not_entitled`, where 0.23 accepted the
-  call. Give the runner's role the clearance.
-- An `enrich` `filter`, `ready_when.signal` or `member_select.prefer_sql` that fails to parse now answers `403`
-  instead of `422` with the parser's message, to an author without the clearance on a source with `sensitive`
-  columns (such as `dial_usage_log`) or a column-restricted author. Debug it as an author with the clearance and no
-  column restriction.
-
-**During the rollout**, make no access or table edits. Old pods serve the removed endpoints, ignore column policies
-and do not move the generation.
-
-**Rollback.** An older build ignores column policies, so **every column they hide becomes visible**. Delete them (or
-the read paths they narrow) before a rollback that must not widen reads. Grants and row policies written through the
-new API stay readable by the older build.
+**Rollback.** An older build ignores column policies, so every column they hide becomes visible. Delete them first if
+that must not happen.
 
 ## 12. Recommended catalog: DIAL CLI harness header
 
@@ -393,12 +304,8 @@ so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may b
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
 | Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
-| An enrichment's read access and rows follow its source; `V56` clears its own | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone; a read-side `PUT` on it is `409 enrichment_follows_source` | Run the §10 queries; grant on the source; replace enrichment policies; save the lists for a rollback (§10) |
-| Sensitive-grant subset rule removed | `422 sensitive_grant_widens` and the pipeline refusals it caused no longer occur | Review who holds each derived table's clearance (§10) |
-| Role-keyed access API replaces the old access and row-policy endpoints (breaking) | The old calls are gone; a `PUT` replaces a whole entry and needs the `generation` | Move clients using the table in §11 |
-| Revision snapshots carry `roles` (breaking) | `access` and `row_policies` are no longer in snapshots | Read `roles` (§11) |
-| Column policies | Hidden columns are absent everywhere; pipeline and export paths refuse them `403 column_not_entitled` | List the cursor columns in a restricted runner's list; delete column policies before a rollback (§11) |
-| Runner clearance on partition, version and identity columns | A runner without the source's clearance gets `403 sensitive_column_not_entitled` | Give the runner's role the clearance (§11) |
-| `enrich` fragments that fail to parse | An uncleared or column-restricted author gets `403` instead of `422` | Debug as a cleared author with no column restriction (§11) |
-| Smaller API changes | New `permissions.grant`, `permissions.columns_restricted`, `ineffective_grants` reasons and error codes (`409 access_conflict`, `409 table_busy`, `409 column_in_column_policy`); `enrichment_read_inert` removed; firewall refusals are an `ErrorView` | Handle the new codes; retry `table_busy` (§10, §11) |
+| An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the §10 query, grant on the source, save the lists for a rollback (§10) |
+| Sensitive-grant subset rule removed | Derived tables no longer need clearance on their input | Review who holds each derived table's clearance (§10) |
+| Role-keyed access API, column policies (breaking) | Old access and row-policy calls are gone; snapshots carry `roles`; hidden columns are absent and refused `403 column_not_entitled` | Move clients using the table in §11; name the cursor columns in a restricted runner's list; delete column policies before a rollback (§11) |
+| Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§11) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
