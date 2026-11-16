@@ -14,7 +14,8 @@ surface is added incrementally as spec-driven changes. The querying surface is t
 translation-only pair `POST /v1/queries/translate` / `translate-sql` (capability
 `query-translation-endpoint`, DSL ↔ SQL without execution). Per-instance settings live under `/v1/settings`
 (capability `instance-settings`), starting with `GET`/`PUT /v1/settings/sessions-source`, which names the source
-table holding session rows and binds its fields to the session roles. Saved queries (`/v1/saved-queries`, capability
+table holding session rows and binds its fields to the session roles, and `app-routes`, the allowlist of DIAL
+application routes an enrich pipeline may call. Saved queries (`/v1/saved-queries`, capability
 `saved-queries`) and dashboards of query widgets (`/v1/dashboards`, capability `dashboards`) store authored
 intent the client runs through those endpoints; the `data-sync` path ingests DIAL
 usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic

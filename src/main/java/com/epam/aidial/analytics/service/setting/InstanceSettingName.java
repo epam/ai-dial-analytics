@@ -7,7 +7,10 @@ package com.epam.aidial.analytics.service.setting;
 public enum InstanceSettingName {
 
     /** Which catalog entity holds session rows, and which of its fields play the session roles. */
-    SESSIONS_SOURCE("sessions-source");
+    SESSIONS_SOURCE("sessions-source"),
+
+    /** The DIAL application routes an enrichment pipeline may call. */
+    APP_ROUTES("app-routes");
 
     private final String wireName;
 

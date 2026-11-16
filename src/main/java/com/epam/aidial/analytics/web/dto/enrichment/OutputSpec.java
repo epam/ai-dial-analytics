@@ -28,7 +28,7 @@ import java.util.List;
  * @param body the object form; null when the bare-string form was used
  */
 @Schema(description = "What the transform produces for one target column: for an llm transform the prose "
-        + "the model is told about the field, as a bare string or an object {prose?, values?, jsonata?} - "
+        + "the model is told about the field, as a bare string or an object {prose?, values?, jsonata?, source?} - "
         + "prose optional, defaulting to the column's own description; for a sql transform the scalar "
         + "expression as a bare string",
         anyOf = {String.class, OutputSpecBody.class})
@@ -56,6 +56,11 @@ public record OutputSpec(String text, OutputSpecBody body) {
     /** The declared domain, or null. Only the object form can carry one. */
     public List<String> values() {
         return body == null ? null : body.values();
+    }
+
+    /** Where a route output's value is read from, or null. Only the object form can carry one. */
+    public String source() {
+        return body == null ? null : body.source();
     }
 
     /** The response transform, or null. Only the object form can carry one. */
