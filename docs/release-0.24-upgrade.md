@@ -21,6 +21,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   removed by the migration, so check who gains and loses access before upgrading (§10).
 - **Table access is managed one role at a time** at `/v1/tables/{name}/access?role=`, with column policies;
   the old five-list access and row-policy endpoints are removed (§11).
+- **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
+  registered `usage-client-identity-live` applies it by hand (§12).
 
 ---
 
@@ -399,6 +401,26 @@ as an entry, at `generation` 0.
   narrow). The added columns are otherwise harmless to an older build, and grants and row policies written through
   the new API are in the documents it reads.
 
+## 12. Recommended catalog: DIAL CLI harness header
+
+The `usage-client-identity-live` pipeline in [`recommended-catalog`](recommended-catalog/README.md) now reads
+`dial_cli_harness_name` from the `X-DIAL-CLI-Harness` header, falling back to the second token of a legacy combined
+`X-DIAL-CLI-Version`, and decides `client_type` `dialcli` on either header. A DIAL CLI that sends the two headers
+separately leaves `dial_cli_harness_name` empty under the earlier expression.
+
+Importing the bundle again does not apply this: import never changes an object that exists, so the preview reports
+the pipeline as `SKIP` with `differs: true` (see [`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)).
+A deployment that already registered the pipeline applies it by hand:
+
+1. Re-declare `usage-client-identity-live` with the bundle's `client_type` and `dial_cli_harness_name` expressions.
+2. Update the `client_type`, `dial_cli_version` and `dial_cli_harness_name` column descriptions of
+   `usage_client_identity` from the bundle (a schema patch `update`). Descriptions only; no data changes.
+3. Backfill the pipeline over the period in which the separate header was sent. Rows whose payload is still
+   retained get their harness; rows past the payload retention window keep it empty.
+
+The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
+so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -423,3 +445,4 @@ as an entry, at `generation` 0.
 | `enrich` authoring re-attributes a `filter`, `ready_when.signal` or `member_select.prefer_sql` that fails to parse | An author without the source's clearance, where the source or an active enrichment has a `sensitive` column, gets `403 sensitive_column_not_entitled` (a column-restricted author `403 column_not_entitled`) for any malformed fragment, where 0.23 answered `422 pipeline_validation_failed`; no column policy is needed for this | Debug malformed fragments as a cleared author with no column restriction (§11) |
 | `permissions.grant`; `ineffective_grants` on both access reads; reason `everyone_reads_all_rows` (additive) | Clients can tell before a request whether the caller may manage access, and see the access warnings after a reload; a `PUT` or read of `read` for `*` without `rows` on a non-enrichment table reports `everyone_reads_all_rows` | Hide access editing when `permissions.grant` is `false`; show or let operators dismiss the new warning (§11) |
 | New error codes | `409 access_conflict`, `403 column_not_entitled`, `409 column_in_column_policy`, `409 table_busy` | Handle them in clients (§11) |
+| Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
