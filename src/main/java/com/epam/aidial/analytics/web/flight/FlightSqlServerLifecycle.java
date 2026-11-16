@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.web.flight;
 
+import com.epam.aidial.analytics.clickhouse.replication.StorageReadyGate;
 import com.epam.aidial.analytics.service.query.arrow.ArrowAllocators;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.arrow.flight.FlightServer;
@@ -32,6 +33,7 @@ public class FlightSqlServerLifecycle implements SmartLifecycle {
     private final ArrowAllocators allocators;
     private final ObjectProvider<CallHeaderAuthenticator> authenticator;
     private final ObjectProvider<FlightPrincipalMiddleware.Factory> principalMiddleware;
+    private final StorageReadyGate gate;
     private volatile FlightServer server;
     private volatile BufferAllocator serverAllocator;
     private volatile boolean running;
@@ -41,17 +43,31 @@ public class FlightSqlServerLifecycle implements SmartLifecycle {
             AdasFlightSqlProducer producer,
             ArrowAllocators allocators,
             ObjectProvider<CallHeaderAuthenticator> authenticator,
-            ObjectProvider<FlightPrincipalMiddleware.Factory> principalMiddleware) {
+            ObjectProvider<FlightPrincipalMiddleware.Factory> principalMiddleware,
+            StorageReadyGate gate) {
         this.properties = properties;
         this.producer = producer;
         this.allocators = allocators;
         this.authenticator = authenticator;
         this.principalMiddleware = principalMiddleware;
+        this.gate = gate;
     }
 
+    /**
+     * Marks the lifecycle running and binds the listener once the ClickHouse storage phase has opened the
+     * {@link StorageReadyGate}: Spring calls this when the context refresh completes, before the phase runs, and the
+     * endpoint must not accept connections until the storage is verified.
+     */
     @Override
     public void start() {
         running = true;
+        gate.whenOpen(this::listen);
+    }
+
+    private void listen() {
+        if (!running) {
+            return;
+        }
         this.serverAllocator = allocators.newChildAllocator("flight-server", Long.MAX_VALUE);
         final Location location = Location.forGrpcInsecure("0.0.0.0", properties.port());
         final FlightServer.Builder builder = FlightServer.builder(serverAllocator, location, producer);

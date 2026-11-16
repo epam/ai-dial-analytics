@@ -16,6 +16,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** {@link AbstractRoleQueryParamIntegrationTest} in {@code oidc} mode. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",
@@ -25,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "providers.full.role-claims=roles",
         "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"]}",
 })
-@Import(TestSecurityConfig.class)
+@Import({TestSecurityConfig.class, OpenStorageGate.class})
 class RoleQueryParamOidcIntegrationTest extends AbstractRoleQueryParamIntegrationTest {
 
     static final String ISSUER = "https://issuer.test/full";

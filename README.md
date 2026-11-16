@@ -35,8 +35,9 @@ an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can
   token even for public packages. Export `GPR_USERNAME` (your GitHub username) and `GPR_PASSWORD` (a
   personal access token with `read:packages`), or set `gpr.user` / `gpr.key` in
   `~/.gradle/gradle.properties`.
-- ClickHouse 25.3 LTS or newer and PostgreSQL. `local_env/docker-compose.yml` provides both for local
-  development.
+- ClickHouse 25.3 LTS or newer, with ClickHouse Keeper and a `Replicated` session database (a single server
+  included; see [ClickHouse replication](docs/clickhouse-replication.md)), and PostgreSQL.
+  `local_env/docker-compose.yml` provides both for local development.
 
 ## Features
 
@@ -168,7 +169,7 @@ endpoints need no credential in any security mode.
 | Endpoint | Use | Checks | Answers |
 |---|---|---|---|
 | `GET /actuator/health/liveness` | Liveness probe, Docker `HEALTHCHECK` | Application state only, no dependency | `200 {"status":"UP"}`, else `503` |
-| `GET /actuator/health/readiness` | Readiness probe | Startup (migrations included) complete, PostgreSQL catalog reachable | `200 {"status":"UP",...}`, else `503` |
+| `GET /actuator/health/readiness` | Readiness probe | Startup (migrations included) complete, ClickHouse storage verified, PostgreSQL catalog reachable | `200 {"status":"UP",...}`, else `503` |
 | `GET /actuator/health` | Diagnostics | All contributors, with details | `200` / `503` |
 | `GET /actuator/prometheus` | Prometheus scrape (pull) | — | Prometheus text format |
 
@@ -206,6 +207,7 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 | Architecture overview | [docs/architecture.md](docs/architecture.md) |
 | Configuration reference | [docs/configuration.md](docs/configuration.md) |
 | ClickHouse server setup and grants | [docs/clickhouse-server.md](docs/clickhouse-server.md) |
+| ClickHouse replication and failover | [docs/clickhouse-replication.md](docs/clickhouse-replication.md) |
 | AWS S3 access | [docs/aws-s3-access.md](docs/aws-s3-access.md) |
 | Google Cloud Storage access | [docs/gcs-access.md](docs/gcs-access.md) |
 | Cloud SQL catalog with IAM auth | [docs/cloud-sql-access.md](docs/cloud-sql-access.md) |

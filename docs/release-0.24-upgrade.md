@@ -3,17 +3,99 @@
 What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
 follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
-Three things make this release more than a redeploy:
+This release runs ADAS on replicated ClickHouse storage, on every deployment, a single server included
+([`clickhouse-replication.md`](clickhouse-replication.md)). That makes it more than a redeploy:
 
-- a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `4` to `5`; a
-  runner on the other version is refused, so enrichment pauses until both sides match
-  ([Enrichment pipelines calling a DIAL application route](#enrichment-pipelines-calling-a-dial-application-route));
-- a **breaking response shape**: a chart's `y_field` is now an array, so a client that reads it as a string must
-  move to the array ([Multi-series charts](#multi-series-charts));
-- a **wider meaning of `*`** in read-side grant lists and row policies, which now stands for every authenticated
-  caller, so look for a stored `*` before upgrading ([The `*` grantee](#the--grantee)).
+- **ClickHouse Keeper and a `Replicated` database are required.** An `Atomic` database is refused at startup,
+  before any change, until an operator changes its engine (§2).
+- **Plain tables convert automatically on the first start**, with a deploy that stops the previous version
+  first (§3).
+- **`CLICKHOUSE_HOST` must reach only the primary replica** (§5).
+- **Four new writer grants** (§1).
+- **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
+- **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
+- **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
+- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `5`, and a runner on
+  the other version is refused, so enrichment pauses until both sides match (§9).
+- **An enrichment's read access follows its source table**: its own read-side grants and row policies are
+  removed by the migration, so check who gains and loses access before upgrading (§10).
+- **Table access is managed one role at a time** at `/v1/tables/{name}/access?role=`, with column policies;
+  the old five-list access and row-policy endpoints are removed (§11).
 
-## Multi-series charts
+---
+
+## 1. Before you deploy
+
+- **Keeper.** Embedded in the server on a single node, or a three-member ensemble. Each server also needs
+  the `shard` and `replica` macros.
+- **Server settings.** In the default profile, `database_replicated_allow_only_replicated_engine = 1`. In
+  `<merge_tree>`, `execute_merges_on_single_replica_time_threshold = 1800` and
+  `wait_for_unique_parts_send_before_shutdown_ms = 60000`. The reasons are in
+  [`clickhouse-replication.md`](clickhouse-replication.md#clickhouse-requirements).
+- **Writer grants.**
+
+  ```sql
+  GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>;
+  GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>;
+  GRANT SELECT ON system.clusters TO <writer>;
+  GRANT SYSTEM MERGES ON <database>.* TO <writer>;
+  ```
+
+  Startup fails naming a missing `SYSTEM SYNC` grant: without them every pipeline run and every ingest cycle
+  would be refused with `503`.
+  Without `SELECT ON system.clusters` ADAS starts, logs a WARN and routes everything to the primary.
+  Without `SYSTEM MERGES` the first-start table conversion (§3) compares row counts with merges running, so a merge
+  that collapses rows between the two reads can make it give a table up and fail startup, which a restart retries.
+- **NTP** on every ClickHouse node and every ADAS pod: the pipeline safety lag covers clock skew among them.
+- **New optional keys.** `CLICKHOUSE_ROUTING_QUERIES`, `CLICKHOUSE_ROUTING_PIPELINES`,
+  `CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL`, `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT` and `CLICKHOUSE_DDL_TASK_TIMEOUT`
+  ([`configuration.md`](configuration.md#clickhouse-replicas-and-routing)). The defaults fit most deployments.
+
+## 2. An `Atomic` database
+
+Startup fails before issuing any DDL or writing any catalog row, naming the database and its engine. ADAS
+never changes a database engine. Follow
+[the manual procedure](clickhouse-replication.md#changing-an-atomic-database-to-replicated), then redeploy.
+
+## 3. A `Replicated` database with plain tables
+
+This is the usual starting point for a deployment managed by ClickHouse's Kubernetes operator: Keeper and a
+`Replicated` database already exist, and every ADAS table in it is plain. The first start with this
+version converts them in place, before the migrations run. The data moves by hardlink and is not
+rewritten. A table larger than `max_table_size_to_drop` needs no server change: the conversion lifts that
+limit for its own drops.
+
+- **Stop the previous version first.** Use a `Recreate` strategy or scale to zero before deploying. A
+  previous-version instance writing during the conversion would lose those rows.
+- **With several registered replicas,** make sure only one of them ever held ADAS data, and drop the others
+  with `SYSTEM DROP DATABASE REPLICA` or empty their copies. Otherwise the conversion refuses, naming each
+  table and replica.
+- **While it runs,** readiness is down, `/v1` answers `503` and no scheduled job runs. Liveness keeps
+  answering.
+- **With `CLICKHOUSE_MIGRATIONS_ENABLED=false`** nothing is converted and startup fails naming each plain
+  table.
+- **An interrupted conversion** leaves an `_adas_replicate_<table>` table. Every start fails naming it until a
+  start with migrations enabled resumes the conversion.
+
+**Rollback.** A build older than 0.24 reads and writes the converted tables normally, but its table creates
+render plain engines, which `database_replicated_allow_only_replicated_engine = 1` refuses.
+
+## 4. ClickHouse unreachable at startup
+
+With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, an instance that cannot reach ClickHouse at startup no longer
+serves unverified. It starts with readiness down, `/v1` answering `503` (the PostgreSQL-only endpoints
+included) and no scheduled job running, and retries the storage checks every
+`CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL` until they pass. A probe on `/actuator/health/readiness` keeps
+traffic away meanwhile; liveness is unaffected. With migrations enabled startup still fails, as before.
+
+## 5. `CLICKHOUSE_HOST`
+
+It now means the primary replica: ingest, API writes and DDL run there. A headless Service over every
+ClickHouse pod keeps working while there is one replica. Replace it with an endpoint that reaches only the
+primary pod before a second replica joins: startup refuses a host that resolves to several addresses, or
+that different replicas answer over fresh connections.
+
+## 6. Multi-series charts
 
 A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
 columns, one per series (see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). Responses always carry the
@@ -26,7 +108,7 @@ one-element array without a migration.
   rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
   `dashboard.widgets` (the nested `inline_query.chart`).
 
-## The `*` grantee
+## 7. The `*` grantee
 
 `*` in a table's `get`, `read` or `sensitive` grant list, or as the role of a row policy, now stands for every
 authenticated caller (see [`row-level-security.md`](row-level-security.md)). Earlier builds stored `*` as an
@@ -47,11 +129,11 @@ ordinary role name that matched only a caller carrying a provider role spelled `
   table another way sees every row. Delete `*` policies, or the read paths they narrow, before rolling back if a
   rollback must not widen reads.
 
-## Row policies on the caller's own rows
+## 8. Row policies on the caller's own rows
 
 A row policy may compare a `string` column with a value of the caller reading the table, `caller.user_hash` or
 `caller.project`, and an entry's `rows` (`PUT /v1/tables/{name}/access?role={role}`, see
-[Role-keyed table access](#role-keyed-table-access)) accepts the policy as a SQL condition in `where` instead of
+[Role-keyed table access](#11-role-keyed-table-access)) accepts the policy as a SQL condition in `where` instead of
 `filter` (see [`row-level-security.md`](row-level-security.md#own-rows-comparing-a-column-with-the-caller)).
 Nothing changes for stored policies.
 
@@ -66,7 +148,29 @@ Nothing changes for stored policies.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
   confines fails. Replace or delete such policies before rolling back.
 
-## An enrichment's read-side access is its source's
+## 9. Enrichment pipelines calling a DIAL application route
+
+An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
+`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
+response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
+nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
+also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
+
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
+  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
+- **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
+  in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
+  setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
+  with `409 app_route_in_use`.
+- **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
+  `route`, `request_template` and each nested output's `source`, then enable it again.
+- **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
+  sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
+  `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
+  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
+  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
+
+## 10. An enrichment's read-side access is its source's
 
 An enrichment is never queried on its own: every read of its rows has its source as `FROM`. Its `get`, `read` and
 `sensitive` access is now its `source_table`'s, and it stores no row policy (see
@@ -90,7 +194,7 @@ included.
   non-sensitive columns in schema discovery and translation. A holder of an enrichment's `modify` and the source's
   clearance gains schema authority over the enrichment's sensitive columns. A column not meant for every reader
   of the source is hidden by a column policy on the source that does not name it (see
-  [Role-keyed table access](#role-keyed-table-access)), or by marking it `sensitive`.
+  [Role-keyed table access](#11-role-keyed-table-access)), or by marking it `sensitive`.
 - **Who loses access.** A role granted `get`, `read` or `sensitive` on an enrichment but not on its source loses
   the enrichment's listing and definition, its columns, or its sensitive columns: on query surfaces they become
   unknown fields (`400`), schema edits of them answer `422` unknown column, and pipeline authoring and runner scans
@@ -165,8 +269,8 @@ SELECT enrichment, 'get', role
    AND NOT (role <> '*' AND coalesce(ea -> 'modify', '[]'::jsonb) ? role);
 ```
 
-- **During the rollout**, make no access or pipeline edits. Until every replica runs the new build, old
-  replicas judge enrichments by their own, now empty, lists and still apply the subset rule: they may refuse
+- **During the rollout**, make no access or pipeline edits. Until every ADAS pod runs the new build, old
+  pods judge enrichments by their own, now empty, lists and still apply the subset rule: they may refuse
   enrichment columns to per-table readers of the source and to runner scans, and fail refreshes of rollups that
   read enrichment columns. These failures are expected, need no action, and stop when the rollout finishes.
 - **Rollback.** `V56` has no undo, and an older build reads the cleared lists as the enrichments' own empty grants:
@@ -184,7 +288,7 @@ SELECT enrichment, 'get', role
   `DELETE /v1/tables/{enrichment}/access?role={role}` when it holds neither, since the restored lists confer nothing and
   the restored policies keep narrowing.
 
-## Role-keyed table access
+## 11. Role-keyed table access
 
 A table's access is now one **entry** per raw provider role, `{"privileges": [...], "rows": ..., "columns": ...}`,
 read and replaced at `/v1/tables/{name}/access?role={role}` (see
@@ -278,7 +382,7 @@ as an entry, at `generation` 0.
   naming a hidden column. Debug a malformed fragment as an author holding the clearance and no column restriction.
 - **New codes:** `409 access_conflict`, `403 column_not_entitled`, `409 column_in_column_policy`, `409 table_busy`.
 
-- **During the rollout**, make no access or table edits until every replica runs the new build. An old replica
+- **During the rollout**, make no access or table edits until every ADAS pod runs the new build. An old pod
   serves the removed endpoints and ignores column policies, does not move the generation, and records
   `column_policies` as `NULL` in any revision it writes, which that revision's snapshot reads as no policies.
 - **Rollback.** An older build ignores `column_policies`, so **every column a column policy hides becomes visible**
@@ -286,44 +390,26 @@ as an entry, at `generation` 0.
   narrow). The added columns are otherwise harmless to an older build, and grants and row policies written through
   the new API are in the documents it reads.
 
-## Enrichment pipelines calling a DIAL application route
-
-An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
-`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
-response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
-nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
-also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
-
-- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
-  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
-- **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
-  in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
-  setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
-  with `409 app_route_in_use`.
-- **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
-  `route`, `request_template` and each nested output's `source`, then enable it again.
-- **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
-  sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
-  `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
-  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
-  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
+## Summary
 
 | Change | Effect | Action |
 |---|---|---|
-| `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
-| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines |
-| Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |
-| An enrichment's `get`, `read`, `sensitive` and rows follow its source; `V56` clears its read-side lists and row policies | New `409 enrichment_follows_source` on `PUT .../access?role={role}` for an enrichment when the entry carries `get`, `read`, `sensitive`, `rows` or `columns`; source readers and clearance holders gain its columns; enrichment-only grantees lose them; `supports_final` can turn true | Run the two queries above before upgrading; grant enrichment readers on the source; decide each enrichment policy's replacement; save the lists and policies for a rollback |
-| `enrichment_read_inert` removed from `ineffective_grants` | A client matching on the code never sees it | Drop the code from clients |
-| Access `PUT` resolves the table first | A `rows` with both `filter` and `where` for a missing table answers `404`, not `422` | None |
-| Sensitive-grant subset rule removed | No more `422 sensitive_grant_widens` (access and schema endpoints), `422 pipeline_validation_failed` for a widening role (pipeline registration, enable, refresh), or `409 pipeline_declaration_unresolvable` (grant edits, schema edits marking a column sensitive, `enrich` registration and enable) | Review who holds each derived table's clearance: it no longer has to be cleared on what the table derives from |
-| Role-keyed access API replaces the five-list `GET`/`PUT .../access` and `.../row-policies` (breaking) | The old calls are gone; `PUT .../access?role={role}` replaces a whole entry and needs the `generation` (`422` missing, `409 access_conflict` when that role changed since the read); an unchanged `PUT` answers `200` and writes nothing; no `permissions` in its response; `list` and bundle-named roles are `422`; a missing `role` is `400`; `DELETE` answers `409` only when sent a `generation` | Move clients using the mapping table above; URL-encode the role as a query value |
-| Firewall refusals are `ErrorView` `400 bad_request` | A client matching the bare `400` body finds an `ErrorView` | Update clients that matched the bare `400` |
-| Bounded wait on concurrent writes to one table (`TABLES_LOCK_TIMEOUT`, default `10s`) | A write that waits longer for another change to the same table is refused `409 table_busy` | Retry on `table_busy`; raise the timeout if long schema changes make it frequent |
-| Revision snapshots carry `roles` instead of `access` and `row_policies` (breaking); they hide a column the revision's or the current column policies hide | Snapshot consumers reading `access` or `row_policies` find nothing; a column restricted today is hidden in older revisions too | Read `roles` |
-| Column policies; `permissions.columns_restricted` (additive) | Hidden columns are absent from every read surface; new `403 column_not_entitled` on pipeline and export paths and on a schema `PATCH` touching a TTL stored on a policy-hidden column, and `409 column_in_column_policy` on an emptying drop or enrichment delete | Name the cursor columns (`event_id` and `_ingested_at` on `dial_usage_log`) and an aligned target's partition column in a restricted runner's list; make no access or table edits during the rollout; before a rollback, delete column policies that must keep hiding |
-| The scan judges an aligned target's source partition column for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `partition_by` column is refused `403 sensitive_column_not_entitled` scanning for a target aligned with it | Grant the runner's role the source's clearance |
-| Materialize judges the source's version and identity columns for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `version_column` or `identity_column` is refused `403 sensitive_column_not_entitled` on `materialize` | Grant the runner's role the source's clearance |
-| `enrich` authoring re-attributes a `filter`, `ready_when.signal` or `member_select.prefer_sql` that fails to parse | An author without the source's clearance, where the source or an active enrichment has a `sensitive` column, gets `403 sensitive_column_not_entitled` (a column-restricted author `403 column_not_entitled`) for any malformed fragment, where 0.23 answered `422 pipeline_validation_failed`; no column policy is needed for this | Debug malformed fragments as a cleared author with no column restriction |
-| New error codes | `409 access_conflict`, `403 column_not_entitled`, `409 column_in_column_policy`, `409 table_busy` | Handle them in clients |
+| Replicated ClickHouse storage required | An `Atomic` database is refused at startup; plain tables in a `Replicated` database convert on the first start | Set up Keeper, server settings and writer grants (§1); change an `Atomic` engine by hand (§2); stop the previous version before deploying (§3) |
+| `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
+| `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§7) |
+| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
+| Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
+| An enrichment's `get`, `read`, `sensitive` and rows follow its source; `V56` clears its read-side lists and row policies | New `409 enrichment_follows_source` on `PUT .../access?role={role}` for an enrichment when the entry carries `get`, `read`, `sensitive`, `rows` or `columns`; source readers and clearance holders gain its columns; enrichment-only grantees lose them; `supports_final` can turn true | Run the two queries above before upgrading; grant enrichment readers on the source; decide each enrichment policy's replacement; save the lists and policies for a rollback (§10) |
+| `enrichment_read_inert` removed from `ineffective_grants` | A client matching on the code never sees it | Drop the code from clients (§10) |
+| Access `PUT` resolves the table first | A `rows` with both `filter` and `where` for a missing table answers `404`, not `422` | None (§10) |
+| Sensitive-grant subset rule removed | No more `422 sensitive_grant_widens` (access and schema endpoints), `422 pipeline_validation_failed` for a widening role (pipeline registration, enable, refresh), or `409 pipeline_declaration_unresolvable` (grant edits, schema edits marking a column sensitive, `enrich` registration and enable) | Review who holds each derived table's clearance: it no longer has to be cleared on what the table derives from (§10) |
+| Role-keyed access API replaces the five-list `GET`/`PUT .../access` and `.../row-policies` (breaking) | The old calls are gone; `PUT .../access?role={role}` replaces a whole entry and needs the `generation` (`422` missing, `409 access_conflict` when that role changed since the read); an unchanged `PUT` answers `200` and writes nothing; no `permissions` in its response; `list` and bundle-named roles are `422`; a missing `role` is `400`; `DELETE` answers `409` only when sent a `generation` | Move clients using the mapping table above; URL-encode the role as a query value (§11) |
+| Firewall refusals are `ErrorView` `400 bad_request` | A client matching the bare `400` body finds an `ErrorView` | Update clients that matched the bare `400` (§11) |
+| Bounded wait on concurrent writes to one table (`TABLES_LOCK_TIMEOUT`, default `10s`) | A write that waits longer for another change to the same table is refused `409 table_busy` | Retry on `table_busy`; raise the timeout if long schema changes make it frequent (§11) |
+| Revision snapshots carry `roles` instead of `access` and `row_policies` (breaking); they hide a column the revision's or the current column policies hide | Snapshot consumers reading `access` or `row_policies` find nothing; a column restricted today is hidden in older revisions too | Read `roles` (§11) |
+| Column policies; `permissions.columns_restricted` (additive) | Hidden columns are absent from every read surface; new `403 column_not_entitled` on pipeline and export paths and on a schema `PATCH` touching a TTL stored on a policy-hidden column, and `409 column_in_column_policy` on an emptying drop or enrichment delete | Name the cursor columns (`event_id` and `_ingested_at` on `dial_usage_log`) and an aligned target's partition column in a restricted runner's list; make no access or table edits during the rollout; before a rollback, delete column policies that must keep hiding (§11) |
+| The scan judges an aligned target's source partition column for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `partition_by` column is refused `403 sensitive_column_not_entitled` scanning for a target aligned with it | Grant the runner's role the source's clearance (§11) |
+| Materialize judges the source's version and identity columns for the clearance | A runner without `TABLE_SENSITIVE` on a source with a `sensitive` `version_column` or `identity_column` is refused `403 sensitive_column_not_entitled` on `materialize` | Grant the runner's role the source's clearance (§11) |
+| `enrich` authoring re-attributes a `filter`, `ready_when.signal` or `member_select.prefer_sql` that fails to parse | An author without the source's clearance, where the source or an active enrichment has a `sensitive` column, gets `403 sensitive_column_not_entitled` (a column-restricted author `403 column_not_entitled`) for any malformed fragment, where 0.23 answered `422 pipeline_validation_failed`; no column policy is needed for this | Debug malformed fragments as a cleared author with no column restriction (§11) |
+| New error codes | `409 access_conflict`, `403 column_not_entitled`, `409 column_in_column_policy`, `409 table_busy` | Handle them in clients (§11) |

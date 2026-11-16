@@ -19,6 +19,12 @@
 # (ClickHouse: dial_usage_log and its companions) and db/migration/postgres (PostgreSQL: the table
 # catalog, pipelines, grants and audit history).
 #
+# ClickHouse runs as a single replica with an embedded Keeper, and its `default` database is a
+# Replicated database: ADAS requires one on every deployment (docs/clickhouse-replication.md). The
+# init script creates it only on an empty volume. A volume created before this layout holds an
+# Atomic `default` database, which ADAS refuses at startup; wipe it with `down -v`, or follow the
+# manual engine-change procedure in docs/clickhouse-replication.md to keep its data.
+#
 # Images are pinned to match the versions the integration tests run (ClickHouse 26.8, PostgreSQL 16;
 # see ClickHouseContainerSupport / PostgresContainerSupport). ClickHouse 26.8 is the newest verified
 # version, not the floor — ADAS supports 25.3 LTS or newer, and 26.8 is the floor only for the AI query
@@ -57,6 +63,12 @@ services:
       # (V1 needs it too, for the dial_usage_log copies that V11 later drops).
       # Throwaway local-dev key — see the file header.
       - ./clickhouse/config.d/encryption.xml:/etc/clickhouse-server/config.d/encryption.xml:ro
+      # Embedded ClickHouse Keeper and the macros of this single replica.
+      - ./clickhouse/config.d/keeper.xml:/etc/clickhouse-server/config.d/keeper.xml:ro
+      # Refuses a plain MergeTree inside the Replicated database, as docs/clickhouse-replication.md recommends.
+      - ./clickhouse/users.d/zzz-replicated-only.xml:/etc/clickhouse-server/users.d/zzz-replicated-only.xml:ro
+      # Re-creates `default` as a Replicated database on first start (empty volume only).
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # /ping returns 200 "Ok." once the server is accepting HTTP requests.
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]

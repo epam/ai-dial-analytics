@@ -29,13 +29,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",
         "providers.full.issuer=https://issuer.test/full",
         "providers.full.jwk-set-uri=https://issuer.test/full/jwks",
 })
-@Import(TestSecurityConfig.class)
+@Import({TestSecurityConfig.class, OpenStorageGate.class})
 class HealthProbesIntegrationTest {
 
     private static final HttpClient HTTP = HttpClient.newHttpClient();
@@ -73,6 +75,7 @@ class HealthProbesIntegrationTest {
         assertThat(body.path("status").asText()).isEqualTo("UP");
         assertThat(body.path("components").path("readinessState").path("status").asText()).isEqualTo("UP");
         assertThat(body.path("components").path("db").path("status").asText()).isEqualTo("UP");
+        assertThat(body.path("components").path("storageReady").path("status").asText()).isEqualTo("UP");
     }
 
     @Test

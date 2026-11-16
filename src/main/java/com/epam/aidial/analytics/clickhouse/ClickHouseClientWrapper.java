@@ -3,6 +3,9 @@ package com.epam.aidial.analytics.clickhouse;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.client.api.query.QuerySettings;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaMeters;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaTarget;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
@@ -13,7 +16,8 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
+import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * The only component that knows about ClickHouse. Opens a read-only HTTP connection from
@@ -25,6 +29,11 @@ import java.util.function.Supplier;
  *
  * <p>The underlying {@link Client} is created lazily on first use so the service still boots (and
  * stays healthy) when ClickHouse is unreachable; the failure then surfaces per-request as a 503.
+ *
+ * <p><b>Which replica.</b> A statement executes on the replica bound by {@link ReplicaScope} — a pipeline run's home
+ * or a user query's replica — and on the primary ({@code clickhouse.host}) when none is bound. A statement that
+ * cannot connect to a bound non-primary replica reports it unreachable, so this instance stops routing to it until
+ * the next discovery refresh.
  */
 @Component
 @Slf4j
@@ -33,6 +42,7 @@ public class ClickHouseClientWrapper {
 
     private final ClickHouseProperties properties;
     private final ClickHouseSpans clickHouseSpans;
+    private final ReplicaMeters replicaMeters;
     private volatile Client client;
 
     /**
@@ -49,7 +59,7 @@ public class ClickHouseClientWrapper {
      * @param sql a complete, self-contained SQL statement (parameters already inlined)
      */
     public List<GenericRecord> query(String sql) {
-        return execute(null, () -> client().queryAll(sql));
+        return execute(null, client -> client.queryAll(sql));
     }
 
     /**
@@ -62,7 +72,7 @@ public class ClickHouseClientWrapper {
      * @param settings the per-query ClickHouse settings to run the statement under
      */
     public List<GenericRecord> query(String sql, QuerySettings settings) {
-        return execute(settings.getQueryId(), () -> client().queryAll(sql, settings));
+        return execute(settings.getQueryId(), client -> client.queryAll(sql, settings));
     }
 
     /**
@@ -70,14 +80,20 @@ public class ClickHouseClientWrapper {
      * {@code sql}). For statements ADAS writes itself whose values come from data it read, never from a caller.
      */
     public List<GenericRecord> query(String sql, Map<String, Object> params, QuerySettings settings) {
-        return execute(settings.getQueryId(), () -> client().queryAll(sql, params, settings));
+        return execute(settings.getQueryId(), client -> client.queryAll(sql, params, settings));
     }
 
-    private List<GenericRecord> execute(String queryId, Supplier<List<GenericRecord>> call) {
+    private List<GenericRecord> execute(String queryId, Function<Client, List<GenericRecord>> call) {
+        final Optional<ReplicaTarget> target = ReplicaScope.current();
         return clickHouseSpans.query(queryId, () -> {
             try {
-                return call.get();
+                final Client bound = target.map(ReplicaTarget::readClient).orElseGet(this::primaryClient);
+                target.ifPresentOrElse(t -> replicaMeters.statement(t.route(), t.name()), replicaMeters::unboundStatement);
+                return call.apply(bound);
             } catch (Exception ex) {
+                if (target.isPresent() && !target.get().primary() && ClickHouseFailures.isConnectFailure(ex)) {
+                    target.get().unreachable();
+                }
                 if (ClickHouseFailures.isUnavailable(ex)) {
                     throw new ClickHouseUnavailableException("ClickHouse is unreachable", ex);
                 }
@@ -86,7 +102,8 @@ public class ClickHouseClientWrapper {
         });
     }
 
-    private Client client() {
+    /** The primary's read client, built on first use; what an unbound statement uses. */
+    public Client primaryClient() {
         Client local = client;
         if (local == null) {
             synchronized (this) {

@@ -67,7 +67,7 @@ class IngestLedgerIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     @BeforeEach
     void cleanSlate() {
-        execute("TRUNCATE TABLE " + LEDGER);
+        clear(LEDGER);
     }
 
     @Test

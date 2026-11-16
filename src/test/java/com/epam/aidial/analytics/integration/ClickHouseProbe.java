@@ -32,7 +32,9 @@ final class ClickHouseProbe {
                 .addEndpoint("http://" + container.getHost() + ":" + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
                 .setUsername(container.getUsername())
                 .setPassword(container.getPassword())
-                .setDefaultDatabase(container.getDatabaseName())
+                .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
+                // As the fixture writer does: the server's async_insert default would hold a seeding INSERT.
+                .serverSetting("async_insert", "0")
                 .build();
     }
 }

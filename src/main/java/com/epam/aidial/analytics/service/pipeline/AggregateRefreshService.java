@@ -4,6 +4,8 @@ import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.clickhouse.ClickHouseInsertSelectExecutor;
 import com.epam.aidial.analytics.clickhouse.FinalSettings;
 import com.epam.aidial.analytics.clickhouse.StatementTag;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouter;
+import com.epam.aidial.analytics.clickhouse.replication.SyncPlan;
 import com.epam.aidial.analytics.configuration.AggregateProperties;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.exception.PipelineConflictException;
@@ -136,6 +138,7 @@ public class AggregateRefreshService {
     private final TransitionLog transitions;
     private final PreviewValueCapper capper;
     private final PortableQueryRenderer portable;
+    private final ReplicaRouter replicas;
 
     /**
      * The probed window's <b>start and end</b> tuples, plus whether the probe filled its limit.
@@ -188,12 +191,13 @@ public class AggregateRefreshService {
                 .build();
         final long startNanos = System.nanoTime();
         try {
-            final RefreshOutcome outcome =
-                    spanTracer.internalSpan(REFRESH_SPAN, attributes, () -> runRefresh(pipeline));
+            final Ran ran = spanTracer.internalSpan(REFRESH_SPAN, attributes, () -> runRefresh(pipeline));
+            final RefreshOutcome outcome = ran.outcome();
             final Duration elapsed = Duration.ofNanos(System.nanoTime() - startNanos);
             metrics.recordRun(name, true, outcome.rowsWritten(), elapsed, outcome.lagSeconds());
-            log.info("Pipeline '{}' refreshed in {} ms: {} row(s) written, has_more={}, lag={}s",
-                    name, elapsed.toMillis(), outcome.rowsWritten(), outcome.hasMore(), outcome.lagSeconds());
+            log.info("Pipeline '{}' refreshed on replica {} in {} ms: {} row(s) written, has_more={}, lag={}s",
+                    name, ran.replica() == null ? "-" : ran.replica(), elapsed.toMillis(), outcome.rowsWritten(),
+                    outcome.hasMore(), outcome.lagSeconds());
             return outcome;
         } catch (RuntimeException ex) {
             metrics.recordRun(name, false, 0L, Duration.ofNanos(System.nanoTime() - startNanos), 0L);
@@ -216,7 +220,13 @@ public class AggregateRefreshService {
         }
     }
 
-    private RefreshOutcome runRefresh(PipelineEntity pipeline) {
+    /**
+     * A refresh's outcome and the replica it ran on ({@code null} when no statement ran), carried out because the
+     * outcome line is logged after the run has closed and its replica left the log context.
+     */
+    private record Ran(RefreshOutcome outcome, String replica) {}
+
+    private Ran runRefresh(PipelineEntity pipeline) {
         final String name = pipeline.getName();
         // Decoded once and threaded through every step below. The declaration lives in an untyped JSON
         // column since the two registries merged, so each read of it is a Jackson parse rather than a field
@@ -248,9 +258,23 @@ public class AggregateRefreshService {
             // within one enrichment cadence. Logged when it starts, not on every tick it lasts.
             holdState(name, Hold.HELD, bound.get().enrichment());
             stateWriter.recordSuccess(name, null, null, 0L, false, bound.get());
-            return new RefreshOutcome(0L, false, PipelineEntity.stalenessSeconds(pipeline.getCursorVersion()));
+            return new Ran(new RefreshOutcome(0L, false, PipelineEntity.stalenessSeconds(pipeline.getCursorVersion())), null);
         }
 
+        // On the pipeline's home replica from here on, brought up to date after the catalog reads above (the
+        // freshness bound names positions committed before the syncs): probe and write both execute there. A sync
+        // that cannot complete refuses the run before any read, leaving the cursor where it was.
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(name, SyncPlan.of(List.of(input),
+                EnrichmentJoins.referencedEnrichments(model, declaration.referencedFields()), null)
+                .withSafetyLag(properties.safetyLag()))) {
+            return new Ran(refreshOnHome(pipeline, input, model, cursorColumns, declaration, filter, bound), run.replica());
+        }
+    }
+
+    private RefreshOutcome refreshOnHome(PipelineEntity pipeline, String input, QueryEntityModel model,
+            CursorColumns cursorColumns, Declaration declaration, AggregateCompiler.CompiledFilter filter,
+            Optional<EnrichmentFreshness.Bound> bound) {
+        final String name = pipeline.getName();
         final List<Condition> windowPredicates = windowPredicates(pipeline, cursorColumns);
         final Window window = probe(name, model, cursorColumns, filter, windowPredicates);
         if (window == null) {
@@ -441,7 +465,11 @@ public class AggregateRefreshService {
             SqlLog.LOG.debug("Pipeline '{}' preview statement: {}", name,
                     FinalSettings.render(sample.getSQL(ParamType.INLINED), settings, model.partitionLocal()));
         }
-        final List<Map<String, Object>> sampled = runSample(name, sample, settings, model);
+        final List<Map<String, Object>> sampled;
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(name, SyncPlan.of(List.of(input),
+                EnrichmentJoins.referencedEnrichments(model, declaration.referencedFields()), null))) {
+            sampled = runSample(name, sample, settings, model);
+        }
         // Capped at the query API's own row ceiling, so a preview-rows above it still yields a statement it runs.
         final PortableQueryRenderer.Portable rendered = portable.tryRender(
                 declaration.portableQuery(input, Math.min(properties.previewRows(), StructuredQueryBuilder.MAX_LIMIT)));
