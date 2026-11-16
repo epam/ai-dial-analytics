@@ -53,8 +53,29 @@ Nothing changes for stored policies.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
   confines fails. Replace or delete such policies before rolling back.
 
+## Recommended catalog: DIAL CLI harness header
+
+The `usage-client-identity-live` pipeline in [`recommended-catalog`](recommended-catalog/README.md) now reads
+`dial_cli_harness_name` from the `X-DIAL-CLI-Harness` header, falling back to the second token of a legacy combined
+`X-DIAL-CLI-Version`, and decides `client_type` `dialcli` on either header. A DIAL CLI that sends the two headers
+separately leaves `dial_cli_harness_name` empty under the earlier expression.
+
+Importing the bundle again does not apply this: import never changes an object that exists, so the preview reports
+the pipeline as `SKIP` with `differs: true` (see [`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)).
+A deployment that already registered the pipeline applies it by hand:
+
+1. Re-declare `usage-client-identity-live` with the bundle's `client_type` and `dial_cli_harness_name` expressions.
+2. Update the `client_type`, `dial_cli_version` and `dial_cli_harness_name` column descriptions of
+   `usage_client_identity` from the bundle (a schema patch `update`). Descriptions only; no data changes.
+3. Backfill the pipeline over the period in which the separate header was sent. Rows whose payload is still
+   retained get their harness; rows past the payload retention window keep it empty.
+
+The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
+so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
+
 | Change | Effect | Action |
 |---|---|---|
+| Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill as above |
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |
