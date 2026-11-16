@@ -74,6 +74,12 @@ public class TransformOutput {
      */
     private String jsonata;
 
+    /**
+     * Where a {@code dial_app_route} output's value comes from: JSONata over the route's response body. Absent means
+     * the response member named by {@link #name}.
+     */
+    private String source;
+
     /** A scalar expression over the read source's declared columns. SQL only. */
     private String sql;
 }

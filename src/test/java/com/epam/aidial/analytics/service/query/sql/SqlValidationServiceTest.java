@@ -54,7 +54,9 @@ class SqlValidationServiceTest {
                 Duration.ofSeconds(20), DataSize.ofGigabytes(2), DataSize.ofMegabytes(512));
         final StructuredQueryService queryService = new StructuredQueryService(
                 catalog,
-                new StructuredQueryExecutor(builder, renderContext, clickHouse, com.epam.aidial.analytics.service.security.RowPolicyFilterStubs.inert(),
+                new StructuredQueryExecutor(builder, renderContext, clickHouse,
+                        com.epam.aidial.analytics.service.security.RowPolicyFilterStubs.inert(),
+                        com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs.inPlace(),
                         mock(com.epam.aidial.analytics.service.query.rebuild.ComputedFieldCompleter.class)),
                 new CompositeQueryBuilder(builder),
                 renderContext,

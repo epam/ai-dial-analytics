@@ -60,8 +60,8 @@ class IngestFailureLedgerIntegrationTest extends AbstractClickHouseIntegrationTe
 
     @BeforeEach
     void cleanSlate() {
-        execute("TRUNCATE TABLE " + TABLE);
-        execute("TRUNCATE TABLE " + ClickHouseIngestLedger.TABLE);
+        clear(TABLE);
+        clear(ClickHouseIngestLedger.TABLE);
     }
 
     @Test

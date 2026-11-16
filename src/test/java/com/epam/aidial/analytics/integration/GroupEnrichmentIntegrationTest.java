@@ -970,7 +970,7 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
      */
     @Test
     void groupPipelineReadsTheSourceItDeclares() throws Exception {
-        execute("TRUNCATE TABLE rate_analytics");
+        clear("rate_analytics");
         execute("INSERT INTO rate_analytics (request_time, _ingested_at, project_id, trace_id, "
                 + "core_span_id, deployment, user_hash, chat_id, response_id, rate, comment) VALUES "
                 + "('2026-01-01 00:00:00.000','2020-01-01 00:00:01.000','p','t1','s1','d','u','chat-a','r1',1,NULL),"
@@ -1012,7 +1012,7 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
             mockMvc.perform(get("/v1/tables/" + ENRICHMENT))
                     .andExpect(jsonPath("$.source_table").value(SOURCE));
         } finally {
-            execute("TRUNCATE TABLE rate_analytics");
+            clear("rate_analytics");
         }
     }
 

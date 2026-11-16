@@ -82,4 +82,21 @@ public final class OutputShapes {
         }
         return byName;
     }
+
+    /**
+     * Each {@code dial_app_route} output's {@code source}, keyed by output name; an output with none is absent. Read
+     * from the current {@code outputs} shape only, because a folded legacy declaration predates the preset.
+     */
+    public static Map<String, String> sourceByOutputName(List<TransformOutput> outputs) {
+        final Map<String, String> byName = new LinkedHashMap<>();
+        if (outputs != null) {
+            for (TransformOutput output : outputs) {
+                final String source = StringUtils.trimToNull(output.getSource());
+                if (output.getName() != null && source != null) {
+                    byName.put(output.getName(), source);
+                }
+            }
+        }
+        return byName;
+    }
 }

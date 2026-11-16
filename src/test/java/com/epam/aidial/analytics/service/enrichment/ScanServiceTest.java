@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.enrichment;
 
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaRouterStubs;
 import com.epam.aidial.analytics.configuration.PipelineBudgetProperties;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.configuration.ScanProperties;
@@ -108,7 +109,7 @@ class ScanServiceTest {
                 new QueryDslConfiguration().clickhouseRenderContext(), executor, codec,
                 new ScanProperties(Duration.ofSeconds(5), 100, 1000), freshness,
                 new PipelineBudgetProperties(Duration.ofSeconds(30), DataSize.ofGigabytes(1)), new TransitionLog(),
-                definitions);
+                definitions, ReplicaRouterStubs.inPlace());
         given(scanSources.entityModel(SOURCE)).willReturn(DialUsageLogTestModel.modelWithEnrichment());
         given(scanSources.cursorColumns(SOURCE))
                 .willReturn(new CursorColumns("_ingested_at", "event_id", SOURCE, null));

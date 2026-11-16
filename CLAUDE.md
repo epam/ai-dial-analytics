@@ -14,7 +14,8 @@ surface is added incrementally as spec-driven changes. The querying surface is t
 translation-only pair `POST /v1/queries/translate` / `translate-sql` (capability
 `query-translation-endpoint`, DSL ↔ SQL without execution). Per-instance settings live under `/v1/settings`
 (capability `instance-settings`), starting with `GET`/`PUT /v1/settings/sessions-source`, which names the source
-table holding session rows and binds its fields to the session roles. Saved queries (`/v1/saved-queries`, capability
+table holding session rows and binds its fields to the session roles, and `app-routes`, the allowlist of DIAL
+application routes an enrich pipeline may call. Saved queries (`/v1/saved-queries`, capability
 `saved-queries`) and dashboards of query widgets (`/v1/dashboards`, capability `dashboards`) store authored
 intent the client runs through those endpoints; the `data-sync` path ingests DIAL
 usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic
@@ -38,6 +39,7 @@ twin; capability `catalog-export-import`) promote user tables and pipelines (nev
 ./gradlew bootRun                           # run locally on http://localhost:5000
 ./gradlew checkstyleMain checkstyleTest     # code style (Google Java Style, 180-char lines)
 ./gradlew test                              # run the test suite
+./gradlew multiReplicaTest                  # opt-in: replication tests on a three-replica cluster
 ```
 
 Smoke test a running instance:
@@ -89,7 +91,7 @@ See the `context:` section of `openspec/config.yaml` for the full set. Highlight
   description, a `Required` column that is `Yes`/`No` or a short condition. Behaviour, rationale and
   cost go to `openspec/specs/<capability>/spec.md`; a change adding no property adds nothing to
   `configuration.md`. Operator knowledge that is neither gets its own `docs/` topic doc
-  (`clickhouse-server.md`, `column-mapping.md`, `kubernetes-exposure.md`).
+  (`clickhouse-server.md`, `clickhouse-replication.md`, `column-mapping.md`, `kubernetes-exposure.md`).
 - A change is done only when `./gradlew clean build` passes.
 - New cache keys, scopes and copied columns belong to a stated tenant/user, and a blank id is
   rejected. With schema validation or migrations off, the operation that needs them fails with an

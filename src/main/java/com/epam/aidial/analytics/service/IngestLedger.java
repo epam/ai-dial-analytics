@@ -19,6 +19,15 @@ import java.util.Map;
 public interface IngestLedger {
 
     /**
+     * Brings the primary up to date on the ingest ledger and the failure ledger before a cycle reads either: a replica
+     * that has just become the primary may not have fetched every entry yet, and would then re-ingest blobs already
+     * recorded. A cycle whose sync fails fails like any other ClickHouse failure of the cycle; see
+     * {@code openspec/specs/clickhouse-replication/spec.md} "Writes run on the primary".
+     */
+    default void sync() {
+    }
+
+    /**
      * The recorded blobs under {@code prefix}: key → the last-modified time recorded for it, the newest entry
      * winning when a blob was recorded more than once.
      *

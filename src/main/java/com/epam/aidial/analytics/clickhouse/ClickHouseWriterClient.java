@@ -1,6 +1,8 @@
 package com.epam.aidial.analytics.clickhouse;
 
 import com.clickhouse.client.api.Client;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaScope;
+import com.epam.aidial.analytics.clickhouse.replication.ReplicaTarget;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
@@ -23,6 +25,10 @@ import org.springframework.stereotype.Component;
  * <p>The 503-versus-4xx distinction that every caller of this client has to draw lives in
  * {@link ClickHouseFailures}, not here: it must be drawn identically whatever statement failed, and the
  * callers differ only in the message they attach.
+ *
+ * <p><b>Which replica.</b> {@link #client()} is the replica bound by {@link ReplicaScope} — a pipeline run's home,
+ * whose {@code INSERT … SELECT} writes its target from there — and the primary when none is bound. DDL and the
+ * system-catalog reads use {@link #primaryClient()} whatever is bound, because every DDL runs on the primary.
  */
 @Component
 @Slf4j
@@ -55,8 +61,13 @@ public class ClickHouseWriterClient {
     private final ClickHouseWriterProperties writerProperties;
     private volatile Client client;
 
-    /** The writer client, built on first use. */
+    /** The writer client of the replica bound to this thread, or the primary's when none is bound. */
     public Client client() {
+        return ReplicaScope.current().map(ReplicaTarget::writerClient).orElseGet(this::primaryClient);
+    }
+
+    /** The primary's writer client, built on first use, whatever replica is bound. */
+    public Client primaryClient() {
         Client local = client;
         if (local == null) {
             synchronized (this) {

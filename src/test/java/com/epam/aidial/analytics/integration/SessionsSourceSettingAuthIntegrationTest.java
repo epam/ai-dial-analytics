@@ -37,6 +37,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
         "clickhouse.migrations.enabled=false",
+        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
+        "clickhouse.port=1",
         "sync.validate-schema=false",
         "poll.enabled=false",
         "security.mode=oidc",
@@ -51,7 +53,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
                 + "\"tableonly\":[\"TABLE_READ\"],\"settingswriter\":[\"SETTINGS_WRITE\",\"TABLE_READ\"]}",
 })
 @AutoConfigureMockMvc
-@Import(TestSecurityConfig.class)
+@Import({TestSecurityConfig.class, OpenStorageGate.class})
 class SessionsSourceSettingAuthIntegrationTest {
 
     static final String AUDIENCE = "adas-test";
@@ -106,6 +108,21 @@ class SessionsSourceSettingAuthIntegrationTest {
         mockMvc.perform(authored(put(URL), token("admin")).content(VALID))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.updated_by").value("admin"));
+    }
+
+    @Test
+    void onlyTheFullAdministratorWritesTheRouteAllowlist() throws Exception {
+        final String routes = "/v1/settings/app-routes";
+        final String body = "{\"routes\":[{\"deployment\":\"insights-app\",\"route\":\"insights\"}]}";
+        mockMvc.perform(authored(put(routes), token("analyst")).content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"));
+        mockMvc.perform(authored(get(routes), token("admin"))).andExpect(status().isNotFound());
+
+        mockMvc.perform(authored(put(routes), token("admin")).content(body)).andExpect(status().isOk());
+        mockMvc.perform(authored(get(routes), token("analyst")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.routes[0].deployment").value("insights-app"));
     }
 
     @Test
