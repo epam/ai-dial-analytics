@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table;
 
 import com.epam.aidial.analytics.exception.ColumnInColumnPolicyException;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +26,7 @@ import java.util.TreeSet;
 public class ColumnPolicyRewriter {
 
     private final ColumnPolicyCodec codec;
+    private final RoleGenerationCodec roleGenerations;
 
     /** Whether {@code owner} stores any column policy, so a caller can skip collecting the names a change removes. */
     public boolean hasPolicies(TableDefinitionEntity owner) {
@@ -75,12 +77,18 @@ public class ColumnPolicyRewriter {
         return rewritten.equals(stored) ? null : rewritten;
     }
 
-    /** Writes a non-null {@link #plan} through {@code owner} and bumps its access generation; a {@code null} plan writes nothing. */
+    /**
+     * Writes a non-null {@link #plan} through {@code owner}, bumps its access generation once and marks every role whose
+     * list changed at the new generation; a {@code null} plan writes nothing.
+     */
     public void apply(TableDefinitionEntity owner, Map<String, List<String>> plan) {
         if (plan == null) {
             return;
         }
+        final Map<String, List<String>> stored = codec.read(owner.getColumnPolicies());
+        final List<String> changed = plan.keySet().stream().filter(role -> !plan.get(role).equals(stored.get(role))).toList();
         owner.setColumnPolicies(codec.write(plan));
         owner.setAccessGeneration(owner.getAccessGeneration() + 1);
+        owner.setAccessRoleGenerations(roleGenerations.mark(owner.getAccessRoleGenerations(), changed, owner.getAccessGeneration()));
     }
 }

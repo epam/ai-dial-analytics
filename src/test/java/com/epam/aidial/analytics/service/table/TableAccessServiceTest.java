@@ -19,6 +19,7 @@ import com.epam.aidial.analytics.service.table.TableAccessService.IneffectiveGra
 import com.epam.aidial.analytics.service.table.TableAccessService.IneffectiveReason;
 import com.epam.aidial.analytics.service.table.TableAccessService.RowsRequest;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicy;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyConditions;
@@ -50,8 +51,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Unit behaviour of {@link TableAccessService}: the role-keyed entry over the three stored documents, the {@code PUT}
- * check order, whole-entry replace, empty-entry removal, canonical ordering, the generation, and the ineffective-grant
- * report. Validation here is mode-independent, so it holds in {@code none} mode too.
+ * check order, whole-entry replace, empty-entry removal, canonical ordering, the generation with its per-role conflict
+ * detection, and the ineffective-grant report. Validation here is mode-independent, so it holds in {@code none} mode too.
  */
 class TableAccessServiceTest {
 
@@ -64,7 +65,7 @@ class TableAccessServiceTest {
     private final RowPolicyService rowPolicies = mock(RowPolicyService.class);
     private final RowPolicyConditions conditions = mock(RowPolicyConditions.class);
     private final TableAccessService service = new TableAccessService(definitions, columns, providerRolePrivileges,
-            rowPolicyCodec, columnPolicyCodec, rowPolicies, conditions);
+            rowPolicyCodec, columnPolicyCodec, rowPolicies, conditions, new RoleGenerationCodec(jsonMapper));
 
     private TableDefinitionEntity table;
 
@@ -127,13 +128,14 @@ class TableAccessServiceTest {
     }
 
     @Test
-    void emptyPutForRoleWithNoEntryAnswersAndBumpsWithoutTouchingDocument() {
+    void emptyPutForRoleWithNoEntryAnswersWithoutBumpingOrTouchingDocument() {
         final String accessBefore = jsonMapper.writeValueAsString(table.getAccess());
         final TableAccess accessObject = table.getAccess();
 
         final EntryReplacement result = service.put("t", "Z", request(4, List.of(), null, null));
 
-        assertThat(result.generation()).isEqualTo(5);
+        assertThat(result.generation()).isEqualTo(4);
+        assertThat(table.getAccessGeneration()).isEqualTo(4);
         assertThat(table.getAccess()).isSameAs(accessObject);
         assertThat(jsonMapper.writeValueAsString(table.getAccess())).isEqualTo(accessBefore);
         assertThat(table.getRowPolicies()).isEqualTo("{}");
@@ -152,7 +154,8 @@ class TableAccessServiceTest {
 
         final EntryReplacement result = service.put("t", "X", request(5, List.of("read"), filterRows(), List.of("a")));
 
-        assertThat(result.generation()).isEqualTo(6);
+        assertThat(result.generation()).isEqualTo(5);
+        assertThat(table.getAccessGeneration()).isEqualTo(5);
         assertThat(table.getRowPolicies()).isSameAs(rows);
         assertThat(table.getColumnPolicies()).isSameAs(cols);
         assertThat(table.getAccess()).isSameAs(access);
@@ -163,14 +166,17 @@ class TableAccessServiceTest {
         service.put("t", " X ", request(4, List.of("read"), null, null));
 
         assertThat(service.get("t", "  X").role()).isEqualTo("X");
-        service.delete("t", "X  ");
+        service.delete("t", "X  ", null);
         assertThat(service.list("t").roles()).isEmpty();
         assertThat(table.getAccessGeneration()).isEqualTo(6);
     }
 
     @Test
     void deleteOfRoleWithNoEntryIsNotFoundAndChangesNothing() {
-        assertThatThrownBy(() -> service.delete("t", "nobody")).isInstanceOf(TableNotFoundException.class);
+        assertThatThrownBy(() -> service.delete("t", "nobody", null)).isInstanceOf(TableNotFoundException.class);
+        assertThatThrownBy(() -> service.delete("t", "nobody", "4")).isInstanceOf(TableNotFoundException.class);
+        // No entry is 404 before the generation is compared, even with one above the table's.
+        assertThatThrownBy(() -> service.delete("t", "nobody", "9")).isInstanceOf(TableNotFoundException.class);
         assertThat(table.getAccessGeneration()).isEqualTo(4);
     }
 
@@ -182,7 +188,7 @@ class TableAccessServiceTest {
 
         assertThatThrownBy(() -> service.list("nope")).isInstanceOf(TableNotFoundException.class);
         assertThatThrownBy(() -> service.get("nope", "X")).isInstanceOf(TableNotFoundException.class);
-        assertThatThrownBy(() -> service.delete("nope", "X")).isInstanceOf(TableNotFoundException.class);
+        assertThatThrownBy(() -> service.delete("nope", "X", "x")).isInstanceOf(TableNotFoundException.class);
         assertThatThrownBy(() -> service.put("nope", "X", invalid)).isInstanceOf(TableNotFoundException.class);
     }
 
@@ -217,6 +223,7 @@ class TableAccessServiceTest {
     @Test
     void staleGenerationIs409WithoutTheCurrentValueAndBeforeInvalidRoleOrBody() {
         table.setAccessGeneration(42);
+        table.setAccessRoleGenerations("{\"READ_ONLY_ANALYTIC\": 42}");
 
         assertThatThrownBy(() -> service.put("t", "READ_ONLY_ANALYTIC", request(41, List.of(), null, List.of())))
                 .isInstanceOf(AccessConflictException.class)
@@ -224,6 +231,66 @@ class TableAccessServiceTest {
                 .hasMessageNotContaining("41");
         assertThat(table.getAccessGeneration()).isEqualTo(42);
         assertThat(service.list("t").roles()).isEmpty();
+    }
+
+    @Test
+    void writesToDifferentRolesFromOneReadBothSucceed() {
+        assertThat(service.put("t", "X", request(4, List.of("read"), null, null)).generation()).isEqualTo(5);
+        assertThat(service.put("t", "Y", request(4, List.of("read"), null, null)).generation()).isEqualTo(6);
+        service.delete("t", "X", "5");
+        assertThat(table.getAccessGeneration()).isEqualTo(7);
+    }
+
+    @Test
+    void writesToOneRoleFromOneReadConflict() {
+        service.put("t", "X", request(4, List.of("read"), null, null));
+
+        assertThatThrownBy(() -> service.put("t", "X", request(4, List.of("get"), null, null))).isInstanceOf(AccessConflictException.class);
+        assertThatThrownBy(() -> service.delete("t", "X", "4")).isInstanceOf(AccessConflictException.class);
+        assertThat(table.getAccessGeneration()).isEqualTo(5);
+        assertThat(service.get("t", "X").entry().privileges()).containsExactly(Privilege.TABLE_READ);
+    }
+
+    @Test
+    void retriedPutAfterSuccessAnswersTheEntryAndWritesNothing() {
+        service.put("t", "X", request(4, List.of("read"), filterRows(), List.of("b", "a")));
+        service.put("t", "Y", request(5, List.of("get"), null, null));
+
+        final EntryReplacement retried = service.put("t", "X", request(4, List.of("read"), filterRows(), List.of("a", "b")));
+
+        assertThat(retried.generation()).isEqualTo(6);
+        assertThat(retried.entry().columns()).containsExactly("a", "b");
+        assertThat(table.getAccessGeneration()).isEqualTo(6);
+    }
+
+    @Test
+    void generationAboveTheTablesConflicts() {
+        assertThatThrownBy(() -> service.put("t", "X", request(5, List.of("read"), null, null))).isInstanceOf(AccessConflictException.class);
+        assertThatThrownBy(() -> service.put("t", "X", request(5, List.of(), null, List.of())))
+                .as("before the body checks").isInstanceOf(AccessConflictException.class);
+        service.put("t", "X", request(4, List.of("read"), null, null));
+        assertThatThrownBy(() -> service.delete("t", "X", "6")).isInstanceOf(AccessConflictException.class);
+        assertThat(table.getAccessGeneration()).isEqualTo(5);
+    }
+
+    @Test
+    void deletedRoleKeepsItsMarkSoAnOlderPutConflicts() {
+        service.put("t", "X", request(4, List.of("read"), null, null));
+        service.delete("t", "X", "5");
+
+        assertThat(table.getAccessGeneration()).isEqualTo(6);
+        assertThatThrownBy(() -> service.put("t", "X", request(5, List.of("read"), null, null))).isInstanceOf(AccessConflictException.class);
+        assertThat(service.put("t", "X", request(6, List.of("read"), null, null)).generation()).isEqualTo(7);
+    }
+
+    @Test
+    void deleteGenerationMustBeAnInteger() {
+        service.put("t", "X", request(4, List.of("read"), null, null));
+        for (final String generation : List.of("", "5.0", "5.5", "five", "9223372036854775808")) {
+            assertThatThrownBy(() -> service.delete("t", "X", generation)).isInstanceOf(TableValidationException.class)
+                    .hasMessageContaining("generation");
+        }
+        assertThat(table.getAccessGeneration()).isEqualTo(5);
     }
 
     @Test

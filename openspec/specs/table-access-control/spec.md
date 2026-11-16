@@ -552,7 +552,7 @@ moment the deployment switches to `oidc`, when refusing it would be too late.
 A catalog import SHALL write no access entry on any table: a created table starts with none and a `system` table's
 entries are never touched, as defined by [catalog-export-import](../catalog-export-import/spec.md) ("Import order and
 no grants"). Access is each environment's own policy, so granting access on an imported table stays an operator action
-through `PUT /v1/tables/{name}/access/{role}`, on the table itself for a source and on its source for an enrichment,
+through `PUT /v1/tables/{name}/access?role=<role>`, on the table itself for a source and on its source for an enrichment,
 whose read-side access is its source's.
 
 #### Scenario: Imported table starts ungranted
@@ -662,7 +662,7 @@ that a pipeline refuses a confined caller.
 
 ### Requirement: A row policy may be written as a SQL condition
 
-`PUT /v1/tables/{name}/access/{role}` SHALL accept `"rows": {"where": "<condition>"}` as an alternative to
+`PUT /v1/tables/{name}/access?role=<role>` SHALL accept `"rows": {"where": "<condition>"}` as an alternative to
 `"rows": {"filter": <filter node>}`. The condition is the text that would follow `WHERE` in a SQL statement over the
 table, in the SQL subset the ad-hoc SQL surface accepts (see [rest-sql-endpoint](../rest-sql-endpoint/spec.md)).
 Exactly one of `where` and `filter` SHALL be given: a `rows` carrying both, or neither, SHALL be refused
@@ -742,8 +742,8 @@ reach a caller only on the source rows it reads.
 
 State an earlier build stores on an enrichment — an old replica during a rolling upgrade, or one rolled back to —
 SHALL NOT widen anything. A `get`, `read` or `sensitive` grant stored there SHALL confer nothing, SHALL be returned as
-stored, and MAY be cleared by a `PUT .../access/{role}` of that role's entry or removed with
-`DELETE .../access/{role}`. A row policy stored there SHALL keep narrowing as it did — it only ever withholds the
+stored, and MAY be cleared by a `PUT .../access?role=<role>` of that role's entry or removed with
+`DELETE .../access?role=<role>`. A row policy stored there SHALL keep narrowing as it did — it only ever withholds the
 enrichment's values on rows the source returns — SHALL be returned as stored, and MAY be cleared or removed the same
 way. Whether another of the caller's roles lifts such a leftover policy SHALL be decided by the same rule as on any
 table, against the enrichment's own stored grant lists, as when the policy was written.
@@ -951,13 +951,14 @@ row policy or column policy on an enrichment, the generation check, the role, `t
 
 #### Scenario: none mode still refuses a read grant or a row policy on an enrichment
 
-- **WHEN** the service runs in `none` mode and a `PUT .../access/{role}` for an enrichment carries `read`, a `rows` or a
+- **WHEN** the service runs in `none` mode and a `PUT .../access?role=<role>` for an enrichment carries `read`, a `rows` or a
   `columns`
 - **THEN** each request is refused `409 enrichment_follows_source`
 
 #### Scenario: none mode still checks the generation
 
-- **WHEN** the service runs in `none` mode and a `PUT .../access/{role}` carries a stale `generation`
+- **WHEN** the service runs in `none` mode and a `PUT .../access?role=<role>` changing that role's entry carries a
+  `generation` older than the role's last change
 - **THEN** the request is refused `409 access_conflict`
 
 ### Requirement: Role-keyed access API
@@ -972,22 +973,24 @@ An **entry** SHALL be `{"privileges": [...], "rows": ..., "columns": ...}`: `pri
 policies"). A stored entry SHALL be returned with `privileges` de-duplicated in the order `get`, `read`, `sensitive`,
 `write`, `modify`, `rows` as `{"filter": <filter node>}` or `null`, and `columns` as a sorted list or `null`.
 
-- `GET /v1/tables/{name}/access` SHALL return `{"generation": <integer>, "roles": {"<role>": <entry>, ...}}`, the
-  members of `roles` sorted by role, with an empty `roles` object when the table has no entry.
-- `GET /v1/tables/{name}/access/{role}` SHALL return `{"generation": <integer>, "role": "<role>", ...entry}`, and
+- `GET /v1/tables/{name}/access`, with no `role` parameter, SHALL return `{"generation": <integer>, "roles":
+  {"<role>": <entry>, ...}}`, the members of `roles` sorted by role, with an empty `roles` object when the table has
+  no entry.
+- `GET /v1/tables/{name}/access?role=<role>` SHALL return `{"generation": <integer>, "role": "<role>", ...entry}`, and
   `404 not_found` when the role has no entry on the table.
-- `PUT /v1/tables/{name}/access/{role}` SHALL take `{"generation": <integer>, "privileges": [...], "rows": ...,
+- `PUT /v1/tables/{name}/access?role=<role>` SHALL take `{"generation": <integer>, "privileges": [...], "rows": ...,
   "columns": ...}` and SHALL **replace the role's whole entry**: an absent or `null` `privileges` SHALL mean `[]`, and
   an absent `rows` or `columns` SHALL mean `null`. Nothing about another role's entry SHALL change. The response SHALL be `200`
-  with `{"generation", "role", "privileges", "rows", "columns", "ineffective_grants"}`: the entry as stored, the new
-  generation, and the report described below. It SHALL NOT carry a `permissions` member; the caller's own permissions
+  with `{"generation", "role", "privileges", "rows", "columns", "ineffective_grants"}`: the entry as stored, the
+  table's generation after the request, and the report described below. It SHALL NOT carry a `permissions` member; the caller's own permissions
   are reported by `GET /v1/tables/{name}`.
-- `DELETE /v1/tables/{name}/access/{role}` SHALL remove the role's entry and answer `204`, or `404 not_found` when the
-  role has no entry on the table. It SHALL carry no body and no generation.
+- `DELETE /v1/tables/{name}/access?role=<role>` SHALL remove the role's entry and answer `204`, or `404 not_found` when
+  the role has no entry on the table. It SHALL carry no body; it MAY carry a `generation` query parameter, which makes
+  the removal conditional (see "Access configuration generation").
 
 An entry whose `privileges` is empty and whose `rows` and `columns` are both `null` SHALL NOT be stored: a `PUT` of one
 SHALL remove the role's entry if it has one, and SHALL answer `200` with that empty entry, after which a
-`GET .../access/{role}` answers `404`. An entry MAY carry `rows`, `columns` or both with an empty `privileges`: it then
+`GET .../access?role=<role>` answers `404`. An entry MAY carry `rows`, `columns` or both with an empty `privileges`: it then
 grants nothing. Its `columns` narrow a caller only where the role governs the caller's access to the table (see
 "Column visibility by caller role"), a global read privilege included, and are ignored otherwise. Its `rows` take part
 in "Row-policy evaluation by caller role", which combines the policy of every role a confined caller carries whether
@@ -995,22 +998,16 @@ or not that role may read the table: on a role with no read path to the table, `
 confined caller that also carries the role, rather than narrowing anything, and gives a caller carrying only that
 role no read.
 
-The `{role}` path segment SHALL carry the raw provider role as one percent-encoded path segment, decoded once. A `/` in
-a role SHALL be sent as `%2F` and a `%` as `%25`, and the service SHALL accept both in this segment, so role
-`/analytics/viewers` is addressed as `.../access/%2Fanalytics%2Fviewers` and listed under `"/analytics/viewers"`. The
-decoded value SHALL be trimmed on every method, so `GET .../access/%20X` names `X`. On a `PUT` it SHALL follow the
-grantee rules: a blank value or a bundle or privilege name SHALL be refused `422 validation_error`. `*` SHALL be an
-ordinary key with the meaning given in "Per-table privilege grants". `GET` and `DELETE` naming a role that has no
-entry, however spelled, SHALL answer `404`.
-
-A role the service's request firewall refuses on every path cannot be addressed: one containing `;`, `\`, `//`, a NUL,
-carriage-return or line-feed character, U+2028 or U+2029, or one that is exactly `.` or `..`. A request naming one SHALL
-be refused with HTTP 400 before any check below, as [authentication](../authentication/spec.md) ("Encoded path
-separators and firewall refusals") specifies for every path, so no entry for such a role can be created, read alone or
-removed through this API. An entry for such a role stored by an earlier build — only the removed privilege-keyed `PUT`
-carried roles in its body — SHALL keep applying as stored and SHALL be listed by `GET .../access`; the upgrade guide
-gives the procedure that removes such entries with the previous release's API before upgrading. Accepting `%2F` and
-`%25` holds for every path the service serves, not only this one (see the same authentication requirement).
+The role SHALL be carried as the `role` query parameter: the raw provider role as an ordinary URL-encoded query value,
+decoded once. Any character SHALL be allowed, so every role is addressable: role `/analytics/viewers` is addressed as
+`.../access?role=%2Fanalytics%2Fviewers`, `team%ops` as `?role=team%25ops` and `a;b` as `?role=a%3Bb`, and each is
+listed under its decoded name. The decoded value SHALL be trimmed on every method, so `?role=%20X` names `X`. A `PUT`,
+a `DELETE` or a one-role `GET` whose `role` is missing, or blank once trimmed, SHALL be refused `400 bad_request`
+before any other check, and so SHALL one carrying `role` more than once, rather than joining the values into one role.
+On a `PUT` the role SHALL follow the grantee rules: a bundle or privilege name SHALL be refused
+`422 validation_error`. `*` SHALL be an ordinary key with the meaning given in "Per-table privilege grants". `GET`
+and `DELETE` naming a role that has no entry, however spelled, SHALL answer `404`. The role SHALL NOT be accepted as a
+path segment: `/v1/tables/{name}/access/<anything>` is an unknown path (`404 not_found`).
 
 A `rows` member in a request SHALL be `{"filter": <filter node>}` or `{"where": "<condition>"}` (see "A row policy may
 be written as a SQL condition"); it is stored and returned as `{"filter": ...}`.
@@ -1041,7 +1038,7 @@ naming an enrichment SHALL behave as on any table, so state an earlier build sto
 
 A `PUT`'s checks SHALL run in this order, the first failing one deciding the response:
 
-1. a role the request firewall refuses (see above), or a body that does not bind — malformed JSON, a member other than
+1. a missing, blank or repeated `role` (see above), or a body that does not bind — malformed JSON, a member other than
    `generation`, `privileges`, `rows` and `columns`, a `rows` member other than `filter` and `where`, or a member of the
    wrong JSON type, including an item of `privileges` or `columns` that is not a JSON string (a number, `null` or a
    nested array) (`400 bad_request`). `generation` binds any JSON value and is judged by step 5;
@@ -1050,17 +1047,22 @@ A `PUT`'s checks SHALL run in this order, the first failing one deciding the res
 4. the enrichment refusal (`409 enrichment_follows_source`);
 5. a `generation` that is absent, `null`, not a JSON integer, or outside the range of a signed 64-bit integer
    (`422 validation_error`);
-6. a stale `generation` (`409 access_conflict`, see "Access configuration generation");
-7. the role (`422 validation_error`);
-8. `write` or `modify` on a `system` table (`409 table_is_system`);
-9. the remaining checks, each `422 validation_error` and in no specified order among themselves: an unknown privilege
+6. an entry that passes every check below and equals, as it would be stored, the role's stored entry (an absent
+   entry being the empty one): the request SHALL answer `200` with that entry and the table's current generation and
+   SHALL change nothing, whatever `generation` it carries (see "Access configuration generation");
+7. a conflicting `generation` (`409 access_conflict`, see "Access configuration generation");
+8. the role (`422 validation_error`);
+9. `write` or `modify` on a `system` table (`409 table_is_system`);
+10. the remaining checks, each `422 validation_error` and in no specified order among themselves: an unknown privilege
    value, `*` with `write` or `modify`, a `rows` carrying both or neither of `filter` and `where`, the translation of a
    `where`, the row policy's own validation, and the column policy's validation.
 
-A `DELETE`'s checks SHALL run in the order `403 forbidden`, unknown table (`404 not_found`), and no entry for the role
-(`404 not_found`); a `DELETE` carries no generation and SHALL NOT answer `409 access_conflict`. A `GET` of one role's
-entry SHALL check `403`, then the table (`404`), then the entry (`404`); `GET .../access` SHALL check `403`, then the
-table (`404`).
+A `DELETE`'s checks SHALL run in the order: a missing, blank or repeated `role` (`400 bad_request`), `403 forbidden`, unknown
+table (`404 not_found`), a `generation` parameter that is not an integer within the signed 64-bit range
+(`422 validation_error`), no entry for the role (`404 not_found`), and a conflicting `generation`
+(`409 access_conflict`); a `DELETE` without a `generation` SHALL NOT answer `409 access_conflict`. A `GET` of one
+role's entry SHALL check a blank or repeated `role` (`400`), `403`, then the table (`404`), then the entry (`404`);
+`GET .../access` SHALL check `403`, then the table (`404`).
 
 These rules constrain what may be stored, so they SHALL apply in `none` security mode too. Every `PUT` or `DELETE`
 that changes the stored entry SHALL be recorded in the audit trail as one change to the table definition (see
@@ -1070,7 +1072,7 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
 
 - **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access` at `generation` 4, `PUT`s
   `{"generation": 4, "privileges": ["read"], "rows": {"where": "project_id = 'P-1'"}}` for role `X`, reads
-  `GET /v1/tables/t/access/X`, then `DELETE`s `X`'s entry
+  `GET /v1/tables/t/access?role=X`, then `DELETE`s `X`'s entry
 - **THEN** the `PUT` answers `200` with `generation` 5, `privileges` `["read"]`, `rows` carrying the equivalent
   `filter` and `columns` `null`; the `GET` returns the same entry with `"role": "X"`; the `DELETE` answers `204`; and a
   further `GET /v1/tables/t/access` returns `"roles": {}` at `generation` 6
@@ -1091,15 +1093,15 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
 
 - **GIVEN** role `X` has an entry carrying `write`
 - **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": []}` for `X`
-- **THEN** the response is `200` with an empty entry, `GET .../access/X` answers `404 not_found`, and `X` is absent
-  from `GET .../access`
+- **THEN** the response is `200` with an empty entry, `GET .../access?role=X` answers `404 not_found`, and `X` is
+  absent from `GET .../access`
 - **AND WHEN** a caller `PUT`s `{"generation": <current>, "privileges": []}` for role `Z`, which has no entry
-- **THEN** the response is `200` with an empty entry and the generation incremented, and no revision or activity is
+- **THEN** the response is `200` with an empty entry and the generation unchanged, and no revision or activity is
   recorded for the table
 
 #### Scenario: Reading one role that has no entry
 
-- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access/nobody`
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access?role=nobody`
 - **THEN** the response is `404 not_found`
 
 #### Scenario: Removing an absent entry is not found
@@ -1109,32 +1111,49 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
 
 #### Scenario: An unknown table is not found on reading or removing entries
 
-- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/nope/access` or `GET /v1/tables/nope/access/X`, or
-  `DELETE`s `/v1/tables/nope/access/X`, for a table that does not exist
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/nope/access` or `GET /v1/tables/nope/access?role=X`,
+  or `DELETE`s `/v1/tables/nope/access?role=X`, for a table that does not exist
 - **THEN** each response is `404 not_found`
 
-#### Scenario: A role containing a slash or a percent sign is addressed percent-encoded
+#### Scenario: A role containing a slash, percent sign or semicolon is an ordinary query value
 
 - **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["read"]}` to
-  `/v1/tables/t/access/%2Fanalytics%2Fviewers`, then to `/v1/tables/t/access/team%25ops`
-- **THEN** both answer `200` with `role` `"/analytics/viewers"` and `"team%ops"` respectively,
-  `GET /v1/tables/t/access` lists both under those names, `GET` of each encoded path returns its entry, and a
-  `DELETE` of each encoded path answers `204`
+  `/v1/tables/t/access?role=%2Fanalytics%2Fviewers`, then to `?role=team%25ops`, then to `?role=a%3Bb`, in either
+  security mode
+- **THEN** each answers `200` with `role` `"/analytics/viewers"`, `"team%ops"` and `"a;b"` respectively,
+  `GET /v1/tables/t/access` lists all three under those names, `GET` with each `role` value returns its entry, and a
+  `DELETE` with each answers `204`
 
-#### Scenario: A role the firewall refuses cannot be addressed
+#### Scenario: A missing or blank role is a bad request
 
-- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry to `/v1/tables/t/access/a%3Bb`
-- **THEN** the response is `400 bad_request` as an `ErrorView`, and nothing is stored
+- **WHEN** a caller `PUT`s an entry to, or `DELETE`s, `/v1/tables/t/access` with no `role` parameter, or with
+  `?role=%20`
+- **THEN** the response is `400 bad_request`, before the privilege check, and nothing is stored
+- **AND WHEN** a caller `PUT`s an entry to, `DELETE`s, or reads `/v1/tables/t/access?role=a&role=b`
+- **THEN** each response is `400 bad_request`, and no entry for a role `a,b` or any other is stored
+
+#### Scenario: The role is not a path segment
+
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access/X`
+- **THEN** the response is `404 not_found`, as for any unknown path
+
+#### Scenario: A role sent as a path segment meets the request firewall
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry for role `a;b` as a path segment,
+  `/v1/tables/t/access/a%3Bb`, instead of as `?role=a%3Bb`
+- **THEN** the response is `400 bad_request` as an `ErrorView`, because the request firewall refuses an encoded `;` in
+  any path, and nothing is stored
 
 #### Scenario: The role is trimmed on read and removal
 
 - **GIVEN** role `X` has an entry on `t`
-- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access/%20X%20`
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access?role=%20X%20`
 - **THEN** the response is `X`'s entry with `"role": "X"`
 
 #### Scenario: A stale generation is reported before an invalid role
 
-- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry with a stale `generation` for role `READ_ONLY_ANALYTIC`
+- **GIVEN** an entry an earlier build stored for role `READ_ONLY_ANALYTIC`, removed after a client read the access
+- **WHEN** that client `PUT`s an entry for `READ_ONLY_ANALYTIC` carrying the generation it read
 - **THEN** the response is `409 access_conflict`, not `422`
 
 #### Scenario: Two concurrent deletes of one entry
@@ -1149,11 +1168,12 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
   `X`'s entry waits for it
 - **THEN** the `PUT` answers `200`, the `DELETE` then answers `204`, and the generation has moved by two
 - **AND WHEN** instead the `DELETE` commits first and the `PUT` carries the generation read before it
-- **THEN** the `DELETE` answers `204`, the `PUT` answers `409 access_conflict`, and the generation has moved by one
+- **THEN** the `DELETE` answers `204`, the `PUT` answers `200`, because `Y`'s entry did not change after that read,
+  and the generation has moved by two
 
 #### Scenario: A caller without TABLE_GRANT is refused
 
-- **WHEN** a caller holding `TABLE_READ` but not `TABLE_GRANT` reads `GET .../access`, reads `GET .../access/X`,
+- **WHEN** a caller holding `TABLE_READ` but not `TABLE_GRANT` reads `GET .../access`, reads `GET .../access?role=X`,
   `PUT`s or `DELETE`s an entry
 - **THEN** each response is `403 forbidden`
 
@@ -1229,7 +1249,7 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
 #### Scenario: State left on an enrichment is read and removed
 
 - **GIVEN** an enrichment on which an earlier build stored, for role `R`, a `read` grant and a row policy
-- **WHEN** a caller holding `TABLE_GRANT` reads `GET .../access/R` on it and then `DELETE`s that entry
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET .../access?role=R` on it and then `DELETE`s that entry
 - **THEN** the read returns the entry as stored, and the `DELETE` answers `204`
 
 #### Scenario: The response carries no permissions member
@@ -1268,56 +1288,73 @@ that changes the stored entry SHALL be recorded in the audit trail as one change
 
 #### Scenario: Repeating a PUT records no revision
 
-- **WHEN** a caller `PUT`s for a role exactly the entry it already has, with the current generation
-- **THEN** the response is `200` with the generation incremented, and no revision or activity is recorded for the table
+- **WHEN** a caller `PUT`s for a role exactly the entry it already has, with the current generation or an older one
+- **THEN** the response is `200` with the entry and the generation unchanged, and no revision or activity is recorded
+  for the table
 
 ### Requirement: Access configuration generation
 
 Each table SHALL carry one access `generation`, a non-negative integer covering every role's entry on it. It SHALL be
 `0` for a table created after this capability and for every table that existed before it. `GET .../access`,
-`GET .../access/{role}` and every successful `PUT` response SHALL carry it.
+`GET .../access?role=<role>` and every successful `PUT` response SHALL carry it.
 
-A `PUT /v1/tables/{name}/access/{role}` SHALL carry the `generation` the client last read. It SHALL succeed only when
-that value equals the stored generation; otherwise the response SHALL be `409` with machine code `access_conflict` and
-nothing SHALL change. The message SHALL tell the caller to read the access again and reapply its change, and SHALL NOT
-name a generation, neither the current one nor the one sent, so a client re-reads rather than retrying with a fresher
-number. A `generation` that is
+The service SHALL also record, for each role, the generation at which that role's entry last changed: its
+**last-change mark**. A change that removes the entry SHALL set the mark too, and the mark SHALL be kept after the entry
+is gone, so a client that read the entry before its removal still conflicts. A role whose entry has not changed since
+this capability has mark `0`. No endpoint SHALL return the marks.
+
+A `PUT /v1/tables/{name}/access?role=<role>` SHALL carry the `generation` the client last read. A `generation` that is
 absent, `null`, not a JSON integer (`"7"`, `7.5`, `7.0`), or outside the range of a signed 64-bit integer SHALL be refused
-`422 validation_error`. The check SHALL apply whichever role the `PUT` names, so a client that read the configuration
-before another role's entry changed is refused.
+`422 validation_error`. Otherwise:
 
-Every successful `PUT` and `DELETE` SHALL increment the generation of the table it names by exactly one, including a
-`PUT` that leaves the entry as it was and one that removes an empty entry or stores an empty entry for a role that had
-none. A schema operation that rewrites a stored entry's `columns` (see [table-management](../table-management/spec.md),
+1. when the entry the request would store equals the role's stored entry (an absent entry being the empty one), the
+   request SHALL answer `200` with that entry and the current generation, SHALL write and record nothing, and SHALL
+   leave the generation and the marks as they were, whatever `generation` it carries, so a client may retry a `PUT`
+   whose response it lost;
+2. otherwise, when the `generation` is greater than the table's, which no client can have read, or less than the
+   role's last-change mark, the request SHALL be refused `409 access_conflict` and nothing SHALL change;
+3. otherwise the entry SHALL be written, the table's generation incremented by exactly one, and the role's mark set
+   to the new generation.
+
+A change to another role's entry after the client's read SHALL NOT make its `PUT` conflict. The `409` message SHALL
+tell the caller to read the access again and reapply its change, and SHALL NOT name a generation, neither the current
+one nor the one sent, so a client re-reads rather than retrying with a fresher number.
+
+A `DELETE /v1/tables/{name}/access?role=<role>` MAY carry a `generation` query parameter. Without it the removal SHALL
+NOT be conditioned on any generation. With it, a value that is not an integer within the signed 64-bit range SHALL be
+refused `422 validation_error`; a role with no entry SHALL still answer `404 not_found`; and a value greater than the
+table's generation, or less than the role's last-change mark, SHALL be refused `409 access_conflict` with nothing
+changed. A successful `DELETE` SHALL increment the generation by exactly one and set the role's mark to the new
+generation.
+
+A schema operation that rewrites a stored entry's `columns` (see [table-management](../table-management/spec.md),
 "Column policies follow a rename and refuse an emptying drop") SHALL increment, by exactly one, the generation of the
-table **whose entries it rewrites**: a rename or drop through `PATCH /v1/tables/{name}/schema`, a re-define through
-`POST /v1/tables/{name}/schema` that drops a listed column, and the delete of an enrichment. For an enrichment's column
-and for an enrichment's delete, those entries are its **source's** (they name the column as `<enrichment>.<column>`),
-so the source's generation moves and the enrichment's does not. Nothing else SHALL change a generation: a description
-update, a schema operation that rewrites no entry, a row write and a pipeline change leave it as it was, so none of
-them makes a concurrent access edit conflict. A schema operation that rewrites an entry does make a `PUT` that read the
-generation before it conflict, because the entry that client read is no longer the stored one. A refused request SHALL
-change nothing.
+table **whose entries it rewrites**, and SHALL set the mark of every role whose list it changed to the new generation;
+a role whose list it left as it was keeps its mark. Such operations are a rename or drop through
+`PATCH /v1/tables/{name}/schema`, a re-define through `POST /v1/tables/{name}/schema` that drops a listed column, and
+the delete of an enrichment. For an enrichment's column and for an enrichment's delete, those entries are its
+**source's** (they name the column as `<enrichment>.<column>`), so the source's generation and marks move and the
+enrichment's do not. Nothing else SHALL change a generation or a mark: a `PUT` that changes no entry, a description
+update, a schema operation that rewrites no entry, a row write and a pipeline change leave them as they were, so none
+of them makes a concurrent access edit conflict. A refused request SHALL change nothing.
 
-The check and the write SHALL be atomic: of two writes that read the same generation, whichever roles they name,
-exactly one SHALL succeed and the other SHALL answer `409 access_conflict`. A `DELETE` carries no generation and SHALL
-NOT be checked against one: it removes the entry when one exists, so of two concurrent `DELETE`s of one entry one
-answers `204` and the other `404 not_found`, and a `DELETE` racing a write to another role answers `204` whichever
-commits first. The write then succeeds when it committed first, and answers `409 access_conflict` when the `DELETE`
-did, because the generation it carries is then stale.
+The check and the write SHALL be atomic: of two writes to the same role that read the same generation and would each
+change its entry, exactly one SHALL succeed and the other SHALL answer `409 access_conflict`, while two writes to
+different roles from the same read SHALL both succeed. Of two concurrent `DELETE`s of one entry without a
+`generation`, one answers `204` and the other `404 not_found`.
 
-The generation SHALL NOT be part of the audited state, of a revision snapshot or of a catalog export.
+The generation and the marks SHALL NOT be part of the audited state, of a revision snapshot or of a catalog export.
 
 #### Scenario: A PUT with the current generation succeeds
 
 - **GIVEN** a table at access `generation` 7
-- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry with `generation` 7
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s a changed entry with `generation` 7
 - **THEN** the response is `200` with `generation` 8
 
 #### Scenario: A stale PUT is refused and changes nothing
 
-- **GIVEN** table `usage` at access `generation` 42
-- **WHEN** a caller `PUT`s an entry for role `viewers` with `generation` 41
+- **GIVEN** table `usage` at access `generation` 42, on which role `viewers`' entry last changed at generation 42
+- **WHEN** a caller `PUT`s a different entry for `viewers` with `generation` 41
 - **THEN** the response is `409 access_conflict`, its message names no generation (it contains neither `42` nor
   `41`), and a subsequent read returns every entry unchanged at `generation` 42
 
@@ -1328,7 +1365,7 @@ The generation SHALL NOT be part of the audited state, of a revision snapshot or
 
 #### Scenario: The generation is checked before the rest of the body
 
-- **WHEN** a caller `PUT`s an entry with a stale `generation` and `"columns": []`
+- **WHEN** a caller `PUT`s, for a role whose entry changed after the `generation` it carries, `"columns": []`
 - **THEN** the response is `409 access_conflict`, not `422`
 
 #### Scenario: A missing generation is reported before staleness and the body
@@ -1340,20 +1377,66 @@ The generation SHALL NOT be part of the audited state, of a revision snapshot or
 
 - **GIVEN** two clients that both read a table's access at `generation` 5
 - **WHEN** one `PUT`s an entry for role `X` and the other an entry for role `Y`, both with `generation` 5
+- **THEN** both receive `200`, and the table is at `generation` 7
+
+#### Scenario: Two writes to one role from the same read
+
+- **GIVEN** two clients that both read a table's access at `generation` 5
+- **WHEN** both `PUT` different entries for role `X` with `generation` 5
 - **THEN** exactly one receives `200` and the other `409 access_conflict`
+
+#### Scenario: A retried PUT is answered without a write
+
+- **GIVEN** a `PUT` for role `X` carrying `generation` 5 succeeded, moving the table to 6, and role `Y` changed after
+  it, moving the table to 7
+- **WHEN** the client sends the identical `PUT` again, carrying `generation` 5
+- **THEN** the response is `200` with `X`'s entry and `generation` 7, the generation does not move, and no revision is
+  recorded
+- **AND WHEN** it `PUT`s a different entry for `X` carrying `generation` 5
+- **THEN** the response is `409 access_conflict`
+
+#### Scenario: A generation above the table's is refused
+
+- **GIVEN** a table at access `generation` 3
+- **WHEN** a caller `PUT`s a changed entry, or `DELETE`s an entry, carrying `generation` 4
+- **THEN** the response is `409 access_conflict` and nothing changes
 
 #### Scenario: A DELETE moves the generation
 
 - **GIVEN** a table at access `generation` 3 with an entry for role `X`
 - **WHEN** a caller `DELETE`s `X`'s entry
-- **THEN** a subsequent `GET .../access` returns `generation` 4, and a `PUT` carrying `generation` 3 answers
-  `409 access_conflict`
+- **THEN** a subsequent `GET .../access` returns `generation` 4, a `PUT` for `X` carrying `generation` 3 answers
+  `409 access_conflict`, and a `PUT` for role `Y`, unchanged since, carrying `generation` 3 answers `200`
+
+#### Scenario: A DELETE with a generation is conditional on its own role
+
+- **GIVEN** a table at access `generation` 6, on which role `X`'s entry last changed at generation 5 and role `Y`'s at
+  generation 6
+- **WHEN** a caller sends `DELETE .../access?role=X&generation=5`
+- **THEN** the response is `204`
+- **AND WHEN** it sends `DELETE .../access?role=Y&generation=5`
+- **THEN** the response is `409 access_conflict` and `Y`'s entry is kept
+- **AND WHEN** it sends `DELETE .../access?role=Y&generation=5.0`, or `DELETE .../access?role=nobody&generation=7`
+- **THEN** the responses are `422 validation_error` and `404 not_found` respectively
+
+#### Scenario: A DELETE without a generation is unconditional
+
+- **GIVEN** role `Y`'s entry changed after a client read the access
+- **WHEN** the client `DELETE`s `Y`'s entry without a `generation`
+- **THEN** the response is `204`
 
 #### Scenario: A schema change does not move the generation
 
 - **GIVEN** a table at access `generation` 2 whose entries name no column the change touches
 - **WHEN** its description is updated and a column is added
 - **THEN** `GET .../access` still returns `generation` 2, and a `PUT` carrying `generation` 2 succeeds
+
+#### Scenario: A rename marks only the roles whose lists it rewrote
+
+- **GIVEN** a table at access `generation` 2 on which role `X`'s entry lists `a` and role `Y`'s does not
+- **WHEN** column `a` is renamed
+- **THEN** the table is at `generation` 3, a `PUT` changing `X`'s entry carrying `generation` 2 answers
+  `409 access_conflict`, and a `PUT` changing `Y`'s entry carrying `generation` 2 answers `200`
 
 #### Scenario: An enrichment column rename moves the source's generation
 
@@ -1539,6 +1622,18 @@ SHALL NOT be evaluated and every column SHALL be visible.
 - **WHEN** a caller carrying both requests the entity's schema and queries the table
 - **THEN** both show `c` only, over the rows of `P1` and of `P2`
 
+#### Scenario: Gaining a column-restricted role can hide a confined role's columns
+
+- **GIVEN** a table with columns `project`, `x` and `y`; an entry for `A` with `read`, `rows` admitting
+  `project = 'P1'` and `columns` `null`; and an entry for `B` with `read`, no `rows` and `columns` `["x"]`
+- **WHEN** a caller carrying both runs `SELECT * FROM t`
+- **THEN** it reads every row with column `x` only, because showing `A`'s other columns would show them on the rows
+  only `B` admits
+- **AND WHEN** `B`'s entry also carries `rows`, admitting `project = 'P2'`
+- **THEN** it reads the rows of `P1` and of `P2`, still with column `x` only
+- **AND WHEN** instead `B`'s `columns` list `x`, `y` and `project`
+- **THEN** it reads every row with all three columns
+
 #### Scenario: A rows-only entry without a read path adds rows but no columns
 
 - **GIVEN** an entry for `X` with `read`, `rows` admitting `project = 'P1'` and `columns` `["a", "project"]`, and an
@@ -1660,8 +1755,13 @@ policy hides from other readers is stored and returned to them verbatim: that is
 sensitive column (see [saved-queries](../saved-queries/spec.md), "A sensitive value may be persisted in a saved query
 body"), not a new one.
 
-A revision snapshot SHALL hide columns by the column policies the table had at that revision; an enrichment snapshot,
-by its source's current policies, as its read-side flags are resolved.
+A revision snapshot SHALL hide a column that either the column policies the table had at that revision or the
+table's current column policies hide from the caller, so neither a restriction recorded then nor one added since is
+bypassed by reading an older revision. A revision recorded before column policies existed is judged by the current
+policies alone. A column SHALL be matched by the name it carries in the revision: a current allowlist that lists only a
+renamed column's new name hides it in a revision taken before the rename. An enrichment snapshot SHALL be judged by its
+source's current policies, as its read-side flags are resolved. A snapshot's `permissions.columns_restricted` SHALL be
+judged over the revision's own columns.
 
 #### Scenario: Every query surface omits a hidden column
 
@@ -1685,6 +1785,13 @@ by its source's current policies, as its read-side flags are resolved.
 
 - **WHEN** the same caller reads `GET /v1/tables/t`
 - **THEN** `c` is absent from its columns and `permissions.columns_restricted` is `true`
+
+#### Scenario: An older revision hides a column the current policies hide
+
+- **GIVEN** a revision of `t` at which the caller's only role had no column policy, and a later entry for that role
+  with `columns` `["k"]`
+- **WHEN** the caller requests `t`'s snapshot at that revision
+- **THEN** only `k` is listed and `permissions.columns_restricted` is `true`
 
 #### Scenario: A schema change cannot name a hidden column
 

@@ -249,7 +249,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         entry(EVENTS, RUNNER, "\"privileges\":[\"read\"],\"columns\":[\"event_id\",\"ingest_time\",\"project_id\"]");
         send(patch("/v1/tables/" + EVENTS + "/schema"), admin(), "{\"rename\":[{\"from\":\"ingest_time\",\"to\":\"loaded_at\"}]}")
                 .andExpect(status().isOk());
-        asAdmin(get("/v1/tables/" + EVENTS + "/access/" + RUNNER)).andExpect(jsonPath("$.columns", hasItem("loaded_at")))
+        asAdmin(get("/v1/tables/" + EVENTS + "/access?role=" + RUNNER)).andExpect(jsonPath("$.columns", hasItem("loaded_at")))
                 .andExpect(jsonPath("$.columns", not(hasItem("ingest_time"))));
     }
 
@@ -478,7 +478,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
 
     private ResultActions putEntry(String table, String role, String members) throws Exception {
         final String access = asAdmin(get("/v1/tables/" + table + "/access")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-        return send(put("/v1/tables/" + table + "/access/" + role), admin(),
+        return send(put("/v1/tables/" + table + "/access?role=" + role), admin(),
                 "{\"generation\":" + JsonPath.read(access, "$.generation") + "," + members + "}");
     }
 
@@ -487,7 +487,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         final Map<String, Object> roles = JsonPath.read(asAdmin(get("/v1/tables/" + table + "/access")).andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString(), "$.roles");
         if (roles.containsKey(role)) {
-            asAdmin(delete("/v1/tables/" + table + "/access/" + role)).andExpect(status().isNoContent());
+            asAdmin(delete("/v1/tables/" + table + "/access?role=" + role)).andExpect(status().isNoContent());
         }
     }
 

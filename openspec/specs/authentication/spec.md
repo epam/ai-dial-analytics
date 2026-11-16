@@ -516,7 +516,7 @@ A bundle SHALL be expanded when configuration is parsed, and SHALL NOT be observ
 authorization check thereafter: no endpoint, filter or evaluator SHALL branch on a bundle name.
 `FULL_ADMIN` and `READ_ONLY_ADMIN` SHALL expand to exactly the authority the corresponding
 application role carries today, with **declared exceptions**. First, reading a table's access entries
-(`GET /v1/tables/{name}/access` and `GET /v1/tables/{name}/access/{role}`) requires `TABLE_GRANT`, which
+(`GET /v1/tables/{name}/access` and `GET /v1/tables/{name}/access?role=<role>`) requires `TABLE_GRANT`, which
 `READ_ONLY_ADMIN` does not hold, so a caller that could read a table's access under that bundle receives `403`. The
 entries disclose which provider roles exist and what each may do, which is not a catalog read (see
 `table-access-control`). `READ_ONLY_ADMIN` and
@@ -531,9 +531,9 @@ privilege implication** states. No other bundle's authority changes. A fourth is
 `SETTINGS_READ` and `SETTINGS_WRITE`. A `roles-mapping` that names raw privileges rather than a bundle gains
 neither, and must name `SETTINGS_READ` for its holders to read the settings. Apart from those four, an
 unmodified `roles-mapping` changes nothing observable. A table's access entries are keyed by raw provider roles, so a
-bundle name SHALL be refused as the role of `PUT /v1/tables/{name}/access/{role}` (`422 validation_error`). An entry
+bundle name SHALL be refused as the role of `PUT /v1/tables/{name}/access?role=<role>` (`422 validation_error`). An entry
 stored under a bundle name by an earlier build, which matches a raw provider role of that name, SHALL keep applying as
-stored until it is removed with `DELETE /v1/tables/{name}/access/{role}` (see `table-access-control`, "Role-keyed
+stored until it is removed with `DELETE /v1/tables/{name}/access?role=<role>` (see `table-access-control`, "Role-keyed
 access API").
 
 Every `roles-mapping` (`security.defaults.roles-mapping`, `providers.<name>.roles-mapping`,
@@ -561,7 +561,7 @@ implication edges in four places and let a bundle drift out of step with them.
 
 #### Scenario: A read of access entries is the one thing READ_ONLY_ADMIN loses
 - **WHEN** a caller mapped to `READ_ONLY_ADMIN` reads `GET /v1/tables/{name}/access` or
-  `GET /v1/tables/{name}/access/{role}`
+  `GET /v1/tables/{name}/access?role=<role>`
 - **THEN** the response is `403 forbidden`, while every catalog, registry, audit and saved-query read
   that bundle reached before still succeeds
 
@@ -922,35 +922,31 @@ logged or returned by any endpoint.
 - **WHEN** a provider sets `logging-key`, leaves `logging-salt` unset and does not turn obfuscation off
 - **THEN** startup fails naming the provider and the missing setting
 
-### Requirement: Encoded path separators and firewall refusals
+### Requirement: Encoded path separators are refused
 
-The service SHALL accept a percent-encoded slash (`%2F`, `%2f`) and a percent-encoded percent sign (`%25`) inside a
-path segment on every path it serves, in both security modes, where an earlier build refused the request `400`. A `/v1`
-path variable carrying them SHALL be decoded once and answered as the endpoint answers that decoded value — an unknown
-table named `a/b`, for one, is `404 not_found` — and the role segment of `/v1/tables/{name}/access/{role}` relies on
-it (see `table-access-control`, "Role-keyed access API").
-
-Which handler and which privilege check apply SHALL NOT change: no encoded character SHALL act as a path separator
-when a request is matched to a handler or to an authentication rule, so a request under a public operational path
-(such as `/actuator/health/**`), or under the API-docs paths when they are public, reaches only that path's handlers,
-and a `/v1` request is authorized for the handler it matched. Every other rule of the request firewall SHALL stay: a
-path carrying `;`, `\`, `//` (encoded or not), an encoded `.`, a NUL, carriage-return or line-feed character, U+2028 or
-U+2029, or a segment that is exactly `.` or `..`, SHALL still be refused.
+The service SHALL refuse with HTTP 400 a request whose path carries a percent-encoded slash (`%2F`, `%2f`) or
+percent-encoded percent sign (`%25`) in a path segment, on every path it serves and in both security modes, so no
+encoded character acts as a path separator when a request is matched to a handler or to an authentication rule, and
+none reaches a handler inside a path variable. No `/v1` endpoint carries a value that would need one in a path
+segment: a value that may contain any character, such as the role of a table access entry (see
+`table-access-control`, "Role-keyed access API"), travels as a query parameter. Every other rule of the request
+firewall SHALL stay: a path carrying `;`, `\`, `//` (encoded or not), an encoded `.`, a NUL, carriage-return or
+line-feed character, U+2028 or U+2029, or a segment that is exactly `.` or `..`, SHALL be refused.
 
 A request the service's request firewall refuses SHALL be answered as `ErrorView` `400 bad_request`, in both security
-modes. A request the servlet container rejects before the service sees it (an encoded NUL, for one) gets the
-container's own `400` response, which is not an `ErrorView`; the service promises only HTTP 400 for those.
+modes. A request the servlet container rejects before the service sees it (an encoded slash or an encoded NUL, for
+two) gets the container's own `400` response, which is not an `ErrorView`; the service promises only HTTP 400 for
+those.
 
-#### Scenario: An encoded slash names an unknown resource
+#### Scenario: An encoded slash in a path segment is refused
 
 - **WHEN** a caller holding `TABLE_GET` globally reads `GET /v1/tables/a%2Fb`
-- **THEN** the response is `404 not_found` for an unknown table, not `400`
+- **THEN** the response is HTTP 400, in either security mode
 
-#### Scenario: An encoded traversal stays under its public path
+#### Scenario: An encoded traversal never leaves its public path
 
 - **WHEN** an anonymous caller in `oidc` mode requests `/actuator/health/%2F..%2Fenv`
-- **THEN** it is answered as an unknown health component is, `404`, and never by another endpoint or as a server
-  error
+- **THEN** the response is HTTP 400, and the request reaches no endpoint
 
 #### Scenario: A firewall refusal is an ErrorView
 

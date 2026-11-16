@@ -227,7 +227,7 @@ class FlightMetadataAuthIntegrationTest {
 
             assertThat(tableSchemaFields("dial_usage_log", bearer(fullAdminToken()))).contains("deployment");
         } finally {
-            tableAccess.delete("dial_usage_log", "viewer");
+            tableAccess.delete("dial_usage_log", "viewer", null);
         }
     }
 

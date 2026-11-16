@@ -53,6 +53,7 @@ import com.epam.aidial.analytics.exception.SettingNotFoundException;
 import com.epam.aidial.analytics.exception.SettingValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.exception.SystemTableException;
+import com.epam.aidial.analytics.exception.TableBusyException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableRelayoutInProgressException;
@@ -66,7 +67,6 @@ import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -536,6 +536,12 @@ public class DefaultExceptionHandler {
         return new ErrorView(req, HttpStatus.CONFLICT, "access_conflict", ex.getMessage());
     }
 
+    @ResponseStatus(HttpStatus.CONFLICT)
+    @ExceptionHandler(TableBusyException.class)
+    public ErrorView handleTableBusy(HttpServletRequest req, TableBusyException ex) {
+        return new ErrorView(req, HttpStatus.CONFLICT, "table_busy", ex.getMessage());
+    }
+
     @ResponseStatus(HttpStatus.FORBIDDEN)
     @ExceptionHandler(ColumnNotEntitledException.class)
     public ErrorView handleColumnNotEntitled(HttpServletRequest req, ColumnNotEntitledException ex) {
@@ -764,20 +770,6 @@ public class DefaultExceptionHandler {
         // surface here. URL-level denials are handled in the filter chain. Both render the same shape.
         return new ErrorView(req, HttpStatus.FORBIDDEN, "forbidden",
             "You do not have permission to perform this operation");
-    }
-
-    /**
-     * An encoded {@code /} reaches the health endpoint decoded inside its one component segment (the request firewall
-     * accepts {@code %2F}), and the endpoint refuses a multi-segment component with this exception: answered as the
-     * unknown component it names, never as a server fault. Anywhere else it stays the catch-all {@code 500}.
-     */
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<ErrorView> handleIllegalArgument(HttpServletRequest req, IllegalArgumentException ex) {
-        if (StringUtils.startsWith(req.getRequestURI(), "/actuator/health/")) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(new ErrorView(req, HttpStatus.NOT_FOUND, "not_found", "No such health component"));
-        }
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(handleGeneralError(req, ex));
     }
 
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)

@@ -218,7 +218,7 @@ context: |
   - **Authorization is a privilege, held globally or granted per table.** Eighteen `Privilege` values;
     six are table-scoped (`TABLE_LIST`/`GET`/`READ`/`SENSITIVE`/`WRITE`/`MODIFY`) and a caller's
     effective access is the union of what it holds globally and what a table's role-keyed access entries
-    (`/v1/tables/{name}/access/{role}`: `privileges`, `rows`, `columns`, under one per-table `generation`)
+    (`/v1/tables/{name}/access?role={role}`: `privileges`, `rows`, `columns`, under one per-table `generation`)
     grant its raw provider roles — five privilege keys, since `TABLE_LIST` is global-or-implied and has none.
     The entry is a view over the `access`, `row_policies` and `column_policies` documents. For an
     enrichment the read-side lists and the clearance are its source's (`GoverningAccess`, shared by the

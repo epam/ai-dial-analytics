@@ -15,7 +15,7 @@ import java.util.Set;
  * expansion time, so implication has one source of truth. {@code FULL_ADMIN} and {@code READ_ONLY_ADMIN}
  * expand to exactly the authority the corresponding application role carried before privileges existed,
  * with two deliberate exceptions, declared in the {@code authentication} capability.
- * {@code GET /v1/tables/{name}/access} and {@code .../access/{role}} require {@code TABLE_GRANT}, which
+ * {@code GET /v1/tables/{name}/access} and {@code .../access?role={role}} require {@code TABLE_GRANT}, which
  * {@code READ_ONLY_ADMIN} does not hold, because access entries disclose which provider roles exist and what each may
  * do. And
  * {@code FULL_ADMIN} no longer sees other users' {@code personal} saved queries anywhere, the revision

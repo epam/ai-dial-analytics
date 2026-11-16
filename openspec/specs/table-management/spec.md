@@ -3733,7 +3733,7 @@ existing entry, even when it reuses a dropped column's name, because the drop al
 refusal SHALL be evaluated on the lists after the prune; a rename only rewrites names a list still holds, so it never
 refills a list the prune emptied, and such a request is refused.
 
-These guarantees SHALL hold against a concurrent `PUT /v1/tables/{name}/access/{role}`: the refusal and the rewrite
+These guarantees SHALL hold against a concurrent `PUT /v1/tables/{name}/access?role=<role>`: the refusal and the rewrite
 SHALL be decided on the entries as they stand when the schema change commits, and a `PUT` committed after a rename or
 drop SHALL be validated against the columns as they stand then. No interleaving SHALL leave a list empty or naming a
 column the table (or, for a qualified name, the enrichment) no longer has, and none SHALL make the refusal arrive
@@ -3744,7 +3744,8 @@ are the entries it commits against.
 These rules SHALL hold whoever the caller is, and in `none` mode too, because a policy over a missing column would
 be invalid the moment it is enforced. A rename or drop that rewrites any entry SHALL increment, by one, the access
 `generation` of the table whose entries it rewrites — the source's for a column of an enrichment or an enrichment's
-delete, never the enrichment's (see table-access-control, "Access configuration generation"); one that rewrites none
+delete, never the enrichment's — and SHALL record that generation as the last change of every role whose list it
+rewrote, and of no other role (see table-access-control, "Access configuration generation"); one that rewrites none
 SHALL leave every generation as it was. The refusal of a column a row policy references (see "A column a row policy
 references is protected against drop and rename") SHALL be checked first, so a column referenced by both is refused
 `409 column_in_row_policy`. Apart from that, `409 column_in_column_policy` SHALL be checked in no specified order
@@ -3839,4 +3840,50 @@ added later under it.
 - **THEN** either the `PUT` commits first and the drop is refused `409 column_in_column_policy`, or the drop commits
   first and the `PUT` is refused `422 validation_error` naming `b`; `Y` never holds `[]` or a list naming `b` once `b`
   is gone
+
+### Requirement: Writes to one table definition wait a bounded time for each other
+
+Every request that writes a table's definition — an access `PUT` or `DELETE` (see
+[table-access-control](../table-access-control/spec.md), "Role-keyed access API"), a metadata update
+(`PUT /v1/tables/{name}`), a schema definition (`POST /v1/tables/{name}/schema`), a schema `PATCH` and a table
+`DELETE` — SHALL take turns with the other writes of the same definition, and of its source's where it rewrites the
+source's column policies, so none of them writes back state another committed meanwhile. A write that finds another
+holding the definition SHALL wait for it at most the configured lock timeout (`tables.lock-timeout`, ten seconds by
+default). When the wait expires the request SHALL be refused with HTTP 409 and machine code `table_busy`, whose
+message says another change to the table is in progress; it SHALL change nothing, so it MAY be retried as sent, and
+the write holding the definition SHALL complete unaffected. A write that obtains the definition within the timeout
+SHALL be judged against the state the earlier write left. Writes to other tables SHALL NOT wait for it.
+
+The bound SHALL apply to the wait for the definition alone, not to any other statement of the request. A configured
+lock timeout below one millisecond, zero and negative values included, SHALL be refused at startup with a message
+naming `tables.lock-timeout`, because PostgreSQL reads a zero lock timeout as no limit at all.
+
+A schema definition whose `CREATE TABLE` has run when its final status change is refused `table_busy` SHALL undo that
+`CREATE`, as it does when the `CREATE` itself fails: the table is left not materialized, holding the schema it was
+sent as a failed definition does, and the same request sent again succeeds.
+
+#### Scenario: A writer waiting past the lock timeout is refused
+
+- **GIVEN** a change to table `t` that holds its definition for longer than the lock timeout
+- **WHEN** another request updates `t`'s description
+- **THEN** the request answers `409 table_busy`, `t`'s description is unchanged, and the first change commits as it
+  would have
+
+#### Scenario: A write that waits less than the timeout proceeds
+
+- **GIVEN** a change to table `t` that holds its definition for less than the lock timeout
+- **WHEN** an access `PUT` on `t` waits for it
+- **THEN** the `PUT` proceeds once the change commits, and is judged against the entries that change left
+
+#### Scenario: A lock timeout under a millisecond is refused at startup
+
+- **WHEN** the service starts with `TABLES_LOCK_TIMEOUT` set to `0`, `500us` or `-1s`
+- **THEN** startup fails with a message naming `tables.lock-timeout`
+
+#### Scenario: A schema definition refused busy after its CREATE is retried as sent
+
+- **GIVEN** a schema definition of `t` whose `CREATE TABLE` succeeded, and another change holding `t`'s definition past
+  the lock timeout when the definition is to be marked active
+- **WHEN** the definition answers `409 table_busy` and is sent again once the other change has committed
+- **THEN** the first attempt dropped the table it created, and the second answers `200` with `t` active
 

@@ -190,7 +190,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     @Test
     void exportOfEverythingIncludesEnrichmentsOfGettableSourcesUnderTheirClearance() throws Exception {
         labels();
-        mockMvc.perform(delete("/v1/tables/" + SECRET + "/access/" + EXPORTER).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+        mockMvc.perform(delete("/v1/tables/" + SECRET + "/access?role=" + EXPORTER).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isNoContent());
 
         // The exporter may get PLAIN, so it gets PLAIN's enrichment too, whose sensitive column needs PLAIN's clearance.
@@ -236,7 +236,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     private void grant(String table, String role, String... privileges) throws Exception {
         final String access = mockMvc.perform(get("/v1/tables/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-        send(put("/v1/tables/" + table + "/access/" + role), fullAdmin(),
+        send(put("/v1/tables/" + table + "/access?role=" + role), fullAdmin(),
                 "{\"generation\":" + JsonMapper.builder().build().readTree(access).get("generation").asLong()
                         + ",\"privileges\":[\"" + String.join("\",\"", privileges) + "\"]}")
                 .andExpect(status().isOk());
@@ -246,7 +246,7 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     private void entry(String table, String role, String members) throws Exception {
         final String access = mockMvc.perform(get("/v1/tables/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-        send(put("/v1/tables/" + table + "/access/" + role), fullAdmin(),
+        send(put("/v1/tables/" + table + "/access?role=" + role), fullAdmin(),
                 "{\"generation\":" + JsonMapper.builder().build().readTree(access).get("generation").asLong() + "," + members + "}")
                 .andExpect(status().isOk());
     }

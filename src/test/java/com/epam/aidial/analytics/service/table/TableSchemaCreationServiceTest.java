@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.table;
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.SystemTableException;
+import com.epam.aidial.analytics.exception.TableBusyException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
@@ -294,6 +295,28 @@ class TableSchemaCreationServiceTest {
         verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
         verify(writer).markStatus("widget_metrics", TableStatus.FAILED);
         verify(writer, never()).markStatus("widget_metrics", TableStatus.ACTIVE);
+    }
+
+    @Test
+    void busyActiveFlipDropsTheCreatedTableSoTheRetrySucceeds() {
+        given(definitions.findById("widget_metrics"))
+                .willReturn(Optional.of(source("widget_metrics", TableStatus.PENDING, List.of("widget_id"))));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "widget_id", QueryFieldType.STRING)));
+        given(typeMapper.toDdlType(QueryFieldType.STRING, null, null, false)).willReturn("String");
+        given(ddlRenderer.renderCreate(any(), any())).willReturn("CREATE TABLE widget_metrics ...");
+        given(ddlRenderer.renderDrop("widget_metrics")).willReturn("DROP TABLE IF EXISTS `widget_metrics`");
+        given(writer.markStatus("widget_metrics", TableStatus.ACTIVE)).willThrow(new TableBusyException("busy")).willReturn(null);
+        given(writer.markStatus("widget_metrics", TableStatus.FAILED)).willThrow(new TableBusyException("busy"));
+        final DefineSchemaInput input = sourceInput(List.of(col("widget_id", QueryFieldType.STRING)), List.of("widget_id"));
+
+        assertThatThrownBy(() -> service.defineSchema("widget_metrics", input)).isInstanceOf(TableBusyException.class);
+        verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
+
+        service.defineSchema("widget_metrics", input);
+        verify(ddlExecutor, org.mockito.Mockito.times(2)).execute("CREATE TABLE widget_metrics ...");
+        verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
+        verify(writer, org.mockito.Mockito.times(2)).markStatus("widget_metrics", TableStatus.ACTIVE);
     }
 
     @Test

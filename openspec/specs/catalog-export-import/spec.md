@@ -434,7 +434,7 @@ the validation pass's `armable: false` and `arm_problems`. Import SHALL NOT writ
 
 Import SHALL apply objects in dependency order: source tables, then enrichment tables, then `enrich` pipelines, then `aggregate`
 pipelines. Import SHALL write no access: every table it creates has no access entry, so until an operator grants access with
-`PUT /v1/tables/{name}/access/{role}` only callers holding the global privileges can see or read a created source. A created
+`PUT /v1/tables/{name}/access?role=<role>` only callers holding the global privileges can see or read a created source. A created
 enrichment has no read-side access of its own: it is readable at once by every caller that may read its source, which may be a table
 the target already had and had granted, subject to that source's column policies (see
 [table-access-control](../table-access-control/spec.md)).
@@ -652,3 +652,4 @@ armable without a new import.
 - **GIVEN** the same bundle, after `PUT /v1/settings/app-routes` lists `(insights-app, insights)` on the target
 - **WHEN** `/import/preview` runs the bundle again
 - **THEN** the pipeline entry reports `armable: true`
+

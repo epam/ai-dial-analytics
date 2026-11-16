@@ -12,6 +12,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -80,7 +81,7 @@ class TableCatalogServiceTest {
         lenient().when(sensitiveAccess.visibleColumns(anyString())).thenReturn(ColumnVisibility.ALL);
         service = new TableCatalogService(definitions, columns, callerPermissions, sensitiveAccess, writer, ddlExecutor, ddlRenderer,
                 new TableLimitsProperties(256, 1000, 10000), pipelines, pipelineReads, pipelineTargetCascade,
-                new ColumnPolicyRewriter(codec));
+                new ColumnPolicyRewriter(codec, new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
     }
 
     private static CreateTableInput source(String name) {
@@ -155,7 +156,7 @@ class TableCatalogServiceTest {
     void exceedingTableCapIsValidationError() {
         service = new TableCatalogService(definitions, columns, callerPermissions, sensitiveAccess, writer, ddlExecutor, ddlRenderer,
                 new TableLimitsProperties(256, 1, 10000), pipelines, pipelineReads, pipelineTargetCascade,
-                new ColumnPolicyRewriter(codec));
+                new ColumnPolicyRewriter(codec, new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
         given(definitions.existsById("widget_metrics")).willReturn(false);
         given(definitions.count()).willReturn(1L);
 

@@ -8,7 +8,7 @@ import java.util.Map;
 
 /** Every role's entry on a table, keyed by raw provider role and sorted by it, with the table's access generation. */
 public record AccessEntriesDto(
-        @Schema(description = "The table's access generation; send it back on PUT .../access/{role}") long generation,
+        @Schema(description = "The table's access generation; send it back on PUT .../access?role={role}") long generation,
         @Schema(description = "Every role's entry, keyed by raw provider role; an empty object when the table has none")
         Map<String, AccessEntryBodyDto> roles) {
 

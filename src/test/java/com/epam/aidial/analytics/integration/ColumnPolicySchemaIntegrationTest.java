@@ -185,14 +185,14 @@ class ColumnPolicySchemaIntegrationTest extends AbstractOidcAuthIntegrationTest 
     }
 
     private void expectColumns(String role, String... columns) throws Exception {
-        final List<String> stored = JsonPath.read(mockMvc.perform(get(BASE + "/" + TABLE + "/access/" + role)
+        final List<String> stored = JsonPath.read(mockMvc.perform(get(BASE + "/" + TABLE + "/access?role=" + role)
                         .header(HttpHeaders.AUTHORIZATION, bearer(admin())))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.columns");
         assertThat(stored).containsExactly(columns);
     }
 
     private void putEntry(String role, String members) throws Exception {
-        send(put(BASE + "/" + TABLE + "/access/" + role), "{\"generation\":" + generation(TABLE) + "," + members + "}").andExpect(status().isOk());
+        send(put(BASE + "/" + TABLE + "/access?role=" + role), "{\"generation\":" + generation(TABLE) + "," + members + "}").andExpect(status().isOk());
     }
 
     private long generation(String table) throws Exception {

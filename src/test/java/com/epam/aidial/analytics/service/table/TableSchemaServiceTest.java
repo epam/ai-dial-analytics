@@ -69,7 +69,9 @@ class TableSchemaServiceTest {
             new com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec(
                     new com.epam.aidial.analytics.configuration.JsonMapperConfiguration().jsonMapper());
 
-    private final ColumnPolicyRewriter rewriter = new ColumnPolicyRewriter(policyCodec);
+    private final ColumnPolicyRewriter rewriter = new ColumnPolicyRewriter(policyCodec,
+            new com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec(
+                    new com.epam.aidial.analytics.configuration.JsonMapperConfiguration().jsonMapper()));
 
     /** The definition {@code applyPatch} is handed, by name: the locked entity rather than a re-load. */
     private static TableDefinitionEntity named(String name) {
@@ -806,6 +808,8 @@ class TableSchemaServiceTest {
 
         assertThat(policyCodec.read(def.getColumnPolicies())).containsEntry("X", List.of("a", "c")).containsEntry("Y", List.of("a"));
         assertThat(def.getAccessGeneration()).isEqualTo(5);
+        // Only the role whose list changed is marked, so a write for Y from generation 4 still succeeds.
+        assertThat(def.getAccessRoleGenerations()).contains("\"X\":5").doesNotContain("\"Y\"");
     }
 
     @Test

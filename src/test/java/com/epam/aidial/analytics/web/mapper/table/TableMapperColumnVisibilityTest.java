@@ -43,6 +43,7 @@ class TableMapperColumnVisibilityTest {
     void permissionsAreIrrelevantHere() {
         when(permissions.resolve(any(), any(), any())).thenReturn(EffectivePermissions.uniform(true));
         when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
+        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
     }
 
     private static TableView view() {
@@ -90,6 +91,26 @@ class TableMapperColumnVisibilityTest {
         when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("employee_name")));
 
         assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("employee_name");
+    }
+
+    @Test
+    @DisplayName("a revision is judged by the decision that also applies the table's current column policies")
+    void revisionUsesTheRevisionDecision() {
+        when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
+        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("k")));
+
+        assertThat(mapper.toDto(view(), true).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k");
+        assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
+    }
+
+    @Test
+    @DisplayName("visibility intersects: a column either decision hides stays hidden")
+    void visibilitiesIntersect() {
+        final ColumnVisibility then = new ColumnVisibility(Set.of("a", "b"));
+        assertThat(then.and(ColumnVisibility.ALL)).isEqualTo(then);
+        assertThat(ColumnVisibility.ALL.and(then)).isEqualTo(then);
+        assertThat(then.and(new ColumnVisibility(Set.of("b", "c"))).visible()).containsExactly("b");
+        assertThat(ColumnVisibility.ALL.and(ColumnVisibility.ALL)).isEqualTo(ColumnVisibility.ALL);
     }
 
     @Test

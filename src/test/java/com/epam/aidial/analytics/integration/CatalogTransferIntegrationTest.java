@@ -726,7 +726,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     private void putEntry(String table, String role, ObjectNode body) throws Exception {
-        mockMvc.perform(put("/v1/tables/" + table + "/access/" + role).contentType(MediaType.APPLICATION_JSON).content(body.toString()))
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=" + role).contentType(MediaType.APPLICATION_JSON).content(body.toString()))
                 .andExpect(status().isOk());
     }
 
@@ -749,7 +749,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         final JsonNode saved = json.readTree(savedAccess).get("roles");
         for (final Map.Entry<String, JsonNode> entry : json.readTree(access(table)).properties()) {
             if (!saved.has(entry.getKey())) {
-                mockMvc.perform(delete("/v1/tables/" + table + "/access/" + entry.getKey())).andExpect(status().isNoContent());
+                mockMvc.perform(delete("/v1/tables/" + table + "/access?role=" + entry.getKey())).andExpect(status().isNoContent());
             } else if (!saved.get(entry.getKey()).equals(entry.getValue())) {
                 putEntry(table, entry.getKey(), ((ObjectNode) saved.get(entry.getKey()).deepCopy()).put("generation", generation(table)));
             }

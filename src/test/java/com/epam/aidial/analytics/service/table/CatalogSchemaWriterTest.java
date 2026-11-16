@@ -7,6 +7,7 @@ import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,7 +59,8 @@ class CatalogSchemaWriterTest {
     void setUp() {
         writer = new CatalogSchemaWriter(definitions, columns, pipelineGenerations,
                 new TableLimitsProperties(256, 1000, 10000), rowPolicies,
-                new ColumnPolicyRewriter(new ColumnPolicyCodec(new JsonMapperConfiguration().jsonMapper())));
+                new ColumnPolicyRewriter(new ColumnPolicyCodec(new JsonMapperConfiguration().jsonMapper()),
+                        new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
         // Every definition writer locks the row as its first load; the stubs below describe the stored row once.
         lenient().when(definitions.findForUpdate(anyString())).thenAnswer(inv -> definitions.findById(inv.getArgument(0)));
         // A define reads the table's stored columns to find what it drops; a table a test does not stub has none.

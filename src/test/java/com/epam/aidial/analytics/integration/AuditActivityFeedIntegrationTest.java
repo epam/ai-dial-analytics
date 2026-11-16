@@ -155,7 +155,7 @@ class AuditActivityFeedIntegrationTest extends AbstractClickHouseIntegrationTest
         IntegrationTables.source(mockMvc, table, COLUMNS, ORDERING);
         final Number generation = com.jayway.jsonpath.JsonPath.read(mockMvc.perform(get("/v1/tables/" + table + "/access"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.generation");
-        mockMvc.perform(put("/v1/tables/" + table + "/access/team-a").contentType(JSON)
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=team-a").contentType(JSON)
                         .content("{\"generation\":" + generation + ",\"privileges\":[\"read\"],\"columns\":[\"widget_id\"]}"))
                 .andExpect(status().isOk());
         final int granted = revisionOf(table);

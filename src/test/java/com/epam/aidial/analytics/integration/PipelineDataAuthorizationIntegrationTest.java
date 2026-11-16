@@ -110,7 +110,7 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
      * the keys. A blanket refusal would make this test unwritable.
      */
     private void grant(String table, String key, String role) throws Exception {
-        mockMvc.perform(put("/v1/tables/" + table + "/access/" + role)
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=" + role)
                         .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"generation\":" + access(table).get("generation") + ",\"privileges\":[\"" + key + "\"]}"))
@@ -135,7 +135,7 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
     @SuppressWarnings("unchecked")
     private void revoke(String table, String role) throws Exception {
         if (((Map<String, Object>) access(table).get("roles")).containsKey(role)) {
-            mockMvc.perform(delete("/v1/tables/" + table + "/access/" + role)
+            mockMvc.perform(delete("/v1/tables/" + table + "/access?role=" + role)
                             .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                     .andExpect(status().isNoContent());
         }

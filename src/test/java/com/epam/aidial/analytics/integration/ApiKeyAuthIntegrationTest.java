@@ -206,7 +206,7 @@ class ApiKeyAuthIntegrationTest {
         for (final String role : List.of("admin", "viewer")) {
             final Number generation = JsonPath.read(mockMvc.perform(get(BASE + "/" + PROBE_TABLE + "/access").header("Api-Key", ADMIN_KEY))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.generation");
-            mockMvc.perform(put(BASE + "/" + PROBE_TABLE + "/access/" + role).header("Api-Key", ADMIN_KEY)
+            mockMvc.perform(put(BASE + "/" + PROBE_TABLE + "/access?role=" + role).header("Api-Key", ADMIN_KEY)
                             .contentType(MediaType.APPLICATION_JSON).content("{\"generation\":" + generation + ",\"rows\":" + rows + "}"))
                     .andExpect(status().isOk());
         }

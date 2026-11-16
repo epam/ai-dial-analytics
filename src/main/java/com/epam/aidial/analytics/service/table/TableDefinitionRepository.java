@@ -1,28 +1,14 @@
 package com.epam.aidial.analytics.service.table;
 
-import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
-import java.util.Optional;
 
 /** Spring Data JPA repository for {@link TableDefinitionEntity}, keyed by table {@code name}. */
 @Repository
-public interface TableDefinitionRepository extends JpaRepository<TableDefinitionEntity, String> {
-
-    /**
-     * The definition under a {@code SELECT … FOR UPDATE} row lock, which every writer of a definition takes as the
-     * first load of that row in its transaction, so no writer overwrites an access change with stale state. A
-     * locking query returns an entity already in the persistence context without re-reading it; a writer that
-     * cannot avoid an earlier load locks with {@code EntityManager.refresh(entity, PESSIMISTIC_WRITE)} instead.
-     */
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT d FROM TableDefinitionEntity d WHERE d.name = :name")
-    Optional<TableDefinitionEntity> findForUpdate(@Param("name") String name);
+public interface TableDefinitionRepository extends JpaRepository<TableDefinitionEntity, String>, TableDefinitionLocking {
 
     /** Enrichments that reference {@code sourceTable} — used to flatten schemas and block source deletes. */
     List<TableDefinitionEntity> findBySourceTable(String sourceTable);

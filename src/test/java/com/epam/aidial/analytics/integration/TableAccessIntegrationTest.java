@@ -92,7 +92,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     /** PUTs {@code role}'s entry on {@code table} as {@code token}: {@code members} plus the table's current generation. */
     private ResultActions putEntry(String token, String table, String role, String members) throws Exception {
-        return putAs(token, BASE + "/" + table + "/access/" + role,
+        return putAs(token, BASE + "/" + table + "/access?role=" + role,
                 "{\"generation\":" + generation(table) + (members.isEmpty() ? "" : "," + members) + "}");
     }
 
@@ -128,7 +128,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(jsonPath("$.columns").value(nullValue()))
                 .andExpect(jsonPath("$.permissions").doesNotExist());
 
-        mockMvc.perform(get(BASE + "/" + PROBE + "/access/" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.generation").value(before + 1))
                 .andExpect(jsonPath("$.role").value(WRITER_ROLE))
@@ -148,12 +148,12 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
         // An entry left with nothing is removed, and DELETE removes a role's entry outright.
         grant();
-        mockMvc.perform(get(BASE + "/" + PROBE + "/access/" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
-        mockMvc.perform(delete(BASE + "/" + PROBE + "/access/other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNoContent());
-        mockMvc.perform(delete(BASE + "/" + PROBE + "/access/other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNotFound());
         mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(jsonPath("$.roles").isEmpty());
@@ -168,12 +168,12 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
         mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"));
-        mockMvc.perform(get(BASE + "/" + PROBE + "/access/" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
                 .andExpect(status().isForbidden());
         putEntry(readOnlyToken(), PROBE, WRITER_ROLE, privileges("write"))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"));
-        mockMvc.perform(delete(BASE + "/" + PROBE + "/access/" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
                 .andExpect(status().isForbidden());
         // A body that does not bind is refused 400 before the TABLE_GRANT check answers 403.
         putEntry(readOnlyToken(), PROBE, WRITER_ROLE, "\"privileges\":[1]")
@@ -219,7 +219,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .andExpect(jsonPath("$.permissions.write").value(false))
                     .andExpect(jsonPath("$.permissions.modify").value(false));
         } finally {
-            mockMvc.perform(delete(BASE + "/dial_usage_log/access/" + WRITER_ROLE)
+            mockMvc.perform(delete(BASE + "/dial_usage_log/access?role=" + WRITER_ROLE)
                             .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                     .andExpect(status().isNoContent());
         }
@@ -230,7 +230,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
         mockMvc.perform(get(BASE + "/does_not_exist/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
-        mockMvc.perform(get(BASE + "/does_not_exist/access/" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+        mockMvc.perform(get(BASE + "/does_not_exist/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
     }
@@ -440,14 +440,14 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
         createEnrichment();
         try {
             // Judged on the body as sent and before the generation, so none of these bodies carries one.
-            final String access = BASE + "/" + ENRICHMENT + "/access/";
+            final String access = BASE + "/" + ENRICHMENT + "/access?role=";
             for (final String privileges : List.of("[\"get\"]", "[\"read\"]", "[\"sensitive\"]", "[\"read\",\"modify\"]")) {
                 putAs(fullAdminToken(), access + "x", "{\"privileges\":" + privileges + "}")
                         .andExpect(status().isConflict())
                         .andExpect(jsonPath("$.error").value("enrichment_follows_source"))
                         .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(PROBE)));
             }
-            putAs(fullAdminToken(), BASE + "/dial_usage_log_payload/access/x", "{\"privileges\":[\"read\",\"write\"]}")
+            putAs(fullAdminToken(), BASE + "/dial_usage_log_payload/access?role=x", "{\"privileges\":[\"read\",\"write\"]}")
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
             putEntry(fullAdminToken(), ENRICHMENT, "labeler", privileges("write"))
@@ -469,7 +469,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
             }
             mockMvc.perform(delete(access + "team-x").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                     .andExpect(status().isNotFound());
-            putAs(fullAdminToken(), BASE + "/no_such_table/access/team-x", "{\"rows\":{\"filter\":" + filter + ",\"where\":\"a = 1\"}}")
+            putAs(fullAdminToken(), BASE + "/no_such_table/access?role=team-x", "{\"rows\":{\"filter\":" + filter + ",\"where\":\"a = 1\"}}")
                     .andExpect(status().isNotFound());
         } finally {
             dropEnrichment();

@@ -209,7 +209,7 @@ class SensitiveClearanceIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final String access = mockMvc.perform(get(BASE + "/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
-        return perform(put(BASE + "/" + table + "/access/" + role), fullAdmin(),
+        return perform(put(BASE + "/" + table + "/access?role=" + role), fullAdmin(),
                 "{\"generation\":" + com.jayway.jsonpath.JsonPath.read(access, "$.generation")
                         + ",\"privileges\":[\"" + String.join("\",\"", privileges) + "\"]}");
     }

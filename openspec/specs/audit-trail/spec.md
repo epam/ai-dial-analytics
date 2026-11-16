@@ -88,7 +88,7 @@ mean; run state is carried by `last_run_at` and `next_run_at`, which are not aud
 #### Scenario: Access-list change is tracked
 
 - **WHEN** a caller holding `TABLE_GRANT` creates, replaces or removes a role's entry through
-  `PUT` or `DELETE /v1/tables/{name}/access/{role}`
+  `PUT` or `DELETE /v1/tables/{name}/access?role=<role>`
 - **THEN** one `Update` activity for that table is recorded, and the snapshot read by a caller holding
   `TABLE_GRANT` carries the resulting entries under `roles` while the preceding revision's snapshot carries the
   previous ones
@@ -123,11 +123,12 @@ mean; run state is carried by `last_run_at` and `next_run_at`, which are not aud
 #### Scenario: Re-saving an identical row policy records nothing
 
 - **WHEN** a caller `PUT`s for a role exactly the entry, row policy included, that role already has on the table
-- **THEN** the entry is returned as on any `PUT`, and no revision and no activity are recorded
+- **THEN** the entry is returned as on any `PUT`, the access `generation` does not move, and no revision and no
+  activity are recorded
 
 #### Scenario: A concurrent edit records the committed access entries
 
-- **WHEN** a description update of a table runs while a `PUT .../access/{role}` on it commits
+- **WHEN** a description update of a table runs while a `PUT .../access?role=<role>` on it commits
 - **THEN** whichever commits second records a revision whose `roles` carry the entries the `PUT` stored, and the
   description of the description update; neither revision restores the other's previous state
 
@@ -676,8 +677,10 @@ at the end of the given revision, in the same response shape as the current-stat
 belonged to the table at that revision, and SHALL exclude a column that had been dropped by then.
 
 Every member of that response describes the table **as of the requested revision**, including the
-caller's effective permissions, which are resolved from the access entries the table had then, and the columns it
-shows, which are filtered by the column policies the table had then. An enrichment is the
+caller's effective permissions, which are resolved from the access entries the table had then. The columns it shows
+are the exception that fails closed: a column SHALL be hidden when either the column policies the table had then or
+the table's current column policies hide it from the caller, matched by the name the column had at that revision. An
+enrichment is the
 one exception: its read-side access is its source's (see `table-access-control`), and the source's entries at that
 revision are not part of the enrichment's history, so an enrichment snapshot's `read` and `sensitive`, and which of its
 columns it shows, SHALL be resolved from its source's current state, its `rows_restricted` from the source's current
@@ -686,17 +689,19 @@ enrichment had then, and its `get` from either: the source's current state, or t
 then. For an enrichment whose source no longer exists, the source's entries SHALL be taken as empty, so only a global
 privilege — or, for `get`, the enrichment's `modify` grants at that revision — sets a read-side flag. A snapshot
 therefore answers "what could this caller have done then", not "what may they do now", and SHALL NOT be
-used to decide whether an action is currently permitted — the live read answers that. In particular, a snapshot at a
-revision older than a column policy shows that column's metadata to a caller the revision's policies did not
-restrict, although the live read now hides it; this is the same as for a column's `sensitive` flag, which a snapshot
-also resolves as of its revision, and it discloses metadata the caller could see then, never values.
+used to decide whether an action is currently permitted — the live read answers that. Column policies are judged
+both ways because a column restricted today would otherwise reappear, metadata and all, in every revision recorded
+before the restriction, those recorded before column policies existed included; a column renamed since the revision
+is hidden when the current allowlist lists only its new name. The snapshot's `permissions.columns_restricted` is judged
+over the revision's own columns. A column's `sensitive` flag is still resolved as of the revision.
 
 The snapshot SHALL additionally carry the table's access entries as of the revision as `roles`, in the shape of the
 `roles` member of `GET /v1/tables/{name}/access` — each role's `privileges`, `rows` and `columns` — to a caller holding
 `TABLE_GRANT`, and in `none` security mode. That is exactly what reading them live requires, so a past grant is never
 more visible than the present one. For every other caller the member SHALL be absent, not empty: an empty object would
 assert that the table had no entries. When served, it is always present, an empty one being `{}`, including at a
-revision recorded before row or column policies existed, where `rows` and `columns` read `null`. The snapshot SHALL
+revision recorded before row or column policies existed, where `rows` and `columns` read `null` (its columns are
+still filtered by the table's current column policies, as above). The snapshot SHALL
 NOT carry the access `generation`. The live read, the table list and every mutation response SHALL NOT carry `roles`,
 so in `none` mode the snapshot is a superset of the live shape.
 
@@ -747,6 +752,30 @@ is correct where answering with a partial one would assert that the missing colu
 - **WHEN** a caller holding `TABLE_GRANT` requests the snapshot at a revision recorded before column policies existed,
   at which role `X` held `read` and a row policy
 - **THEN** `roles.X` carries `["read"]`, that `rows`, and `columns` `null`
+
+#### Scenario: A revision before column policies existed is filtered by the current ones
+
+- **GIVEN** a revision recorded before column policies existed, and a current entry for the caller's only role with
+  `columns` `["k"]`
+- **WHEN** the caller requests the snapshot at that revision
+- **THEN** it shows column `k` only and `permissions.columns_restricted = true`
+- **AND WHEN** the current entry's `columns` is removed
+- **THEN** the same snapshot shows every column
+
+#### Scenario: A revision older than a column policy hides the column it now restricts
+
+- **GIVEN** a revision at which the caller's only role had no column policy on the table, and a later change that gave
+  it `columns` `["k"]`
+- **WHEN** the caller requests the snapshot at that revision
+- **THEN** it shows column `k` only and `permissions.columns_restricted = true`, while a caller holding `TABLE_GRANT`
+  reads `columns` `null` for that role in the snapshot's `roles`
+
+#### Scenario: A column renamed since the revision is matched by its old name
+
+- **GIVEN** a revision at which column `project` existed, and a current entry for the caller's only role whose
+  `columns` list `k` and `proj`, the name `project` was renamed to
+- **WHEN** the caller requests the snapshot at that revision
+- **THEN** column `project` is not shown
 
 #### Scenario: A snapshot hides columns by the policies of its revision
 

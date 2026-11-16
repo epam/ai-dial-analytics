@@ -12,17 +12,25 @@ operator's guide.
 | Call | Does |
 |---|---|
 | `GET /v1/tables/{name}/access` | Every role's entry, sorted by role, and the table's access `generation` |
-| `GET /v1/tables/{name}/access/{role}` | One role's entry and the `generation`; `404` when the role has none |
-| `PUT /v1/tables/{name}/access/{role}` | Replaces the role's **whole** entry; body `{"generation", "privileges", "rows", "columns"}` |
-| `DELETE /v1/tables/{name}/access/{role}` | Removes the role's entry (`204`), `404` when it has none |
+| `GET /v1/tables/{name}/access?role={role}` | One role's entry and the `generation`; `404` when the role has none |
+| `PUT /v1/tables/{name}/access?role={role}` | Replaces the role's **whole** entry; body `{"generation", "privileges", "rows", "columns"}` |
+| `DELETE /v1/tables/{name}/access?role={role}` | Removes the role's entry (`204`), `404` when it has none; optional `&generation=<n>` makes it conditional |
 
 - **A `PUT` replaces the whole entry.** An absent or `null` `privileges` means none; an absent `rows` or `columns`
   means `null`. To change one part, send the others as you read them. An entry left with no privileges, no `rows`
   and no `columns` is removed.
-- **Every `PUT` carries the `generation` it read.** The generation covers every role's entry on the table. A stale
-  one is refused `409 access_conflict` and nothing changes: read the access again and reapply the change. A missing,
-  `null` or non-integer `generation` is `422 validation_error`. Every successful `PUT` and `DELETE` moves the
-  generation by one, so take the next one from the response. A `DELETE` carries none and never answers `409`.
+- **Every `PUT` carries the `generation` it read.** The table has one generation, and the service remembers at
+  which generation each role's entry last changed (a removal included). A `PUT` is refused `409 access_conflict`,
+  changing nothing, when **its own role's** entry changed after the generation it carries, or when that generation
+  is above the table's: read the access again and reapply the change. A change to another role since your read does
+  not conflict. A missing, `null` or non-integer `generation` is `422 validation_error`.
+- **A retried `PUT` is safe.** A `PUT` that would store exactly the entry the role already has answers `200` with it
+  and the current generation and writes nothing, whatever generation it carries, so retrying after a lost response
+  never conflicts with your own write. A `PUT` or `DELETE` that changes an entry moves the generation by one; take
+  the next one from the response.
+- **A `DELETE` may carry `generation`.** Without it, it removes the entry whatever changed (`204`, or `404` when the
+  role has none). With `&generation=<n>` it is conditional like a `PUT`: `409 access_conflict` when the role's entry
+  changed after `n` or `n` is above the table's, `422` when `n` is not an integer, `404` when the role has no entry.
 - **The response** is the entry as stored, the new `generation` and `ineffective_grants`, which reports a privilege
   that changes nothing (`already_global`, `sensitive_without_verb`, `lifts_row_policies`, `lifts_column_policies`)
   without failing the request. Your own permissions on the table are on `GET /v1/tables/{name}`.
@@ -33,24 +41,23 @@ The examples below read the generation first:
 GEN=$(curl -s "$ADAS/v1/tables/dial_usage_log/access" -H "Authorization: Bearer $TOKEN" | jq .generation)
 ```
 
-### A role containing `/` or `%`
+### A role containing `/`, `%` or other characters
 
-`{role}` is one percent-encoded path segment. Send `/` as `%2F` and `%` as `%25`: IdP group `/analytics/viewers`
-is addressed as `.../access/%2Fanalytics%2Fviewers`, and listed under `"/analytics/viewers"`.
+The role is the `role` query parameter, URL-encoded like any query value, so every role is addressable: IdP group
+`/analytics/viewers` is `?role=%2Fanalytics%2Fviewers` and is listed under `"/analytics/viewers"`; `team%ops` is
+`?role=team%25ops`. The role is trimmed; a missing or blank `role` on `PUT` or `DELETE`, a blank `role` on `GET`, and a
+`role` given more than once, is `400 bad_request`.
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/%2Fanalytics%2Fviewers" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=%2Fanalytics%2Fviewers" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"generation\": $GEN, \"privileges\": [\"read\"]}"
 ```
 
-A role containing `;`, `\`, `//`, a NUL, carriage-return or line-feed character, U+2028 or U+2029, or one that is
-exactly `.` or `..`, cannot be addressed: the request is refused `400 bad_request`.
-
 ## Worked example: role `team-x` sees project `X-PRJ-1`
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/team-x" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=team-x" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d @- <<EOF
 {"generation": $GEN, "privileges": ["read"],
@@ -74,7 +81,7 @@ the entry when the role holds nothing else.
 Instead of `filter`, `rows` can be given as `where`: the condition you would write after `WHERE`.
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/team-x" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=team-x" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d @- <<EOF
 {"generation": $GEN, "privileges": ["read"], "rows": {"where": "project_id IN ('X-PRJ-1')"}}
@@ -85,7 +92,7 @@ The text is an input format. It is translated to a `filter`, and that filter is 
 and enforced, so the response shows the tree and not your SQL. Everything a `filter` may not hold is
 refused in SQL too: subqueries, other tables, aggregates.
 
-An enrichment takes no policy in either form: a `PUT .../access/{role}` naming one with a `rows` (or a `columns`,
+An enrichment takes no policy in either form: a `PUT .../access?role={role}` naming one with a `rows` (or a `columns`,
 or a `get`, `read` or `sensitive` privilege) is refused `409 enrichment_follows_source`, and the message names its
 source. Its rows and columns are its source's (see below).
 
@@ -118,7 +125,7 @@ columns it names. There is no deny form, and an empty list is refused `422` (a r
 should not read the table).
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/team-x" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=team-x" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d @- <<EOF
 {"generation": $GEN, "privileges": ["read"],
@@ -144,6 +151,13 @@ EOF
   > that role's own rows. Example: `R` reads project `P1` with `["a", "project"]` and `U` reads project `P2` with
   > every column; a caller in both sees `a` and `project` only, on both projects. To widen it, widen the narrower
   > role's list, or give the role meant to see everything no row policy.
+
+  > **Gaining a column-restricted role can hide columns.** A caller holding role `A` — `rows` limited to project
+  > `P1`, every column — that also gains role `B` — every row, `"columns": ["x"]` — sees **only `x`**, on every row it
+  > reads. It now reads rows only `B` admits, and `B` shows nothing but `x` on them; since the service cannot tell
+  > which role admitted a row, showing `A`'s other columns would show them on `B`'s rows too. Giving `B` a row policy
+  > does not help: with both roles confined, only the columns both allow are shown. To keep `A`'s columns, list on `B`
+  > the columns `A`'s readers need, or leave `B` without a column restriction.
 - **Roles that do not govern take no part.** A role that only gets the table does not widen what a reader sees, nor
   does a role conferring only `write`, nor an IdP group with no read path. An entry with `rows` and no read path adds
   rows (see above) but its `columns` are never consulted.
@@ -183,8 +197,16 @@ A column a row policy references is refused `409 column_in_row_policy` first.
 
 An operation that rewrites an entry moves the access `generation` of the table **whose entries it rewrote**: the
 table's own, or, for an enrichment's column or an enrichment's delete, its **source's** (the source's entries hold
-the qualified names), never the enrichment's. A schema change that rewrites no entry, a description update and row
-writes leave the generation alone.
+the qualified names), never the enrichment's. Only the roles whose lists it rewrote count as changed, so a `PUT` for
+another role carrying the earlier generation still succeeds. A schema change that rewrites no entry, a description
+update and row writes leave the generation alone.
+
+### Concurrent changes to one table
+
+Access and schema writes to one table take turns. A write that finds another change to the same table in progress
+waits for it at most `TABLES_LOCK_TIMEOUT` (default `10s`, see
+[`configuration.md`](configuration.md#table-definition-writes)); past that it is refused `409 table_busy`, changes
+nothing, and can be retried as sent.
 
 ### Pipelines and export
 
@@ -271,7 +293,7 @@ A policy may compare a `string` column with a value of the caller reading the ta
 on one role then gives every caller its own rows:
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/user" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=user" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d @- <<EOF
 {"generation": $GEN, "privileges": ["read"],
@@ -295,7 +317,7 @@ the read-side privileges (`get`, `read`, `sensitive`; never `write` or `modify`)
 and of a column policy. One entry gives every user their own rows of a table and leaves administrators unconfined:
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access/*" \
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=*" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d @- <<EOF
 {"generation": $GEN, "privileges": ["read"], "rows": {"where": "user_hash = caller.user_hash"}}

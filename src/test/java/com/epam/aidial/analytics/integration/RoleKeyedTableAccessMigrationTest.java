@@ -61,9 +61,9 @@ class RoleKeyedTableAccessMigrationTest {
     }
 
     @Test
-    void everyTableStartsAtGenerationZeroWithNoColumnPolicy() throws SQLException {
-        assertThat(scalar("SELECT count(*) FROM table_definition WHERE access_generation <> 0 OR column_policies <> '{}'::jsonb"))
-                .isEqualTo("0");
+    void everyTableStartsAtGenerationZeroWithNoColumnPolicyAndNoRoleMark() throws SQLException {
+        assertThat(scalar("SELECT count(*) FROM table_definition WHERE access_generation <> 0 OR column_policies <> '{}'::jsonb"
+                + " OR access_role_generations <> '{}'::jsonb")).isEqualTo("0");
         // The seeded system tables as well as the two rows inserted here.
         assertThat(Integer.parseInt(scalar("SELECT count(*) FROM table_definition"))).isGreaterThan(2);
     }
@@ -73,7 +73,8 @@ class RoleKeyedTableAccessMigrationTest {
         assertThat(scalar("SELECT is_nullable FROM information_schema.columns"
                 + " WHERE table_name = 'table_definition_aud' AND column_name = 'column_policies'")).isEqualTo("YES");
         assertThat(scalar("SELECT count(*) FROM information_schema.columns"
-                + " WHERE table_name = 'table_definition_aud' AND column_name = 'access_generation'")).isEqualTo("0");
+                + " WHERE table_name = 'table_definition_aud' AND column_name IN ('access_generation', 'access_role_generations')"))
+                .isEqualTo("0");
         assertThat(scalar("SELECT column_policies IS NULL FROM table_definition_aud WHERE name = 'rk_granted'")).isEqualTo("t");
         assertThat(scalar("SELECT access = '" + ACCESS + "'::jsonb FROM table_definition_aud WHERE name = 'rk_granted'"))
                 .isEqualTo("t");

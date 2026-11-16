@@ -55,7 +55,7 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 "{\"rows\":[{\"k\":\"k1\",\"a\":\"a1\",\"c\":\"2026-01-01T00:00:00Z\",\"s\":\"s1\"},"
                         + "{\"k\":\"k2\",\"a\":\"a2\",\"c\":\"2026-01-02T00:00:00Z\",\"s\":\"s2\"}]}")
                 .andExpect(status().isOk());
-        send(put(BASE + "/" + TABLE + "/access/" + ROLE), admin(),
+        send(put(BASE + "/" + TABLE + "/access?role=" + ROLE), admin(),
                 "{\"generation\":" + generation() + ",\"privileges\":[\"read\",\"sensitive\",\"modify\"],\"columns\":[\"s\",\"k\",\"a\",\"k\"]}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns.length()").value(3))

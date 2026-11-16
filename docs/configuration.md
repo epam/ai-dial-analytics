@@ -289,6 +289,12 @@ Guardrails on `/v1/tables`; a violation is rejected with 422.
 | `TABLES_MAX_TABLES`            | `tables.limits.max-tables`            | `1000`  | No       | Maximum table definitions in the catalog, enforced at create.                                                      |
 | `TABLES_MAX_WRITE_BATCH_ROWS`  | `tables.limits.max-write-batch-rows`  | `10000` | No       | Maximum rows accepted in one `POST /v1/tables/{name}/rows` batch, and the chunk size an OTLP export is written in. |
 
+### Table definition writes
+
+| Variable              | Property              | Default | Required | Description                                                                                                              |
+|-----------------------|-----------------------|---------|----------|--------------------------------------------------------------------------------------------------------------------------|
+| `TABLES_LOCK_TIMEOUT` | `tables.lock-timeout` | `10s`   | No       | Longest a write to a table definition waits for another change to that table; past it, `409 table_busy`. At least `1ms`. |
+
 ### OTLP sinks
 
 The OpenTelemetry sink surface: `/v1/otel/sinks` to provision, `/v1/otel/sink/{name}/v1/{logs,traces,metrics}`
@@ -563,7 +569,7 @@ earlier release needs these edits:
 
 - a value naming `TABLE_READ_SENSITIVE` becomes `TABLE_READ` plus `TABLE_SENSITIVE` — the old name no longer
   exists and fails startup;
-- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` or `GET /v1/tables/{name}/access/{role}`
+- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` or `GET /v1/tables/{name}/access?role={role}`
   must also name `TABLE_GRANT`, which those endpoints require;
 - a role mapped to `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` or bare verbs that audits or manages sensitivity
   must also name `TABLE_SENSITIVE`: without the clearance, `GET /v1/tables` and `GET /v1/tables/{name}`
@@ -574,7 +580,7 @@ catalog read and why sensitivity is a clearance.
 
 Six privileges are **table-scoped** — `TABLE_LIST`, `TABLE_GET`, `TABLE_READ`, `TABLE_SENSITIVE`,
 `TABLE_WRITE`, `TABLE_MODIFY` — and may be held globally or granted to a role on a single table at
-`PUT /v1/tables/{name}/access/{role}`, with effective access the union of the two. `TABLE_LIST` is the one
+`PUT /v1/tables/{name}/access?role={role}`, with effective access the union of the two. `TABLE_LIST` is the one
 with no per-table grant: held globally it lists every table, and a `get` grant already lists its own. A
 valid token mapping to no privilege at all is still authenticated and may be authorized for one table by a
 matching grant, which is the intended shape for a BI tool or an exporter.

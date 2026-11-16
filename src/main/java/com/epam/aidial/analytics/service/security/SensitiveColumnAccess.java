@@ -199,6 +199,17 @@ public class SensitiveColumnAccess {
     }
 
     /**
+     * Which of a revision snapshot's columns the caller sees: those both the snapshot's column policies and the table's
+     * current ones allow, so a restriction added since the revision, or recorded before column policies existed, still
+     * hides the column. Names are matched as the snapshot spells them; an old name today's allowlist does not list is
+     * hidden.
+     */
+    @Transactional(readOnly = true)
+    public ColumnVisibility visibleColumnsAtRevision(TableDefinitionEntity snapshot) {
+        return visibleColumns(snapshot).and(visibleColumns(snapshot.getName()));
+    }
+
+    /**
      * One caller's visible columns of one table, by exposed name (an enrichment's bare, not qualified); {@link #ALL}
      * places no restriction.
      *
@@ -230,6 +241,19 @@ public class SensitiveColumnAccess {
                     .filter(candidate -> ComputedFields.ANCHOR.equals(candidate.getSourceName())
                             || ComputedFields.MARKERS.equals(candidate.getSourceName()))
                     .allMatch(candidate -> allows(candidate.getName()));
+        }
+
+        /** The columns both this and {@code other} allow. */
+        public ColumnVisibility and(ColumnVisibility other) {
+            if (other.visible == null) {
+                return this;
+            }
+            if (visible == null) {
+                return other;
+            }
+            final Set<String> both = new HashSet<>(visible);
+            both.retainAll(other.visible);
+            return new ColumnVisibility(Set.copyOf(both));
         }
 
         /** Whether no column policy restricts the caller here. */

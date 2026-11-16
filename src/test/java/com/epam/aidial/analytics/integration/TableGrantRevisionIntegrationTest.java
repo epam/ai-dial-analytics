@@ -92,7 +92,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     void rowPolicyChangeIsVisibleInTheRevisionDiff() throws Exception {
         putEntry(SOURCE, "team-x", "\"rows\":" + projectIn("P1")).andExpect(status().isOk());
         final int created = tableUpdates(SOURCE).getFirst();
-        perform(delete(BASE + "/" + SOURCE + "/access/team-x"), fullAdmin(), "")
+        perform(delete(BASE + "/" + SOURCE + "/access?role=team-x"), fullAdmin(), "")
                 .andExpect(status().isNoContent());
         final int removed = tableUpdates(SOURCE).getFirst();
         assertThat(removed).isGreaterThan(created);
@@ -133,7 +133,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
                 .andExpect(jsonPath("$.privileges[1]").value("modify"));
 
         assertThat(tableUpdates(ENRICHMENT)).hasSize(before);
-        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/access/team-a").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+        mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/access?role=team-a").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(jsonPath("$.privileges[0]").value("write"))
                 .andExpect(jsonPath("$.privileges[1]").value("modify"));
     }
@@ -164,7 +164,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.roles['team-r'].privileges", hasItem("read")))
                 .andExpect(jsonPath("$.roles['team-x'].rows.filter.op").value("in"));
-        perform(delete(BASE + "/" + ENRICHMENT + "/access/team-x"), fullAdmin(), "")
+        perform(delete(BASE + "/" + ENRICHMENT + "/access?role=team-x"), fullAdmin(), "")
                 .andExpect(status().isNoContent());
     }
 
@@ -222,10 +222,10 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final long first = ((Number) JsonPath.read(putEntry(SOURCE, "team-x", "\"rows\":" + projectIn("P1"))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString(), "$.generation")).longValue();
-        // An unchanged entry still moves the generation; it records no revision.
+        // An unchanged entry neither moves the generation nor records a revision.
         putEntry(SOURCE, "team-x", "\"rows\":" + projectIn("P1"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.generation").value(first + 1))
+                .andExpect(jsonPath("$.generation").value(first))
                 .andExpect(jsonPath("$.rows.filter.op").value("in"));
 
         assertThat(tableUpdates(SOURCE)).hasSize(before + 1);
@@ -254,7 +254,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     }
 
     @Test
-    void revisionRecordedBeforeColumnPoliciesReadsNone() throws Exception {
+    void revisionRecordedBeforeColumnPoliciesReadsNoneAndIsJudgedByTheCurrentPolicies() throws Exception {
         putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
         final int revision = tableUpdates(SOURCE).getFirst();
         // What a revision written before V57 (or by an older replica) holds: no column_policies at all.
@@ -263,7 +263,34 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         snapshot(SOURCE, revision, fullAdmin())
                 .andExpect(jsonPath("$.roles['team-r'].privileges[0]").value("read"))
                 .andExpect(jsonPath("$.roles['team-r'].columns").value(nullValue()));
+        // The current entry still restricts team-r, so the column stays hidden in the old revision too.
+        snapshot(SOURCE, revision, caller("team-r"))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.not(hasItem("project"))))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+        putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"]").andExpect(status().isOk());
         snapshot(SOURCE, revision, caller("team-r")).andExpect(jsonPath("$.columns[*].name", hasItem("project")));
+    }
+
+    @Test
+    void revisionOlderThanPolicyHidesTheColumnFromTheCallerItNowRestricts() throws Exception {
+        putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final int unrestricted = tableUpdates(SOURCE).getFirst();
+        putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
+
+        snapshot(SOURCE, unrestricted, fullAdmin()).andExpect(jsonPath("$.roles['team-r'].columns").value(nullValue()));
+        snapshot(SOURCE, unrestricted, caller("team-r"))
+                .andExpect(jsonPath("$.columns[*].name", hasItem("k")))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.not(hasItem("project"))))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+        snapshot(SOURCE, unrestricted, fullAdmin()).andExpect(jsonPath("$.columns[*].name", hasItem("project")));
+
+        // An old name today's allowlist does not list stays hidden: there is no rename mapping.
+        putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"],\"columns\":[\"k\",\"project\"]").andExpect(status().isOk());
+        perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch(BASE + "/" + SOURCE + "/schema"), fullAdmin(),
+                "{\"rename\":[{\"from\":\"project\",\"to\":\"proj\"}]}").andExpect(status().isOk());
+        snapshot(SOURCE, unrestricted, caller("team-r"))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.not(hasItem("project"))));
+        live(SOURCE, caller("team-r")).andExpect(jsonPath("$.columns[*].name", hasItem("proj")));
     }
 
     @Test
@@ -324,7 +351,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final String access = mockMvc.perform(get(BASE + "/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
-        return perform(put(BASE + "/" + table + "/access/" + role), fullAdmin(),
+        return perform(put(BASE + "/" + table + "/access?role=" + role), fullAdmin(),
                 "{\"generation\":" + ((Number) JsonPath.read(access, "$.generation")).longValue() + "," + members + "}");
     }
 

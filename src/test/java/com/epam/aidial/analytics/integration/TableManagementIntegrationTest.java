@@ -613,11 +613,11 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void noneModeStillRefusesReadGrantOrRowPolicyOnEnrichment() throws Exception {
         // The enrichment check runs before the generation check, so neither body needs a current generation.
-        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access/analytics-viewers").contentType(MediaType.APPLICATION_JSON)
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access?role=analytics-viewers").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"generation\":0,\"privileges\":[\"read\"]}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
-        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access/team-x").contentType(MediaType.APPLICATION_JSON)
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access?role=team-x").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"generation\":0,\"rows\":{\"where\":\"trace_id = 'x'\"}}"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error").value("enrichment_follows_source"));

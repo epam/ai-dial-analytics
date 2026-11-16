@@ -236,7 +236,7 @@ public class TableMapper {
     }
 
     public TableDto toDto(TableView view) {
-        return toDto(view, false, layouts.layout(view.definition()));
+        return toDto(view, false, false, layouts.layout(view.definition()));
     }
 
     /**
@@ -247,10 +247,10 @@ public class TableMapper {
      * revision cannot report it.
      */
     public TableDto toDto(TableView view, boolean includeGrants) {
-        return toDto(view, includeGrants, null);
+        return toDto(view, true, includeGrants, null);
     }
 
-    private TableDto toDto(TableView view, boolean includeGrants, String layout) {
+    private TableDto toDto(TableView view, boolean revision, boolean includeGrants, String layout) {
         final TableDefinitionEntity entity = view.definition();
         final List<String> tagOrder = entity.getTagOrder();
         // When an ordering is set, present the columns sorted by it (via the shared comparator, so the
@@ -261,9 +261,10 @@ public class TableMapper {
         // responses and the revision read — so this is the catalog read surface's single chokepoint, and a
         // revision is judged on the flags it carried then, since those are the flags on its snapshot rows.
         // A column hidden by a column policy is dropped the same way, by the one visibility decision every read surface
-        // applies; a revision is judged by the policies on its snapshot (an enrichment's, by its source's current ones).
+        // applies; a revision is judged by the policies on its snapshot and the table's current ones, a column either
+        // hides staying hidden (an enrichment's, by its source's current ones).
         final boolean cleared = sensitiveAccess.maySeeSensitive(entity.getName());
-        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(entity);
+        final ColumnVisibility visibility = revision ? sensitiveAccess.visibleColumnsAtRevision(entity) : sensitiveAccess.visibleColumns(entity);
         List<ColumnMappingEntity> ordered = view.columns().stream()
                 .filter(col -> cleared || !col.isSensitive())
                 .filter(col -> visibility.allows(col.getName()))

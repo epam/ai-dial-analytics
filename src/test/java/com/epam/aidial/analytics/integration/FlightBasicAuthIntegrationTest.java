@@ -257,7 +257,7 @@ class FlightBasicAuthIntegrationTest {
             assertThat(listedTableNames(credential.orElseThrow())).contains("dial_usage_log");
         } finally {
             if (stored == null) {
-                tableAccess.delete("dial_usage_log", "*");
+                tableAccess.delete("dial_usage_log", "*", null);
             } else {
                 tableAccess.put("dial_usage_log", "*", new EntryRequest(LongNode.valueOf(granted),
                         stored.privileges().stream().map(PrivilegeScope::grantKey).toList(),

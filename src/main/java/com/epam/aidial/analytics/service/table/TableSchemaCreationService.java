@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
+import com.epam.aidial.analytics.exception.TableBusyException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
@@ -95,16 +96,27 @@ public class TableSchemaCreationService {
             final CreateSpec spec = createSpec(persisted, executor != DdlExecutor.NO_OP, List.of());
             executor.execute(ddlRenderer.renderCreate(name, spec));
         } catch (RuntimeException ex) {
-            safeDrop(name, executor);
-            try {
-                writer.markStatus(name, TableStatus.FAILED);
-            } catch (RuntimeException ignored) {
-                // Leave the row PENDING (not queryable); surface the original ClickHouse error below.
-            }
+            undoCreate(name, executor);
             throw ex;
         }
-        writer.markStatus(name, TableStatus.ACTIVE);
+        try {
+            writer.markStatus(name, TableStatus.ACTIVE);
+        } catch (TableBusyException ex) {
+            // Refused before it wrote anything, so the row is not ACTIVE: undo the CREATE so the request can be retried as sent.
+            undoCreate(name, executor);
+            throw ex;
+        }
         return catalogService.get(name);
+    }
+
+    /** Forces the not-materialized outcome after a CREATE that failed or cannot be recorded: drop, then mark FAILED. */
+    private void undoCreate(String name, DdlExecutor executor) {
+        safeDrop(name, executor);
+        try {
+            writer.markStatus(name, TableStatus.FAILED);
+        } catch (RuntimeException ignored) {
+            // Leave the row PENDING (not queryable); the caller surfaces the original error.
+        }
     }
 
     /**

@@ -2,9 +2,12 @@ package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
+import com.epam.aidial.analytics.service.table.TableDefinitionLockingImpl;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import com.jayway.jsonpath.JsonPath;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,12 +17,14 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.node.LongNode;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -39,7 +44,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * The access generation and the definition row lock, over real PostgreSQL, mirroring the dashboard conflict tests.
+ * The access generation with its per-role conflict detection, and the definition row lock with its bounded wait, over
+ * real PostgreSQL, mirroring the dashboard conflict tests.
  *
  * <p>The races are driven deterministically: the test holds the definition's row lock in its own transaction
  * ({@code findForUpdate}), starts the competing request on another thread, waits until PostgreSQL reports it waiting
@@ -63,6 +69,10 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private PlatformTransactionManager transactionManager;
     @Autowired
     private JdbcTemplate jdbc;
+    @Autowired
+    private TableDefinitionLockingImpl locking;
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -111,23 +121,83 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     void putWithoutUsableGenerationIsRefused() throws Exception {
         for (final String generation : List.of("", "\"generation\":null,", "\"generation\":\"0\",", "\"generation\":0.5,",
                 "\"generation\":0.0,", "\"generation\":9223372036854775808,")) {
-            send(put(BASE + "/" + TABLE + "/access/x"), "{" + generation + "\"privileges\":[\"read\"]}")
+            send(put(BASE + "/" + TABLE + "/access?role=x"), "{" + generation + "\"privileges\":[\"read\"]}")
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.error").value("validation_error"));
         }
         // A missing generation is named before an invalid body.
-        send(put(BASE + "/" + TABLE + "/access/x"), "{\"columns\":[]}")
+        send(put(BASE + "/" + TABLE + "/access?role=x"), "{\"columns\":[]}")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.message").value(containsString("generation")));
         asAdmin(get(BASE + "/" + TABLE + "/access")).andExpect(jsonPath("$.generation").value(0)).andExpect(jsonPath("$.roles").isEmpty());
     }
 
     @Test
-    void deleteMovesTheGenerationAndAnOlderPutConflicts() throws Exception {
+    void deleteMovesTheGenerationAndLeavesTheRolesMark() throws Exception {
         putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk()).andExpect(jsonPath("$.generation").value(1));
-        asAdmin(delete(BASE + "/" + TABLE + "/access/x")).andExpect(status().isNoContent());
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=x")).andExpect(status().isNoContent());
         assertThat(generation(TABLE)).isEqualTo(2);
-        putEntry(TABLE, "y", 1, "\"privileges\":[\"read\"]").andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("access_conflict"));
+        // The removed role keeps its last-change mark, so a PUT from before the delete conflicts; another role does not.
+        putEntry(TABLE, "x", 1, "\"privileges\":[\"read\"]").andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("access_conflict"));
+        putEntry(TABLE, "y", 1, "\"privileges\":[\"read\"]").andExpect(status().isOk()).andExpect(jsonPath("$.generation").value(3));
+    }
+
+    @Test
+    void retriedPutAnswersTheEntryWithoutWritingWhileDifferentStalePutConflicts() throws Exception {
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"],\"columns\":[\"b\",\"a\"]").andExpect(status().isOk());
+        putEntry(TABLE, "y", 1, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        final Integer revisions = jdbc.queryForObject("SELECT count(*) FROM table_definition_aud WHERE name = ?", Integer.class, TABLE);
+
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"],\"columns\":[\"a\",\"b\"]")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generation").value(2))
+                .andExpect(jsonPath("$.columns[1]").value("b"));
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM table_definition_aud WHERE name = ?", Integer.class, TABLE)).isEqualTo(revisions);
+        // An unchanged entry answers 200 whatever generation it carries, one above the table's included.
+        putEntry(TABLE, "x", 9, "\"privileges\":[\"read\"],\"columns\":[\"a\",\"b\"]")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generation").value(2));
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"]").andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("access_conflict"));
+        assertThat(generation(TABLE)).isEqualTo(2);
+    }
+
+    @Test
+    void generationAboveTheTablesConflicts() throws Exception {
+        putEntry(TABLE, "x", 1, "\"privileges\":[\"read\"]").andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("access_conflict"));
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=x&generation=2")).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("access_conflict"));
+        assertThat(generation(TABLE)).isEqualTo(1);
+    }
+
+    @Test
+    void deleteWithGenerationConflictsOnlyWithItsOwnRole() throws Exception {
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        putEntry(TABLE, "y", 1, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        // y changed after generation 1, x did not.
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=x&generation=1")).andExpect(status().isNoContent());
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=y&generation=1")).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("access_conflict"));
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=y&generation=1.0")).andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=nobody&generation=1")).andExpect(status().isNotFound());
+        // No entry is 404 before the generation is compared, even with one above the table's (3).
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=nobody&generation=7")).andExpect(status().isNotFound());
+        asAdmin(delete(BASE + "/" + TABLE + "/access?role=y")).andExpect(status().isNoContent());
+        assertThat(generation(TABLE)).isEqualTo(4);
+    }
+
+    @Test
+    void renameMarksOnlyTheRolesWhoseListsChanged() throws Exception {
+        putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"],\"columns\":[\"a\",\"k\"]").andExpect(status().isOk());
+        putEntry(TABLE, "y", 1, "\"privileges\":[\"read\"],\"columns\":[\"b\",\"k\"]").andExpect(status().isOk());
+        send(patch(BASE + "/" + TABLE + "/schema"), "{\"rename\":[{\"from\":\"a\",\"to\":\"a2\"}]}").andExpect(status().isOk());
+        assertThat(generation(TABLE)).isEqualTo(3);
+
+        putEntry(TABLE, "x", 2, "\"privileges\":[\"get\"],\"columns\":[\"a2\",\"k\"]").andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("access_conflict"));
+        putEntry(TABLE, "y", 2, "\"privileges\":[\"get\"],\"columns\":[\"b\",\"k\"]").andExpect(status().isOk())
+                .andExpect(jsonPath("$.generation").value(4));
     }
 
     @Test
@@ -154,24 +224,35 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     // --- races ------------------------------------------------------------------------------------------
 
     @Test
-    void twoPutsForDifferentRolesFromOneReadOneConflicts() throws Exception {
+    void twoPutsForDifferentRolesFromOneReadBothSucceed() throws Exception {
         final Future<MockHttpServletResponse> other = whileLocked(TABLE,
                 entry(TABLE, "x", 0, "\"privileges\":[\"read\"]"),
                 () -> access.put(TABLE, "y", request(0, List.of("read"), null)));
+        assertThat(other.get(30, TimeUnit.SECONDS).getStatus()).isEqualTo(200);
+        asAdmin(get(BASE + "/" + TABLE + "/access"))
+                .andExpect(jsonPath("$.generation").value(2))
+                .andExpect(jsonPath("$.roles.y").exists())
+                .andExpect(jsonPath("$.roles.x").exists());
+    }
+
+    @Test
+    void twoPutsForOneRoleFromOneReadOneConflicts() throws Exception {
+        final Future<MockHttpServletResponse> other = whileLocked(TABLE,
+                entry(TABLE, "x", 0, "\"privileges\":[\"read\"]"),
+                () -> access.put(TABLE, "x", request(0, List.of("get"), null)));
         final MockHttpServletResponse response = other.get(30, TimeUnit.SECONDS);
         assertThat(response.getStatus()).isEqualTo(409);
         assertThat(response.getContentAsString()).contains("access_conflict");
         asAdmin(get(BASE + "/" + TABLE + "/access"))
                 .andExpect(jsonPath("$.generation").value(1))
-                .andExpect(jsonPath("$.roles.y").exists())
-                .andExpect(jsonPath("$.roles.x").doesNotExist());
+                .andExpect(jsonPath("$.roles.x.privileges[0]").value("get"));
     }
 
     @Test
     void twoConcurrentDeletesOfOneEntryOneIsNotFound() throws Exception {
         putEntry(TABLE, "x", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk());
-        final Future<MockHttpServletResponse> other = whileLocked(TABLE, withAdmin(delete(BASE + "/" + TABLE + "/access/x")),
-                () -> access.delete(TABLE, "x"));
+        final Future<MockHttpServletResponse> other = whileLocked(TABLE, withAdmin(delete(BASE + "/" + TABLE + "/access?role=x")),
+                () -> access.delete(TABLE, "x", null));
         assertThat(other.get(30, TimeUnit.SECONDS).getStatus()).isEqualTo(404);
         assertThat(generation(TABLE)).isEqualTo(2);
     }
@@ -179,7 +260,7 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     @Test
     void deleteWaitingForPutToAnotherRoleSucceeds() throws Exception {
         putEntry(TABLE, "y", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk());
-        final Future<MockHttpServletResponse> other = whileLocked(TABLE, withAdmin(delete(BASE + "/" + TABLE + "/access/y")),
+        final Future<MockHttpServletResponse> other = whileLocked(TABLE, withAdmin(delete(BASE + "/" + TABLE + "/access?role=y")),
                 () -> access.put(TABLE, "x", request(1, List.of("read"), null)));
         assertThat(other.get(30, TimeUnit.SECONDS).getStatus()).isEqualTo(204);
         asAdmin(get(BASE + "/" + TABLE + "/access"))
@@ -189,14 +270,61 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     @Test
-    void putWaitingForDeleteOfAnotherRoleConflicts() throws Exception {
+    void putWaitingForDeleteOfAnotherRoleSucceeds() throws Exception {
         putEntry(TABLE, "y", 0, "\"privileges\":[\"read\"]").andExpect(status().isOk());
         final Future<MockHttpServletResponse> other = whileLocked(TABLE, entry(TABLE, "x", 1, "\"privileges\":[\"read\"]"),
-                () -> access.delete(TABLE, "y"));
-        assertThat(other.get(30, TimeUnit.SECONDS).getStatus()).isEqualTo(409);
+                () -> access.delete(TABLE, "y", null));
+        assertThat(other.get(30, TimeUnit.SECONDS).getStatus()).isEqualTo(200);
         asAdmin(get(BASE + "/" + TABLE + "/access"))
-                .andExpect(jsonPath("$.generation").value(2))
-                .andExpect(jsonPath("$.roles").isEmpty());
+                .andExpect(jsonPath("$.generation").value(3))
+                .andExpect(jsonPath("$.roles.x").exists())
+                .andExpect(jsonPath("$.roles.y").doesNotExist());
+    }
+
+    /** A writer that cannot take the row lock within the lock timeout is refused, and the holder's change stands. */
+    @Test
+    void writerWaitingPastTheLockTimeoutIsBusyAndTheHoldersChangeStands() throws Exception {
+        final Object previous = ReflectionTestUtils.getField(locking, "lockTimeout");
+        ReflectionTestUtils.setField(locking, "lockTimeout", Duration.ofMillis(300));
+        try {
+            final MockHttpServletResponse busy = new TransactionTemplate(transactionManager).execute(status -> {
+                definitions.findForUpdate(TABLE).orElseThrow();
+                access.put(TABLE, "x", request(0, List.of("read"), List.of("a", "k")));
+                final Future<MockHttpServletResponse> competing = OTHER.submit(() -> mockMvc.perform(withAdmin(put(BASE + "/" + TABLE))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"description\":\"busy\"}")).andReturn().getResponse());
+                try {
+                    return competing.get(30, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            assertThat(busy.getStatus()).isEqualTo(409);
+            assertThat(busy.getContentAsString()).contains("table_busy");
+        } finally {
+            ReflectionTestUtils.setField(locking, "lockTimeout", previous);
+        }
+        expectEntryKept(TABLE, 1);
+        assertThat(jdbc.queryForObject("SELECT description FROM table_definition WHERE name = ?", String.class, TABLE)).isNotEqualTo("busy");
+    }
+
+    /** The bound is set for the locking statement alone: the transaction's own value is restored, the session's never changes. */
+    @Test
+    void lockTimeoutIsRestoredRightAfterTheLockingStatement() {
+        final Object previous = ReflectionTestUtils.getField(locking, "lockTimeout");
+        ReflectionTestUtils.setField(locking, "lockTimeout", Duration.ofMillis(4321));
+        try {
+            final TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+            final String sessionDefault = transaction.execute(status -> lockTimeout());
+            transaction.executeWithoutResult(status -> {
+                final String before = lockTimeout();
+                definitions.findForUpdate(TABLE).orElseThrow();
+                assertThat(lockTimeout()).isEqualTo(before).isNotEqualTo("4321ms");
+            });
+            final String afterCommit = transaction.execute(status -> lockTimeout());
+            assertThat(afterCommit).isEqualTo(sessionDefault).isNotEqualTo("4321ms");
+        } finally {
+            ReflectionTestUtils.setField(locking, "lockTimeout", previous);
+        }
     }
 
     @Test
@@ -337,6 +465,11 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
         return asAdmin(get(BASE + "/" + table + "/revision/" + revision)).andExpect(status().isOk());
     }
 
+    /** {@code lock_timeout} as the current transaction's connection sees it. */
+    private String lockTimeout() {
+        return String.valueOf(entityManager.createNativeQuery("SELECT current_setting('lock_timeout')").getSingleResult());
+    }
+
     private static EntryRequest request(long generation, List<String> privileges, List<String> columns) {
         return new EntryRequest(LongNode.valueOf(generation), privileges, null, columns);
     }
@@ -351,7 +484,7 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     private MockHttpServletRequestBuilder entry(String table, String role, long generation, String members) {
-        return withAdmin(put(BASE + "/" + table + "/access/" + role)).contentType(MediaType.APPLICATION_JSON)
+        return withAdmin(put(BASE + "/" + table + "/access?role=" + role)).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"generation\":" + generation + (members.isEmpty() ? "" : "," + members) + "}");
     }
 

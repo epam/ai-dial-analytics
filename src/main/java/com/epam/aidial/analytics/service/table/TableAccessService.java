@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
 import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicy;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
@@ -36,8 +37,10 @@ import java.util.TreeSet;
 /**
  * A table's access configuration as one entry per raw provider role, {@code {privileges, rows, columns}}: a view over
  * the three per-table documents {@code access} (the grant lists), {@code row_policies} and {@code column_policies}.
- * A {@code PUT} replaces one role's whole entry in all three, a {@code DELETE} removes it from all three, and both bump
- * the table's access generation under the definition's row lock (see {@code openspec/specs/table-access-control/spec.md}).
+ * A {@code PUT} replaces one role's whole entry in all three, a {@code DELETE} removes it from all three; a write that
+ * changes the entry bumps the table's access generation and records it as the role's last-change mark, under the
+ * definition's row lock. A write conflicts only when its own role changed after the generation it carries (see
+ * {@code openspec/specs/table-access-control/spec.md}, "Access configuration generation").
  *
  * <p>Every rule here constrains what may be stored, so it applies in {@code none} mode too. Authorization sits at the
  * web layer ({@code TABLE_GRANT} on every method).
@@ -45,6 +48,8 @@ import java.util.TreeSet;
 @Service
 @RequiredArgsConstructor
 public class TableAccessService {
+
+    private static final AccessEntry EMPTY = new AccessEntry(List.of(), null, null);
 
     private static final Set<Privilege> READ_SIDE_GRANTS = EnumSet.of(Privilege.TABLE_GET, Privilege.TABLE_READ, Privilege.TABLE_SENSITIVE);
 
@@ -55,6 +60,7 @@ public class TableAccessService {
     private final ColumnPolicyCodec columnPolicyCodec;
     private final RowPolicyService rowPolicies;
     private final RowPolicyConditions conditions;
+    private final RoleGenerationCodec roleGenerations;
 
     /** Why a privilege in an entry changes nothing. */
     public enum IneffectiveReason {
@@ -139,15 +145,62 @@ public class TableAccessService {
     }
 
     /**
-     * Replaces {@code role}'s whole entry on {@code table}, checked in the order the spec lists under the row lock, and
-     * bumps the generation. A document is written only when its decoded value for the role changes, so an unchanged
-     * entry records no revision; the generation moves either way.
+     * Replaces {@code role}'s whole entry on {@code table}, checked in the order the spec lists under the row lock. A
+     * request that would store exactly the entry the role has answers with it and writes nothing, whatever generation it
+     * carries, so a retry is safe. Otherwise the generation must not be above the table's nor older than the role's last
+     * change ({@code 409 access_conflict}); the entry is then written, the generation bumped and the role marked.
      */
     @Transactional
     public EntryReplacement put(String table, String role, EntryRequest request) {
         final TableDefinitionEntity definition = lock(table);
         requireNoReadSideOnEnrichment(definition, request);
-        requireCurrentGeneration(definition, request.generation());
+        final long generation = requireGeneration(request.generation());
+        final String key = StringUtils.trimToEmpty(role);
+        // The remaining checks run now, so the unchanged case compares a validated entry, but a refusal is reported only
+        // after the conflict check, which the spec orders first.
+        AccessEntry entry = null;
+        RuntimeException refusal = null;
+        try {
+            entry = validated(definition, role, request);
+        } catch (TableValidationException | SystemTableException ex) {
+            refusal = ex;
+        }
+        if (entry != null && entry.equals(entries(definition).getOrDefault(key, EMPTY))) {
+            return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, key, entry));
+        }
+        requireNoConflict(definition, key, generation);
+        if (refusal != null) {
+            throw refusal;
+        }
+        write(definition, key, entry);
+        bump(definition, key);
+        return new EntryReplacement(definition.getAccessGeneration(), key, entry, reportIneffective(definition, key, entry));
+    }
+
+    /**
+     * Removes {@code role}'s entry on {@code table}, bumps the generation and marks the role. With a {@code generation}
+     * the removal is conditional on it as a {@code PUT} is; without one it is not.
+     *
+     * @throws TableNotFoundException when the table does not exist or the role has no entry on it (404)
+     */
+    @Transactional
+    public void delete(String table, String role, String generation) {
+        final TableDefinitionEntity definition = lock(table);
+        final Long expected = generation == null ? null : requireGeneration(generation);
+        final String key = StringUtils.trimToEmpty(role);
+        if (!entries(definition).containsKey(key)) {
+            throw noEntry(table, key);
+        }
+        if (expected != null) {
+            requireNoConflict(definition, key, expected);
+        }
+        write(definition, key, EMPTY);
+        bump(definition, key);
+    }
+
+    /** The entry a {@code PUT} would store: the role, then the system refusal, then the remaining body checks. */
+    private AccessEntry validated(TableDefinitionEntity definition, String role, EntryRequest request) {
+        final String table = definition.getName();
         final String grantee = RowPolicyService.requireRole(role);
         final List<String> sentPrivileges = request.privileges() == null ? List.of() : request.privileges();
         if (definition.isSystem() && sentPrivileges.stream().map(StringUtils::trimToEmpty).anyMatch(key -> key.equals("write") || key.equals("modify"))) {
@@ -157,27 +210,14 @@ public class TableAccessService {
         final List<Privilege> privileges = privileges(grantee, sentPrivileges);
         final RowPolicy rows = rows(table, grantee, request.rows());
         final List<String> columnPolicy = columnPolicy(definition, grantee, request.columns());
-        final AccessEntry entry = new AccessEntry(privileges, rows, columnPolicy);
-        write(definition, grantee, entry);
-        definition.setAccessGeneration(definition.getAccessGeneration() + 1);
-        return new EntryReplacement(definition.getAccessGeneration(), grantee, entry, reportIneffective(definition, grantee, entry));
+        return new AccessEntry(privileges, rows, columnPolicy);
     }
 
-    /**
-     * Removes {@code role}'s entry on {@code table} and bumps the generation. Carries no generation and is checked
-     * against none.
-     *
-     * @throws TableNotFoundException when the table does not exist or the role has no entry on it (404)
-     */
-    @Transactional
-    public void delete(String table, String role) {
-        final TableDefinitionEntity definition = lock(table);
-        final String key = StringUtils.trimToEmpty(role);
-        if (!entries(definition).containsKey(key)) {
-            throw noEntry(table, key);
-        }
-        write(definition, key, new AccessEntry(List.of(), null, null));
+    /** Moves the table's generation on by one and records it as {@code role}'s last change. */
+    private void bump(TableDefinitionEntity definition, String role) {
         definition.setAccessGeneration(definition.getAccessGeneration() + 1);
+        definition.setAccessRoleGenerations(roleGenerations.mark(definition.getAccessRoleGenerations(), List.of(role),
+                definition.getAccessGeneration()));
     }
 
     /** Every role's entry assembled from the three documents, sorted by role. */
@@ -270,18 +310,36 @@ public class TableAccessService {
         }
     }
 
-    /** A usable generation ({@code 422} otherwise) equal to the locked row's ({@code 409 access_conflict} otherwise). */
-    private static void requireCurrentGeneration(TableDefinitionEntity definition, JsonNode generation) {
+    /** A {@code PUT}'s generation as a JSON integer within a signed 64-bit range ({@code 422} otherwise). */
+    private static long requireGeneration(JsonNode generation) {
         if (generation == null || generation.isNull()) {
             throw new TableValidationException("'generation' is required: send the generation of the access you read");
         }
         if (!generation.isIntegralNumber() || !generation.canConvertToLong()) {
             throw new TableValidationException("'generation' must be an integer");
         }
-        if (generation.longValue() != definition.getAccessGeneration()) {
+        return generation.longValue();
+    }
+
+    /** A {@code DELETE}'s optional {@code generation} query value as a signed 64-bit integer ({@code 422} otherwise). */
+    private static long requireGeneration(String generation) {
+        try {
+            return Long.parseLong(generation);
+        } catch (NumberFormatException ex) {
+            throw new TableValidationException("'generation' must be an integer");
+        }
+    }
+
+    /**
+     * Refuses {@code 409 access_conflict} a write carrying a generation the caller cannot have read (above the table's)
+     * or one older than {@code role}'s last change. A change to another role since the read does not conflict.
+     */
+    private void requireNoConflict(TableDefinitionEntity definition, String role, long generation) {
+        if (generation > definition.getAccessGeneration()
+                || roleGenerations.markOf(definition.getAccessRoleGenerations(), role) > generation) {
             // No generation is named, neither the current nor the sent one: the caller must re-read and reapply.
-            throw new AccessConflictException("the access of table '" + definition.getName() + "' has changed since you "
-                    + "read it; read it again and reapply your change");
+            throw new AccessConflictException("the access entry of role '" + role + "' on table '" + definition.getName()
+                    + "' has changed since you read it; read it again and reapply your change");
         }
     }
 
