@@ -189,16 +189,18 @@ so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may b
 
 This applies only under `SYNC_REQUEST_BODY_MODE=delta` or `whole-with-path`.
 
-Under `delta`, a request body of 65,536 characters or more that is not JSON, such as a chat body cut at the 4 MiB
+Under `delta`, a request body of 65,536 characters (UTF-16 code units) or more that is not JSON, such as a chat body cut at the 4 MiB
 limit, is now stored once per project, user and UTC day. A later request repeating it exactly is stored with an
 empty `request_body`. Read `dial_usage_log_payload.request_body_full` for the body, as for a later chat turn (see
 [`data-sync`](../openspec/specs/data-sync/spec.md), "A large request body equal to an earlier one is stored once").
-A JSON body is never stored empty, so `json_extract_*` over `request_body` reads as before.
+A JSON body is never stored empty, so `json_extract_*` over `request_body` reads as before. A text function over
+`request_body` (`length`, `LIKE`, a regular expression) sees the empty string on such a row, where it saw the cut
+text before.
 
 Such an empty row holds nothing of its own, so two rules matter once any exist:
 
 - **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
-  by a 0.23 pod, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
+  by a 0.23 instance, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
   `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
   after it; they read `partial` with an empty body until the day is re-ingested.
 - **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an

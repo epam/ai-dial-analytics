@@ -23,8 +23,9 @@ final class PathHash {
     private static final byte[] SEED = "adas-request-delta-v1".getBytes(StandardCharsets.UTF_8);
 
     /**
-     * Seeds every body hash, apart from {@link #SEED}: a system element is hashed as {@code "key":value} text, and a
-     * body with that text under the chain seed would share a chat request's first prefix hash and be taken as its root.
+     * Seeds every body hash, apart from {@link #SEED}. The two kinds of hash could not meet under one seed either: a
+     * prefix past {@code p0} hashes the prefix before it and one element, never a seed, a scope and a day. The separate
+     * seed states the separation instead of leaving it to that difference in shape.
      */
     private static final byte[] BODY_SEED = "adas-request-body-v1".getBytes(StandardCharsets.UTF_8);
 

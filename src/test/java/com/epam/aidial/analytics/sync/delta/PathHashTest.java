@@ -22,6 +22,16 @@ class PathHashTest {
         assertThat(PathHash.prefixes("1:pu", "2026-01-01", "[]", HISTORY)[1]).isEqualTo(empty);
     }
 
+    /** A body hash is one per scope, day and exact text. */
+    @Test
+    void bodyHashCoversScopeDayAndText() {
+        UUID hash = PathHash.body("1:pu", "2026-01-01", "body");
+
+        assertThat(PathHash.body("1:pu", "2026-01-01", "body")).isEqualTo(hash);
+        assertThat(List.of(hash, PathHash.body("1:pv", "2026-01-01", "body"), PathHash.body("1:pu", "2026-01-02", "body"),
+                PathHash.body("1:pu", "2026-01-01", "body ")).stream().distinct()).hasSize(4);
+    }
+
     @Test
     void scopeAndDaySeparateChains() {
         UUID path = PathHash.prefixes("1:pu", "2026-01-01", null, HISTORY)[1];

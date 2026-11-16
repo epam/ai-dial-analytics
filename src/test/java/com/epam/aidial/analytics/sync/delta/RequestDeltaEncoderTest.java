@@ -1097,19 +1097,86 @@ class RequestDeltaEncoderTest {
         });
     }
 
-    /** A system element is hashed as {@code "key":value}; a body with that very text must not become the chat's root. */
+    /** The stored time is compared as an instant at millisecond precision, however the text renders it. */
     @Test
-    void chatRequestNeverLinksToBodyHashedWhole() {
-        String prompt = "s".repeat(70_000);
-        Map<String, Object> body = row("e1", "10:00:00.000", "\"system\":\"" + prompt + "\"");
-        Map<String, Object> chat = row("e2", "10:00:05.000", "{\"system\":\"" + prompt + "\",\"messages\":[" + msg("user", "u1") + "]}");
+    void timeIsComparedInMillisecondsWhateverItsRendering() {
+        Map<String, Object> zulu = row("e1", "10:00:00.000Z", truncated("a"));
+        Map<String, Object> sameMillisecond = row("e2", "10:00:00.0009", truncated("a"));
+        Map<String, Object> later = row("e3", "10:00:00.001999", truncated("a"));
 
-        flush(body);
-        flush(chat);
+        flush(zulu);
+        flush(sameMillisecond);
+        flush(later);
 
-        assertThat(body).containsKey("request_hash");
-        assertThat(chat.get("request_parent_hash")).isEqualTo(RequestDeltaEncoder.NO_PARENT.toString());
-        assertThat(PathHash.body("1:pu", DAY, "h")).isNotEqualTo(PathHash.prefixes("1:pu", DAY, null, List.of("h"))[1]);
+        assertThat(zulu).containsKey("request_hash");
+        assertThat(sameMillisecond.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(later.get("request_body")).isEqualTo("");
+        assertThat(later.get("request_parent_hash")).isEqualTo(zulu.get("request_hash"));
+    }
+
+    /** A carrier's stored row is ignored when its event is in the batch, in whatever letter case the two ids are written. */
+    @Test
+    void eventIdsAreMatchedWhateverTheirLetterCase() {
+        RequestDeltaEncoder reporting = new RequestDeltaEncoder(new ParentLookup() {
+            @Override
+            public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+                return Map.of();
+            }
+
+            @Override
+            public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+                return hashes.stream().map(hash -> new Carrier(hash, "0000000a-0000-4000-8000-00000000000b", 0L)).toList();
+            }
+        }, 1000, registry, "dial_usage_log_payload");
+        Map<String, Object> row = row("0000000A-0000-4000-8000-00000000000B", "10:00:00.000", truncated("a"));
+
+        reporting.encode(new ArrayList<>(List.of(row)));
+
+        assertThat(row.get("request_body")).isEqualTo(truncated("a"));
+    }
+
+    /** Nesting is read only so far: a body past the bound is taken to be JSON, so it keeps its text on every row. */
+    @Test
+    void bodyNestedPastTheScanBoundIsTakenToBeJson() {
+        String body = "[".repeat(RequestDeltaEncoder.MAX_SCAN_DEPTH + 1);
+        Map<String, Object> first = row("e1", "10:00:00.000", body);
+        Map<String, Object> second = row("e2", "10:00:05.000", body);
+
+        flush(first);
+        flush(second);
+
+        assertThat(RequestDeltaEncoder.json(body)).isTrue();
+        assertThat(RequestDeltaEncoder.json("[".repeat(RequestDeltaEncoder.MAX_SCAN_DEPTH - 1))).isFalse();
+        assertThat(List.of(first, second)).allSatisfy(row -> {
+            assertThat(row).doesNotContainKeys("request_hash", "request_parent_hash");
+            assertThat(row.get("request_body")).isEqualTo(body);
+        });
+    }
+
+    /** A flush whose chat lookup failed does not wait on the table again for its bodies: they are stored whole. */
+    @Test
+    void carrierLookupIsSkippedAfterFailedChatLookup() {
+        AtomicInteger carrierLookups = new AtomicInteger();
+        RequestDeltaEncoder failing = new RequestDeltaEncoder(new ParentLookup() {
+            @Override
+            public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+                throw new IllegalStateException("ClickHouse is unreachable");
+            }
+
+            @Override
+            public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+                carrierLookups.incrementAndGet();
+                return hashes.stream().map(hash -> new Carrier(hash, "stored-elsewhere", 0L)).toList();
+            }
+        }, 1000, registry, "dial_usage_log_payload");
+        Map<String, Object> chat = row("e1", "10:00:00.000", chat("[" + msg("user", "u1") + "," + msg("assistant", "a1") + "," + msg("user", "u2") + "]"));
+        Map<String, Object> body = row("e2", "10:00:01.000", truncated("a"));
+
+        failing.encode(new ArrayList<>(List.of(chat, body)));
+
+        assertThat(carrierLookups).hasValue(0);
+        assertThat(body.get("request_body")).isEqualTo(truncated("a"));
+        assertThat(registry.get("ingest.request.delta.lookup.failures").counter().count()).isEqualTo(1.0);
     }
 
     /** A chat body cut at the size limit: not JSON, and long enough to be hashed whole. */
@@ -1236,7 +1303,7 @@ class RequestDeltaEncoderTest {
                 String time = (String) row.get("request_time");
                 if (hash != null && hashes.contains(UUID.fromString((String) hash)) && days.contains(time.substring(0, 10))) {
                     found.add(new Carrier(UUID.fromString((String) hash), (String) row.get("event_id"),
-                            LocalDateTime.parse(time.replace(' ', 'T')).toInstant(ZoneOffset.UTC).toEpochMilli()));
+                            LocalDateTime.parse(time.replace(' ', 'T').replace("Z", "")).toInstant(ZoneOffset.UTC).toEpochMilli()));
                 }
             }
             return found;

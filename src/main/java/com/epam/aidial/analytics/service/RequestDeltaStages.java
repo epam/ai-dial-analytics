@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
  * whatever the operator named the table. The table is checked once, on the stage's first flush: by then the startup
  * migrations have run, which they have not while this bean is built. One encoder per such table, built once at
  * startup, so its path cache outlives a run and the poller, the scheduled sync and a backfill all see each other's
- * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path, so a row
+ * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path (and a large body that is not JSON with its body hash), so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
  * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
  * {@code sync.sensitive-columns-enabled=false} has no body to rewrite and gets no stage, so its chain and cache-marker

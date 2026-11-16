@@ -107,7 +107,8 @@ unless, under `whole-with-path` or `delta`, it is eligible for a body hash (see 
 earlier one is stored once"). Such a
 body is an MCP JSON-RPC body, an embeddings request (an `input` of strings or token arrays included), a value
 that does not parse as JSON (including a body truncated at 4 MiB), a JSON object naming one member twice, a
-request whose `request_time` carries a UTC offset other than zero (its text day need not be its partition day),
+request whose `request_time` is written with a numeric UTC offset, `+00:00` included (its text day need not be its
+partition day),
 or a JSON value of any other shape. Such a request SHALL never be the parent of a chat request. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
 content column.
 
@@ -123,8 +124,9 @@ content column.
 
 #### Scenario: A truncated chat body is stored whole
 
-- **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`, and no
-  earlier request of its project, user and UTC day carried the same body
+- **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`, it holds at
+  least 65,536 UTF-16 code units as stored, and no earlier request of its project, user and UTC day carried the
+  same body
 - **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, its body hash in
   `request_hash`, and an all-zero `request_parent_hash`
 
@@ -472,16 +474,18 @@ newest message on each turn, so the same earlier message would otherwise hash di
 
 A request body SHALL be **eligible for a body hash** when it is not JSON (a body truncated at 4 MiB and a
 multipart upload are such bodies), holds at least 65,536 UTF-16 code units as ingest is about to store it, that
-is, after the inline-file rewrite, its row has a project or a user, and its `request_time` reads as an instant
-carrying no UTC offset other than zero. A body is JSON when it is one syntactically valid JSON value with nothing
+is, after the inline-file rewrite, its row has a project or a user, and its `request_time` is a date and time
+written without a UTC offset or with `Z`; a time written with a numeric offset, `+00:00` included, is not eligible. A body is JSON when it is one syntactically valid JSON value with nothing
 but whitespace around it, however
-deeply nested, however long its numbers and strings, and whether or not an object names a member twice. A client whose conversation has outgrown the 4 MiB body
+deeply nested, however long its numbers and strings, and whether or not an object names a member twice. A body
+nested too deeply for ingest to read to its end SHALL be treated as JSON. A client whose conversation has outgrown the 4 MiB body
 limit sends the same cut text on every later turn, so such bodies repeat exactly. A body that is JSON SHALL NOT be
 eligible, whatever its size and shape, a JSON object naming one member twice included: its top-level members stay
 readable from `request_body` on every row. Its **body hash** SHALL be a 128-bit hash of the project, the user, the UTC day of
 `request_time` and the body text exactly as ingest is about to store it, that is, after the inline-file rewrite.
-The body hash and the chat prefix hashes SHALL be seeded apart, so equal text hashed as a body and as a history
-element yields different hashes and a chat request never takes such a row as its parent.
+The body hash SHALL be computed under a seed of its own, apart from the chat prefix hashes. A chat request's parent
+is always a prefix hash of its own history, which no body hash equals, so a chat request never takes a carrier as
+its parent.
 
 Under `whole-with-path`, an eligible row SHALL carry its body hash in `request_hash` and its body whole.
 
@@ -501,7 +505,7 @@ the current version of its row carries the hash: a row version that a re-ingest 
 a copy, and neither SHALL the stored row of an event that is in the same insert, which that insert replaces. A
 row with no carrier in its insert SHALL be a carrier whenever the lookup returns no stored one, for example
 because only another instance's concurrent insert holds it, the lookup's bound on hashes per flush is reached, or
-the lookup fails. A failed lookup SHALL be logged and counted and SHALL NOT fail the insert. Each of these costs storage only. When a
+the lookup fails, or is not issued because the flush's lookup for chat parents failed. A failed lookup SHALL be logged and counted and SHALL NOT fail the insert. Each of these costs storage only. When a
 batch is inserted in parts, a copy whose carrier lies in another part SHALL be stored as a carrier instead, so no
 stored copy names a carrier that a refused part kept out of the table.
 
@@ -598,6 +602,11 @@ part-granular expiry MAY drop a carrier before its copy in the last day of a day
   ingested under `delta`
 - **THEN** both rows carry the body and an all-zero `request_hash`
 
+#### Scenario: A body nested too deeply to read is treated as JSON
+
+- **WHEN** two equal bodies, each 100,001 `[` characters, are ingested under `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
 #### Scenario: An earlier request arriving later becomes the carrier's peer
 
 - **WHEN** a carrier with `request_time` `10:00:05.000` is stored, and a request with an equal body and
@@ -646,9 +655,9 @@ part-granular expiry MAY drop a carrier before its copy in the last day of a day
 - **THEN** both rows hold the body, each with the body hash in `request_hash` and an all-zero
   `request_parent_hash`
 
-#### Scenario: A chat request never links to a hashed whole body
+#### Scenario: A failed chat lookup stores the flush's bodies whole
 
-- **WHEN** a carrier's body is the text `"system":"s"` with `s` long enough to be eligible, and a chat request of
-  the same project, user and UTC day carries that `s` as its top-level `system` and no `tools`
-- **THEN** the chat request is a root
+- **WHEN** a flush carries a chat request and an eligible body, and the payload-table lookup for the chat request's
+  parent fails
+- **THEN** the eligible body's row holds the body and its hash, and the table is not asked about its hash
 

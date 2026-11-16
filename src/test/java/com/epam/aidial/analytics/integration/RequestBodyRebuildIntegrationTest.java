@@ -407,6 +407,31 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
         }
     }
 
+    /**
+     * A stored carrier whose event comes back in the same insert with another body is about to be replaced, so the equal
+     * body beside it keeps its own text. Were the stored row counted, that body would be stored empty and then lose its
+     * carrier to this very insert.
+     */
+    @Test
+    void carrierReplacedByTheSameInsertMakesNoCopy() throws Exception {
+        String cut = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "z".repeat(70_000);
+        String other = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "w".repeat(70_000);
+        raw("t1", "10:00:00.000", cut);
+
+        Map<String, Object> replaced = payloadRow("t1", fixtureTime("10:00:00.000"), other);
+        Map<String, Object> equal = payloadRow("t2", fixtureTime("10:00:05.000"), cut);
+        List<Map<String, Object>> batch = new ArrayList<>(List.of(replaced, equal));
+        RequestDeltaEncoder.Encoding encoding = newEncoder(RequestBodyMode.DELTA).encode(batch);
+        writer.insert(PAYLOAD, batch);
+        encoding.written();
+        usageRow("t2", fixtureTime("10:00:05.000"));
+
+        assertThat(equal.get("request_body")).isEqualTo(cut);
+        assertThat(storedBody("t1")).isEqualTo(other);
+        assertThat(storedBody("t2")).isEqualTo(cut);
+        assertThat(hop("t2", "10:00:05.000").get(STATUS).asString()).isEqualTo("stored");
+    }
+
     /** One request with a body that is not a chat request, through the encoder and writer, and its usage-log row. */
     private Map<String, Object> raw(String traceId, String timeOfDay, String body) {
         Map<String, Object> row = payloadRow(traceId, fixtureTime(timeOfDay), body);

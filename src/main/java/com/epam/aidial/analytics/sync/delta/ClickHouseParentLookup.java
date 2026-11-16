@@ -29,7 +29,8 @@ import java.util.function.Consumer;
  * roots.
  *
  * <p>{@link #carriers} is the one read here that does use {@code FINAL} ({@link #carrierStatement}): a row may store
- * no body at all on the strength of what it returns.
+ * no body at all on the strength of what it returns. It is a second lookup of the flush, chunked and bounded like the
+ * first, and the encoder does not issue it when the first one failed.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
 

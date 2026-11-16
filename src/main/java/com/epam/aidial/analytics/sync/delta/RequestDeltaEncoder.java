@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import tools.jackson.core.JsonParser;
 import tools.jackson.core.StreamReadConstraints;
 import tools.jackson.core.StreamReadFeature;
+import tools.jackson.core.exc.StreamConstraintsException;
 import tools.jackson.core.json.JsonFactory;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
@@ -23,6 +24,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -32,12 +34,13 @@ import java.util.function.Function;
 /**
  * Writes the request-delta columns of payload rows. Specified in {@code openspec/specs/data-sync/spec.md}: "The request
  * body storage mode is configurable", "A chat request body is stored as its new history and a parent link", "A
- * request inherits its parent's tools", "A parent never crosses a UTC day or a user scope", "Cache markers are kept per event" and "A request body that is not a
- * chat request is stored whole".
+ * request inherits its parent's tools", "A parent never crosses a UTC day or a user scope", "Cache markers are kept per event", "A request body that is not a
+ * chat request is stored whole" and "A large request body equal to an earlier one is stored once".
  *
  * <p>Runs once per flush of the payload sink, on the batch about to be inserted, after the mapping (and so after the
  * inline-file rewrite); never under {@link RequestBodyMode#WHOLE}, which parses no body. Under
- * {@link RequestBodyMode#WHOLE_WITH_PATH} it only stamps each chat request with its path and keeps the body: a row
+ * {@link RequestBodyMode#WHOLE_WITH_PATH} it only stamps each chat request with its path (and each body hashed whole
+ * with its hash, see below) and keeps the body: a row
  * stored whole then still supplies its path's history, so a delta row that names it as parent stays rebuildable when
  * its parent is re-ingested under {@code whole-with-path}, and a switch to {@code delta} links onto rows written
  * before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
@@ -132,13 +135,17 @@ public final class RequestDeltaEncoder {
     private static final String FLUSH = "flush";
     private static final String LOOKUP_FAILURES = "ingest.request.delta.lookup.failures";
 
+    /** The nesting depth {@link #json} reads to; the parser keeps one context per open level. */
+    static final int MAX_SCAN_DEPTH = 100_000;
+
     /**
-     * Decides whether a body the encoder's own mapper refused is JSON at all: no duplicate detection and no read limits,
-     * since a repeated member, deep nesting or a long number makes a body awkward, not something other than JSON.
+     * Decides whether a body the encoder's own mapper refused is JSON at all: no duplicate detection and no limit on
+     * a number, a string or the document, since a repeated member or a long number makes a body awkward, not something
+     * other than JSON. Nesting alone stays bounded, at {@link #MAX_SCAN_DEPTH}.
      */
     private static final JsonMapper LENIENT = JsonMapper.builder(JsonFactory.builder()
             .streamReadConstraints(StreamReadConstraints.builder()
-                    .maxNestingDepth(Integer.MAX_VALUE)
+                    .maxNestingDepth(MAX_SCAN_DEPTH)
                     .maxNumberLength(Integer.MAX_VALUE)
                     .maxStringLength(Integer.MAX_VALUE)
                     .maxNameLength(Integer.MAX_VALUE)
@@ -169,8 +176,8 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * @param mode          {@code whole-with-path} stamps chat requests with their path only; {@code delta} also links and
-     *                      splits them. Not {@code whole}, which needs no encoder
+     * @param mode          {@code whole-with-path} stamps chat requests with their path, and bodies hashed whole with
+     *                      their hash, only; {@code delta} also links and splits them. Not {@code whole}, which needs no encoder
      * @param lookup        finds parents stored by earlier flushes, other runs or other instances; unused under
      *                      {@code whole-with-path}
      * @param cacheCapacity how many written paths this instance remembers; unused under {@code whole-with-path}
@@ -192,9 +199,9 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * Writes the request-delta columns of the chat requests among {@code rows}, in place. Under {@code delta} their
-     * {@code request_body} is cut to what the parent does not supply; under {@code whole-with-path} it is kept. Every other row
-     * is left untouched.
+     * Writes the request-delta columns of the chat requests and of the bodies hashed whole among {@code rows}, in place.
+     * Under {@code delta} a chat request's {@code request_body} is cut to what the parent does not supply and a copy's is
+     * emptied; under {@code whole-with-path} every body is kept. Every other row is left untouched.
      *
      * @param rows the payload batch about to be inserted
      * @return what to record once the insert carrying {@code rows} has succeeded
@@ -218,7 +225,9 @@ public final class RequestDeltaEncoder {
         items.sort(Comparator.comparing(Item::time));
 
         Map<UUID, ChainNode> stored = storedParents(items);
-        Map<UUID, Long> storedCarriers = storedCarriers(items, rows);
+        // A flush whose chat lookup just failed does not wait on the table a second time: its bodies are stored whole.
+        Map<UUID, Long> storedCarriers = stored == null ? Map.of() : storedCarriers(items, rows);
+        stored = stored == null ? Map.of() : stored;
         // The earliest carrier of each body hash among the rows of this flush visited so far.
         Map<UUID, Item> flushCarriers = new HashMap<>();
         Map<UUID, ChainNode> written = new HashMap<>();
@@ -274,7 +283,8 @@ public final class RequestDeltaEncoder {
 
     /**
      * The payload table's answer for the requests that neither an earlier request of the flush nor the cache can link
-     * at all. {@code items} are in time order, so "earlier" matches what {@link #resolve} will see.
+     * at all, or {@code null} when the lookup failed. {@code items} are in time order, so "earlier" matches what
+     * {@link #resolve} will see.
      */
     private Map<UUID, ChainNode> storedParents(List<Item> items) {
         Set<UUID> earlier = new HashSet<>();
@@ -303,7 +313,7 @@ public final class RequestDeltaEncoder {
             registry.counter(LOOKUP_FAILURES, "table", table).increment();
             log.warn("Parent lookup in {} for {} candidate path(s) failed; the requests waiting on it are stored as chain roots",
                     table, candidates.size(), ex);
-            return Map.of();
+            return null;
         }
         Map<UUID, ChainNode> stored = new HashMap<>();
         found.forEach((path, ancestors) -> stored.put(path, ChainNode.stored(path, ancestors)));
@@ -337,17 +347,22 @@ public final class RequestDeltaEncoder {
             return Map.of();
         }
         Set<String> flushed = new HashSet<>();
-        rows.forEach(row -> flushed.add(String.valueOf(row.get(EVENT_ID))));
+        // Compared in one letter case: a mapping is free to render its event ids in either.
+        rows.forEach(row -> flushed.add(String.valueOf(row.get(EVENT_ID)).toLowerCase(Locale.ROOT)));
         Map<UUID, Long> earliest = new HashMap<>();
         for (ParentLookup.Carrier carrier : found) {
-            if (!flushed.contains(carrier.eventId())) {
+            if (!flushed.contains(carrier.eventId().toLowerCase(Locale.ROOT))) {
                 earliest.merge(carrier.hash(), carrier.timeMillis(), Math::min);
             }
         }
         return earliest;
     }
 
-    /** Whether {@code body} is one JSON value and nothing else, read as tokens so no tree is built. */
+    /**
+     * Whether {@code body} is one JSON value and nothing else, read as tokens so no tree is built. A body nested past
+     * {@link #MAX_SCAN_DEPTH} is taken to be JSON without being read to its end: it is then stored whole, which costs
+     * space at worst, where reading on would cost memory for every level.
+     */
     static boolean json(String body) {
         try (JsonParser parser = LENIENT.createParser(body)) {
             if (parser.nextToken() == null) {
@@ -355,6 +370,8 @@ public final class RequestDeltaEncoder {
             }
             parser.skipChildren();
             return parser.nextToken() == null;
+        } catch (StreamConstraintsException ex) {
+            return true;
         } catch (RuntimeException ex) {
             return false;
         }
@@ -493,7 +510,8 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * One chat request of the batch: its row and its prefix hashes. The split body is not kept; {@link #write} parses
+     * One chat request of the batch, with its row and its prefix hashes, or one body hashed whole, whose single hash
+     * stands where a chat request's path does. The split body is not kept; {@link #write} parses
      * the body again (see the class note on memory).
      */
     private static final class Item {

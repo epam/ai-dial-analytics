@@ -44,7 +44,7 @@ time-ordered, so half the repeats would arrive "before" their carrier and stay w
 milliseconds as the `DateTime64(3)` column stores it. Text comparison was rejected: any difference between the
 server's rendering and the mapping's would order a re-ingested carrier after its own stored row and make it a copy
 of itself. A row whose `request_time` does not parse is not eligible; the existing rule already keeps out a time
-with a non-zero offset.
+written with a numeric offset.
 
 **Stored carriers are looked up deduplicated, in a statement of their own.** The chat lookup stays as it is: any
 row version carrying a path yields the same history. A carrier is different, since a replaced version that still
@@ -77,16 +77,20 @@ of one flush are bounded by the same number as its chat candidates; a row past t
 share of rows stored as copies is visible beside roots and children. The counter is not part of the capability's
 spec and this change does not add it there.
 
-**A separate hash domain.** The body hash uses its own seed. A system element is hashed as `"key":value`, which
-is not JSON, so a non-JSON body with that text would otherwise share a chat request's first prefix hash and be
-taken as its root.
+**A separate hash domain.** The body hash uses its own seed. It is not what keeps the two kinds of hash apart: a
+chat prefix past the first hashes the prefix before it and one element, never a seed, a scope and a day, so the
+inputs differ in shape under any seed. The separate seed states that separation instead of leaving it implied.
 
 **Only a body that is not JSON is eligible.** A copy's `request_body` is empty, so a JSON body stored as a copy
 would lose the top-level members readers extract from it; a body that is not JSON has none to lose. The encoder's
 parse already fails on such a body, but it also fails on valid JSON that names a member twice or exceeds the
 parser's default read limits. A body over the size bound that fails it is therefore read once more, as a token
-stream with duplicate detection off and the read limits lifted, to the end of the input, and is eligible only when
-that fails too: a valid value followed by anything but whitespace is not JSON.
+stream with duplicate detection off and the limits on numbers, strings and document length lifted, to the end of
+the input, and is eligible only when that fails too: a valid value followed by anything but whitespace is not
+JSON. Nesting stays bounded, at 100,000 levels, because the parser keeps a context per open level and a body of
+nothing but opening brackets would otherwise cost memory for each; a body past the bound is taken to be JSON and
+stored whole. A flush whose chat lookup failed does not issue the carrier lookup, so a table that is not
+answering is waited on once per flush, not twice.
 Alternative rejected: every large non-chat body, which would have covered large MCP and embeddings requests at
 the cost of their readable members.
 

@@ -139,7 +139,7 @@ not stored whole. Every turn of a conversation re-sends the history before it, a
 `request_body` keeps the request with only the history elements this turn added, without the system prompt and the
 tools when the earlier turn it links to already has them, and a hidden link to that turn. The first turn of a
 conversation is stored complete, and every other body (MCP, embeddings, anything that does not parse) is stored
-whole, with one exception: a body of 65,536 characters or more that is not JSON, such as a chat body cut at the
+whole, with one exception: a body of 65,536 characters (UTF-16 code units) or more that is not JSON, such as a chat body cut at the
 4 MiB limit, is stored once per project, user and UTC day. A later request repeating it exactly has an empty
 `request_body`; `request_body_full` returns the body. A JSON body is never stored empty.
 
