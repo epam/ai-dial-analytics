@@ -30,4 +30,4 @@
 ## 5. Verification
 
 - [x] 5.1 `openspec validate revision-visibility-by-table-life --strict`
-- [ ] 5.2 `./gradlew clean build` (by CI on the pull request)
+- [x] 5.2 `./gradlew clean build` (by CI on the pull request)
