@@ -4,14 +4,7 @@ import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.List;
@@ -34,43 +27,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * filter, which needs two people holding the same role.
  *
  * <p>ClickHouse is never contacted: saved queries are validated by translation, which renders SQL and
- * discards it. Only PostgreSQL is required.
+ * discards it. The context is the shared one of {@link AbstractOidcAuthIntegrationTest}.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "clickhouse.migrations.enabled=false",
-        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
-        "clickhouse.port=1",
-        "sync.validate-schema=false",
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.full.issuer=" + SavedQueryAuthIntegrationTest.FULL_ISSUER,
-        "providers.full.jwk-set-uri=https://issuer.test/full/jwks",
-        "providers.full.audiences=" + SavedQueryAuthIntegrationTest.AUDIENCE,
-        "providers.full.role-claims=roles",
-        "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"]}",
-        "providers.readonly.issuer=" + SavedQueryAuthIntegrationTest.READONLY_ISSUER,
-        "providers.readonly.jwk-set-uri=https://issuer.test/readonly/jwks",
-        "providers.readonly.audiences=" + SavedQueryAuthIntegrationTest.AUDIENCE,
-        "providers.readonly.role-claims=roles",
-        "providers.readonly.roles-mapping={\"viewer\":[\"READ_ONLY_ADMIN\"]}",
-        "providers.writer.issuer=" + SavedQueryAuthIntegrationTest.WRITER_ISSUER,
-        "providers.writer.jwk-set-uri=https://issuer.test/writer/jwks",
-        "providers.writer.audiences=" + SavedQueryAuthIntegrationTest.AUDIENCE,
-        "providers.writer.role-claims=roles",
-        "providers.writer.roles-mapping={\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
-                + "\"curator\":[\"SAVED_QUERY_WRITE\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"]}",
-})
-@AutoConfigureMockMvc
-@Import({TestSecurityConfig.class, OpenStorageGate.class})
-class SavedQueryAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String FULL_ISSUER = "https://issuer.test/full";
-    static final String READONLY_ISSUER = "https://issuer.test/readonly";
-    static final String WRITER_ISSUER = "https://issuer.test/writer";
+class SavedQueryAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String BASE = "/v1/saved-queries";
 
@@ -84,14 +43,6 @@ class SavedQueryAuthIntegrationTest {
     private static final String COMMON = PERSONAL
             .replace("\"scope\":\"personal\"", "\"scope\":\"common\"")
             .replace("\"Mine\"", "\"Shared\"");
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @DynamicPropertySource
-    static void dynamicProperties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-    }
 
     // ---------------------------------------------------------------- personal scope
 

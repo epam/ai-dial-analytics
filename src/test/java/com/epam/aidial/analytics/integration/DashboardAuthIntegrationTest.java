@@ -1,17 +1,9 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
-import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.List;
@@ -35,40 +27,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * the bundles; another maps single privileges, each alongside {@code TABLE_READ} only so its inline bodies
  * translate — that privilege implies nothing about dashboards.
  *
- * <p>Only PostgreSQL is required; inline bodies are validated by translation, never executed.
+ * <p>Inline bodies are validated by translation, never executed; the context is the shared one of
+ * {@link AbstractOidcAuthIntegrationTest}.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "clickhouse.migrations.enabled=false",
-        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
-        "clickhouse.port=1",
-        "sync.validate-schema=false",
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.bundles.issuer=" + DashboardAuthIntegrationTest.BUNDLES_ISSUER,
-        "providers.bundles.jwk-set-uri=https://issuer.test/bundles/jwks",
-        "providers.bundles.audiences=" + DashboardAuthIntegrationTest.AUDIENCE,
-        "providers.bundles.role-claims=roles",
-        "providers.bundles.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
-                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"]}",
-        "providers.single.issuer=" + DashboardAuthIntegrationTest.SINGLE_ISSUER,
-        "providers.single.jwk-set-uri=https://issuer.test/single/jwks",
-        "providers.single.audiences=" + DashboardAuthIntegrationTest.AUDIENCE,
-        "providers.single.role-claims=roles",
-        "providers.single.roles-mapping={\"reader\":[\"SAVED_QUERY_READ\",\"TABLE_READ\"],"
-                + "\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
-                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"readpublisher\":[\"SAVED_QUERY_READ\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"tableonly\":[\"TABLE_READ\"]}",
-})
-@AutoConfigureMockMvc
-@Import({TestSecurityConfig.class, OpenStorageGate.class})
-class DashboardAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String BUNDLES_ISSUER = "https://issuer.test/bundles";
-    static final String SINGLE_ISSUER = "https://issuer.test/single";
+class DashboardAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String BASE = "/v1/dashboards";
     private static final String FEED = "/v1/activities";
@@ -81,14 +43,6 @@ class DashboardAuthIntegrationTest {
     private static final String SENSITIVE_WIDGET = """
             {"id":"w1","row_limit":10,"layout":{"x":0,"y":0,"w":6,"h":4},
              "inline_query":{"name":"Sensitive","sql":"SELECT project_id FROM dial_usage_log WHERE \\"dial_usage_log_payload.request_body\\" = 'a secret'"}}""";
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @DynamicPropertySource
-    static void dynamicProperties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-    }
 
     // ---------------------------------------------------------------- visibility
 

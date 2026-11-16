@@ -64,6 +64,39 @@ import org.springframework.test.web.servlet.MockMvc;
         // is, so a test states the value it compares with instead of a digest. Inert for every other test.
         "providers.readonly.logging-key=email",
         "providers.readonly.obfuscate-user-email=false",
+        // One provider per persona set a single class drives, each on its own issuer so it is inert for the others.
+        "providers.writer.issuer=" + AbstractOidcAuthIntegrationTest.WRITER_ISSUER,
+        "providers.writer.jwk-set-uri=https://issuer.test/writer/jwks",
+        "providers.writer.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
+        "providers.writer.role-claims=roles",
+        "providers.writer.roles-mapping={\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
+                + "\"curator\":[\"SAVED_QUERY_WRITE\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
+                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"]}",
+        "providers.bundles.issuer=" + AbstractOidcAuthIntegrationTest.BUNDLES_ISSUER,
+        "providers.bundles.jwk-set-uri=https://issuer.test/bundles/jwks",
+        "providers.bundles.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
+        "providers.bundles.role-claims=roles",
+        "providers.bundles.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
+                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"]}",
+        "providers.single.issuer=" + AbstractOidcAuthIntegrationTest.SINGLE_ISSUER,
+        "providers.single.jwk-set-uri=https://issuer.test/single/jwks",
+        "providers.single.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
+        "providers.single.role-claims=roles",
+        "providers.single.roles-mapping={\"reader\":[\"SAVED_QUERY_READ\",\"TABLE_READ\"],"
+                + "\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
+                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
+                + "\"readpublisher\":[\"SAVED_QUERY_READ\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
+                + "\"tableonly\":[\"TABLE_READ\"]}",
+        "providers.settings.issuer=" + AbstractOidcAuthIntegrationTest.SETTINGS_ISSUER,
+        "providers.settings.jwk-set-uri=https://issuer.test/settings/jwks",
+        "providers.settings.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
+        "providers.settings.role-claims=roles",
+        "providers.settings.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
+                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"],\"sensitive\":[\"READ_ONLY_SENSITIVE_ANALYTIC\"],"
+                + "\"tableonly\":[\"TABLE_READ\"],\"settingswriter\":[\"SETTINGS_WRITE\",\"TABLE_READ\"]}",
+        // The Flight SQL listener on an ephemeral port, for the Flight metadata auth tests; idle for the REST ones.
+        "flight.enabled=true",
+        "flight.port=0",
 })
 @AutoConfigureMockMvc
 @Import(TestSecurityConfig.class)
@@ -72,6 +105,10 @@ abstract class AbstractOidcAuthIntegrationTest {
     static final String AUDIENCE = "adas-test";
     static final String FULL_ISSUER = "https://issuer.test/full";
     static final String READONLY_ISSUER = "https://issuer.test/readonly";
+    static final String WRITER_ISSUER = "https://issuer.test/writer";
+    static final String BUNDLES_ISSUER = "https://issuer.test/bundles";
+    static final String SINGLE_ISSUER = "https://issuer.test/single";
+    static final String SETTINGS_ISSUER = "https://issuer.test/settings";
 
     @Autowired
     protected MockMvc mockMvc;

@@ -1,19 +1,12 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
-import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.List;
@@ -33,31 +26,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * sees the catalog as the writer does. Privileges come from {@code roles-mapping}s, so the bundle contents and the
  * {@code SETTINGS_WRITE -> SETTINGS_READ} implication under test are the parser's.
  *
- * <p>Only PostgreSQL is required: validation reads the catalog, never ClickHouse.
+ * <p>Validation reads the catalog, never ClickHouse; the context is the shared one of
+ * {@link AbstractOidcAuthIntegrationTest}.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "clickhouse.migrations.enabled=false",
-        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
-        "clickhouse.port=1",
-        "sync.validate-schema=false",
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.test.issuer=" + SessionsSourceSettingAuthIntegrationTest.ISSUER,
-        "providers.test.jwk-set-uri=https://issuer.test/settings/jwks",
-        "providers.test.audiences=" + SessionsSourceSettingAuthIntegrationTest.AUDIENCE,
-        "providers.test.role-claims=roles",
-        "providers.test.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
-                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"],\"sensitive\":[\"READ_ONLY_SENSITIVE_ANALYTIC\"],"
-                + "\"tableonly\":[\"TABLE_READ\"],\"settingswriter\":[\"SETTINGS_WRITE\",\"TABLE_READ\"]}",
-})
-@AutoConfigureMockMvc
-@Import({TestSecurityConfig.class, OpenStorageGate.class})
-class SessionsSourceSettingAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String ISSUER = "https://issuer.test/settings";
+class SessionsSourceSettingAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String URL = "/v1/settings/sessions-source";
 
@@ -70,15 +42,7 @@ class SessionsSourceSettingAuthIntegrationTest {
              "title":"dial_usage_log_payload.request_body"}}""";
 
     @Autowired
-    private MockMvc mockMvc;
-
-    @Autowired
     private JdbcTemplate jdbc;
-
-    @DynamicPropertySource
-    static void dynamicProperties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-    }
 
     @BeforeEach
     @AfterEach
@@ -175,6 +139,6 @@ class SessionsSourceSettingAuthIntegrationTest {
     }
 
     private static String token(String role) {
-        return JwtTestTokens.token(ISSUER, AUDIENCE, Map.of("sub", role, "roles", List.of(role), "email", role + "@test"));
+        return JwtTestTokens.token(SETTINGS_ISSUER, AUDIENCE, Map.of("sub", role, "roles", List.of(role), "email", role + "@test"));
     }
 }
