@@ -1,6 +1,6 @@
 ## 1. Storage and migration
 
-- [x] 1.1 Add Postgres migration `V56__role_keyed_table_access.sql` (confirm V56 is still the next free version): `table_definition` gains `column_policies JSONB NOT NULL DEFAULT '{}'::jsonb` and `access_generation BIGINT NOT NULL DEFAULT 0`; `table_definition_aud` gains `column_policies JSONB`. At most a one-line header naming what it adds and linking `openspec/specs/table-access-control/spec.md`
+- [x] 1.1 Add Postgres migration `V57__role_keyed_table_access.sql` (confirm V57 is still the next free version): `table_definition` gains `column_policies JSONB NOT NULL DEFAULT '{}'::jsonb` and `access_generation BIGINT NOT NULL DEFAULT 0`; `table_definition_aud` gains `column_policies JSONB`. At most a one-line header naming what it adds and linking `openspec/specs/table-access-control/spec.md`
 - [x] 1.2 `TableDefinitionEntity`: map `columnPolicies` as JSON text (`@JdbcTypeCode(SqlTypes.JSON)` on a `String`, like `rowPolicies`, never a mapped `List<String>`); map `accessGeneration` as an ordinary updatable field, `@NotAudited`
 - [x] 1.3 Add a `ColumnPolicyCodec` (role → sorted, de-duplicated names; roles sorted) mirroring `RowPolicyCodec`, so its output is deterministic; change detection compares decoded values, never stored text (Postgres re-serialises JSONB)
 - [x] 1.4 `TableDefinitionRepository`: a `PESSIMISTIC_WRITE` finder (`findForUpdate(name)`); no bulk-update query (the generation is bumped through the entity under the lock)
@@ -64,7 +64,7 @@
 
 - [x] 8.1 `TableDto` / `TableMapper` revision path: replace `access` and `row_policies` with `roles` (assembled from the snapshot's three documents, `column_policies` `NULL` read as none), served under the same `TABLE_GRANT`/`none` rule, never carrying `generation`; filter snapshot columns by the revision's column policies (enrichment: source's current state)
 - [x] 8.2 Confirm an entry `PUT`/`DELETE` records one `Update` activity and an unchanged `PUT` records none (no `AuditResourceMapper` change expected)
-- [x] 8.3 Tests (`TableGrantRevisionIntegrationTest`): `roles` served/withheld/`none` mode; pre-V56 revision reads `columns: null`; snapshot hides columns by the revision's policies; the enrichment clean-up lag scenario in the new shape
+- [x] 8.3 Tests (`TableGrantRevisionIntegrationTest`): `roles` served/withheld/`none` mode; pre-V57 revision reads `columns: null`; snapshot hides columns by the revision's policies; the enrichment clean-up lag scenario in the new shape
 
 ## 9. Concurrency tests
 

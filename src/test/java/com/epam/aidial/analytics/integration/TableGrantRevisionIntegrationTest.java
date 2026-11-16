@@ -175,7 +175,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final int latest = jdbc.queryForObject("SELECT max(rev) FROM table_definition_aud WHERE name = ?", Integer.class, ENRICHMENT);
 
         jdbc.execute(new String(new org.springframework.core.io.ClassPathResource(
-                "db/migration/postgres/V55__enrichment_access_follows_source.sql").getContentAsByteArray(),
+                "db/migration/postgres/V56__enrichment_access_follows_source.sql").getContentAsByteArray(),
                 java.nio.charset.StandardCharsets.UTF_8));
 
         mockMvc.perform(get(BASE + "/" + ENRICHMENT + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
@@ -257,7 +257,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     void revisionRecordedBeforeColumnPoliciesReadsNone() throws Exception {
         putEntry(SOURCE, "team-r", "\"privileges\":[\"read\"],\"columns\":[\"k\"]").andExpect(status().isOk());
         final int revision = tableUpdates(SOURCE).getFirst();
-        // What a revision written before V56 (or by an older replica) holds: no column_policies at all.
+        // What a revision written before V57 (or by an older replica) holds: no column_policies at all.
         jdbc.update("UPDATE table_definition_aud SET column_policies = NULL WHERE name = ? AND rev = ?", SOURCE, revision);
 
         snapshot(SOURCE, revision, fullAdmin())

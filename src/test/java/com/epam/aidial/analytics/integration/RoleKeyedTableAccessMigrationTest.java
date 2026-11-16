@@ -14,7 +14,7 @@ import java.sql.Statement;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Drives {@code V56__role_keyed_table_access.sql} against catalog rows as {@code V55} leaves them: the stored grant
+ * Drives {@code V57__role_keyed_table_access.sql} against catalog rows as {@code V56} leaves them: the stored grant
  * lists and row policies survive untouched, every table starts at access generation 0 with no column policy, and the
  * audit mirror gains the column an audited entity now writes (a mirror lacking a column fails every write at commit).
  */
@@ -34,14 +34,14 @@ class RoleKeyedTableAccessMigrationTest {
             statement.execute("DROP DATABASE IF EXISTS " + DATABASE + " WITH (FORCE)");
             statement.execute("CREATE DATABASE " + DATABASE);
         }
-        flyway("55").migrate();
+        flyway("56").migrate();
         execute("INSERT INTO table_definition (name, type, status, access, row_policies) VALUES"
                 + " ('rk_granted', 'SOURCE', 'ACTIVE', '" + ACCESS + "'::jsonb, '" + POLICIES + "'::jsonb),"
                 + " ('rk_plain', 'SOURCE', 'ACTIVE', '{}'::jsonb, '{}'::jsonb)");
         execute("INSERT INTO revinfo (id, timestamp) VALUES (1, 0)");
         execute("INSERT INTO table_definition_aud (name, rev, revtype, access, row_policies) VALUES"
                 + " ('rk_granted', 1, 0, '" + ACCESS + "'::jsonb, '" + POLICIES + "'::jsonb)");
-        flyway("56").migrate();
+        flyway("57").migrate();
     }
 
     @AfterAll

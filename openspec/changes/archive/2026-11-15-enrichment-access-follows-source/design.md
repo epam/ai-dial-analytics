@@ -64,7 +64,7 @@ A small shared resolver (one method: definition → governing access) is used by
 
 ### 2. Clear the stored lists and policies with a migration, and ignore any that reappear
 
-Migration `V55` sets, for `type = 'ENRICHMENT'`, `access = access - 'get' - 'read' - 'sensitive'` and
+Migration `V56` sets, for `type = 'ENRICHMENT'`, `access = access - 'get' - 'read' - 'sensitive'` and
 `row_policies = '{}'`, so the stored catalog says what is in force.
 
 The migration runs once, but an earlier build can write these again: an old replica during a rolling upgrade, or an operator restoring them
@@ -216,12 +216,12 @@ that Decision 4 removes.
      enrichment policy.
    - **Who loses access**, per key: a role on the enrichment's `sensitive` list that the source's `sensitive` list does not name (nor `*`); a role on the enrichment's `read` list that the source's `read` list does not name (nor `*`); and a role on the enrichment's `get` list that holds no `get` on the source through its `get`, `read` or `modify` list (a `*` in `modify` not counting) and is not on the enrichment's own `modify` list. Expected empty; move any grantee it finds to the same key on the
      source. Roles that `roles-mapping` maps to the privilege globally keep it whatever the lists say, and can be ignored.
-2. Deploy. `V55` clears the enrichment lists and policies.
+2. Deploy. `V56` clears the enrichment lists and policies.
 
-**Rollback (manual).** `V55` has no undo, and a build older than this change reads the cleared lists as its own
+**Rollback (manual).** `V56` has no undo, and a build older than this change reads the cleared lists as its own
 empty grants. Until they are restored, per-table readers of a source and runner scans lose the enrichment's columns,
 rollups that read enrichment columns fail every refresh, and arming or patching the `enrich` pipeline filling an
-enrichment is refused. The older build ignores the applied `V55` (Flyway skips migrations newer than the code it
+enrichment is refused. The older build ignores the applied `V56` (Flyway skips migrations newer than the code it
 ships), so rolling back is:
 
 1. **Before upgrading**, save every enrichment's read-side lists and row policies, by reading
@@ -239,6 +239,6 @@ ships), so rolling back is:
 5. An enrichment created after the upgrade has no saved lists. Grant on it the roles of its source's readers that
    should read it, as the older build requires.
 
-Upgrading again later does not re-run `V55`, which is already recorded. The restored lists then confer nothing, and
+Upgrading again later does not re-run `V56`, which is already recorded. The restored lists then confer nothing, and
 restored policies keep narrowing (Decision 2) until they are removed: send each enrichment's `get`, `read` and
 `sensitive` empty, and `DELETE` each of its policies, after the second upgrade.

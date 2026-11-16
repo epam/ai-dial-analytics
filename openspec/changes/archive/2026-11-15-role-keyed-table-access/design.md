@@ -290,7 +290,7 @@ validation delegated). Stable codes added to `DefaultExceptionHandler`: `access_
 
 No new resource type: a `PUT`/`DELETE` that changes an entry is one `table_definition` revision, so one `Update`
 activity, attributed as today. `table_definition_aud` gains `column_policies`. The revision mapper assembles `roles`
-from the snapshot's three documents; a pre-V56 revision has `column_policies` `NULL`, read as no policies.
+from the snapshot's three documents; a pre-V57 revision has `column_policies` `NULL`, read as no policies.
 
 ## Risks / Trade-offs
 
@@ -349,7 +349,7 @@ from the snapshot's three documents; a pre-V56 revision has `column_policies` `N
 
 ## Migration Plan
 
-1. `V56__role_keyed_table_access.sql` (one-line header naming what it adds, linking
+1. `V57__role_keyed_table_access.sql` (one-line header naming what it adds, linking
    `openspec/specs/table-access-control/spec.md`):
    `ALTER TABLE table_definition ADD COLUMN column_policies JSONB NOT NULL DEFAULT '{}'::jsonb, ADD COLUMN
    access_generation BIGINT NOT NULL DEFAULT 0;` and `ALTER TABLE table_definition_aud ADD COLUMN column_policies

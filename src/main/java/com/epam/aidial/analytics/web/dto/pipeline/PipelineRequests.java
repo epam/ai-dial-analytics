@@ -210,13 +210,17 @@ public final class PipelineRequests {
                     + "derivation computed in the database)", example = "llm")
             TransformType type,
 
-            @Schema(description = "Request-shaping preset; optional, defaults to chat_completion. Forbidden "
-                    + "for `sql`.", example = "chat_completion")
+            @Schema(description = "How the deployment is called: `chat_completion` (the default) or "
+                    + "`dial_app_route`. Forbidden for `sql`.", example = "chat_completion")
             TransformPreset preset,
 
-            @Schema(description = "DIAL deployment/model the transform calls; required for `llm`, forbidden "
-                    + "for `sql`", example = "gemini-2.5-flash-lite")
+            @Schema(description = "DIAL deployment the transform calls, a model or an application; required for "
+                    + "`llm`, forbidden for `sql`", example = "gemini-2.5-flash-lite")
             String model,
+
+            @Schema(description = "The application route called under `/v1/deployments/{model}/route/`; required "
+                    + "for preset `dial_app_route`, forbidden otherwise", example = "insights")
+            String route,
 
             @Schema(description = "Preset parameters (temperature, max_tokens, …); forbidden for `sql`")
             Map<String, Object> params,
@@ -268,9 +272,13 @@ public final class PipelineRequests {
             @Schema(description = "Request-shaping preset; forbidden for `sql`", example = "chat_completion")
             TransformPreset preset,
 
-            @Schema(description = "DIAL deployment/model; required for `llm`, forbidden for `sql`",
-                    example = "gemini-2.5-flash-lite")
+            @Schema(description = "DIAL deployment, a model or an application; required for `llm`, forbidden for "
+                    + "`sql`", example = "gemini-2.5-flash-lite")
             String model,
+
+            @Schema(description = "The application route; required for preset `dial_app_route`, forbidden otherwise",
+                    example = "insights")
+            String route,
 
             @Schema(description = "Preset parameters; forbidden for `sql`")
             Map<String, Object> params,

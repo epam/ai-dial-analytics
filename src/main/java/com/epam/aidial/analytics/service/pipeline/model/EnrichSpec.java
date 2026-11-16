@@ -237,6 +237,10 @@ public final class EnrichSpec implements PipelineSpec {
         @JsonProperty("preset")
         private TransformPreset preset;
 
+        /** The application route under the deployment's {@code route/} prefix; {@code dial_app_route} only. */
+        @JsonProperty("route")
+        private String route;
+
         /** Parameters shaping the preset's request; {@code llm} only. */
         @JsonProperty("params")
         private Map<String, Object> params;

@@ -36,7 +36,7 @@ same table silently overwrite each other, and there is no way to keep a column f
 - Revision snapshots carry the role-keyed `roles` member in place of `access` and `row_policies`, same withholding.
 - An enrichment's entry takes only `write` and `modify`; anything else is `409 enrichment_follows_source`. Source
   entries name an enrichment's columns as `<enrichment>.<column>`.
-- Catalog: Postgres migration `V56` adds `column_policies` and `access_generation` to `table_definition` (and
+- Catalog: Postgres migration `V57` adds `column_policies` and `access_generation` to `table_definition` (and
   `column_policies` to its audit mirror). No config key.
 
 ## Capabilities
@@ -81,7 +81,7 @@ None.
   code, `none` mode).
 - API: breaking for every client of the old grant and row-policy endpoints; `docs/release-0.24-upgrade.md` maps old
   calls to new ones.
-- Catalog schema: `V56` (two columns, one audit-mirror column). Rolling back to a build without column policies
+- Catalog schema: `V57` (two columns, one audit-mirror column). Rolling back to a build without column policies
   makes every hidden column visible again.
 - Docs: `row-level-security.md`, `catalog-promotion.md`, `claude-code-telemetry.md`, `configuration.md` (prose links
   only, no new property), `recommended-catalog/README.md`, `release-0.24-upgrade.md`.

@@ -3,6 +3,16 @@
 What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
 follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
 
+Three things make this release more than a redeploy:
+
+- a **coordinated deploy** with the Enrichment Runner, because the contract version rises from `4` to `5`; a
+  runner on the other version is refused, so enrichment pauses until both sides match
+  ([Enrichment pipelines calling a DIAL application route](#enrichment-pipelines-calling-a-dial-application-route));
+- a **breaking response shape**: a chart's `y_field` is now an array, so a client that reads it as a string must
+  move to the array ([Multi-series charts](#multi-series-charts));
+- a **wider meaning of `*`** in read-side grant lists and row policies, which now stands for every authenticated
+  caller, so look for a stored `*` before upgrading ([The `*` grantee](#the--grantee)).
+
 ## Multi-series charts
 
 A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
@@ -26,7 +36,7 @@ ordinary role name that matched only a caller carrying a provider role spelled `
   by every authenticated caller, with its sensitive columns when the list is `sensitive`. Remove the entry with the
   previous release's `PUT /v1/tables/{name}/access` unless that is what you want. After the upgrade, the startup log
   lists every table on which the `*` entry carries a privilege or a row policy. It skips an enrichment's `get`,
-  `read` and `sensitive`, which confer nothing any more (and which the `V55` migration clears, a `*` included; see
+  `read` and `sensitive`, which confer nothing any more (and which the `V56` migration clears, a `*` included; see
   below); a `*` row policy on one is still listed.
 - A `*` stored with `write` or `modify` grants nothing, and the next `PUT /v1/tables/{name}/access/*` drops it.
 - **Flight SQL admits every authenticated caller.** The connection gate used to turn away a caller holding no
@@ -61,7 +71,7 @@ Nothing changes for stored policies.
 An enrichment is never queried on its own: every read of its rows has its source as `FROM`. Its `get`, `read` and
 `sensitive` access is now its `source_table`'s, and it stores no row policy (see
 [`table-access-control`](../openspec/specs/table-access-control/spec.md)). `write` and `modify` stay the
-enrichment's own, and its own `modify` still lets a role read its definition. The Postgres migration `V55` removes
+enrichment's own, and its own `modify` still lets a role read its definition. The Postgres migration `V56` removes
 every enrichment's `get`, `read` and `sensitive` lists and its row policies, the seeded `dial_usage_log_payload`
 included.
 
@@ -109,7 +119,7 @@ included.
   `403 sensitive_column_not_entitled` when one carries a sensitive column the caller lacks the source's clearance
   for, where the enrichment used to be left out. An imported enrichment of a source this environment already
   grants is readable at once by that source's readers.
-- **Revision snapshots lag the migration.** `V55` writes no audit revision, so an enrichment's latest snapshot keeps
+- **Revision snapshots lag the migration.** `V56` writes no audit revision, so an enrichment's latest snapshot keeps
   showing the removed lists and policies until its next change.
 
 **Before upgrading**, run both queries against the catalog database.
@@ -159,7 +169,7 @@ SELECT enrichment, 'get', role
   replicas judge enrichments by their own, now empty, lists and still apply the subset rule: they may refuse
   enrichment columns to per-table readers of the source and to runner scans, and fail refreshes of rollups that
   read enrichment columns. These failures are expected, need no action, and stop when the rollout finishes.
-- **Rollback.** `V55` has no undo, and an older build reads the cleared lists as the enrichments' own empty grants:
+- **Rollback.** `V56` has no undo, and an older build reads the cleared lists as the enrichments' own empty grants:
   per-table readers of a source and runner scans lose the enrichment columns, rollups that read them fail every
   refresh, and arming or patching the `enrich` pipeline filling an enrichment is refused. Before upgrading, save
   every enrichment's read-side lists and row policies (`GET /v1/tables/{enrichment}/access` and
@@ -169,7 +179,7 @@ SELECT enrichment, 'get', role
   If a restore is refused `422 sensitive_grant_widens`, or a rollup still fails its refresh, a table was cleared
   after the upgrade for a role not cleared on a table it reads: narrow that table's `read` or `sensitive` list, or
   grant the role on the table it reads. Grant enrichments created after the upgrade the roles of their source's
-  readers that should read them. Upgrading again does not re-run `V55`: then, for each role you restored on an
+  readers that should read them. Upgrading again does not re-run `V56`: then, for each role you restored on an
   enrichment, `PUT /v1/tables/{enrichment}/access/{role}` with only its `write` and `modify`, or
   `DELETE /v1/tables/{enrichment}/access/{role}` when it holds neither, since the restored lists confer nothing and
   the restored policies keep narrowing.
@@ -180,7 +190,7 @@ A table's access is now one **entry** per raw provider role, `{"privileges": [..
 read and replaced at `/v1/tables/{name}/access/{role}` (see
 [`table-access-control`](../openspec/specs/table-access-control/spec.md) and
 [`row-level-security.md`](row-level-security.md)). It replaces both the five-list grant API and the row-policy API,
-which are removed with no alias. Stored grants and row policies need no migration: the Postgres migration `V56` adds
+which are removed with no alias. Stored grants and row policies need no migration: the Postgres migration `V57` adds
 `column_policies` and `access_generation` to `table_definition` (and `column_policies` to its audit mirror), and every
 existing grant and policy reads as an entry, at `generation` 0.
 
@@ -220,7 +230,7 @@ existing grant and policy reads as an entry, at `generation` 0.
   sees them (an encoded NUL, for one) keep its plain `400` page.
 - **Revision snapshots carry `roles`** (the role-keyed entries) in place of `access` and `row_policies`, withheld under
   the same rule as before (`TABLE_GRANT`, or `none` mode). This **breaks a client that reads a snapshot's `access` or
-  `row_policies`**. A revision written before `V56` reads every entry with `columns: null`. Snapshots never carry the
+  `row_policies`**. A revision written before `V57` reads every entry with `columns: null`. Snapshots never carry the
   generation.
 - **`permissions.columns_restricted`** is added on `GET /v1/tables` and `GET /v1/tables/{name}` (additive).
 - **Column policies** are new: an entry's `columns` restricts the role to the listed columns, naming an enrichment's
@@ -274,12 +284,35 @@ Re-grant the access to a role the IdP can emit under an addressable name.
   narrow). The added columns are otherwise harmless to an older build, and grants and row policies written through
   the new API are in the documents it reads.
 
+## Enrichment pipelines calling a DIAL application route
+
+An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
+`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
+response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
+nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
+also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
+
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
+  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
+- **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
+  in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
+  setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
+  with `409 app_route_in_use`.
+- **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
+  `route`, `request_template` and each nested output's `source`, then enable it again.
+- **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
+  sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
+  `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
+  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
+  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
+
 | Change | Effect | Action |
 |---|---|---|
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays as above |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies |
-| An enrichment's `get`, `read`, `sensitive` and rows follow its source; `V55` clears its read-side lists and row policies | New `409 enrichment_follows_source` on `PUT .../access/{role}` for an enrichment when the entry carries `get`, `read`, `sensitive`, `rows` or `columns`; source readers and clearance holders gain its columns; enrichment-only grantees lose them; `supports_final` can turn true | Run the two queries above before upgrading; grant enrichment readers on the source; decide each enrichment policy's replacement; save the lists and policies for a rollback |
+| An enrichment's `get`, `read`, `sensitive` and rows follow its source; `V56` clears its read-side lists and row policies | New `409 enrichment_follows_source` on `PUT .../access/{role}` for an enrichment when the entry carries `get`, `read`, `sensitive`, `rows` or `columns`; source readers and clearance holders gain its columns; enrichment-only grantees lose them; `supports_final` can turn true | Run the two queries above before upgrading; grant enrichment readers on the source; decide each enrichment policy's replacement; save the lists and policies for a rollback |
 | `enrichment_read_inert` removed from `ineffective_grants` | A client matching on the code never sees it | Drop the code from clients |
 | Access `PUT` resolves the table first | A `rows` with both `filter` and `where` for a missing table answers `404`, not `422` | None |
 | Sensitive-grant subset rule removed | No more `422 sensitive_grant_widens` (access and schema endpoints), `422 pipeline_validation_failed` for a widening role (pipeline registration, enable, refresh), or `409 pipeline_declaration_unresolvable` (grant edits, schema edits marking a column sensitive, `enrich` registration and enable) | Review who holds each derived table's clearance: it no longer has to be cleared on what the table derives from |
