@@ -174,7 +174,9 @@ A deployment already on a `Replicated` database whose ADAS tables are plain `Mer
   history table. The session database belongs to ADAS; keep nothing else in it.
 - **How.** For each table: create a replicated twin named `_adas_replicate_<table>`, `ATTACH
   PARTITION ALL FROM` the original (hardlinks, no data rewritten), compare row counts, `EXCHANGE
-  TABLES`, compare again, drop the old copy. A replicated table that still deduplicates inserts gets
+  TABLES`, compare again, drop the old copy. The drop lifts `max_table_size_to_drop` for that
+  statement only, so a table larger than the server's limit (50 GB by default) needs no config
+  change. A writer profile that forbids changing the setting gets the server's limit back. A replicated table that still deduplicates inserts gets
   `ALTER TABLE … MODIFY SETTING` instead.
 - **Watching it.** Each table logs `Converting plain table …` and `Converted … rows in … ms`. Readiness
   stays down, `/v1` answers `503` and scheduled jobs do not run until it finishes. Liveness keeps

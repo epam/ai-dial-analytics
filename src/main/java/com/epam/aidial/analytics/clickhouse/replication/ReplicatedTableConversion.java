@@ -51,6 +51,11 @@ public class ReplicatedTableConversion {
     /** The reserved prefix of a conversion twin; distinct from the relayout's {@code _relayout_}. */
     public static final String PREFIX = "_adas_replicate_";
     private static final int RESTART_ATTEMPTS = 3;
+    /** The server's drop-size guard setting, lifted (set to 0) for twin drops only. */
+    private static final String DROP_SIZE_GUARD = "max_table_size_to_drop";
+    private static final int UNKNOWN_SETTING = 115;
+    private static final int READONLY = 164;
+    private static final int SETTING_CONSTRAINT_VIOLATION = 452;
 
     private static final String TABLES = "SELECT name, engine, engine_full, create_table_query FROM system.tables "
             + "WHERE database = {db:String} AND NOT is_temporary ORDER BY name";
@@ -191,22 +196,22 @@ public class ReplicatedTableConversion {
                 ddl("RENAME TABLE " + ClickHouseIdentifiers.quote(twin.name()) + " TO " + ClickHouseIdentifiers.quote(name));
             } else if (original.plain()) {
                 log.info("Removing the twin of an interrupted conversion of '{}' before its exchange", name);
-                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
+                dropTwin(twin.name(), false);
             } else if (twin.plain() && holdsAtLeast(name, twin.name())) {
                 // The table check refuses to serve while a twin exists, so the converted table has taken no writes
                 // since the exchange; at least as many rows as the old copy means nothing was lost.
                 log.info("Finishing an interrupted conversion of '{}' after its exchange", name);
-                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
+                dropTwin(twin.name(), false);
             } else if (twin.plain()) {
                 // Fewer rows (lost in the copy, or collapsed by a merge of the converted table): the old copy is
                 // restored and the table converts afresh below.
                 log.warn("An interrupted conversion of '{}' left fewer rows in the converted table; exchanging back", name);
                 ddl("EXCHANGE TABLES " + ClickHouseIdentifiers.quote(name) + " AND " + ClickHouseIdentifiers.quote(twin.name()));
-                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
+                dropTwin(twin.name(), false);
             } else {
                 log.warn("Conversion leftover '{}' is replicated beside a replicated '{}'; dropping the leftover",
                         twin.name(), name);
-                ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin.name()));
+                dropTwin(twin.name(), false);
             }
             // An interrupted conversion may have left merges stopped on the table that stays (until a server restart).
             restartMerges(name);
@@ -241,7 +246,7 @@ public class ReplicatedTableConversion {
         final String twin = PREFIX + name;
         final long started = System.nanoTime();
         log.info("Converting plain table '{}' ({}) to its replicated form", name, table.engine());
-        ddl("DROP TABLE IF EXISTS " + ClickHouseIdentifiers.quote(twin));
+        dropTwin(twin, true);
         final long converted;
         try {
             ddl(ReplicatedDdl.toReplicated(ReplicatedDdl.renamed(table.createTableQuery(), connection.sessionDatabase(), twin)));
@@ -256,7 +261,7 @@ public class ReplicatedTableConversion {
                 ddl("ALTER TABLE " + ClickHouseIdentifiers.quote(twin) + " ATTACH PARTITION ALL FROM " + ClickHouseIdentifiers.quote(name));
                 final long before = count(name);
                 if (count(twin) != before) {
-                    ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin));
+                    dropTwin(twin, false);
                     return false;
                 }
             } catch (RuntimeException ex) {
@@ -295,7 +300,7 @@ public class ReplicatedTableConversion {
             throw new IllegalStateException("merges could not be restarted on the converted table; its old copy is kept as '"
                     + twin + "' so the next start restarts them");
         }
-        ddl("DROP TABLE " + ClickHouseIdentifiers.quote(twin));
+        dropTwin(twin, false);
         log.info("Converted '{}' to its replicated form: {} rows in {} ms", name, converted,
                 (System.nanoTime() - started) / 1_000_000);
         return true;
@@ -402,9 +407,37 @@ public class ReplicatedTableConversion {
 
     private void dropQuietly(String table) {
         try {
-            ddl("DROP TABLE IF EXISTS " + ClickHouseIdentifiers.quote(table));
+            dropTwin(table, true);
         } catch (RuntimeException ex) {
             log.warn("Could not remove conversion twin '{}'; the next start removes it: {}", table, ex.getMessage());
+        }
+    }
+
+    /**
+     * Drops a conversion twin with the server's drop-size guard ({@code max_table_size_to_drop}, 50 GB by default)
+     * lifted for this statement. The guard stops an operator dropping a large table by mistake; a twin drop is a step
+     * the conversion has already decided on, and under the guard a large table's twin could never be dropped, so every
+     * start would fail on it. The setting travels with the statement through the database's DDL log, so other
+     * replicas drop their copies under it too.
+     *
+     * <p>When the writer's settings profile forbids changing the setting ({@code SETTING_CONSTRAINT_VIOLATION},
+     * {@code READONLY}), or the server does not take it per query ({@code UNKNOWN_SETTING}), the drop is retried under
+     * the server's guard, as before the override existed: a twin below the guard still drops, and one above it fails
+     * naming the guard.
+     */
+    private void dropTwin(String table, boolean ifExists) {
+        final String statement = "DROP TABLE " + (ifExists ? "IF EXISTS " : "") + ClickHouseIdentifiers.quote(table);
+        final QuerySettings unguarded = DdlSettings.apply(new QuerySettings(), ddl.taskTimeout())
+                .serverSetting(DROP_SIZE_GUARD, "0");
+        try {
+            writer.primaryClient().queryAll(statement, unguarded);
+        } catch (RuntimeException ex) {
+            if (!ClickHouseFailures.hasServerCode(ex, SETTING_CONSTRAINT_VIOLATION, READONLY, UNKNOWN_SETTING)) {
+                throw ex;
+            }
+            log.warn("Cannot lift {} for this drop ({}); dropping conversion twin '{}' under the server's limit",
+                    DROP_SIZE_GUARD, ex.getMessage(), table);
+            ddl(statement);
         }
     }
 

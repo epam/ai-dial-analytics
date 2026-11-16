@@ -129,6 +129,60 @@ class ReplicatedStorageIntegrationTest extends AbstractClickHouseIntegrationTest
         assertThat(queryScalar("SELECT count() AS c FROM " + PLAIN + " SETTINGS final = 0", "c")).isEqualTo("1000");
     }
 
+    /**
+     * The old copy's drop lifts the server's drop-size guard: under {@code max_table_size_to_drop} a large table's old
+     * copy could never be dropped and every start would fail on it.
+     */
+    @Test
+    void theOldCopyIsDroppedWithTheDropSizeGuardLifted() {
+        createPlain("CREATE TABLE " + PLAIN + " (id UInt32) ENGINE = MergeTree ORDER BY id");
+        execute("INSERT INTO " + PLAIN + " SELECT number FROM numbers(10)");
+        final String since = serverNow();
+
+        conversion.convert();
+
+        assertThat(engine(PLAIN).get("engine")).isEqualTo("ReplicatedMergeTree");
+        assertEveryTwinDropLiftedTheGuard(since);
+    }
+
+    /**
+     * Exchanged, then stopped before the old copy was dropped: the converted table serves and the plain old copy sits
+     * beside it. The resume drops the old copy, also with the guard lifted.
+     */
+    @Test
+    void conversionInterruptedAfterTheExchangeIsFinishedWithTheDropSizeGuardLifted() {
+        execute("CREATE TABLE " + PLAIN + " (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS "
+                + ReplicatedDdl.NO_INSERT_DEDUPLICATION);
+        createPlain("CREATE TABLE " + TWIN + " (id UInt32) ENGINE = MergeTree ORDER BY id");
+        execute("INSERT INTO " + TWIN + " SELECT number FROM numbers(10)");
+        execute("ALTER TABLE " + PLAIN + " ATTACH PARTITION ALL FROM " + TWIN);
+        final String since = serverNow();
+
+        conversion.convert();
+
+        assertThat(queryScalar("SELECT count() AS c FROM " + PLAIN, "c")).isEqualTo("10");
+        assertThat(queryScalar("SELECT count() AS c FROM system.tables WHERE database = currentDatabase() AND name = '"
+                + TWIN + "'", "c")).isEqualTo("0");
+        assertEveryTwinDropLiftedTheGuard(since);
+    }
+
+    private String serverNow() {
+        return queryScalar("SELECT toString(now64(6)) AS t", "t");
+    }
+
+    /**
+     * At least one drop of {@link #TWIN} finished since {@code since}, and every one of them lifted
+     * {@code max_table_size_to_drop}. A {@code Replicated} database logs a drop twice (the statement and its replay
+     * from the database log), so the count itself is not pinned.
+     */
+    private void assertEveryTwinDropLiftedTheGuard(String since) {
+        execute("SYSTEM FLUSH LOGS");
+        final String drops = "SELECT count() AS c FROM system.query_log WHERE type = 'QueryFinish' AND query_kind = 'Drop' "
+                + "AND event_time_microseconds >= toDateTime64('" + since + "', 6) AND query LIKE '%" + TWIN + "%'";
+        assertThat(Long.parseLong(queryScalar(drops + " AND Settings['max_table_size_to_drop'] = '0'", "c"))).isPositive();
+        assertThat(queryScalar(drops + " AND Settings['max_table_size_to_drop'] != '0'", "c")).isEqualTo("0");
+    }
+
     /** Stopped after the attach, before the exchange: the original serves, and the next start converts afresh. */
     @Test
     void conversionInterruptedAfterTheAttachIsResumed() {

@@ -208,7 +208,11 @@ twin beside a plain table is dropped and the table converted again; a plain twin
 dropped when the converted table holds at least the twin's rows, and exchanged back otherwise. While any
 reserved-prefix table exists, the startup table check SHALL fail, so no instance serves writes into a table whose
 conversion has not finished and a resume never compares counts a write has moved.
-That prefix SHALL differ from the relayout's. When a table is given up, it stays plain and the startup table
+That prefix SHALL differ from the relayout's. A twin SHALL be dropped with the server's drop-size guard
+(`max_table_size_to_drop`) lifted for that statement only, on every replica. The guard protects against an
+accidental drop, while a twin drop is a step the conversion has already decided on, and under the guard a large
+table's twin could never be dropped, so every start would fail on it. When the writer's settings profile forbids
+changing the setting, or the server does not accept it per query, the drop SHALL be retried under the server's guard. When a table is given up, it stays plain and the startup table
 check then refuses it, naming the table and the reason.
 
 The service SHALL refuse to convert, without issuing any DDL, when the database has another registered replica,
@@ -256,6 +260,12 @@ upgrade documentation SHALL require a deploy that stops the previous version bef
 - **THEN** with migrations disabled the table check fails naming the leftover twin, and no traffic is served
 - **AND** with migrations enabled the leftover is resolved first, the converted table is kept, and the
   service starts
+
+#### Scenario: A table larger than the server's drop-size limit is converted
+
+- **GIVEN** a plain table whose size exceeds the server's `max_table_size_to_drop`
+- **WHEN** the service converts it, or resumes a conversion of it interrupted after the exchange
+- **THEN** the old copy is dropped on every replica and the service starts, with the server setting unchanged
 
 #### Scenario: Diverged replicas are not converted
 

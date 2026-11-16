@@ -244,4 +244,48 @@ class MultiReplicaIntegrationTest {
             CLUSTER.execute(MultiReplicaClickHouseSupport.PRIMARY, "DROP TABLE IF EXISTS " + plain + " SYNC");
         }
     }
+
+    /**
+     * Cut short before its exchange: the replicated twin holds the rows on every replica. The resume drops it with the
+     * drop-size guard lifted, and the setting reaches every replica through the database's DDL log, so a replica's own
+     * guard cannot refuse its copy.
+     */
+    @Test
+    void conversionTwinIsDroppedOnEveryReplicaWithTheDropSizeGuardLifted() {
+        final String plain = "mr_plain_events";
+        final String twin = ReplicatedTableConversion.PREFIX + plain;
+        final String since;
+        try (Client primary = CLUSTER.client(MultiReplicaClickHouseSupport.PRIMARY)) {
+            primary.queryAll("CREATE TABLE " + plain + " (id UInt32) ENGINE = MergeTree ORDER BY id",
+                    new QuerySettings().serverSetting("database_replicated_allow_only_replicated_engine", "0"));
+            primary.queryAll("INSERT INTO " + plain + " SELECT number FROM numbers(10)");
+            primary.queryAll("CREATE TABLE " + twin + " (id UInt32) ENGINE = ReplicatedMergeTree ORDER BY id SETTINGS "
+                    + "replicated_deduplication_window = 0");
+            primary.queryAll("ALTER TABLE " + twin + " ATTACH PARTITION ALL FROM " + plain);
+            since = primary.queryAll("SELECT toString(now64(6)) AS t").getFirst().getString("t");
+        }
+        try {
+            for (final String replica : MultiReplicaClickHouseSupport.REPLICAS) {
+                CLUSTER.execute(replica, "SYSTEM SYNC REPLICA " + twin);
+            }
+
+            conversion.convert();
+
+            for (final String replica : MultiReplicaClickHouseSupport.REPLICAS) {
+                CLUSTER.execute(replica, "SYSTEM SYNC DATABASE REPLICA " + MultiReplicaClickHouseSupport.DATABASE);
+                CLUSTER.execute(replica, "SYSTEM FLUSH LOGS");
+                try (Client client = CLUSTER.client(replica)) {
+                    assertThat(client.queryAll("SELECT count() AS n FROM system.tables WHERE database = currentDatabase() "
+                            + "AND name = '" + twin + "'").getFirst().getLong("n")).as(replica).isZero();
+                    assertThat(client.queryAll("SELECT count() AS n FROM system.query_log WHERE type = 'QueryFinish' "
+                            + "AND query_kind = 'Drop' AND query LIKE '%" + twin + "%' "
+                            + "AND event_time_microseconds >= toDateTime64('" + since + "', 6) "
+                            + "AND Settings['max_table_size_to_drop'] = '0'").getFirst().getLong("n")).as(replica).isPositive();
+                }
+            }
+        } finally {
+            CLUSTER.execute(MultiReplicaClickHouseSupport.PRIMARY, "DROP TABLE IF EXISTS " + twin + " SYNC");
+            CLUSTER.execute(MultiReplicaClickHouseSupport.PRIMARY, "DROP TABLE IF EXISTS " + plain + " SYNC");
+        }
+    }
 }

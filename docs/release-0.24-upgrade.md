@@ -58,7 +58,8 @@ never changes a database engine. Follow
 This is the usual starting point for a deployment managed by ClickHouse's Kubernetes operator: Keeper and a
 `Replicated` database already exist, and every ADAS table in it is plain. The first start with this
 version converts them in place, before the migrations run. The data moves by hardlink and is not
-rewritten.
+rewritten. A table larger than `max_table_size_to_drop` needs no server change: the conversion lifts that
+limit for its own drops.
 
 - **Stop the previous version first.** Use a `Recreate` strategy or scale to zero before deploying. A
   previous-version instance writing during the conversion would lose those rows.
