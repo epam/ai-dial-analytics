@@ -117,7 +117,7 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
         final String entry = "$.pipelines[?(@.name=='" + PIPELINE + "')]";
         mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
                 .andExpect(status().isOk())
-                .andExpect(header().string(RunnerContract.HEADER, "5"))
+                .andExpect(header().string(RunnerContract.HEADER, "6"))
                 .andExpect(jsonPath(entry + ".transform.route").value(hasItem("insights")))
                 .andExpect(jsonPath(entry + ".transform.model").value(hasItem("insights-app")))
                 .andExpect(jsonPath(entry + ".outputs[0].source").value(hasItem("scores.toxicity")));

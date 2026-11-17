@@ -15,14 +15,18 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
 - **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
 - **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
-- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `5`, and a runner on
-  the other version is refused, so enrichment pauses until both sides match (§9).
+- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `6`, and a runner on
+  any other version is refused, so enrichment pauses until both sides match (§9, §14).
 - **An enrichment's read access follows its source table.** A migration removes its own read-side grants and row
   policies, so check who gains and loses access before upgrading (§10).
 - **Table access is managed one role at a time** at `/v1/tables/{name}/access?role=`, with new column policies. The
   old access and row-policy endpoints are removed (§11).
 - **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
   registered `usage-client-identity-live` applies it by hand (§12).
+- **Under `SYNC_REQUEST_BODY_MODE=delta`, a repeated large request body that is not JSON is stored once**, so later
+  rows repeating it have an empty `request_body` (§13).
+- **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
+- **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
 
 ---
 
@@ -171,8 +175,9 @@ response such as `intent_counts.check`, and otherwise reads the response member 
 nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
 also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
 
-- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
-  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `6` in this
+  release (the route preset and the input token budget of §14), and a runner on any other version is refused
+  until both sides match, so enrichment pauses during the skew.
 - **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
   in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
   setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
@@ -341,6 +346,36 @@ Such an empty row holds nothing of its own, so two rules matter once any exist:
 - **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
   empty body.
 
+## 14. Per-pipeline input token budget for group pipelines
+
+The Enrichment Runner trims a group pipeline's assembled input to an approximate token budget before the call, and
+that budget was one runner-wide setting. A `group` pipeline may now declare its own with
+`advanced.input_token_budget` (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
+
+- **`0` switches the runner's trimming off** for that pipeline, for example a `dial_app_route` application that
+  counts tokens and decides what to keep itself. A positive value is the pipeline's own ceiling. Absent keeps the
+  runner's configured default.
+- **Group pipelines only.** On a `schedule` pipeline the member is refused with `422 pipeline_validation_failed`
+  on every write, a disabled draft included, as `trigger.member_select` is. A patch that moves a pipeline from
+  `group` to `schedule` leaves it out of `advanced`. A negative value is refused the same way.
+- **Restate it on every declaration patch.** `advanced` is replaced, not merged, so a `PATCH` that re-declares the
+  pipeline without `advanced.input_token_budget` clears it, and the runner's default trimming applies again.
+- **Contract `6`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
+  it (§9).
+- **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
+  runner's default trimming applies again. Roll ADAS and the runner back together.
+
+## 15. Catalog bundle format version 3
+
+`POST /v1/catalog/export` now writes `format_version: 3`, because a bundle may carry an `enrich` transform's `route`
+(§9) and `advanced.input_token_budget` (§14) (see
+[`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `3`, whatever its
+pipelines use.
+
+- **Import into 0.24 first.** A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`.
+  Upgrade the target before promoting from an upgraded environment.
+- **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -349,7 +384,7 @@ Such an empty row holds nothing of its own, so two rules matter once any exist:
 | `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§7) |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `6` | A runner on any contract other than `6` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
 | An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the two §10 queries, hide or grant per role, save the lists for a rollback (§10) |
 | Sensitive-grant subset rule removed | Derived tables no longer need clearance on their input | Review who holds each derived table's clearance (§10) |
@@ -357,3 +392,5 @@ Such an empty row holds nothing of its own, so two rules matter once any exist:
 | Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§11) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
+| `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
+| Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |

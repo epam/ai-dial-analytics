@@ -306,7 +306,7 @@ public final class PipelineRequests {
             @JsonProperty("response_schema") Map<String, Object> responseSchema) {}
 
     /**
-     * The execution knobs, nested rather than flat so four runner hints stay out of the declaration's
+     * The execution knobs, nested rather than flat so five runner hints stay out of the declaration's
      * required-looking surface in Swagger and in the MCP tool schema.
      *
      * <p><b>These names are the whole vocabulary — both projections serve this block, under these
@@ -341,7 +341,13 @@ public final class PipelineRequests {
             @Schema(description = "Fraction of eligible rows to evaluate, strictly in (0, 1]. A value above "
                     + "1 is refused rather than read as a percentage; 0 is refused naming `enabled: false`, "
                     + "which is how a pipeline that evaluates nothing is declared.", example = "0.1")
-            @JsonProperty("sample_fraction") Double sampleFraction) {}
+            @JsonProperty("sample_fraction") Double sampleFraction,
+
+            @Schema(description = "Approximate token ceiling the runner trims a group's assembled input to. "
+                    + "0 switches the runner's trimming off, a positive value is this pipeline's own ceiling, and "
+                    + "absent means the runner's configured default. Valid only on a `group` pipeline; a negative "
+                    + "value is refused.", example = "8000")
+            @JsonProperty("input_token_budget") Integer inputTokenBudget) {}
 
     /**
      * Body of {@code PATCH /v1/pipelines/{name}}. Every member is optional: sending only {@code enabled}

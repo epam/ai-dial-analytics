@@ -30,8 +30,10 @@ public final class RunnerContract {
      * that raising it is a one-character edit rather than two that could disagree. A literal rather than a
      * rendering of {@link #VERSION} because it is used in an annotation, which needs a compile-time
      * constant.
+     *
+     * <p>{@code 6}: the compiled projection's {@code advanced} block gains {@code input_token_budget}.
      */
-    public static final String VERSION_VALUE = "5";
+    public static final String VERSION_VALUE = "6";
 
     /**
      * The same version as a number, for comparisons and messages. Compared for equality and nothing else;

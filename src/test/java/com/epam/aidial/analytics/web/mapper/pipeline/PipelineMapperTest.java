@@ -84,7 +84,7 @@ class PipelineMapperTest {
     private static CreatePipelineRequest enrich(TriggerRequest trigger) {
         return new CreatePipelineRequest("toxicity-live", PipelineKind.ENRICH, "usage_toxicity", null, null,
                 null, null, null, trigger, llmTransform(vars("text", "request_body")),
-                new AdvancedRequest(5000, 50, 300, null), true);
+                new AdvancedRequest(5000, 50, 300, null, null), true);
     }
 
     /** An {@code llm} transform in the shape a new declaration authors: prose outputs, bound inputs. */
@@ -292,7 +292,7 @@ class PipelineMapperTest {
         // at 1. ADAS refuses the second reading outright, so `50` cannot mean 50% by accident; the runner
         // needs no edit for this, its > 1 branch simply becomes unreachable.
         assertThatThrownBy(() -> mapper.toRegistration(enrichWithAdvanced(
-                new AdvancedRequest(null, null, null, 50.0d))))
+                new AdvancedRequest(null, null, null, 50.0d, null))))
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("advanced.sample_fraction")
                 .hasMessageContaining("(0, 1]")
@@ -304,7 +304,7 @@ class PipelineMapperTest {
         // The sampler reads 0 as keep-nothing: a pipeline that is armed and evaluates no rows. That state
         // has an honest spelling already, so the refusal names it rather than storing the dishonest one.
         assertThatThrownBy(() -> mapper.toRegistration(enrichWithAdvanced(
-                new AdvancedRequest(null, null, null, 0.0d))))
+                new AdvancedRequest(null, null, null, 0.0d, null))))
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("advanced.sample_fraction")
                 .hasMessageContaining("'enabled': false");
@@ -313,14 +313,69 @@ class PipelineMapperTest {
     @Test
     void sampleFractionOfOneIsAccepted() {
         assertThat(((EnrichSpec) mapper.toRegistration(enrichWithAdvanced(
-                new AdvancedRequest(null, null, null, 1.0d))).spec()).getSampling())
+                new AdvancedRequest(null, null, null, 1.0d, null))).spec()).getSampling())
                 .isEqualTo(1.0d);
     }
 
+    @Test
+    void inputTokenBudgetRoundTripsAsSent() {
+        final EnrichSpec spec = (EnrichSpec) mapper.toRegistration(enrichWithAdvanced(
+                new AdvancedRequest(null, null, null, null, 1000), groupTrigger())).spec();
+        final PipelineEntity entity = enrichEntity();
+        entity.setSpec(specCodec.write(spec));
+
+        assertThat(spec.getInputTokenBudget()).isEqualTo(1000);
+        assertThat(mapper.toDto(entity).advanced().inputTokenBudget()).isEqualTo(1000);
+    }
+
+    @Test
+    void zeroInputTokenBudgetIsServedAndKeepsTheAdvancedBlock() {
+        // 0 switches the runner's trimming off: a value, not an absence, so the block holding only it is
+        // served rather than omitted as "no knob declared".
+        final EnrichSpec spec = (EnrichSpec) mapper.toRegistration(enrichWithAdvanced(
+                new AdvancedRequest(null, null, null, null, 0), groupTrigger())).spec();
+        final PipelineEntity entity = enrichEntity();
+        entity.setSpec(specCodec.write(spec));
+
+        final AdvancedRequest advanced = mapper.toDto(entity).advanced();
+        assertThat(advanced).isNotNull();
+        assertThat(advanced.inputTokenBudget()).isZero();
+    }
+
+    @Test
+    void negativeInputTokenBudgetIsRefusedNamingIt() {
+        assertThatThrownBy(() -> mapper.toRegistration(enrichWithAdvanced(
+                new AdvancedRequest(null, null, null, null, -1))))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("advanced.input_token_budget");
+    }
+
+    @Test
+    void anInputTokenBudgetOnAnAggregateDeclarationIsRefusedAsAnEnrichMember() {
+        final CreatePipelineRequest request = new CreatePipelineRequest(NAME, PipelineKind.AGGREGATE,
+                "usage_daily", List.of("dial_usage_log"), null,
+                List.of(new GroupKeyRequest("deployment", null, null)),
+                List.of(new MeasureRequest("call_count", "count", null, null, false)), null, schedule(),
+                null, new AdvancedRequest(null, null, null, null, 0), null);
+
+        assertThatThrownBy(() -> mapper.toRegistration(request))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("advanced.input_token_budget")
+                .hasMessageContaining("'enrich' kind");
+    }
+
     private static CreatePipelineRequest enrichWithAdvanced(AdvancedRequest advanced) {
+        return enrichWithAdvanced(advanced, new TriggerRequest("schedule", null, null, null, null));
+    }
+
+    private static CreatePipelineRequest enrichWithAdvanced(AdvancedRequest advanced, TriggerRequest trigger) {
         return new CreatePipelineRequest("toxicity-live", PipelineKind.ENRICH, "usage_toxicity", null, null,
-                null, null, null, new TriggerRequest("schedule", null, null, null, null),
-                llmTransform(null), advanced, true);
+                null, null, null, trigger, llmTransform(null), advanced, true);
+    }
+
+    /** The trigger {@code advanced.input_token_budget} exists for; the service refuses it on any other. */
+    private static TriggerRequest groupTrigger() {
+        return new TriggerRequest("group", null, "chat_id", new ReadyWhenDto(null, "10m", null, null), null);
     }
 
     // --- cross-kind rejection ------------------------------------------------------------------------
@@ -364,7 +419,7 @@ class PipelineMapperTest {
                 List.of(new GroupKeyRequest("deployment", null, null)),
                 List.of(new MeasureRequest("call_count", "count", null, null, false)), null, schedule(),
                 llmTransform(vars("text", "request_body")),
-                new AdvancedRequest(5000, null, null, null), null);
+                new AdvancedRequest(5000, null, null, null, null), null);
 
         // A caller who mistook one kind's vocabulary for another's has more than one field to fix, and a
         // message naming one of five sends them round the loop four more times.
@@ -485,7 +540,7 @@ class PipelineMapperTest {
     @Test
     void advancedOnlyPatchStillCountsAsDeclarationChange() {
         final PatchPipelineRequest request = new PatchPipelineRequest(null, null, null, null, null, null,
-                null, null, null, null, null, new AdvancedRequest(1200, null, null, null));
+                null, null, null, null, null, new AdvancedRequest(1200, null, null, null, null));
 
         // A knob is a declaration member, so it bumps the change token and re-runs the gate. The failure
         // this pins is not "the knob was ignored" but "the patch answered success having dropped it": a
@@ -555,7 +610,7 @@ class PipelineMapperTest {
         // Not a completeness rule: omitting inputs would repoint the pipeline at its target's parent, a
         // change to what it reads that the draft save never wrote.
         final PatchPipelineRequest request = new PatchPipelineRequest(null, null, null, null, null, null,
-                null, null, null, null, null, new AdvancedRequest(1200, null, null, null));
+                null, null, null, null, null, new AdvancedRequest(1200, null, null, null, null));
 
         assertThatThrownBy(() -> mapper.toRegistration(stored(PipelineKind.ENRICH, "response_ratings", false), request,
                 () -> "turns"))
@@ -611,7 +666,7 @@ class PipelineMapperTest {
     @Test
     void draftPatchMayDropDeclaredReadSourceExplicitly() {
         final PatchPipelineRequest request = new PatchPipelineRequest(null, null, null, null, List.of(), null,
-                null, null, null, null, null, new AdvancedRequest(1200, null, null, null));
+                null, null, null, null, null, new AdvancedRequest(1200, null, null, null, null));
 
         assertThat(mapper.toRegistration(stored(PipelineKind.ENRICH, "response_ratings", false), request,
                 () -> "response_ratings").inputTable()).as("even when the declared source is the parent").isNull();
@@ -634,7 +689,7 @@ class PipelineMapperTest {
     void partialEnrichDeclarationPatchOfDisabledPipelineIsAccepted() {
         final PatchPipelineRequest request = new PatchPipelineRequest(null, null, null, null,
                 null, null, null, null, null, null, null,
-                new AdvancedRequest(1200, null, null, null));
+                new AdvancedRequest(1200, null, null, null, null));
 
         final PipelineRegistration registration = draftPatched(PipelineKind.ENRICH, request);
 
@@ -674,7 +729,7 @@ class PipelineMapperTest {
     void armedIsReadFromTheStoredFlagWhenThePatchCarriesNone() {
         // Asked of an enrich pipeline: a declaration patch of an enabled aggregate is left to the service's 409.
         final PatchPipelineRequest partial = new PatchPipelineRequest(null, null, null, null,
-                null, null, null, null, null, null, null, new AdvancedRequest(1200, null, null, null));
+                null, null, null, null, null, null, null, new AdvancedRequest(1200, null, null, null, null));
 
         assertThat(patched(stored(PipelineKind.ENRICH, null, false), partial)).isNotNull();
         assertThatThrownBy(() -> patched(stored(PipelineKind.ENRICH, null, true), partial))
@@ -698,7 +753,7 @@ class PipelineMapperTest {
     void partialEnrichDeclarationPatchIsRejectedOnItsOwnRequiredSet() {
         final PatchPipelineRequest request = new PatchPipelineRequest(null, null, null, "usage_toxicity",
                 null, null, null, null, null, null, null,
-                new AdvancedRequest(1200, null, null, null));
+                new AdvancedRequest(1200, null, null, null, null));
 
         // A different required set, because an enrich declaration has no group keys or measures — asserting
         // it against the aggregate list would refuse a complete enrich patch. `transform` replaced

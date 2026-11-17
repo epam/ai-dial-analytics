@@ -1,12 +1,15 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.enrichment.support.RunnerContract;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.TestPropertySource;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
@@ -19,8 +22,10 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -932,6 +937,93 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
                 .andExpect(jsonPath("$.message").value(containsString("trigger.member_select is only valid for a group pipeline")));
+    }
+
+    /** Only the group lane has an input budget, so a row-grain pipeline declaring one is refused. */
+    @Test
+    void inputTokenBudgetIsRejectedForRowGrainPipelines() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"row-pipeline\"," + rowTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"advanced\":{\"input_token_budget\":0},"
+                                + "\"enabled\":true}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(
+                        containsString("advanced.input_token_budget is only valid for a group pipeline")));
+    }
+
+    /**
+     * Refused on a draft too, as {@code member_select} is: a stated non-group trigger and a budget contradict each
+     * other whatever the pipeline's state, and a draft storing both would read as a budget that took effect.
+     */
+    @Test
+    void inputTokenBudgetIsRejectedForRowGrainDrafts() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"row-pipeline\"," + rowTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"advanced\":{\"input_token_budget\":0},"
+                                + "\"enabled\":false}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(
+                        containsString("advanced.input_token_budget is only valid for a group pipeline")));
+        mockMvc.perform(get("/v1/pipelines/row-pipeline")).andExpect(status().isNotFound());
+    }
+
+    /** A group pipeline's budget is served under both projections, so the runner reads it from the feed. */
+    @Test
+    void inputTokenBudgetRoundTripsThroughBothProjections() throws Exception {
+        String name = JsonPath.read(mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"conv-budget-pipeline\"," + groupTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"group\",\"group_by\":\"chat_id\","
+                                + "\"ready_when\":{\"idle\":\"10m\"}},"
+                                + "\"advanced\":{\"input_token_budget\":0},"
+                                + "\"enabled\":true}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.advanced.input_token_budget").value(0))
+                .andReturn().getResponse().getContentAsString(), "$.name");
+
+        mockMvc.perform(get("/v1/pipelines/" + name + "?view=source"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.advanced.input_token_budget").value(0));
+
+        mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(RunnerContract.HEADER, "6"))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + name + "')].advanced.input_token_budget")
+                        .value(contains(0)));
+    }
+
+    /** The budget is an authored member, so a catalog bundle carries it to the importing catalog. */
+    @Test
+    void inputTokenBudgetSurvivesCatalogExportAndImport() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"conv-budget-pipeline\"," + groupTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"group\",\"group_by\":\"chat_id\","
+                                + "\"ready_when\":{\"idle\":\"10m\"}},"
+                                + "\"advanced\":{\"input_token_budget\":0},"
+                                + "\"enabled\":true}"))
+                .andExpect(status().isCreated());
+        final String bundle = mockMvc.perform(post("/v1/catalog/export").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"components\":[{\"type\":\"pipeline\",\"name\":\"conv-budget-pipeline\"}]}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        mockMvc.perform(delete("/v1/pipelines/conv-budget-pipeline")).andExpect(status().isNoContent());
+
+        mockMvc.perform(multipart("/v1/catalog/import")
+                        .file(new MockMultipartFile("file", "bundle.json", MediaType.APPLICATION_JSON_VALUE,
+                                bundle.getBytes(StandardCharsets.UTF_8)))
+                        .param("resolution_policy", "SKIP_IF_EXISTS")
+                        .param("acknowledge_reused_names", "true"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/v1/pipelines/conv-budget-pipeline"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.advanced.input_token_budget").value(0));
     }
 
     /** The policy round-trips through the registry and the sync feed, which is how the caller ever sees it. */

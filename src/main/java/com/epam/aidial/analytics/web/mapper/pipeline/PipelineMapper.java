@@ -121,7 +121,8 @@ public abstract class PipelineMapper {
             "transform.params",
             "transform.request_template", "transform.inputs", "transform.outputs",
             "transform.output_vars", "transform.response_schema",
-            "advanced.rows_per_scan", "advanced.rows_per_call", "advanced.rate_rpm", "advanced.sample_fraction");
+            "advanced.rows_per_scan", "advanced.rows_per_call", "advanced.rate_rpm", "advanced.sample_fraction",
+            "advanced.input_token_budget");
 
     /**
      * The retired row-grain trigger kind, refused by name rather than as an unknown value so the author is told
@@ -592,11 +593,12 @@ public abstract class PipelineMapper {
      */
     private static AdvancedRequest toAdvancedDto(EnrichSpec spec) {
         if (spec.getSampling() == null && spec.getBatchScanLimit() == null
-                && spec.getBatchChunk() == null && spec.getRateRpm() == null) {
+                && spec.getBatchChunk() == null && spec.getRateRpm() == null
+                && spec.getInputTokenBudget() == null) {
             return null;
         }
         return new AdvancedRequest(spec.getBatchScanLimit(), spec.getBatchChunk(), spec.getRateRpm(),
-                spec.getSampling());
+                spec.getSampling(), spec.getInputTokenBudget());
     }
 
     /**
@@ -782,6 +784,7 @@ public abstract class PipelineMapper {
             spec.setBatchScanLimit(advanced == null ? null : advanced.rowsPerScan());
             spec.setBatchChunk(advanced == null ? null : advanced.rowsPerCall());
             spec.setRateRpm(advanced == null ? null : advanced.rateRpm());
+            spec.setInputTokenBudget(inputTokenBudgetOf(advanced));
             return spec;
         }
         final AggregateSpec spec = new AggregateSpec();
@@ -997,6 +1000,22 @@ public abstract class PipelineMapper {
     }
 
     /**
+     * {@code input_token_budget}, stored as sent once a negative value is refused: {@code 0} switches the
+     * runner's trimming off and is a value, not an absence, and a negative ceiling has no meaning.
+     */
+    private static Integer inputTokenBudgetOf(AdvancedRequest advanced) {
+        if (advanced == null || advanced.inputTokenBudget() == null) {
+            return null;
+        }
+        final int budget = advanced.inputTokenBudget();
+        if (budget < 0) {
+            throw new PipelineValidationException("advanced.input_token_budget must be 0 or greater, not " + budget
+                    + "; 0 switches the runner's trimming off");
+        }
+        return budget;
+    }
+
+    /**
      * v1 reads exactly one source. A multi-source declaration is rejected rather than silently truncated.
      * An absent one is accepted for either kind here: an {@code enrich} pipeline may follow its target's
      * parent, and an {@code aggregate} pipeline may not have named its input yet while it is being
@@ -1163,7 +1182,8 @@ public abstract class PipelineMapper {
                 advanced == null ? null : advanced.rowsPerScan(),
                 advanced == null ? null : advanced.rowsPerCall(),
                 advanced == null ? null : advanced.rateRpm(),
-                advanced == null ? null : advanced.sampleFraction());
+                advanced == null ? null : advanced.sampleFraction(),
+                advanced == null ? null : advanced.inputTokenBudget());
     }
 
     /** The names, in {@code names} order, of the values that were actually sent. */
