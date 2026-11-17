@@ -1,11 +1,13 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.dashboard.DashboardAccess;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
@@ -34,6 +36,14 @@ abstract class AbstractPostgresIntegrationTest {
 
     @Autowired
     protected MockMvc mockMvc;
+
+    /**
+     * A spy so {@link DashboardWriteRaceIntegrationTest} can hold a write between its check and its commit. Declared
+     * here rather than there because a bean override is part of the test-context cache key: on one subclass it would
+     * fork a second context. Unstubbed it calls the real bean, and Mockito resets it after every test.
+     */
+    @MockitoSpyBean
+    protected DashboardAccess dashboardAccess;
 
     @DynamicPropertySource
     static void postgresProperties(DynamicPropertyRegistry registry) {

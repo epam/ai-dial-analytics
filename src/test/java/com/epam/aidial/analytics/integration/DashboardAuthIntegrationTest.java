@@ -1,17 +1,9 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
-import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.List;
@@ -31,44 +23,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <p>Every caller's privileges come from a {@code roles-mapping}, never from injected authorities, so the
  * {@code SAVED_QUERY_WRITE -> SAVED_QUERY_READ} and {@code SAVED_QUERY_PUBLISH -> SAVED_QUERY_READ}
- * implications under test are the parser's. One provider maps
- * the bundles; another maps single privileges, each alongside {@code TABLE_READ} only so its inline bodies
- * translate — that privilege implies nothing about dashboards.
+ * implications under test are the parser's. The shared {@code personas} provider maps
+ * the bundles and the single privileges, each single privilege alongside {@code TABLE_READ} only so its inline
+ * bodies translate — that privilege implies nothing about dashboards.
  *
- * <p>Only PostgreSQL is required; inline bodies are validated by translation, never executed.
+ * <p>Inline bodies are validated by translation and not meant to be executed. The context is the shared one
+ * of {@link AbstractOidcAuthIntegrationTest}, which points at a live ClickHouse, so this is design intent the
+ * test does not check: an accidental execution would succeed rather than fail it.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "clickhouse.migrations.enabled=false",
-        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
-        "clickhouse.port=1",
-        "sync.validate-schema=false",
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.bundles.issuer=" + DashboardAuthIntegrationTest.BUNDLES_ISSUER,
-        "providers.bundles.jwk-set-uri=https://issuer.test/bundles/jwks",
-        "providers.bundles.audiences=" + DashboardAuthIntegrationTest.AUDIENCE,
-        "providers.bundles.role-claims=roles",
-        "providers.bundles.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
-                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"]}",
-        "providers.single.issuer=" + DashboardAuthIntegrationTest.SINGLE_ISSUER,
-        "providers.single.jwk-set-uri=https://issuer.test/single/jwks",
-        "providers.single.audiences=" + DashboardAuthIntegrationTest.AUDIENCE,
-        "providers.single.role-claims=roles",
-        "providers.single.roles-mapping={\"reader\":[\"SAVED_QUERY_READ\",\"TABLE_READ\"],"
-                + "\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
-                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"readpublisher\":[\"SAVED_QUERY_READ\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"tableonly\":[\"TABLE_READ\"]}",
-})
-@AutoConfigureMockMvc
-@Import({TestSecurityConfig.class, OpenStorageGate.class})
-class DashboardAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String BUNDLES_ISSUER = "https://issuer.test/bundles";
-    static final String SINGLE_ISSUER = "https://issuer.test/single";
+class DashboardAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String BASE = "/v1/dashboards";
     private static final String FEED = "/v1/activities";
@@ -81,14 +44,6 @@ class DashboardAuthIntegrationTest {
     private static final String SENSITIVE_WIDGET = """
             {"id":"w1","row_limit":10,"layout":{"x":0,"y":0,"w":6,"h":4},
              "inline_query":{"name":"Sensitive","sql":"SELECT project_id FROM dial_usage_log WHERE \\"dial_usage_log_payload.request_body\\" = 'a secret'"}}""";
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @DynamicPropertySource
-    static void dynamicProperties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-    }
 
     // ---------------------------------------------------------------- visibility
 
@@ -476,7 +431,7 @@ class DashboardAuthIntegrationTest {
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder builder, String token) {
-        return builder.header(HttpHeaders.AUTHORIZATION, "Bearer " + token).contentType("application/json");
+        return builder.header(HttpHeaders.AUTHORIZATION, bearer(token)).contentType("application/json");
     }
 
     private static String token(String issuer, String sub, String role) {
@@ -486,54 +441,54 @@ class DashboardAuthIntegrationTest {
     }
 
     private static String admin() {
-        return token(BUNDLES_ISSUER, "admin-user", "admin");
+        return token(PERSONAS_ISSUER, "admin-user", "admin");
     }
 
     private static String otherAdmin() {
-        return token(BUNDLES_ISSUER, "admin-user-2", "admin");
+        return token(PERSONAS_ISSUER, "admin-user-2", "admin");
     }
 
     /** {@code READ_ONLY_ADMIN}: keeps private dashboards and reads the audit feed. */
     private static String alice() {
-        return token(BUNDLES_ISSUER, "alice", "viewer");
+        return token(PERSONAS_ISSUER, "alice", "viewer");
     }
 
     /** A second {@code READ_ONLY_ADMIN}, so the owner filter has two people holding the same role. */
     private static String bob() {
-        return token(BUNDLES_ISSUER, "bob", "viewer");
+        return token(PERSONAS_ISSUER, "bob", "viewer");
     }
 
     private static String analyst() {
-        return token(BUNDLES_ISSUER, "analyst", "analyst");
+        return token(PERSONAS_ISSUER, "analyst", "analyst");
     }
 
     /** A {@code READ_ONLY_ADMIN} whose token carries no {@code sub}, so its principal does not resolve. */
     private static String principalless() {
-        return token(BUNDLES_ISSUER, null, "viewer");
+        return token(PERSONAS_ISSUER, null, "viewer");
     }
 
     /** The same, holding {@code FULL_ADMIN}, so it can create a public dashboard with no owner. */
     private static String principallessAdmin() {
-        return token(BUNDLES_ISSUER, null, "admin");
+        return token(PERSONAS_ISSUER, null, "admin");
     }
 
     private static String reader() {
-        return token(SINGLE_ISSUER, "reader", "reader");
+        return token(PERSONAS_ISSUER, "reader", "reader");
     }
 
     private static String writer() {
-        return token(SINGLE_ISSUER, "writer", "writer");
+        return token(PERSONAS_ISSUER, "writer", "writer");
     }
 
     private static String publisher() {
-        return token(SINGLE_ISSUER, "publisher", "publisher");
+        return token(PERSONAS_ISSUER, "publisher", "publisher");
     }
 
     private static String readPublisher() {
-        return token(SINGLE_ISSUER, "readpublisher", "readpublisher");
+        return token(PERSONAS_ISSUER, "readpublisher", "readpublisher");
     }
 
     private static String tableOnly() {
-        return token(SINGLE_ISSUER, "tableonly", "tableonly");
+        return token(PERSONAS_ISSUER, "tableonly", "tableonly");
     }
 }

@@ -2,7 +2,6 @@ package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.service.audit.AuditActivityEntity;
 import com.epam.aidial.analytics.service.audit.AuditActivityRepository;
-import com.epam.aidial.analytics.service.dashboard.DashboardAccess;
 import com.epam.aidial.analytics.service.dashboard.DashboardVisibility;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -39,8 +37,6 @@ class DashboardWriteRaceIntegrationTest extends AbstractPostgresIntegrationTest 
 
     private static final String BASE = "/v1/dashboards";
 
-    @MockitoSpyBean
-    private DashboardAccess access;
     @Autowired
     private JdbcTemplate jdbc;
     @Autowired
@@ -58,7 +54,7 @@ class DashboardWriteRaceIntegrationTest extends AbstractPostgresIntegrationTest 
                 onAnotherConnection(write);
             }
             return null;
-        }).when(access).requireWritable(any(DashboardVisibility.class));
+        }).when(dashboardAccess).requireWritable(any(DashboardVisibility.class));
     }
 
     @Test
