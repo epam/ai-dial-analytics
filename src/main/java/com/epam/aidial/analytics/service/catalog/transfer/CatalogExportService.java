@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.PipelineNotFoundException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
@@ -15,6 +16,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -122,8 +124,8 @@ public class CatalogExportService {
     }
 
     /**
-     * A table in bundle shape, whatever the caller may see: every stored column and, when {@code withAccess},
-     * its grants. For import's {@code prev}, which describes the target's own object to the importing caller.
+     * A table in bundle shape, whatever the caller may see: every stored column, and no grants, which never
+     * travel. For import's {@code prev}, which describes the target's own object to the importing caller.
      */
     @Transactional(readOnly = true)
     public BundleTable bundleTable(TableDefinitionEntity definition) {
@@ -412,8 +414,24 @@ public class CatalogExportService {
                     .collect(Collectors.groupingBy(ColumnMappingEntity::getTableName));
         }
 
-        /** Columns are never dropped silently: a bundle table whose sensitive column the caller cannot see is a 403. */
+        /**
+         * Columns are never dropped silently: a bundle table with a column the caller cannot see is a 403 — one a column
+         * policy hides is {@code column_not_entitled}, checked across every bundle table before any is checked for the
+         * clearance, so the code does not depend on the order the tables were selected in.
+         */
         private void requireSensitiveVisible() {
+            for (final String name : tables.keySet()) {
+                final ColumnVisibility visibility = sensitiveAccess.visibleColumns(name);
+                final ColumnMappingEntity hiddenColumn = visibility.isAll() ? null : mappings.getOrDefault(name, List.of()).stream()
+                        .filter(column -> !visibility.allows(column.getName()))
+                        .findFirst()
+                        .orElse(null);
+                if (hiddenColumn != null) {
+                    throw new ColumnNotEntitledException("table '" + name + "' has column '" + hiddenColumn.getName()
+                            + "', which a column policy hides from this caller; a bundle carries every column, so it "
+                            + "cannot be exported by this caller");
+                }
+            }
             for (final String name : tables.keySet()) {
                 if (sensitiveAccess.maySeeSensitive(name)) {
                     continue;

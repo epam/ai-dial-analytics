@@ -186,7 +186,8 @@ public class EnrichPreviewService {
         if (bound != null && bound.withholdsEverything()) {
             notes.add(PreviewNotes.heldByEnrichment(bound.enrichment()));
         } else if (bound != null && preview.newest() != null && preview.newest().isPast(bound)) {
-            notes.add(PreviewNotes.enrichmentBehind(bound.enrichment(), preview.newest().version(), bound.version(), true));
+            notes.add(PreviewNotes.enrichmentBehind(bound.enrichment(), preview.newest().version(), bound.version(), true,
+                    preview.versionVisible()));
         }
         if (preview.rows().isEmpty()) {
             notes.add(noMatchingRows());

@@ -15,6 +15,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.List;
 import java.util.Map;
@@ -22,7 +24,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -51,6 +55,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String ROLLUP = "rls_rollup";
     private static final String PIPELINE = "rls-rollup";
     private static final String COUNT = "SELECT count(*) AS c FROM " + PROBE;
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     @Autowired
     private TableDefinitionRepository definitions;
@@ -68,9 +73,9 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                          {"project":"P3","n":4}]}"""))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.inserted").value(4));
-        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"read\":[\"team-x\",\"team-y\"]}"))
-                .andExpect(status().isOk());
+        for (final String role : List.of("team-x", "team-y")) {
+            putEntry(PROBE, role, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+        }
     }
 
     @AfterEach
@@ -86,32 +91,38 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     void policyIsCreatedReadAndRemoved() throws Exception {
         putPolicy("team-x", projectIn("P1"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.filter.op").value("in"));
+                .andExpect(jsonPath("$.rows.filter.op").value("in"))
+                .andExpect(jsonPath("$.privileges[0]").value("read"));
         putPolicy("team-y", projectIn("P2")).andExpect(status().isOk());
 
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
+        asAdmin(get(BASE + "/" + PROBE + "/access"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.policies['team-x'].filter.args[0].name").value("project"))
-                .andExpect(jsonPath("$.policies['team-y'].filter.args[1].items[0].value").value("P2"));
+                .andExpect(jsonPath("$.roles['team-x'].rows.filter.args[0].name").value("project"))
+                .andExpect(jsonPath("$.roles['team-y'].rows.filter.args[1].items[0].value").value("P2"));
 
-        asAdmin(delete(BASE + "/" + PROBE + "/row-policies/team-x")).andExpect(status().isNoContent());
-        asAdmin(delete(BASE + "/" + PROBE + "/row-policies/team-x"))
+        // Clearing the policy keeps the role's read.
+        putPolicy("team-x", "null").andExpect(status().isOk()).andExpect(jsonPath("$.rows").value(nullValue()));
+        asAdmin(get(BASE + "/" + PROBE + "/access"))
+                .andExpect(jsonPath("$.roles['team-x'].rows").value(nullValue()))
+                .andExpect(jsonPath("$.roles['team-x'].privileges[0]").value("read"));
+        // A role with no entry has nothing to remove.
+        asAdmin(delete(BASE + "/" + PROBE + "/access?role=team-z"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
-                .andExpect(jsonPath("$.policies['team-x']").doesNotExist());
     }
 
     @Test
     void thePolicyApiRequiresTableGrant() throws Exception {
-        mockMvc.perform(get(BASE + "/" + PROBE + "/row-policies").header(HttpHeaders.AUTHORIZATION, bearer(token("viewer"))))
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(token("viewer"))))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"));
-        mockMvc.perform(put(BASE + "/" + PROBE + "/row-policies/team-x")
+        mockMvc.perform(put(BASE + "/" + PROBE + "/access?role=team-x")
                         .header(HttpHeaders.AUTHORIZATION, bearer(token("viewer")))
-                        .contentType(MediaType.APPLICATION_JSON).content(projectIn("P1")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"generation\":" + access(PROBE).get("generation").asLong() + ",\"privileges\":[\"read\"],"
+                                + "\"rows\":" + projectIn("P1") + "}"))
                 .andExpect(status().isForbidden());
-        asAdmin(get(BASE + "/no_such_table/row-policies"))
+        asAdmin(get(BASE + "/no_such_table/access"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
     }
@@ -142,7 +153,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("bad_request"));
 
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+        assertNoPolicies();
     }
 
     // --- enforcement ---------------------------------------------------------------------------------------
@@ -258,11 +269,11 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     void callerValueConfinesEachCallerToItsOwnRows() throws Exception {
         putPolicy("team-x", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.filter.args[1].type").value("param"))
-                .andExpect(jsonPath("$.filter.args[1].name").value("caller.user_hash"));
+                .andExpect(jsonPath("$.rows.filter.args[1].type").value("param"))
+                .andExpect(jsonPath("$.rows.filter.args[1].name").value("caller.user_hash"));
         // Stored with the parameter, never with one caller's value.
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
-                .andExpect(jsonPath("$.policies['team-x'].filter.args[1].name").value("caller.user_hash"));
+        asAdmin(get(BASE + "/" + PROBE + "/access"))
+                .andExpect(jsonPath("$.roles['team-x'].rows.filter.args[1].name").value("caller.user_hash"));
 
         // One policy, two callers, two answers.
         sql(callerToken("P1", "team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
@@ -319,9 +330,13 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     @Test
     void wildcardGrantAndPolicyGiveEveryCallerItsOwnRows() throws Exception {
         // One unit for everyone: `*` may read, confined to its own rows. No role is granted the read by name.
-        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content("{\"read\":[\"*\"]}"))
+        for (final String role : List.of("team-x", "team-y")) {
+            asAdmin(delete(BASE + "/" + PROBE + "/access?role=" + role)).andExpect(status().isNoContent());
+        }
+        putEntry(PROBE, "*", "\"privileges\":[\"read\"]")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.read[0]").value("*"));
+                .andExpect(jsonPath("$.role").value("*"))
+                .andExpect(jsonPath("$.privileges[0]").value("read"));
         putPolicy("*", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}").andExpect(status().isOk());
 
         // A caller whose only role has nothing to do with the table, and one with no role at all.
@@ -338,7 +353,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
 
         // Everyone may be let in to read, never to write.
-        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content("{\"write\":[\"*\"]}"))
+        putEntry(PROBE, "*", "\"privileges\":[\"read\",\"write\"]")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("validation_error"));
     }
@@ -350,17 +365,17 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
         // Every caller carries `*`, which now reads with no policy: by the rule, that lifts team-x's
         // confinement. The grant is accepted and says so.
-        final String everyone = "{\"read\":[\"team-x\",\"team-y\",\"*\"]}";
-        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content(everyone))
+        putEntry(PROBE, "*", "\"privileges\":[\"read\"]")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.ineffective_grants", hasSize(1)))
+                .andExpect(jsonPath("$.ineffective_grants", hasSize(2)))
                 .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
-                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"));
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
         sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
 
         // With a policy of its own, `*` confines again and the grant is no longer reported.
-        putPolicy("*", projectIn("P2")).andExpect(status().isOk());
-        asAdmin(put(BASE + "/" + PROBE + "/access").contentType(MediaType.APPLICATION_JSON).content(everyone))
+        putPolicy("*", projectIn("P2"))
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.ineffective_grants").isEmpty());
         sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
     }
@@ -392,7 +407,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     @Test
     void ownRowsPolicyOnTheUsageLogCoversItsPayloadEnrichment() throws Exception {
         // The payload table has no user column and needs none: it is only ever joined from the usage log, so
-        // the usage log's policy decides which payload rows a caller can reach.
+        // the usage log's policy decides which payload rows a caller can reach, and its grants who reads them.
         final String usage = "dial_usage_log";
         final String payload = "dial_usage_log_payload";
         final String time = "'" + java.time.LocalDate.now(java.time.ZoneOffset.UTC) + " 00:00:00.000'";
@@ -408,14 +423,9 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                         + " request_body) VALUES (toUUID('" + row[0] + "')," + time + ",'rls-own','" + row[0].substring(28)
                         + "','" + row[2] + "')");
             }
-            // The payload columns are sensitive, and a clearance on a table is bounded by the one it reads.
-            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
-            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"read\":[\"team-x\"],\"sensitive\":[\"team-x\"]}")).andExpect(status().isOk());
-            asAdmin(put(BASE + "/" + usage + "/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
-                            + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}"))
+            // The payload columns are sensitive; the usage log's read and clearance are the payload's.
+            putEntry(usage, "team-x", "\"privileges\":[\"read\",\"sensitive\"],\"rows\":{\"filter\":{\"op\":\"eq\",\"args\":["
+                    + "{\"type\":\"field\",\"name\":\"user_hash\"},{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}")
                     .andExpect(status().isOk());
 
             final String query = "{\"entity\":\"" + usage + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\","
@@ -440,12 +450,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
             // Unconfined, both rows are there to be confined from.
             execute(adminToken(), query).andExpect(jsonPath("$.rows", hasSize(2)));
         } finally {
-            asAdmin(delete(BASE + "/" + usage + "/row-policies/team-x"));
-            // The derived table first: the source's clearance cannot be withdrawn from under it.
-            // An absent key leaves its list untouched, so each is cleared by name.
-            final String none = "{\"read\":[],\"sensitive\":[]}";
-            asAdmin(put(BASE + "/" + payload + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
-            asAdmin(put(BASE + "/" + usage + "/access").contentType(MediaType.APPLICATION_JSON).content(none));
+            asAdmin(delete(BASE + "/" + usage + "/access?role=team-x"));
             try (com.clickhouse.client.api.Client writer = clickHouseWriter()) {
                 writer.queryAll("ALTER TABLE " + usage + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
                 writer.queryAll("ALTER TABLE " + payload + " DELETE WHERE trace_id = 'rls-own' SETTINGS mutations_sync = 1");
@@ -483,7 +488,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .andExpect(jsonPath("$.error").value("validation_error"));
         }
 
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+        assertNoPolicies();
     }
 
     @Test
@@ -498,9 +503,8 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                             + "\"ordering_key\":[\"id\"]}"))
                     .andExpect(status().isOk());
 
-            asAdmin(put(BASE + "/" + table + "/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"kind\"},"
-                            + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}"))
+            putPolicy(table, "team-x", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"kind\"},"
+                            + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}")
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.error").value("validation_error"));
         } finally {
@@ -526,13 +530,13 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     void policyWrittenAsSqlConditionIsStoredAsItsFilter() throws Exception {
         putPolicy("team-x", "{\"where\":\"project IN ('P1', 'P2')\"}")
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.filter").exists())
+                .andExpect(jsonPath("$.rows.filter").exists())
                 // The text is an input format: what is stored and returned is the filter.
-                .andExpect(jsonPath("$.where").doesNotExist());
+                .andExpect(jsonPath("$.rows.where").doesNotExist());
         sql(token("team-x"), COUNT).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(3));
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies"))
-                .andExpect(jsonPath("$.policies['team-x'].filter").exists())
-                .andExpect(jsonPath("$.policies['team-x'].where").doesNotExist());
+        asAdmin(get(BASE + "/" + PROBE + "/access"))
+                .andExpect(jsonPath("$.roles['team-x'].rows.filter").exists())
+                .andExpect(jsonPath("$.roles['team-x'].rows.where").doesNotExist());
 
         putPolicy("team-x", "{\"where\":\"project = caller.user_hash\"}")
                 .andExpect(status().isOk())
@@ -602,15 +606,16 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.message").value(containsString("no subquery and no other clause")));
         }
-        asAdmin(get(BASE + "/" + PROBE + "/row-policies")).andExpect(jsonPath("$.policies").isEmpty());
+        assertNoPolicies();
 
-        // An enrichment is never a statement's FROM, so its policies are written as a filter.
-        asAdmin(put(BASE + "/dial_usage_log_payload/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"where\":\"trace_id = 'x'\"}"))
-                .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.message").value(containsString("enrichment")));
-        asAdmin(put(BASE + "/no_such_table/row-policies/team-x").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"where\":\"a = 1\"}"))
+        // An enrichment takes no policy at all: its rows are its source's, so the refusal names the source.
+        asAdmin(put(BASE + "/dial_usage_log_payload/access?role=team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"generation\":0,\"rows\":{\"where\":\"trace_id = 'x'\"}}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"))
+                .andExpect(jsonPath("$.message").value(containsString("dial_usage_log'")));
+        asAdmin(put(BASE + "/no_such_table/access?role=team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"generation\":0,\"rows\":{\"where\":\"a = 1\"}}"))
                 .andExpect(status().isNotFound());
     }
 
@@ -637,7 +642,7 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(jsonPath("$.error").value("column_in_row_policy"))
                 .andExpect(jsonPath("$.message").value(containsString("team-x")));
 
-        asAdmin(delete(BASE + "/" + PROBE + "/row-policies/team-x")).andExpect(status().isNoContent());
+        putPolicy("team-x", "null").andExpect(status().isOk());
         asAdmin(patch(BASE + "/" + PROBE + "/schema").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"rename\":[{\"from\":\"project\",\"to\":\"proj\"}]}"))
                 .andExpect(status().isOk());
@@ -683,9 +688,38 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isOk());
     }
 
-    private ResultActions putPolicy(String role, String body) throws Exception {
-        return asAdmin(put(BASE + "/" + PROBE + "/row-policies/" + role)
-                .contentType(MediaType.APPLICATION_JSON).content(body));
+    private ResultActions putPolicy(String role, String rows) throws Exception {
+        return putPolicy(PROBE, role, rows);
+    }
+
+    /**
+     * Sets {@code role}'s row policy on {@code table} to {@code rows} ({@code {"filter": ...}}, {@code {"where": ...}} or
+     * {@code null}), keeping the privileges and columns its entry already holds: a PUT replaces the whole entry.
+     */
+    private ResultActions putPolicy(String table, String role, String rows) throws Exception {
+        final JsonNode access = access(table);
+        final JsonNode entry = access.path("roles").path(role);
+        return asAdmin(put(BASE + "/" + table + "/access?role=" + role).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"generation\":" + access.get("generation").asLong()
+                        + ",\"privileges\":" + (entry.has("privileges") ? entry.get("privileges").toString() : "[]")
+                        + ",\"columns\":" + (entry.has("columns") ? entry.get("columns").toString() : "null")
+                        + ",\"rows\":" + rows + "}"));
+    }
+
+    /** PUTs {@code role}'s whole entry on {@code table} ({@code members} plus the current generation). */
+    private ResultActions putEntry(String table, String role, String members) throws Exception {
+        return asAdmin(put(BASE + "/" + table + "/access?role=" + role).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"generation\":" + access(table).get("generation").asLong() + "," + members + "}"));
+    }
+
+    private JsonNode access(String table) throws Exception {
+        return JSON.readTree(asAdmin(get(BASE + "/" + table + "/access")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+    }
+
+    /** No role on the probe carries a row policy. */
+    private void assertNoPolicies() throws Exception {
+        asAdmin(get(BASE + "/" + PROBE + "/access")).andExpect(jsonPath("$.roles[*].rows", everyItem(nullValue())));
     }
 
     private ResultActions execute(String token, String query) throws Exception {

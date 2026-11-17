@@ -42,6 +42,14 @@ public record QueryEntityModel(
         boolean collapsing,
         boolean finalCapable) {
 
+    /**
+     * Whether the entity's own column with physical name {@code physical} is in this caller's model — absent when a
+     * column policy hides it or it is sensitive and the caller lacks the clearance.
+     */
+    public boolean exposesSourceColumn(String physical) {
+        return baseSchema.stream().anyMatch(field -> !field.name().contains(".") && field.source().equals(physical));
+    }
+
     public QueryEntityModel {
         bindings = Collections.unmodifiableMap(new LinkedHashMap<>(bindings));
     }

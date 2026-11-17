@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
+import com.jayway.jsonpath.JsonPath;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -187,7 +188,7 @@ class ApiKeyAuthIntegrationTest {
         // A project key has a project and no user hash, a per-user key the reverse; the unknown side of the
         // OR matches nothing and the other side confines each key to its own rows.
         final String field = "{\"type\":\"field\",\"name\":\"owner\"}";
-        final String filter = "{\"filter\":{\"op\":\"or\",\"args\":["
+        final String rows = "{\"filter\":{\"op\":\"or\",\"args\":["
                 + "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"param\",\"name\":\"caller.project\"}]},"
                 + "{\"op\":\"eq\",\"args\":[" + field + ",{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}]}}";
         mockMvc.perform(post(BASE).header("Api-Key", ADMIN_KEY).contentType(MediaType.APPLICATION_JSON).content(createBody()))
@@ -203,8 +204,10 @@ class ApiKeyAuthIntegrationTest {
                                 + "{\"owner\":\"u1@test\",\"n\":3},{\"owner\":\"other\",\"n\":4}]}"))
                 .andExpect(status().isOk());
         for (final String role : List.of("admin", "viewer")) {
-            mockMvc.perform(put(BASE + "/" + PROBE_TABLE + "/row-policies/" + role).header("Api-Key", ADMIN_KEY)
-                            .contentType(MediaType.APPLICATION_JSON).content(filter))
+            final Number generation = JsonPath.read(mockMvc.perform(get(BASE + "/" + PROBE_TABLE + "/access").header("Api-Key", ADMIN_KEY))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.generation");
+            mockMvc.perform(put(BASE + "/" + PROBE_TABLE + "/access?role=" + role).header("Api-Key", ADMIN_KEY)
+                            .contentType(MediaType.APPLICATION_JSON).content("{\"generation\":" + generation + ",\"rows\":" + rows + "}"))
                     .andExpect(status().isOk());
         }
 

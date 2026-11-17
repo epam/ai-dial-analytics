@@ -57,7 +57,7 @@ an optional Arrow Flight SQL endpoint. BI tools such as Grafana and Power BI can
 - **OpenTelemetry sinks:** ADAS can act as an OTLP/HTTP backend, landing logs, traces and metrics in
   queryable tables.
 - **Access control:** OIDC and DIAL API key authentication, per-table grants, sensitive and heavy column
-  handling, and row-level security.
+  handling, and per-role row and column policies.
 - **Saved queries, dashboards and audit trail:** shareable saved queries and dashboards of query widgets,
   plus a full revision history of catalog changes.
 - **Catalog promotion:** export and import user tables and pipelines between environments.
@@ -193,7 +193,7 @@ In `oidc` mode, callers authenticate with an OIDC bearer token or a DIAL API key
 governed per table, with more controls on top:
 
 - [Sensitive and heavy columns](docs/heavy-columns.md) for raw prompt and response payloads
-- [Row-level security](docs/row-level-security.md) per provider role
+- [Row- and column-level security](docs/row-level-security.md) per provider role
 
 The shipped mapping stores raw request and response bodies in an encrypted payload table with a 90-day
 retention by default (`SYNC_PAYLOAD_TTL_DAYS`). Review [column mapping](docs/column-mapping.md) before enabling ingestion.
@@ -216,7 +216,7 @@ To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a publ
 | Heavy and sensitive columns | [docs/heavy-columns.md](docs/heavy-columns.md) |
 | Enum columns | [docs/enum-columns.md](docs/enum-columns.md) |
 | Column tags | [docs/column-tags.md](docs/column-tags.md) |
-| Row-level security | [docs/row-level-security.md](docs/row-level-security.md) |
+| Row- and column-level security | [docs/row-level-security.md](docs/row-level-security.md) |
 | Catalog promotion | [docs/catalog-promotion.md](docs/catalog-promotion.md) |
 | Recommended catalog | [docs/recommended-catalog/](docs/recommended-catalog/README.md) |
 | Grafana dashboards | [docs/grafana-dashboards.md](docs/grafana-dashboards.md) |

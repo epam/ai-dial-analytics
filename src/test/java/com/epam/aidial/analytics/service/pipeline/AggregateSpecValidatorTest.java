@@ -3,7 +3,6 @@ package com.epam.aidial.analytics.service.pipeline;
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
-import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFieldResolver;
 import com.epam.aidial.analytics.service.enrichment.support.SensitiveProjectionGuard;
 import com.epam.aidial.analytics.service.enrichment.validation.FilterSqlValidator;
@@ -112,10 +111,7 @@ class AggregateSpecValidatorTest {
     @BeforeEach
     void setUp() {
         validator = new AggregateSpecValidator(definitions, pipelines, new QueryFunctionCatalog(),
-                filterValidator, sensitiveGuard, new EntityFieldResolver(columns, catalog), freshness, SPEC_CODEC,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(
-                        definitions, columns, pipelines, pipelineReads, org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
-                sqlReader);
+                filterValidator, sensitiveGuard, new EntityFieldResolver(columns, catalog), freshness, SPEC_CODEC, sqlReader);
 
         given(definitions.findById(INPUT)).willReturn(Optional.of(input()));
         given(definitions.findById(TARGET)).willReturn(Optional.of(target(List.of("deployment", "day"))));
@@ -1239,11 +1235,10 @@ class AggregateSpecValidatorTest {
     }
 
     @Test
-    @DisplayName("a rollup target granted more widely than its input is refused as a validation failure")
-    void widelyGrantedRollupTargetIsRefused() {
-        // Two things at once, and the second is the point of the re-throw: the rule fires on the aggregate
-        // path at all, and it surfaces as this capability's own 422 pipeline_validation_failed rather than
-        // as the grant surface's sensitive_grant_widens. One condition, one code per surface.
+    @DisplayName("a rollup target may clear a role for its sensitive columns that its input does not clear")
+    void rollupTargetClearanceIsItsOwn() {
+        // No derived-table subset rule: the target's readers are decided by its own grants. The flag still has to
+        // be carried across the derivation (sensitiveColumnIntoUnprotectedTargetColumnIsRejected).
         given(columns.findByTableNameOrderByOrdinal(INPUT)).willReturn(List.of(
                 column(INPUT, "deployment", QueryFieldType.STRING),
                 column(INPUT, "request_time", QueryFieldType.TIMESTAMP),
@@ -1259,11 +1254,7 @@ class AggregateSpecValidatorTest {
         final AggregateSpec spec =
                 spec(valid().getGroupBy(), List.of(measure("peak", "max", "total_tokens")));
 
-        assertThatThrownBy(() -> validate(spec))
-                .isInstanceOf(PipelineValidationException.class)
-                .isNotInstanceOf(SensitiveGrantWidensException.class)
-                .hasMessageContaining("analysts")
-                .hasMessageContaining(INPUT);
+        assertThatCode(() -> validate(spec)).doesNotThrowAnyException();
     }
 
     @Test
@@ -1544,8 +1535,6 @@ class AggregateSpecValidatorTest {
         // surface inside every scheduled refresh, visible only in state.last_error.
         validator = new AggregateSpecValidator(definitions, pipelines, catalogWithTwoOperandAggregate(),
                 filterValidator, sensitiveGuard, new EntityFieldResolver(columns, catalog), freshness, SPEC_CODEC,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(
-                        definitions, columns, pipelines, pipelineReads, org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
                 org.mockito.Mockito.mock(AggregateSqlReader.class));
         final AggregateSpec spec = spec(valid().getGroupBy(),
                 List.of(measure("call_count", "pair_max", "deployment")));

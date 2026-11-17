@@ -119,8 +119,8 @@ Every other seeded column is non-heavy — including the `object`-typed
 `"dial_usage_log_payload.jwt_claims"` and `"dial_usage_log_payload.request_tags"` (small claim/header
 documents), the `*_body_bytes` size columns, and `rate_analytics.comment`. All four heavy columns are
 also `sensitive`, so the wildcard change is observable only to callers holding the `TABLE_SENSITIVE` clearance on
-the owning table and to deployments
-running `security.mode=none`.
+the owning table (for an enrichment column, its source's: `dial_usage_log`'s for the payload columns) and to
+deployments running `security.mode=none`.
 
 **`heavy` and the payload split are independent.** The claim/header pair moved to the payload
 enrichment without becoming heavy, and is excluded from a wildcard anyway — by ownership, not by size.

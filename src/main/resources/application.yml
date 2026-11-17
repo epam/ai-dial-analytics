@@ -170,6 +170,7 @@ backfill:
   max-days: ${BACKFILL_MAX_DAYS:366}
 
 tables:
+  lock-timeout: ${TABLES_LOCK_TIMEOUT:10s}
   limits:
     max-columns-per-table: ${TABLES_MAX_COLUMNS_PER_TABLE:256}
     max-tables: ${TABLES_MAX_TABLES:1000}
