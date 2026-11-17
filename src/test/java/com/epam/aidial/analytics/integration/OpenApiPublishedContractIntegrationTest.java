@@ -34,6 +34,7 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
     private static final String LIST_PATH = "/v1/pipelines";
     private static final String READ_PATH = "/v1/pipelines/{name}";
     private static final String BACKFILL_PATH = "/v1/data-sync/backfill";
+    private static final String ACCESS_PATH = "/v1/tables/{name}/access";
 
     /**
      * The default has to be published, not merely true. Both reads carry {@code view}, and a consumer that
@@ -97,6 +98,38 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
         assertThat(values(state))
                 .as("published accepted values of state")
                 .containsExactly("running", "completed", "failed");
+    }
+
+    /**
+     * The access list and the one-role read are two handlers on one path and method, which OpenAPI cannot tell apart.
+     * The document must publish them as one {@code GET} whose {@code role} is optional, with both answers described:
+     * a required {@code role} would leave a generated client no way to list the entries.
+     */
+    @Test
+    void tableAccessPublishesOneGetWithAnOptionalRoleCoveringListAndRead() throws Exception {
+        final JsonNode document = document();
+        final JsonNode get = document.path("paths").path(ACCESS_PATH).path("get");
+        final JsonNode role = parameter(document, ACCESS_PATH, "role");
+
+        assertThat(role.path("in").asString()).isEqualTo("query");
+        assertThat(role.path("required").asBoolean(false)).as("role must be optional: without it the GET lists every entry").isFalse();
+        assertThat(role.path("description").asString()).contains("omit it to list every role's entry");
+        assertThat(get.path("summary").asString()).contains("List a table's access entries").contains("read one role's entry");
+        assertThat(get.path("description").asString()).contains("Without `role`").contains("With `role`");
+        final List<String> answers = new ArrayList<>();
+        for (final JsonNode media : get.path("responses").path("200").path("content")) {
+            media.path("schema").path("oneOf").forEach(shape -> answers.add(shape.path("$ref").asString()));
+        }
+        assertThat(answers).containsExactlyInAnyOrder("#/components/schemas/AccessEntriesDto", "#/components/schemas/AccessEntryDto");
+        for (final String method : List.of("put", "delete")) {
+            final JsonNode required = document.path("paths").path(ACCESS_PATH).path(method).path("parameters");
+            assertThat(required.toString()).as("%s keeps a required role", method).contains("\"name\":\"role\"");
+            for (final JsonNode parameter : required) {
+                if ("role".equals(parameter.path("name").asString())) {
+                    assertThat(parameter.path("required").asBoolean(false)).as("%s role required", method).isTrue();
+                }
+            }
+        }
     }
 
     private JsonNode document() throws Exception {

@@ -73,7 +73,9 @@ public class CatalogTransferController {
                     + "computed in both directions; an empty or absent list exports every exportable object. System "
                     + "tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left "
                     + "out. Each table needs TABLE_GET, and one with sensitive columns the caller may not see is "
-                    + "refused (403). Grants never travel: each environment sets its own.")
+                    + "refused (403 `sensitive_column_not_entitled`), and one with a column a column policy hides from the "
+                    + "caller is refused 403 `column_not_entitled`, checked across every bundle table first. Grants, row "
+                    + "policies and column policies never travel: each environment sets its own.")
     public ResponseEntity<CatalogBundle> export(@Valid @RequestBody(required = false) ExportRequest request) {
         final CatalogBundle bundle = exportService.export(request);
         final String filename = "adas-catalog-" + FILE_TIMESTAMP.format(bundle.exportedAt()) + ".json";

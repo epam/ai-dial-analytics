@@ -24,7 +24,6 @@ because the target replaces rows by key, a refresh that aggregated only its wind
 overwrite a bucket's running total, and recomputing whole keys is what makes runs idempotent and late
 data self-healing.
 ## Requirements
-
 ### Requirement: Aggregate spec vocabulary
 
 An `aggregate` pipeline's `spec` SHALL declare `measures` over its input, plus an optional `filter`
@@ -2493,55 +2492,6 @@ because a refresh writes its target table.
 - **THEN** they are exactly `TABLE_READ`, `TABLE_SENSITIVE`, `TABLE_GET` and `TABLE_LIST`, because
   `TABLE_READ` confers the privileges it implies and a check tests exact containment
 
-### Requirement: A rollup target may not grant a protected column more widely than its input
-
-Where a rollup target **carries** a `sensitive` column, its `sensitive` grantee set SHALL be a
-subset of the roles its input table lists under **both** `read` and `sensitive` (every role on the
-target's `sensitive` list counts, whatever its `read` grant; the target's `modify` list is not
-checked; and a role in the target's `read` list that `roles-mapping` maps to global `TABLE_SENSITIVE`
-must be listed under `read` by the input, as `enrichment-runtime` states) — the same condition as the enrichment rule in `enrichment-runtime`, which
-that capability states and defends: the target carrying such a column, **not** the narrower "a pipeline
-derives one from a sensitive input column". The narrow reading is the more precise statement of the risk
-and is not answerable when a grant is edited, and it is the input table the rollup reads that the subset
-is taken against.
-
-It SHALL be enforced at all four of the points `enrichment-runtime` names, reached here through the
-pipeline's `input_table` rather than a catalog parent: registration and enable of an `aggregate` pipeline
-(rejected `422 pipeline_validation_failed`), `PUT /v1/tables/{name}/access` on either table, and either
-schema endpoint when the target first comes to carry a sensitive column (rejected
-`422 sensitive_grant_widens`).
-
-**This is a distinct rule from the sensitivity-propagation one above, and the gap between them was a
-disclosure.** Requiring the derived column to carry the `sensitive` flag stops it being served to an
-unentitled caller; it says nothing about *who* is entitled. A rollup target is a `SOURCE` — a
-first-class queryable entity with its own grant lists and, unlike an enrichment, **no catalog
-parent** — so a rule that walked source/enrichment parentage never examined it at all. The result was
-more direct than the enrichment path: a rollup is addressable on its own, so a caller granted
-sensitive-value reads on the target needed no grant whatsoever on the table being aggregated, and the
-scheduler's elevated identity did the copying.
-
-#### Scenario: A laxer rollup target is refused at registration
-
-- **GIVEN** `dial_usage_log.jwt_claims` is `sensitive` and `dial_usage_log`'s `read` and `sensitive`
-  lists both name `pii-team`, and no other role is on both
-- **WHEN** an `aggregate` pipeline is registered whose target declares a `sensitive` column derived
-  from `jwt_claims`, and whose target's `sensitive` list names `analysts`
-- **THEN** the registration is rejected `422 pipeline_validation_failed`, naming the widening role
-  and both tables
-
-#### Scenario: Granting the rollup target more widely is refused
-
-- **GIVEN** the same pipeline registered with matching lists
-- **WHEN** an operator grants `sensitive` on the rollup target to a role the input does not list
-  under both `read` and `sensitive`
-- **THEN** the request is rejected `422 sensitive_grant_widens` and neither list changes
-
-#### Scenario: Narrowing the input walks its rollup targets
-
-- **WHEN** an operator revokes `sensitive` or `read` on the input table from a role while a rollup
-  target of it still names that role under `sensitive` and carries a sensitive column
-- **THEN** the request is rejected `422 sensitive_grant_widens`
-
 ### Requirement: Array-consuming aggregates are query-time only
 
 A measure `fn` naming an array-consuming aggregate SHALL be refused by the declaration gate. The two
@@ -3052,19 +3002,30 @@ naming the function.
 
 ### Requirement: An SQL declaration is governed for sensitive columns and enrichment positions as the form path is
 
-The sensitive-column, lineage, grant and enrichment-position rules of the form declaration SHALL apply to
+The sensitive-column, lineage and enrichment-position rules of the form declaration SHALL apply to
 an SQL declaration over **every** column its block references, in the select list, the `WHERE` and the
 `GROUP BY`:
 
 - The statement SHALL be resolved at the declaring caller's read entitlement. A column the caller cannot
   see because it is `sensitive` and the caller is not cleared SHALL be refused with HTTP 403
-  `sensitive_column_not_entitled`, not reported as an unknown column. The system identity a scheduled
+  `sensitive_column_not_entitled`, not reported as an unknown column. A column a column policy hides
+  from the caller (see [table-access-control](../table-access-control/spec.md), "Column visibility by caller
+  role") SHALL be refused with HTTP 403 `column_not_entitled` in the same way, and a column both hidden and
+  sensitive without the clearance SHALL be refused `column_not_entitled`. The system identity a scheduled
   refresh runs under sees every column, so the remaining rules bite for it and for a cleared caller.
-- When the statement cannot be planned at all, and its text mentions a `sensitive` column of the source
-  the caller may not read, the refusal SHALL be HTTP 403 `sensitive_column_not_entitled` rather than the
-  422 for the planning failure. The mention SHALL be found by an over-approximating token scan of the
-  text, so the check fails closed: a protected name anywhere in an unplannable statement answers 403. With
-  no declared `inputs`, the check SHALL run against every source table the text names.
+- When the statement cannot be planned at all, its text SHALL be checked for **protected** columns it
+  mentions: a column of the source, or a qualified column of one of its active enrichments, that is hidden
+  from the caller by a column policy, or is `sensitive` and the caller may not read it. A mentioned column
+  hidden by a column policy SHALL be refused HTTP 403 `column_not_entitled`; otherwise a mentioned
+  `sensitive` column the caller may not read SHALL be refused HTTP 403 `sensitive_column_not_entitled`;
+  either rather than the 422 for the planning failure. Every table the check covers SHALL be checked for
+  policy-hidden columns before any is checked for the clearance, so the code does not depend on the order
+  the tables are visited in. The mention SHALL be found by an over-approximating token scan of the text,
+  so the check fails closed: a protected name anywhere in an unplannable statement answers 403. A planning
+  failure whose text mentions no protected column SHALL stay the 422 for the planning failure, for a
+  column-restricted or uncleared caller too: this path does not re-attribute every failure the way a
+  pipeline-scoped `filter` parse does (see table-access-control, "Pipeline and export paths refuse a hidden
+  column"). With no declared `inputs`, the check SHALL run against every source table the text names.
 - A target column whose select expression reads a `sensitive` column, of the input or of an enrichment,
   SHALL itself be declared `sensitive`, or the declaration SHALL be rejected with HTTP 422
   `pipeline_validation_failed` naming both columns (see **Sensitive-column governance on the aggregate
@@ -3075,8 +3036,6 @@ an SQL declaration over **every** column its block references, in the select lis
   decides which rows feed the aggregate, not the value written, so it does not require the target column
   to be `sensitive`. A `CASE` condition in a group key, or in a `CASE` above the aggregate, decides the
   value written and SHALL count for lineage.
-- The target's `sensitive` grants SHALL NOT widen past its input's (see **A rollup target may not grant a
-  protected column more widely than its input**).
 - An enrichment the statement reads SHALL be clampable, and one written by a group-triggered pipeline or
   by a pipeline ADAS does not execute SHALL be refused with HTTP 422 naming the enrichment (see **An
   enrichment whose materialized position cannot be established is not aggregatable**).
@@ -3113,6 +3072,15 @@ an SQL declaration over **every** column its block references, in the select lis
 - **WHEN** a caller not cleared for `sensitive` columns submits an SQL declaration that fails to parse and
   whose text mentions the `sensitive` source column `jwt_claims`
 - **THEN** the response is HTTP 403 `sensitive_column_not_entitled`, not the 422 for the parse failure
+
+#### Scenario: An unplannable statement naming a policy-hidden column is refused with 403
+
+- **GIVEN** a caller from which a column policy hides source column `user_hash`, and which is not cleared for the
+  `sensitive` source column `jwt_claims`
+- **WHEN** it submits an SQL declaration that fails to parse and whose text mentions both `jwt_claims` and `user_hash`
+- **THEN** the response is HTTP 403 `column_not_entitled`, naming `user_hash`
+- **AND WHEN** it submits an SQL declaration that fails to parse and whose text mentions no protected column
+- **THEN** the response is the 422 for the parse failure, not a 403
 
 #### Scenario: A non-clampable enrichment is refused
 
@@ -3351,3 +3319,25 @@ string literal or comment is not a reference.
   `"dial_usage_log_payload.request_body_rebuild" = 'rebuilt'`
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the field, and no pipeline is
   stored
+
+### Requirement: A rollup target's clearance is its own
+
+Who may read a rollup target and its sensitive columns SHALL be decided by the target's own grant lists, independently
+of its input table's and of the enrichments it reads. A role MAY be cleared on the target without being cleared on any table the
+pipeline reads, and registration, enable, refresh, grant edits and schema edits SHALL NOT compare the target's lists
+with theirs. A rollup column derived from a `sensitive` input column SHALL still be declared `sensitive` (see
+"Sensitive-column governance on the aggregate path").
+
+#### Scenario: A rollup target may clear a role its input does not
+
+- **GIVEN** an enabled aggregate pipeline whose target carries a `sensitive` column and whose input's `sensitive`
+  list does not name `analysts`
+- **WHEN** an operator grants `sensitive` on the rollup target to `analysts`
+- **THEN** the request succeeds, and the pipeline's next refresh succeeds
+
+#### Scenario: Flagging a column sensitive on such a target is accepted
+
+- **GIVEN** the same rollup target, whose `sensitive` list names `analysts`
+- **WHEN** a caller holding `TABLE_MODIFY` on the target and `TABLE_SENSITIVE` marks another target column `sensitive`
+- **THEN** the request succeeds
+

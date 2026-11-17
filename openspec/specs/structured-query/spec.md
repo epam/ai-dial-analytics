@@ -1423,7 +1423,8 @@ rule SHALL hold identically across them, because they all delegate to the shared
 versions — its source when the source is `upsert_by_key`, and every enrichment table the query joins for it
 (an enrichment always collapses) — and its separate `count(*)` total-count statement likewise; a raw read
 SHALL deduplicate none of them. An entity is **final-capable** when anything it reads collapses versions:
-its source is `upsert_by_key`, or it has at least one active enrichment the caller may read. Capability SHALL
+its source is `upsert_by_key`, or it has at least one active enrichment the caller may read — every active enrichment, for a caller that may
+read the source, because an enrichment's read is its source's. Capability SHALL
 be decided at `TABLE_READ` — the bar execution resolves the entity at — on every surface, including translation
 (resolved at `TABLE_GET`) and discovery (`TABLE_LIST`), so an enrichment the caller may get but not read
 never makes an entity final-capable on one surface and not on another. An `append`
@@ -1577,9 +1578,16 @@ and not a courtesy.
 
 #### Scenario: An enrichment the caller cannot read does not make the entity final-capable
 
-- **WHEN** a caller holds `list` and `get` but not `read` on the only enrichment of an `append` source it may
-  read, and sends `"final": true` (or writes `FINAL`) to execute or to translate
-- **THEN** both are rejected with `illegal_final`, and a query omitting `final` is read and translated raw
+- **WHEN** a caller holds `list` and `get` but not `read` on an `append` source with an active enrichment, so it may
+  not read that enrichment either, and sends `"final": true` (or writes `FINAL`) to translate
+- **THEN** the translation is rejected with `illegal_final`, a query omitting `final` is translated raw, and executing
+  either reports an unknown entity
+
+#### Scenario: An absent final reads an enriched append source final for a reader of the source
+
+- **WHEN** `query.force-final` is off, a caller holding `read` on an `append` source and nothing on its enrichment
+  sends a query that omits `final` and projects an enrichment column holding two unmerged versions for a grain key
+- **THEN** the query is read final and the source row is returned once with the latest enrichment value
 
 #### Scenario: The flag forces final reads
 
@@ -3340,45 +3348,6 @@ path SHALL confirm the table's or column's existence.
 - **THEN** the response is `400 bad_request` reporting an unknown entity, and does not reveal that
   the entity exists
 
-### Requirement: Composite entity visibility is decided per owning table
-
-A queryable entity is a source table flattened with its active enrichments. Read visibility SHALL be
-decided **per owning physical table** at the single point where the resolved query model is
-assembled, so the same entity resolves to different flat schemas for different callers.
-
-An entity SHALL be visible if and only if its **source** is readable by the caller. For a visible
-entity, the columns of each enrichment the caller cannot read SHALL be **absent** from the model, so
-they are omitted from discovery and referencing one fails as an ordinary unknown field. Omitting an
-enrichment SHALL NOT change the result's row count, because the grain join contributes at most one
-row per source row.
-
-A `read` grant on an enrichment table alone SHALL confer nothing on the query surface: an enrichment
-is not a queryable entity, so there is no statement that can reach its rows. The service SHALL NOT
-serve an enrichment-only read through its source's entity, because the grain key is the source's
-column and the statement's `FROM` is the source table, so doing so would disclose the source's row
-population and its grain-key values.
-
-#### Scenario: An unreadable enrichment's columns are absent
-
-- **GIVEN** an entity whose source the caller may read and one of whose enrichments it may not
-- **WHEN** the caller requests that entity's schema and then queries it
-- **THEN** the enrichment's columns are absent from the schema, referencing one fails as an unknown
-  field, and the row count matches what a fully-privileged caller receives
-
-#### Scenario: An entity is invisible when its source is
-
-- **GIVEN** an entity whose source the caller may not read but one of whose enrichments grants it
-  `read`
-- **WHEN** the caller lists entities or queries that entity
-- **THEN** the entity is absent from discovery and the query reports an unknown entity
-
-#### Scenario: Sensitive columns are decided per owning table too
-
-- **GIVEN** an entity whose source and one enrichment both carry sensitive columns, and a caller
-  holding `read` on both tables and `sensitive` on the source only
-- **WHEN** the caller queries the entity
-- **THEN** the source's sensitive columns resolve and the enrichment's do not
-
 ### Requirement: Lambda expressions
 
 The system SHALL accept a `lambda` expression — the eighth `Expr` kind — spelled
@@ -4611,6 +4580,50 @@ enrichment version fans a row out in the page and must fan it out in the count t
 - **WHEN** a composite SQL statement's block projects a heavy enrichment column, or a non-heavy column of an
   aligned enrichment, under a `LIMIT`
 - **THEN** the block renders as "SQL translation" describes, with no page-key subquery
+
+### Requirement: Composite entity visibility follows the source
+
+A queryable entity is a source table flattened with its active enrichments. Read visibility SHALL be
+decided **per owning physical table** at the single point where the resolved query model is
+assembled, so the same entity resolves to different flat schemas for different callers. For an enrichment, the
+read-side privileges are its source's (see `table-access-control`, "An enrichment's read-side access is its
+source's"), so per-owning-table evaluation differs between the source and an enrichment only in which columns are
+which table's.
+
+An entity SHALL be visible if and only if its **source** is readable by the caller. For a visible
+entity, every active enrichment's non-sensitive columns SHALL be present in the model, and its sensitive columns
+SHALL be present exactly when the caller holds the source's clearance. A caller SHALL therefore never see a different set of enrichments
+than another caller with the same privileges on the source.
+
+There SHALL be no read of an enrichment without a read of its source: an enrichment is not a queryable entity, so
+there is no statement that can reach its rows, and the service SHALL NOT serve an enrichment's columns through its
+source's entity to a caller that may not read the source, because the grain key is the source's column and the
+statement's `FROM` is the source table, so doing so would disclose the source's row population and its grain-key
+values.
+
+#### Scenario: A reader of the source sees every enrichment
+
+- **GIVEN** an entity with two active enrichments, and a caller that may read the source and holds nothing on either
+  enrichment
+- **WHEN** the caller requests that entity's schema and then queries a column of each enrichment
+- **THEN** both enrichments' non-sensitive columns are present in the schema, the query resolves, and the row count
+  matches what a fully-privileged caller receives
+
+#### Scenario: An entity is invisible when its source is
+
+- **GIVEN** an entity whose source the caller may not read, and one of whose enrichments lists the caller's role in
+  its `write` or `modify` list
+- **WHEN** the caller lists entities or queries that entity
+- **THEN** the entity is absent from discovery and the query reports an unknown entity
+
+#### Scenario: Sensitive columns follow the source's clearance
+
+- **GIVEN** an entity whose source and one enrichment both carry sensitive columns, and a caller
+  holding `read` on the source and no clearance
+- **WHEN** the caller queries the entity
+- **THEN** neither the source's nor the enrichment's sensitive columns resolve
+- **AND WHEN** the caller is granted `sensitive` on the source
+- **THEN** both resolve
 
 ## Implementation notes
 

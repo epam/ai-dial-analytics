@@ -500,7 +500,9 @@ public class AggregateRefreshService {
         if (bound.isPresent() && bound.get().withholdsEverything()) {
             notes.add(PreviewNotes.heldByEnrichment(bound.get().enrichment()));
         } else if (bound.isPresent() && newest != null && newest.isPast(bound.get())) {
-            notes.add(PreviewNotes.enrichmentBehind(bound.get().enrichment(), newest.version(), bound.get().version(), true));
+            // The note's instants are values of the input's version column; a caller whose model lacks it gets the gap only.
+            notes.add(PreviewNotes.enrichmentBehind(bound.get().enrichment(), newest.version(), bound.get().version(), true,
+                    model.exposesSourceColumn(cursorColumns.version())));
         }
         if (rows.isEmpty()) {
             notes.add(declaration.noMatchingRows(input));

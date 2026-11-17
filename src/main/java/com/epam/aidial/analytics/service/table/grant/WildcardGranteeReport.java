@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.table.grant;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
@@ -42,7 +43,9 @@ public class WildcardGranteeReport implements ApplicationRunner {
         for (final TableDefinitionEntity table : tables) {
             final List<String> places = new ArrayList<>();
             for (final Privilege privilege : PrivilegeScope.GRANTABLE) {
-                if (table.getAccess() != null && table.getAccess().rolesFor(privilege).contains(SecurityClaimsExtractor.ANYONE)) {
+                // An enrichment's read-side lists confer nothing, so a '*' left in one opens nothing.
+                final boolean inert = table.getType() == TableType.ENRICHMENT && !PrivilegeScope.isModifying(privilege);
+                if (!inert && table.getAccess() != null && table.getAccess().rolesFor(privilege).contains(SecurityClaimsExtractor.ANYONE)) {
                     places.add(PrivilegeScope.grantKey(privilege));
                 }
             }

@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
@@ -34,7 +35,7 @@ import java.util.Set;
  *
  * <p>The import endpoints need only {@code TABLE_CREATE}, so what an entry reports as {@code prev} follows the
  * export's visibility rules, never the full objects the planner compares: grants only with {@code TABLE_GRANT},
- * sensitive columns only with the clearance on that table, nothing for a table the caller may not
+ * sensitive columns only with the clearance on that table, no column a column policy hides, nothing for a table the caller may not
  * {@code TABLE_GET}, and no pipeline declaration without {@code REGISTRY_READ}.
  */
 @Component
@@ -66,8 +67,9 @@ class ImportTargetReader {
                         null));
             } else {
                 final BundleTable full = exportService.bundleTable(definition);
+                final ColumnVisibility columnVisibility = sensitiveAccess.visibleColumns(definition);
                 final BundleTable prev = visible
-                        ? new BundleTable(full.table(), sensitiveVisible ? full.schema() : withoutSensitive(full.schema()))
+                        ? new BundleTable(full.table(), withoutHidden(full.schema(), sensitiveVisible, columnVisibility))
                         : null;
                 tables.put(name, new ImportTarget.Table(name, definition.getType(), false, definition.getStatus(), full,
                         prev));
@@ -130,9 +132,14 @@ class ImportTargetReader {
                 String.class, args));
     }
 
-    private static DefineSchemaRequest withoutSensitive(DefineSchemaRequest schema) {
+    /** {@code schema} without the columns hidden from the caller: sensitive ones without the clearance, and policy-hidden ones. */
+    private static DefineSchemaRequest withoutHidden(DefineSchemaRequest schema, boolean sensitiveVisible, ColumnVisibility visibility) {
+        if (sensitiveVisible && visibility.isAll()) {
+            return schema;
+        }
         final List<ColumnRequest> visible = nullSafe(schema.columns()).stream()
-                .filter(col -> !Boolean.TRUE.equals(col.sensitive()))
+                .filter(col -> sensitiveVisible || !Boolean.TRUE.equals(col.sensitive()))
+                .filter(col -> visibility.allows(col.name()))
                 .toList();
         return new DefineSchemaRequest(visible, schema.orderingKey(), schema.partitionBy(), schema.grainKey(),
                 schema.cardinality(), schema.identityColumn(), schema.versionColumn(), schema.ttl(), schema.write());
