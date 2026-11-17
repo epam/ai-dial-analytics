@@ -808,7 +808,7 @@ public class EnrichSpecValidator {
             if (declaration.memberSelect() != null) {
                 throw new PipelineValidationException("trigger.member_select is only valid for a group pipeline");
             }
-            if (declaration.spec().getInputTokenBudget() != null) {
+            if (declaration.inputTokenBudget() != null) {
                 throw new PipelineValidationException("advanced.input_token_budget is only valid for a group pipeline");
             }
             return;

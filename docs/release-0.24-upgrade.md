@@ -331,9 +331,11 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
 - **`0` switches the runner's trimming off** for that pipeline, for example a `dial_app_route` application that
   counts tokens and decides what to keep itself. A positive value is the pipeline's own ceiling. Absent keeps the
   runner's configured default.
-- **Group pipelines only.** On a `schedule` pipeline the member is refused with `422 pipeline_validation_failed`,
-  as `trigger.group_by` is; a patch moving a pipeline from `group` to `schedule` drops it in the same patch. A
-  negative value is refused the same way.
+- **Group pipelines only.** On a `schedule` pipeline the member is refused with `422 pipeline_validation_failed`
+  on every write, a disabled draft included, as `trigger.member_select` is. A patch that moves a pipeline from
+  `group` to `schedule` leaves it out of `advanced`. A negative value is refused the same way.
+- **Restate it on every declaration patch.** `advanced` is replaced, not merged, so a `PATCH` that re-declares the
+  pipeline without `advanced.input_token_budget` clears it, and the runner's default trimming applies again.
 - **Contract `6`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
   it (§9).
 - **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the

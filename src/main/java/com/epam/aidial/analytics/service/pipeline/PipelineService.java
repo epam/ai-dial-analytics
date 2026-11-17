@@ -677,7 +677,7 @@ public class PipelineService implements PipelineTargetCascade {
         pipeline.setTriggerGroupBy(StringUtils.trimToNull(registration.triggerGroupBy()));
         pipeline.setReadyWhen(registration.readyWhen());
         pipeline.setMemberSelect(registration.memberSelect());
-        requireNoTriggerContradiction(pipeline);
+        requireNoTriggerContradiction(pipeline, spec);
         DeclaredComputedFields.requireNone(pipeline, spec);
         requireValidCron(pipeline.getTriggerKind(), pipeline.getTriggerCron(), armed);
         return spec;
@@ -757,15 +757,18 @@ public class PipelineService implements PipelineTargetCascade {
     }
 
     /**
-     * The two trigger contradictions refused on <b>every</b> write, armed or not.
+     * The trigger contradictions refused on <b>every</b> write, armed or not.
      *
      * <p>They are not incompleteness — they are two stated members that cannot both be true, which no
-     * further authoring resolves — and the database refuses both on every row
+     * further authoring resolves. The database refuses the first two on every row
      * ({@code pipeline_member_select_only_group}, {@code pipeline_aggregate_is_scheduled}), so deferring
-     * them would only move the author's error from a named 422 to an integrity violation at flush. A
-     * trigger kind that is not stated yet contradicts nothing, which is also how the CHECKs read it.
+     * them would only move the author's error from a named 422 to an integrity violation at flush.
+     * {@code advanced.input_token_budget} lives in the spec JSON, out of reach of a CHECK, and is refused
+     * here for the same reason as {@code member_select}: a draft that stores it on a non-group trigger reads
+     * to its author as a budget that took effect. A trigger kind that is not stated yet contradicts nothing,
+     * which is also how the CHECKs read it.
      */
-    private static void requireNoTriggerContradiction(PipelineEntity pipeline) {
+    private static void requireNoTriggerContradiction(PipelineEntity pipeline, PipelineSpec spec) {
         final TriggerKind kind = pipeline.getTriggerKind();
         if (kind == null) {
             return;
@@ -777,6 +780,9 @@ public class PipelineService implements PipelineTargetCascade {
         }
         if (pipeline.getMemberSelect() != null && kind != TriggerKind.GROUP) {
             throw new PipelineValidationException("trigger.member_select is only valid for a group pipeline");
+        }
+        if (spec instanceof EnrichSpec enrich && enrich.getInputTokenBudget() != null && kind != TriggerKind.GROUP) {
+            throw new PipelineValidationException("advanced.input_token_budget is only valid for a group pipeline");
         }
     }
 

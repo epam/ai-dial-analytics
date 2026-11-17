@@ -954,6 +954,25 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
                         containsString("advanced.input_token_budget is only valid for a group pipeline")));
     }
 
+    /**
+     * Refused on a draft too, as {@code member_select} is: a stated non-group trigger and a budget contradict each
+     * other whatever the pipeline's state, and a draft storing both would read as a budget that took effect.
+     */
+    @Test
+    void inputTokenBudgetIsRejectedForRowGrainDrafts() throws Exception {
+        mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"row-pipeline\"," + rowTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\","
+                                + "\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"advanced\":{\"input_token_budget\":0},"
+                                + "\"enabled\":false}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                .andExpect(jsonPath("$.message").value(
+                        containsString("advanced.input_token_budget is only valid for a group pipeline")));
+        mockMvc.perform(get("/v1/pipelines/row-pipeline")).andExpect(status().isNotFound());
+    }
+
     /** A group pipeline's budget is served under both projections, so the runner reads it from the feed. */
     @Test
     void inputTokenBudgetRoundTripsThroughBothProjections() throws Exception {

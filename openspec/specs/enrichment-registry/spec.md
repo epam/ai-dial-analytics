@@ -3470,8 +3470,9 @@ A negative value SHALL be rejected with HTTP 422 `pipeline_validation_failed` na
 `advanced.input_token_budget`. The runner has no meaning for a negative ceiling, and storing one would leave a
 declaration whose effect is a fallback the author did not choose.
 
-The member SHALL be rejected with HTTP 422 `pipeline_validation_failed` on a pipeline whose trigger is not `group`,
-under the same rule as `trigger.group_by`, `trigger.ready_when` and `trigger.member_select`. Only the group lane
+The member SHALL be rejected with HTTP 422 `pipeline_validation_failed` on a pipeline whose trigger is not `group`.
+Like `trigger.member_select`, and unlike `trigger.group_by` and `trigger.ready_when`, it SHALL be refused on every
+write whose trigger kind is stated, a disabled draft included, not only when the pipeline is armed. Only the group lane
 has an input budget, and a member accepted where it has no effect reads to its author as having taken effect. On
 an `aggregate` pipeline it SHALL be refused as a member of another kind, like every other `advanced` member.
 
@@ -3503,6 +3504,12 @@ the runner contract pins, so the runner contract version SHALL be raised to `6` 
 - **WHEN** a `schedule` pipeline declares `advanced.input_token_budget`
 - **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the member as valid only for a
   group pipeline
+
+#### Scenario: A budget on a schedule draft is rejected
+
+- **WHEN** `POST /v1/pipelines` declares a disabled `schedule` pipeline with `advanced.input_token_budget`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the member as valid only for a
+  group pipeline, and nothing is stored
 
 #### Scenario: A budget on an aggregate pipeline is refused as another kind's member
 
