@@ -2873,7 +2873,10 @@ It SHALL be added by a later catalog migration as a new `column_mapping` row of 
 `sensitive` and `heavy`, with a description, placed after the existing columns; for a row whose request body is
 stored whole it reads as `NULL`. The same migration SHALL extend the seeded description of `request_body` to say
 that under delta storage a chat request is re-serialized without its history's `cache_control` markers and carries
-only its new history, replacing it only while it is still the seeded text.
+only its new history, replacing it only while it is still the seeded text. A further catalog migration SHALL
+extend that description to say that under delta storage a repeated large body that is not JSON is stored as an
+empty string and read through `request_body_full`, replacing it only while it is still the text that earlier
+migration wrote.
 
 The payload enrichment's part of the entity schema SHALL also carry two **computed fields**,
 `"dial_usage_log_payload.request_body_full"` (`string`, nullable) and `"dial_usage_log_payload.request_body_rebuild"`
@@ -2992,6 +2995,17 @@ the API could try to modify (see "Table TTL").
 
 - **WHEN** the catalog is read after the table-catalog migrations run
 - **THEN** `column_mapping` holds no row for `request_body_full` or `request_body_rebuild`
+
+#### Scenario: The request body description names the empty body of a copy
+
+- **WHEN** the catalog migrations have run on a catalog whose `request_body` description no operator has edited
+- **THEN** the description of `"dial_usage_log_payload.request_body"` says that under delta storage a repeated
+  large body that is not JSON is stored empty and read through `request_body_full`
+
+#### Scenario: An edited request body description is kept
+
+- **WHEN** an operator has edited the `request_body` description and the catalog migrations run
+- **THEN** the description is the operator's text
 
 ### Requirement: An object column is always non-nullable
 
@@ -3921,7 +3935,6 @@ sent as a failed definition does, and the same request sent again succeeds.
 - **WHEN** the definition answers `409 table_busy` and is sent again once the other change has committed
 - **THEN** the first attempt dropped the table it created, and the second answers `200` with `t` active
 
-
 ### Requirement: Every materialized table uses the replicated engine variant
 
 The engine this specification names for a table the catalog materializes SHALL be read as an engine family. The
@@ -3983,3 +3996,4 @@ A table registered over hand-written DDL SHALL use a replicated engine, or the s
 
 - **WHEN** a materialized `upsert_by_key` source is read back
 - **THEN** it reports `write: "upsert_by_key"`, matching its `ReplicatedReplacingMergeTree(_updated_at)` engine
+
