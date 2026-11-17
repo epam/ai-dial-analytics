@@ -10,11 +10,11 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
 /**
- * Base for the authorization integration tests that drive the REST surface in {@code oidc} mode over
- * both containers. Boots {@code @SpringBootTest} + {@code @AutoConfigureMockMvc} against the singleton
- * PostgreSQL and ClickHouse containers, with two locally-signed JWT issuers — one mapping to
- * {@code FULL_ADMIN}, one to {@code READ_ONLY_ADMIN} — plus an opaque provider introspected against
- * {@link OpaqueUserInfoServerSupport}. Tokens are minted with
+ * Base for the authorization integration tests that drive the REST and Flight SQL surfaces in {@code oidc} mode
+ * over both containers. Boots {@code @SpringBootTest} + {@code @AutoConfigureMockMvc} against the singleton
+ * PostgreSQL and ClickHouse containers, with locally-signed JWT issuers — {@code full} and {@code readonly}
+ * shared by most subclasses, plus one issuer per persona set a single class drives — and an opaque provider
+ * introspected against {@link OpaqueUserInfoServerSupport}. Tokens are minted with
  * {@link com.epam.aidial.analytics.web.security.JwtTestTokens} and verified against the HMAC secret
  * {@link TestSecurityConfig} installs, so no live JWKS endpoint is needed.
  *

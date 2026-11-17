@@ -21,9 +21,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * Scope-based authorization of {@code /v1/saved-queries} in {@code oidc} mode.
  *
- * <p>Two JWT providers are configured — one granting {@code FULL_ADMIN}, one {@code READ_ONLY_ADMIN} —
- * whose tokens are minted locally and verified against an HMAC secret via {@link TestSecurityConfig},
- * so no live JWKS or IdP is needed. Two distinct {@code READ_ONLY_ADMIN} principals exercise the owner
+ * <p>Three JWT providers are used — {@code full} granting {@code FULL_ADMIN}, {@code readonly}
+ * {@code READ_ONLY_ADMIN}, and {@code writer} mapping the saved-query privileges — whose tokens are
+ * minted locally and verified against an HMAC secret via {@link TestSecurityConfig}, so no live JWKS
+ * or IdP is needed. Two distinct {@code READ_ONLY_ADMIN} principals exercise the owner
  * filter, which needs two people holding the same role.
  *
  * <p>ClickHouse is never contacted: saved queries are validated by translation, which renders SQL and
