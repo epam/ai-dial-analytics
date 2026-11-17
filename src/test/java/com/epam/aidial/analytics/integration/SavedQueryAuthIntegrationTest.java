@@ -27,8 +27,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * or IdP is needed. Two distinct {@code READ_ONLY_ADMIN} principals exercise the owner
  * filter, which needs two people holding the same role.
  *
- * <p>ClickHouse is never contacted: saved queries are validated by translation, which renders SQL and
- * discards it. The context is the shared one of {@link AbstractOidcAuthIntegrationTest}.
+ * <p>Saved queries are validated by translation, which renders SQL and discards it, so ClickHouse is not
+ * meant to be contacted. The context is the shared one of {@link AbstractOidcAuthIntegrationTest}, which
+ * points at a live ClickHouse, so this is design intent the test does not check: an accidental
+ * ClickHouse call would succeed rather than fail it.
  */
 class SavedQueryAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -463,7 +465,7 @@ class SavedQueryAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder builder, String token) {
-        return builder.header(HttpHeaders.AUTHORIZATION, "Bearer " + token).contentType("application/json");
+        return builder.header(HttpHeaders.AUTHORIZATION, bearer(token)).contentType("application/json");
     }
 
     private static String admin() {
@@ -504,19 +506,19 @@ class SavedQueryAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
      * only so its bodies translate; it implies nothing about saved queries.
      */
     private static String writer() {
-        return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
+        return JwtTestTokens.token(PERSONAS_ISSUER, AUDIENCE,
                 Map.of("sub", "writer", "roles", List.of("writer"), "email", "writer@test"));
     }
 
     /** A caller mapped to both saved-query writes and no saved-query read: it reads by implication. */
     private static String curator() {
-        return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
+        return JwtTestTokens.token(PERSONAS_ISSUER, AUDIENCE,
                 Map.of("sub", "curator", "roles", List.of("curator"), "email", "curator@test"));
     }
 
     /** A caller mapped to {@code SAVED_QUERY_PUBLISH} alone among the saved-query privileges. */
     private static String publisher() {
-        return JwtTestTokens.token(WRITER_ISSUER, AUDIENCE,
+        return JwtTestTokens.token(PERSONAS_ISSUER, AUDIENCE,
                 Map.of("sub", "publisher", "roles", List.of("publisher"), "email", "publisher@test"));
     }
 

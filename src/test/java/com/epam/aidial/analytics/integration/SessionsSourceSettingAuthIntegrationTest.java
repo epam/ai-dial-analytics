@@ -26,8 +26,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * sees the catalog as the writer does. Privileges come from {@code roles-mapping}s, so the bundle contents and the
  * {@code SETTINGS_WRITE -> SETTINGS_READ} implication under test are the parser's.
  *
- * <p>Validation reads the catalog, never ClickHouse; the context is the shared one of
- * {@link AbstractOidcAuthIntegrationTest}.
+ * <p>Validation reads the catalog and is not meant to reach ClickHouse. The context is the shared one of
+ * {@link AbstractOidcAuthIntegrationTest}, which points at a live ClickHouse, so this is design intent the
+ * test does not check: an accidental ClickHouse call would succeed rather than fail it.
  */
 class SessionsSourceSettingAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -135,10 +136,10 @@ class SessionsSourceSettingAuthIntegrationTest extends AbstractOidcAuthIntegrati
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder builder, String token) {
-        return builder.header(HttpHeaders.AUTHORIZATION, "Bearer " + token).contentType("application/json");
+        return builder.header(HttpHeaders.AUTHORIZATION, bearer(token)).contentType("application/json");
     }
 
     private static String token(String role) {
-        return JwtTestTokens.token(SETTINGS_ISSUER, AUDIENCE, Map.of("sub", role, "roles", List.of(role), "email", role + "@test"));
+        return JwtTestTokens.token(PERSONAS_ISSUER, AUDIENCE, Map.of("sub", role, "roles", List.of(role), "email", role + "@test"));
     }
 }

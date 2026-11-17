@@ -37,8 +37,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Catalog metadata is subject to the same role-based sensitive-column filtering as query results
  * (spec: "Catalog metadata honors the caller's column visibility"). Runs the Flight endpoint in
- * {@code oidc} mode with two locally-minted JWT providers — one granting {@code FULL_ADMIN}, one
- * {@code READ_ONLY_ADMIN} — and asserts that the Arrow schema {@code GetTables} reports for
+ * {@code oidc} mode with two of the shared context's locally-minted JWT providers — one granting
+ * {@code FULL_ADMIN}, one {@code READ_ONLY_ADMIN} — and asserts that the Arrow schema {@code GetTables} reports for
  * {@code dial_usage_log} omits the {@code sensitive} columns for the read-only caller while carrying
  * them for the admin.
  *
@@ -266,7 +266,7 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
 
     private static CallOption bearerOption(String token) {
         final FlightCallHeaders headers = new FlightCallHeaders();
-        headers.insert("authorization", "Bearer " + token);
+        headers.insert("authorization", bearer(token));
         return new HeaderCallOption(headers);
     }
 

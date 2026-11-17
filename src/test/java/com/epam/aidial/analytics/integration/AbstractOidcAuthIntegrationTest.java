@@ -13,7 +13,8 @@ import org.springframework.test.web.servlet.MockMvc;
  * Base for the authorization integration tests that drive the REST and Flight SQL surfaces in {@code oidc} mode
  * over both containers. Boots {@code @SpringBootTest} + {@code @AutoConfigureMockMvc} against the singleton
  * PostgreSQL and ClickHouse containers, with locally-signed JWT issuers — {@code full} and {@code readonly}
- * shared by most subclasses, plus one issuer per persona set a single class drives — and an opaque provider
+ * shared by most subclasses, plus a {@code personas} issuer for the saved-query, dashboard and settings
+ * personas — and an opaque provider
  * introspected against {@link OpaqueUserInfoServerSupport}. Tokens are minted with
  * {@link com.epam.aidial.analytics.web.security.JwtTestTokens} and verified against the HMAC secret
  * {@link TestSecurityConfig} installs, so no live JWKS endpoint is needed.
@@ -29,9 +30,10 @@ import org.springframework.test.web.servlet.MockMvc;
  *
  * <p>The corollary is that a subclass must not add its own {@code @SpringBootTest} properties or
  * {@code @DynamicPropertySource} method — either one forks the context and gives the duplication back.
- * A property only one subclass reads is cheaper added to this shared set (it is inert for the others)
- * than paid for as a second context; see the same reasoning in
- * {@link AbstractClickHouseIntegrationTest}.
+ * A property only one subclass reads is cheaper added to this shared set than paid for as a second
+ * context; see the same reasoning in {@link AbstractClickHouseIntegrationTest}. A provider is not inert,
+ * though: its role names join the one role-name lookup every class sees, so a new provider picks names
+ * no other class grants, writes policies for, or puts on a token.
  *
  * <p>Requires a running Docker daemon.
  */
@@ -64,35 +66,22 @@ import org.springframework.test.web.servlet.MockMvc;
         // is, so a test states the value it compares with instead of a digest. Inert for every other test.
         "providers.readonly.logging-key=email",
         "providers.readonly.obfuscate-user-email=false",
-        // One provider per persona set a single class drives, each on its own issuer so it is inert for the others.
-        "providers.writer.issuer=" + AbstractOidcAuthIntegrationTest.WRITER_ISSUER,
-        "providers.writer.jwk-set-uri=https://issuer.test/writer/jwks",
-        "providers.writer.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
-        "providers.writer.role-claims=roles",
-        "providers.writer.roles-mapping={\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
-                + "\"curator\":[\"SAVED_QUERY_WRITE\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"]}",
-        "providers.bundles.issuer=" + AbstractOidcAuthIntegrationTest.BUNDLES_ISSUER,
-        "providers.bundles.jwk-set-uri=https://issuer.test/bundles/jwks",
-        "providers.bundles.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
-        "providers.bundles.role-claims=roles",
-        "providers.bundles.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
-                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"]}",
-        "providers.single.issuer=" + AbstractOidcAuthIntegrationTest.SINGLE_ISSUER,
-        "providers.single.jwk-set-uri=https://issuer.test/single/jwks",
-        "providers.single.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
-        "providers.single.role-claims=roles",
-        "providers.single.roles-mapping={\"reader\":[\"SAVED_QUERY_READ\",\"TABLE_READ\"],"
+        // The personas the saved-query, dashboard and settings auth classes drive, on an issuer of their own.
+        // Role names are global across providers: every provider's roles-mapping joins the one role-name lookup
+        // (`ProviderRolePrivileges`) behind row-policy confinement, `already_global` advice and the sensitive-grant
+        // check, so each name below holds its privileges globally for every class in this context. A new name must
+        // be one no other class grants, writes policies for, or puts on a token.
+        "providers.personas.issuer=" + AbstractOidcAuthIntegrationTest.PERSONAS_ISSUER,
+        "providers.personas.jwk-set-uri=https://issuer.test/personas/jwks",
+        "providers.personas.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
+        "providers.personas.role-claims=roles",
+        "providers.personas.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
+                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"],\"sensitive\":[\"READ_ONLY_SENSITIVE_ANALYTIC\"],"
+                + "\"reader\":[\"SAVED_QUERY_READ\",\"TABLE_READ\"],"
                 + "\"writer\":[\"SAVED_QUERY_WRITE\",\"TABLE_READ\"],"
                 + "\"publisher\":[\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
                 + "\"readpublisher\":[\"SAVED_QUERY_READ\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
-                + "\"tableonly\":[\"TABLE_READ\"]}",
-        "providers.settings.issuer=" + AbstractOidcAuthIntegrationTest.SETTINGS_ISSUER,
-        "providers.settings.jwk-set-uri=https://issuer.test/settings/jwks",
-        "providers.settings.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
-        "providers.settings.role-claims=roles",
-        "providers.settings.roles-mapping={\"admin\":[\"FULL_ADMIN\"],\"viewer\":[\"READ_ONLY_ADMIN\"],"
-                + "\"analyst\":[\"READ_ONLY_ANALYTIC\"],\"sensitive\":[\"READ_ONLY_SENSITIVE_ANALYTIC\"],"
+                + "\"curator\":[\"SAVED_QUERY_WRITE\",\"SAVED_QUERY_PUBLISH\",\"TABLE_READ\"],"
                 + "\"tableonly\":[\"TABLE_READ\"],\"settingswriter\":[\"SETTINGS_WRITE\",\"TABLE_READ\"]}",
         // The Flight SQL listener on an ephemeral port, for the Flight metadata auth tests; idle for the REST ones.
         "flight.enabled=true",
@@ -105,10 +94,7 @@ abstract class AbstractOidcAuthIntegrationTest {
     static final String AUDIENCE = "adas-test";
     static final String FULL_ISSUER = "https://issuer.test/full";
     static final String READONLY_ISSUER = "https://issuer.test/readonly";
-    static final String WRITER_ISSUER = "https://issuer.test/writer";
-    static final String BUNDLES_ISSUER = "https://issuer.test/bundles";
-    static final String SINGLE_ISSUER = "https://issuer.test/single";
-    static final String SETTINGS_ISSUER = "https://issuer.test/settings";
+    static final String PERSONAS_ISSUER = "https://issuer.test/personas";
 
     @Autowired
     protected MockMvc mockMvc;

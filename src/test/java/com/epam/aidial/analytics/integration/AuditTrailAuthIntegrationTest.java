@@ -44,7 +44,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code FULL_ADMIN}-only), and 403 for an authenticated caller who maps to no application role
  * (proving it did not end up at bare authentication).
  *
- * <p>Nothing here issues ClickHouse DDL; the context is the shared one of {@link AbstractOidcAuthIntegrationTest}.
+ * <p>Nothing here is meant to issue ClickHouse DDL. The context is the shared one of
+ * {@link AbstractOidcAuthIntegrationTest}, which points at a live ClickHouse, so this is design intent the
+ * test does not check: accidental DDL would succeed rather than fail it.
  */
 class AuditTrailAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -335,7 +337,7 @@ class AuditTrailAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder request, String token) {
-        return request.header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+        return request.header(HttpHeaders.AUTHORIZATION, bearer(token))
                 .contentType(MediaType.APPLICATION_JSON);
     }
 

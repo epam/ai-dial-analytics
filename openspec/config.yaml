@@ -195,13 +195,15 @@ context: |
   `AbstractClickHouseIntegrationTest` / `AbstractPostgresIntegrationTest` (singleton Testcontainers
   via `@DynamicPropertySource`). **Each test owns its data — truncate + insert, never a shared
   fixture** — or you get order-dependent flakes against the shared container.
-  OIDC-mode REST and Flight auth tests extend `AbstractOidcAuthIntegrationTest`. **Every distinct
+  JWT-only OIDC REST and Flight auth tests extend `AbstractOidcAuthIntegrationTest`; api-key,
+  Flight basic-auth and actuator tests keep their own context. **Every distinct
   context costs heap and a JDBC pool**: `@SpringBootTest`/`@TestPropertySource` properties, a
   `@DynamicPropertySource` method, `@Import`s and `@MockitoBean`/`@MockitoSpyBean` fields are all part
   of the context-cache key, and the cache is capped (`src/test/resources/spring.properties`), so a
-  forked context also evicts and rebuilds others. Add a provider, property or spy a subclass needs
-  to its base's shared set when it is inert for the rest; fork only for a property that changes
-  behaviour the other classes assert.
+  forked context also evicts and rebuilds others. Add a property or spy a subclass needs to its
+  base's shared set when it is inert for the rest; fork only for a property that changes behaviour
+  the other classes assert. A provider is never inert: its role names join the one role-name lookup
+  every class sees, so pick names no other class grants, writes policies for, or puts on a token.
 
   ## Operational invariants
 

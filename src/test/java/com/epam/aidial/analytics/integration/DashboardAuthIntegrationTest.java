@@ -23,12 +23,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <p>Every caller's privileges come from a {@code roles-mapping}, never from injected authorities, so the
  * {@code SAVED_QUERY_WRITE -> SAVED_QUERY_READ} and {@code SAVED_QUERY_PUBLISH -> SAVED_QUERY_READ}
- * implications under test are the parser's. One provider maps
- * the bundles; another maps single privileges, each alongside {@code TABLE_READ} only so its inline bodies
- * translate — that privilege implies nothing about dashboards.
+ * implications under test are the parser's. The shared {@code personas} provider maps
+ * the bundles and the single privileges, each single privilege alongside {@code TABLE_READ} only so its inline
+ * bodies translate — that privilege implies nothing about dashboards.
  *
- * <p>Inline bodies are validated by translation, never executed; the context is the shared one of
- * {@link AbstractOidcAuthIntegrationTest}.
+ * <p>Inline bodies are validated by translation and not meant to be executed. The context is the shared one
+ * of {@link AbstractOidcAuthIntegrationTest}, which points at a live ClickHouse, so this is design intent the
+ * test does not check: an accidental execution would succeed rather than fail it.
  */
 class DashboardAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -430,7 +431,7 @@ class DashboardAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder builder, String token) {
-        return builder.header(HttpHeaders.AUTHORIZATION, "Bearer " + token).contentType("application/json");
+        return builder.header(HttpHeaders.AUTHORIZATION, bearer(token)).contentType("application/json");
     }
 
     private static String token(String issuer, String sub, String role) {
@@ -440,54 +441,54 @@ class DashboardAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     private static String admin() {
-        return token(BUNDLES_ISSUER, "admin-user", "admin");
+        return token(PERSONAS_ISSUER, "admin-user", "admin");
     }
 
     private static String otherAdmin() {
-        return token(BUNDLES_ISSUER, "admin-user-2", "admin");
+        return token(PERSONAS_ISSUER, "admin-user-2", "admin");
     }
 
     /** {@code READ_ONLY_ADMIN}: keeps private dashboards and reads the audit feed. */
     private static String alice() {
-        return token(BUNDLES_ISSUER, "alice", "viewer");
+        return token(PERSONAS_ISSUER, "alice", "viewer");
     }
 
     /** A second {@code READ_ONLY_ADMIN}, so the owner filter has two people holding the same role. */
     private static String bob() {
-        return token(BUNDLES_ISSUER, "bob", "viewer");
+        return token(PERSONAS_ISSUER, "bob", "viewer");
     }
 
     private static String analyst() {
-        return token(BUNDLES_ISSUER, "analyst", "analyst");
+        return token(PERSONAS_ISSUER, "analyst", "analyst");
     }
 
     /** A {@code READ_ONLY_ADMIN} whose token carries no {@code sub}, so its principal does not resolve. */
     private static String principalless() {
-        return token(BUNDLES_ISSUER, null, "viewer");
+        return token(PERSONAS_ISSUER, null, "viewer");
     }
 
     /** The same, holding {@code FULL_ADMIN}, so it can create a public dashboard with no owner. */
     private static String principallessAdmin() {
-        return token(BUNDLES_ISSUER, null, "admin");
+        return token(PERSONAS_ISSUER, null, "admin");
     }
 
     private static String reader() {
-        return token(SINGLE_ISSUER, "reader", "reader");
+        return token(PERSONAS_ISSUER, "reader", "reader");
     }
 
     private static String writer() {
-        return token(SINGLE_ISSUER, "writer", "writer");
+        return token(PERSONAS_ISSUER, "writer", "writer");
     }
 
     private static String publisher() {
-        return token(SINGLE_ISSUER, "publisher", "publisher");
+        return token(PERSONAS_ISSUER, "publisher", "publisher");
     }
 
     private static String readPublisher() {
-        return token(SINGLE_ISSUER, "readpublisher", "readpublisher");
+        return token(PERSONAS_ISSUER, "readpublisher", "readpublisher");
     }
 
     private static String tableOnly() {
-        return token(SINGLE_ISSUER, "tableonly", "tableonly");
+        return token(PERSONAS_ISSUER, "tableonly", "tableonly");
     }
 }
