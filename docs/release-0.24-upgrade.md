@@ -17,6 +17,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
 - **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `5`, and a runner on
   the other version is refused, so enrichment pauses until both sides match (§9).
+- **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
+  registered `usage-client-identity-live` applies it by hand (§10).
 
 ---
 
@@ -163,6 +165,26 @@ also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped
   back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
   runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
 
+## 10. Recommended catalog: DIAL CLI harness header
+
+The `usage-client-identity-live` pipeline in [`recommended-catalog`](recommended-catalog/README.md) now reads
+`dial_cli_harness_name` from the `X-DIAL-CLI-Harness` header, falling back to the second token of a legacy combined
+`X-DIAL-CLI-Version`, and decides `client_type` `dialcli` on either header. A DIAL CLI that sends the two headers
+separately leaves `dial_cli_harness_name` empty under the earlier expression.
+
+Importing the bundle again does not apply this: import never changes an object that exists, so the preview reports
+the pipeline as `SKIP` with `differs: true` (see [`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)).
+A deployment that already registered the pipeline applies it by hand:
+
+1. Re-declare `usage-client-identity-live` with the bundle's `client_type` and `dial_cli_harness_name` expressions.
+2. Update the `client_type`, `dial_cli_version` and `dial_cli_harness_name` column descriptions of
+   `usage_client_identity` from the bundle (a schema patch `update`). Descriptions only; no data changes.
+3. Backfill the pipeline over the period in which the separate header was sent. Rows whose payload is still
+   retained get their harness; rows past the payload retention window keep it empty.
+
+The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
+so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -173,3 +195,4 @@ also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
 | Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
+| Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§10) |
