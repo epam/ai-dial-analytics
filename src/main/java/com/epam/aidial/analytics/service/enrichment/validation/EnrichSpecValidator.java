@@ -778,9 +778,10 @@ public class EnrichSpecValidator {
      * there is no row-vs-group marker to check. Enforced here:
      *
      * <ol>
-     *   <li>{@code group_by}, {@code ready_when}, {@code member_select} and {@code advanced.input_token_budget}
-     *       are valid <b>only</b> on a {@code GROUP} trigger — the enforceable form of "{@code schedule} stays
-     *       row-grain";
+     *   <li>{@code group_by}, {@code ready_when} and {@code member_select} are valid <b>only</b> on a
+     *       {@code GROUP} trigger — the enforceable form of "{@code schedule} stays row-grain".
+     *       {@code advanced.input_token_budget} is refused off a group trigger earlier, on every write, in
+     *       {@code PipelineService};
      *   <li>a {@code GROUP} pipeline's {@code group_by} equals the target enrichment's grain key, because the
      *       enrichment is physically keyed on that column and collapses by it, so grouping by anything else
      *       would write many groups' labels onto one key and lose all but the last;
@@ -807,9 +808,6 @@ public class EnrichSpecValidator {
             }
             if (declaration.memberSelect() != null) {
                 throw new PipelineValidationException("trigger.member_select is only valid for a group pipeline");
-            }
-            if (declaration.inputTokenBudget() != null) {
-                throw new PipelineValidationException("advanced.input_token_budget is only valid for a group pipeline");
             }
             return;
         }

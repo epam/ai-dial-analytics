@@ -48,7 +48,9 @@ public record CatalogBundle(
      *   <li>{@code 1} — the first shape.</li>
      *   <li>{@code 2} — adds an {@code aggregate} declaration's {@code sql}. A version-1 ADAS refuses a version-2
      *       bundle with the readable newer-format 422 rather than the strict binder's unknown-field 400.</li>
+     *   <li>{@code 3} — adds an {@code enrich} transform's {@code route} and the {@code dial_app_route} preset, and a
+     *       {@code group} pipeline's {@code advanced.input_token_budget}.</li>
      * </ul>
      */
-    public static final int FORMAT_VERSION = 2;
+    public static final int FORMAT_VERSION = 3;
 }

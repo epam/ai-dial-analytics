@@ -14,9 +14,9 @@
 
 ## 2. Group-only validation
 
-- [x] 2.1 `EnrichSpecValidator.validateGroupTrigger`: refuse `advanced.input_token_budget` on a non-group trigger
-      with `"advanced.input_token_budget is only valid for a group pipeline"`, beside the `trigger.group_by`,
-      `trigger.ready_when` and `trigger.member_select` refusals
+- [x] 2.1 `PipelineService.requireNoTriggerContradiction`: refuse `advanced.input_token_budget` on a non-group
+      trigger with `"advanced.input_token_budget is only valid for a group pipeline"`, on every write, drafts
+      included, beside the `trigger.member_select` refusal
 
 ## 3. Raise the runner contract to 6
 
@@ -32,11 +32,15 @@
 - [x] 4.1 `PipelineMapperTest`: the member round-trips; `0` is served as `0`, and a block holding only it is not
       omitted; a negative value is refused naming the member; an `aggregate` declaration carrying it is refused as
       the `enrich` kind's member
-- [x] 4.2 Validator test: a `schedule` pipeline declaring it is refused with 422 `pipeline_validation_failed`; a
-      `group` pipeline declaring it is accepted
+- [x] 4.2 `GroupEnrichmentIntegrationTest`: an enabled `schedule` pipeline and a disabled `schedule` draft declaring
+      it are each refused with 422 `pipeline_validation_failed`; a `group` pipeline declaring it is accepted
 - [x] 4.3 Feed test: the enrich feed (`view=compiled`) and `GET /v1/pipelines/{name}` (`view=source`) both carry
       `advanced.input_token_budget`, and the response carries `Adas-Contract-Version: 6`
 - [x] 4.4 Catalog export/import round-trip carries the member
+- [x] 4.5 `StoredSpecShapeTest`: the stored spec writes `input_token_budget` under that name, and writes a `0`
+- [x] 4.6 Catalog bundle `format_version` → `3` (`CatalogBundle.FORMAT_VERSION`, `catalog-export-import` spec,
+      `CatalogTransferIntegrationTest`), covering this member and the `transform.route` member shipped in the same
+      release
 
 ## 5. Docs
 

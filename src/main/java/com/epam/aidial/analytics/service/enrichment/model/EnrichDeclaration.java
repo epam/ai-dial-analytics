@@ -95,10 +95,6 @@ public record EnrichDeclaration(PipelineEntity pipeline, EnrichSpec spec) {
         return spec.getRateRpm();
     }
 
-    public Integer inputTokenBudget() {
-        return spec.getInputTokenBudget();
-    }
-
     public long generation() {
         return pipeline.getGeneration();
     }

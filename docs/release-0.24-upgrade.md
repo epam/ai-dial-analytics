@@ -24,6 +24,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
   registered `usage-client-identity-live` applies it by hand (§12).
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§13).
+- **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§14).
 
 ---
 
@@ -341,6 +342,17 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
 - **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
   runner's default trimming applies again. Roll ADAS and the runner back together.
 
+## 14. Catalog bundle format version 3
+
+`POST /v1/catalog/export` now writes `format_version: 3`, because a bundle may carry an `enrich` transform's `route`
+(§9) and `advanced.input_token_budget` (§13) (see
+[`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `3`, whatever its
+pipelines use.
+
+- **Import into 0.24 first.** A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`.
+  Upgrade the target before promoting from an upgraded environment.
+- **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -357,3 +369,4 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
 | Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§11) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§13) |
+| Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§14) |

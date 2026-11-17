@@ -346,7 +346,7 @@ public final class PipelineRequests {
             @Schema(description = "Approximate token ceiling the runner trims a group's assembled input to. "
                     + "0 switches the runner's trimming off, a positive value is this pipeline's own ceiling, and "
                     + "absent means the runner's configured default. Valid only on a `group` pipeline; a negative "
-                    + "value is refused.", example = "0")
+                    + "value is refused.", example = "8000")
             @JsonProperty("input_token_budget") Integer inputTokenBudget) {}
 
     /**

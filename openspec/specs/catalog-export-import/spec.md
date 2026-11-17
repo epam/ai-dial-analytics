@@ -174,7 +174,7 @@ skipped.
 
 ### Requirement: Bundle format and version compatibility
 
-The bundle SHALL carry `format: "adas-catalog"`, an integer `format_version` (currently `2`), `exported_at`, `skipped`,
+The bundle SHALL carry `format: "adas-catalog"`, an integer `format_version` (currently `3`), `exported_at`, `skipped`,
 `required_system_tables`, `tables` (each `{ table, schema }` in request shape) and `pipelines` (each
 `{ pipeline, exported_enabled }`).
 
@@ -187,6 +187,11 @@ every bundle a version-`2` ADAS writes with the readable `catalog_bundle_version
 binding's unknown-field `400` that a bundle carrying `sql` under version `1` would meet. A version-`1` bundle SHALL still import into
 a version-`2` ADAS unchanged: it carries no `sql`, and every pipeline in it is in form mode.
 
+Version `3` adds an `enrich` transform's `route` with the `dial_app_route` preset, and a `group` pipeline's
+`advanced.input_token_budget`. As with version `2`, every export SHALL write `3` whatever its pipelines use, so an ADAS that reads
+only version `2` refuses the bundle with `catalog_bundle_version_unsupported` rather than an unknown-field `400`. A version-`1` or
+version-`2` bundle SHALL still import into a version-`3` ADAS unchanged: neither carries those members.
+
 Import SHALL parse in two stages. Stage 1 SHALL read only `format` and `format_version`, leniently: a wrong or missing `format` SHALL
 be `400`, and a `format_version` above the highest supported SHALL be `422` with `error` `catalog_bundle_version_unsupported`, whose
 message names the bundle's version. Stage 2 SHALL bind the whole bundle strictly: unreadable JSON, an unknown field at any depth,
@@ -194,27 +199,34 @@ an unknown enum value, or a constraint violation SHALL be `400`.
 
 #### Scenario: Bundle from a newer ADAS
 
-- **WHEN** a bundle with `format_version: 3` that also carries unknown fields is uploaded to an ADAS that supports version 2
-- **THEN** the response is `422` with `error` `catalog_bundle_version_unsupported`, and the message names version 3
+- **WHEN** a bundle with `format_version: 4` that also carries unknown fields is uploaded to an ADAS that supports version 3
+- **THEN** the response is `422` with `error` `catalog_bundle_version_unsupported`, and the message names version 4
 
 #### Scenario: A bundle carrying sql is refused readably by an older ADAS
 
 - **WHEN** a `format_version: 2` bundle holding an aggregate pipeline with `sql` is uploaded to an ADAS that supports only version 1
 - **THEN** the response is `422` with `error` `catalog_bundle_version_unsupported` naming version 2, not a `400` naming `sql`
 
+#### Scenario: A bundle carrying an input token budget is refused readably by an older ADAS
+
+- **WHEN** a `format_version: 3` bundle holding a group pipeline with `advanced.input_token_budget` is uploaded to an ADAS that
+  supports only version 2
+- **THEN** the response is `422` with `error` `catalog_bundle_version_unsupported` naming version 3, not a `400` naming
+  `input_token_budget`
+
 #### Scenario: A version 1 bundle still imports
 
-- **WHEN** a `format_version: 1` bundle exported before the bump is uploaded to an ADAS that supports version 2
+- **WHEN** a `format_version: 1` bundle exported before the bump is uploaded to an ADAS that supports version 3
 - **THEN** it is parsed and planned as before, and each of its aggregate pipelines is imported in form mode
 
 #### Scenario: Unknown nested field
 
-- **WHEN** a `format_version: 2` bundle carries an unknown field inside a pipeline's transform
+- **WHEN** a `format_version: 3` bundle carries an unknown field inside a pipeline's transform
 - **THEN** the response is `400`
 
 #### Scenario: Missing required nested field
 
-- **WHEN** a `format_version: 2` bundle has a table entry whose `table.name` is blank
+- **WHEN** a `format_version: 3` bundle has a table entry whose `table.name` is blank
 - **THEN** the response is `400`
 
 ### Requirement: Columns travel as stored

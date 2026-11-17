@@ -320,7 +320,7 @@ class PipelineMapperTest {
     @Test
     void inputTokenBudgetRoundTripsAsSent() {
         final EnrichSpec spec = (EnrichSpec) mapper.toRegistration(enrichWithAdvanced(
-                new AdvancedRequest(null, null, null, null, 1000))).spec();
+                new AdvancedRequest(null, null, null, null, 1000), groupTrigger())).spec();
         final PipelineEntity entity = enrichEntity();
         entity.setSpec(specCodec.write(spec));
 
@@ -333,7 +333,7 @@ class PipelineMapperTest {
         // 0 switches the runner's trimming off: a value, not an absence, so the block holding only it is
         // served rather than omitted as "no knob declared".
         final EnrichSpec spec = (EnrichSpec) mapper.toRegistration(enrichWithAdvanced(
-                new AdvancedRequest(null, null, null, null, 0))).spec();
+                new AdvancedRequest(null, null, null, null, 0), groupTrigger())).spec();
         final PipelineEntity entity = enrichEntity();
         entity.setSpec(specCodec.write(spec));
 
@@ -365,9 +365,17 @@ class PipelineMapperTest {
     }
 
     private static CreatePipelineRequest enrichWithAdvanced(AdvancedRequest advanced) {
+        return enrichWithAdvanced(advanced, new TriggerRequest("schedule", null, null, null, null));
+    }
+
+    private static CreatePipelineRequest enrichWithAdvanced(AdvancedRequest advanced, TriggerRequest trigger) {
         return new CreatePipelineRequest("toxicity-live", PipelineKind.ENRICH, "usage_toxicity", null, null,
-                null, null, null, new TriggerRequest("schedule", null, null, null, null),
-                llmTransform(null), advanced, true);
+                null, null, null, trigger, llmTransform(null), advanced, true);
+    }
+
+    /** The trigger {@code advanced.input_token_budget} exists for; the service refuses it on any other. */
+    private static TriggerRequest groupTrigger() {
+        return new TriggerRequest("group", null, "chat_id", new ReadyWhenDto(null, "10m", null, null), null);
     }
 
     // --- cross-kind rejection ------------------------------------------------------------------------

@@ -341,21 +341,24 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         importCall("/v1/catalog/import/preview", blankName.toString(), null, "SKIP_IF_EXISTS")
                 .andExpect(status().isBadRequest());
 
-        assertThat(bundle.get("format_version").asInt()).isEqualTo(2);
+        assertThat(bundle.get("format_version").asInt()).isEqualTo(3);
         final ObjectNode newer = bundle.deepCopy();
-        newer.put("format_version", 3);
-        newer.put("added_in_v3", true);
+        newer.put("format_version", 4);
+        newer.put("added_in_v4", true);
         importCall("/v1/catalog/import", newer.toString(), null, "SKIP_IF_EXISTS")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("catalog_bundle_version_unsupported"))
-                .andExpect(jsonPath("$.message").value(containsString("format_version 3")));
+                .andExpect(jsonPath("$.message").value(containsString("format_version 4")));
 
-        // A version-1 bundle — the same shape without `sql` — still reads, and plans as before.
-        final ObjectNode older = bundle.deepCopy();
-        older.put("format_version", 1);
-        importCall("/v1/catalog/import/preview", older.toString(), null, "SKIP_IF_EXISTS")
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.validation_errors").isEmpty());
+        // Version-1 and version-2 bundles — this shape carries neither `sql` nor a route or input token budget —
+        // still read, and plan as before.
+        for (int version : new int[] {1, 2}) {
+            final ObjectNode older = bundle.deepCopy();
+            older.put("format_version", version);
+            importCall("/v1/catalog/import/preview", older.toString(), null, "SKIP_IF_EXISTS")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.validation_errors").isEmpty());
+        }
 
         final ObjectNode wrongFormat = bundle.deepCopy();
         wrongFormat.put("format", "dm-config");
@@ -494,7 +497,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
 
             final ObjectNode bundle = (ObjectNode) json.readTree(
                     export("{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + pipeline + "\"}]}"));
-            assertThat(bundle.get("format_version").asInt()).isEqualTo(2);
+            assertThat(bundle.get("format_version").asInt()).isEqualTo(3);
             assertThat(names(bundle.get("tables"), "table")).contains(BASE, SENT, target);
             final JsonNode bundled = pipeline(bundle, pipeline);
             assertThat(bundled.get("sql").asString()).isEqualTo(SQL_DECLARATION);

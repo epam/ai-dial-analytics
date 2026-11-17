@@ -4,8 +4,9 @@
 `PipelineMapper.toSpec` stores each knob as sent into `EnrichSpec`, which is persisted as the pipeline's `spec` JSON.
 `toAdvancedDto` serves them back, and omits the block when every knob is null. ADAS writes no default, because a
 default echoed back would be indistinguishable from an operator's choice. Range checks run in the mapper; the
-`sample_fraction` rule is the precedent. Group-only trigger members are refused on a `schedule` pipeline in
-`EnrichSpecValidator.validateGroupTrigger`.
+`sample_fraction` rule is the precedent. Group-only trigger members are refused on a `schedule` pipeline:
+`trigger.group_by` and `trigger.ready_when` in `EnrichSpecValidator.validateGroupTrigger`, only when the pipeline is
+armed, and `trigger.member_select` on every write, drafts included, in `PipelineService.requireNoTriggerContradiction`.
 
 The Enrichment Runner trims a group's input to `group.input-token-budget`, estimated at four characters per token.
 Its paired change reads `advanced.input_token_budget` as a per-pipeline override and speaks contract `6`.
@@ -53,8 +54,10 @@ meaning. Refusing at write time keeps the stored declaration honest. The check s
 ### Group-only, refused on a `schedule` pipeline
 
 Only the group lane has an input budget, so on a `schedule` pipeline the knob would be accepted and do nothing.
-That is exactly why `trigger.group_by`, `trigger.ready_when` and `trigger.member_select` are refused there, and
-this knob joins them in `validateGroupTrigger`. A patch that changes a pipeline's trigger from `group` to
+That is exactly why `trigger.group_by`, `trigger.ready_when` and `trigger.member_select` are refused there. This
+knob follows `member_select` into `PipelineService.requireNoTriggerContradiction`, so it is refused on every write,
+a disabled draft included, rather than only when the pipeline is armed: a draft is authored intent too, and the
+member does nothing on a `schedule` pipeline whatever its state. A patch that changes a pipeline's trigger from `group` to
 `schedule` must drop the knob in the same patch, as it must drop the other group-only members.
 
 - *Alternative: accept it on any trigger as inert.* Rejected. An accepted member that changes nothing reads to its
@@ -81,7 +84,10 @@ any change to a pinned shape bumps the version.
 
 ## Migration Plan
 
-1. Deploy ADAS and the Enrichment Runner together on contract `6`, as for every bump. No catalog migration.
+1. Deploy ADAS and the Enrichment Runner together on contract `6`, as for every bump. No catalog migration. The
+   member changes the catalog bundle's pipeline shape, so the bundle `format_version` rises to `3` (see
+   [`catalog-export-import`](../../../specs/catalog-export-import/spec.md)); an older ADAS refuses a new bundle
+   readably.
 2. Declare `advanced.input_token_budget` on the group pipelines that need it, for example `0` on a
    `dial_app_route` pipeline whose application trims its own input.
 3. Rollback: roll both back together. The stored member is ignored by the older build.

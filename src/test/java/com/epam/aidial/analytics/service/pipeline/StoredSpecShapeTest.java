@@ -71,6 +71,7 @@ class StoredSpecShapeTest {
         spec.setBatchScanLimit(1000);
         spec.setBatchChunk(1);
         spec.setRateRpm(75);
+        spec.setInputTokenBudget(0);
         return spec;
     }
 
@@ -85,7 +86,10 @@ class StoredSpecShapeTest {
         final JsonNode stored = reserialize(storedEnrichSpec());
 
         assertThat(stored.propertyNames()).contains(
-                "rows_per_scan", "rows_per_call", "sample_fraction", "rate_rpm");
+                "rows_per_scan", "rows_per_call", "sample_fraction", "rate_rpm", "input_token_budget");
+        // input_token_budget has no former spelling; a 0 (trimming off) is a value and is written, not dropped
+        // as an absence, which would read back as the runner's default.
+        assertThat(stored.get("input_token_budget").asInt()).isZero();
         // The former spellings are read-only aliases: accepted on the way in, never written out, so a
         // rewritten row carries exactly one spelling of each knob rather than drifting into two.
         assertThat(stored.propertyNames()).doesNotContain(
