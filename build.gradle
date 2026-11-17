@@ -385,6 +385,8 @@ def MULTI_REPLICA_TESTS = '*.MultiReplica*IntegrationTest'
 tasks.named('test') {
     useJUnitPlatform()
     jvmArgs arrowJvmArgs
+    // The cached Spring test contexts outgrow Gradle's 512m default and fail the run with "Java heap space".
+    maxHeapSize = '2g'
     // DeltaSpecStructureTest reads spec files from disk, so they are a real input of this task: without
     // declaring them Gradle reports it UP-TO-DATE after a spec-only edit and the check never runs against
     // the change it exists to guard. Narrowed to the files the test actually walks — declaring all of
