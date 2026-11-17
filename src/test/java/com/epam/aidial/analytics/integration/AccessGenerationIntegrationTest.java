@@ -390,6 +390,26 @@ class AccessGenerationIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(jsonPath("$.roles.x.columns", org.hamcrest.Matchers.containsInAnyOrder("k", LABELS + ".tag")));
     }
 
+    /** An enrichment PATCH that drops and renames nothing changes no source list, so it does not wait on its source. */
+    @Test
+    void enrichmentColumnAddDoesNotWaitForItsSource() throws Exception {
+        send(post(BASE), "{\"name\":\"" + LABELS + "\",\"type\":\"enrichment\",\"source_table\":\"" + TABLE + "\"}").andExpect(status().isCreated());
+        send(post(BASE + "/" + LABELS + "/schema"), "{\"grain_key\":\"k\",\"columns\":[{\"source_name\":\"label\",\"name\":\"label\",\"type\":\"string\"}]}")
+                .andExpect(status().isOk());
+        final MockHttpServletResponse response = new TransactionTemplate(transactionManager).execute(status -> {
+            definitions.findForUpdate(TABLE).orElseThrow();
+            try {
+                return OTHER.submit(() -> mockMvc.perform(withAdmin(patch(BASE + "/" + LABELS + "/schema"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"add\":[{\"source_name\":\"note\",\"name\":\"note\",\"type\":\"string\"}]}"))
+                        .andReturn().getResponse()).get(30, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        assertThat(response.getStatus()).isEqualTo(200);
+    }
+
     @Test
     void dropWaitingForPutListingTheColumnIsRefusedBeforeAnyAlter() throws Exception {
         final Future<MockHttpServletResponse> other = whileLocked(TABLE, withAdmin(patch(BASE + "/" + TABLE + "/schema"))

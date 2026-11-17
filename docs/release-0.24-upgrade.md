@@ -57,8 +57,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 
 1. **Check for a stored `*`** in `get`, `read` and `sensitive` lists and row policies, and remove the ones you did
    not mean to open to every caller (§7).
-2. **Run the enrichment query** in §10 and grant each role it finds on the source. Decide how to replace each
-   enrichment row policy, and save the lists and policies for a rollback (§10).
+2. **Run the two enrichment queries** in §10: decide for each role that gains access whether to hide the columns
+   from it, and grant each role that loses access on the source. Save the lists and policies for a rollback (§10).
 3. **Give runner roles the source's clearance** where the source's partition, version or identity column is
    `sensitive` (§11).
 4. **Update access-API clients**: move from the old `/access` and `/row-policies` calls to
@@ -195,13 +195,39 @@ stay its own.
 - A `PUT .../access?role=` on an enrichment with anything but `write` and `modify` is
   `409 enrichment_follows_source`.
 - **Source readers gain** the enrichments' columns (sensitive ones with the source's clearance). **Enrichment-only
-  grantees lose** them: the columns become unknown fields. **Enrichment row policies have no equivalent**: replace
-  each with a row policy on the source, or mark the columns `sensitive`.
+  grantees lose** them: the columns become unknown fields. **Enrichment row policies are dropped**, and a role they
+  confined reads the enrichment's values on every source row it can read. To keep the values from a role, leave the
+  `<enrichment>.<column>` names out of its column policy on the source, mark the columns `sensitive`, or confine the
+  role's rows on the source.
 - The sensitive-grant subset rule is gone for every derived table: its clearance holders no longer need clearance on
   its input. Review who holds each derived table's clearance.
 
-**What to do before upgrading.** Find the roles that would lose access, and grant each the same key on the source.
-The query is expected to return nothing; a role mapped to the privilege globally can be ignored.
+**What to do before upgrading.** First, find who gains access: each source `read` or `sensitive` grantee the
+enrichment does not name, and each role whose enrichment row policy is dropped.
+
+```sql
+WITH pair AS (
+  SELECT e.name AS enrichment, e.access AS ea, e.row_policies AS ep, s.access AS sa
+    FROM table_definition e
+    JOIN table_definition s ON s.name = e.source_table
+   WHERE e.type = 'ENRICHMENT')
+SELECT enrichment, 'sensitive' AS gains, role
+  FROM pair, jsonb_array_elements_text(sa -> 'sensitive') AS role
+ WHERE NOT coalesce(ea -> 'sensitive', '[]'::jsonb) ? role
+UNION ALL
+SELECT enrichment, 'read', role
+  FROM pair, jsonb_array_elements_text(sa -> 'read') AS role
+ WHERE NOT coalesce(ea -> 'read', '[]'::jsonb) ? role
+UNION ALL
+SELECT enrichment, 'rows (policy dropped)', role
+  FROM pair, jsonb_object_keys(ep) AS role;
+```
+
+For each row, accept the gain or hide the columns from that role as described above. Column policies exist from 0.24
+on, so set them right after the upgrade; mark columns `sensitive` before it.
+
+Then find the roles that would lose access, and grant each the same key on the source. This query is expected to
+return nothing; a role mapped to the privilege globally can be ignored.
 
 ```sql
 WITH pair AS (
@@ -304,7 +330,7 @@ so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may b
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
 | Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
-| An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the §10 query, grant on the source, save the lists for a rollback (§10) |
+| An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the two §10 queries, hide or grant per role, save the lists for a rollback (§10) |
 | Sensitive-grant subset rule removed | Derived tables no longer need clearance on their input | Review who holds each derived table's clearance (§10) |
 | Role-keyed access API, column policies (breaking) | Old access and row-policy calls are gone; snapshots carry `roles`; hidden columns are absent and refused `403 column_not_entitled` | Move clients using the table in §11; name the cursor columns in a restricted runner's list; delete column policies before a rollback (§11) |
 | Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§11) |

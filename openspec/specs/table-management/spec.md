@@ -3753,7 +3753,8 @@ These guarantees SHALL hold against a concurrent `PUT /v1/tables/{name}/access?r
 SHALL be decided on the entries as they stand when the schema change commits, and a `PUT` committed after a rename or
 drop SHALL be validated against the columns as they stand then. No interleaving SHALL leave a list empty or naming a
 column the table (or, for a qualified name, the enrichment) no longer has, and none SHALL make the refusal arrive
-after the `ALTER`: a schema `PATCH` SHALL hold the definition's row lock (and, for an enrichment, its source's) from
+after the `ALTER`: a schema `PATCH` SHALL hold the definition's row lock (and, for an enrichment's `PATCH` that drops
+or renames a column, its source's) from
 before it reads any policy until its catalog changes commit, so the entries it decides on before issuing the `ALTER`
 are the entries it commits against.
 
@@ -3868,7 +3869,18 @@ holding the definition SHALL wait for it at most the configured lock timeout (`t
 default). When the wait expires the request SHALL be refused with HTTP 409 and machine code `table_busy`, whose
 message says another change to the table is in progress; it SHALL change nothing, so it MAY be retried as sent, and
 the write holding the definition SHALL complete unaffected. A write that obtains the definition within the timeout
-SHALL be judged against the state the earlier write left. Writes to other tables SHALL NOT wait for it.
+SHALL be judged against the state the earlier write left. Writes to other tables SHALL NOT wait for it. An
+enrichment's schema `PATCH` or re-definition SHALL take its source's turn only when it drops or renames a column,
+whether or not the source has column policies at that moment; otherwise it SHALL NOT wait for the source's writers or
+make them wait.
+
+A schema `PATCH` SHALL hold the definition through its ClickHouse `ALTER`, which may run up to
+`clickhouse.ddl.task-timeout`, longer than the lock timeout, so writes to the same table arriving meanwhile MAY be
+refused `table_busy`. If the catalog transaction is lost after the `ALTER` ran (for example, the PostgreSQL session
+timed out or failed over), ClickHouse holds the change and the catalog does not. Sending the same `PATCH` again SHALL
+bring the catalog to it, because an `ALTER` whose column changes are already in place is treated as applied (see
+[clickhouse-replication](../clickhouse-replication/spec.md)); a patch that drops a column and adds or renames another
+to the same name is the exception, and its retry is refused.
 
 The bound SHALL apply to the wait for the definition alone, not to any other statement of the request. A configured
 lock timeout below one millisecond, zero and negative values included, SHALL be refused at startup with a message
@@ -3890,6 +3902,12 @@ sent as a failed definition does, and the same request sent again succeeds.
 - **GIVEN** a change to table `t` that holds its definition for less than the lock timeout
 - **WHEN** an access `PUT` on `t` waits for it
 - **THEN** the `PUT` proceeds once the change commits, and is judged against the entries that change left
+
+#### Scenario: An enrichment column add does not wait for its source
+
+- **GIVEN** an enrichment `e` of table `t`, and another change holding `t`'s definition
+- **WHEN** a schema `PATCH` adds a column to `e`
+- **THEN** the `PATCH` answers `200` without waiting for the change on `t` to commit
 
 #### Scenario: A lock timeout under a millisecond is refused at startup
 

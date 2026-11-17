@@ -108,8 +108,8 @@ public class TableSchemaService {
             Change<String> description, Change<Boolean> sensitive, Change<Boolean> heavy) {}
 
     /**
-     * Applies {@code patch} in one transaction, from the row lock of the table (and, for an enrichment, then of its
-     * source, before anything else loads it) through every validation, the ClickHouse {@code ALTER} and the catalog
+     * Applies {@code patch} in one transaction, from the row lock of the table (and, for an enrichment whose patch drops or
+     * renames a column, then of its source, before anything else loads it) through every validation, the ClickHouse {@code ALTER} and the catalog
      * writes, so the column policies it decides on before the {@code ALTER} are the ones it commits against. The
      * response is read after the commit.
      */
@@ -121,10 +121,12 @@ public class TableSchemaService {
     private void patchLocked(String name, PatchInput patch) {
         final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
-        // The source's lists name an enrichment's columns, so its row is locked too, enrichment first.
-        final TableDefinitionEntity policyOwner = definition.getType() == TableType.ENRICHMENT
-                ? definitions.findForUpdate(definition.getSourceTable()).orElse(null)
-                : definition;
+        // The source's lists name an enrichment's columns, so its row is locked too, enrichment first, when the request
+        // drops or renames one. Decided on the request alone, because the lock must be the first load of the source row,
+        // and taken whether or not the source has column policies now, so that a concurrent PUT cannot add one meanwhile.
+        final TableDefinitionEntity policyOwner = definition.getType() != TableType.ENRICHMENT ? definition
+                : patch.drop().isEmpty() && patch.rename().isEmpty() ? null
+                : definitions.findForUpdate(definition.getSourceTable()).orElse(null);
         definition.requireModifiable();
         // PATCH is the live-schema surface: it emits immediate ClickHouse ALTERs, so it applies only to a
         // materialized table. A not-yet-materialized table's schema is defined and materialized via
