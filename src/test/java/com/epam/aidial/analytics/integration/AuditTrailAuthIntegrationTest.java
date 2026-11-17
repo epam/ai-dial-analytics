@@ -15,18 +15,11 @@ import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
-import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -51,40 +44,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code FULL_ADMIN}-only), and 403 for an authenticated caller who maps to no application role
  * (proving it did not end up at bare authentication).
  *
- * <p>Only PostgreSQL is required; nothing here issues ClickHouse DDL.
+ * <p>Nothing here is meant to issue ClickHouse DDL. The context is the shared one of
+ * {@link AbstractOidcAuthIntegrationTest}, which points at a live ClickHouse, so this is design intent the
+ * test does not check: accidental DDL would succeed rather than fail it.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "clickhouse.migrations.enabled=false",
-        // No ClickHouse here: the startup engine check finds nothing to reach, so the storage gate stays closed.
-        "clickhouse.port=1",
-        "sync.validate-schema=false",
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.full.issuer=" + AuditTrailAuthIntegrationTest.FULL_ISSUER,
-        "providers.full.jwk-set-uri=https://issuer.test/full/jwks",
-        "providers.full.audiences=" + AuditTrailAuthIntegrationTest.AUDIENCE,
-        "providers.full.role-claims=roles",
-        "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"]}",
-        "providers.readonly.issuer=" + AuditTrailAuthIntegrationTest.READONLY_ISSUER,
-        "providers.readonly.jwk-set-uri=https://issuer.test/readonly/jwks",
-        "providers.readonly.audiences=" + AuditTrailAuthIntegrationTest.AUDIENCE,
-        "providers.readonly.role-claims=roles",
-        "providers.readonly.roles-mapping={\"viewer\":[\"READ_ONLY_ADMIN\"]}",
-})
-@AutoConfigureMockMvc
-@Import({TestSecurityConfig.class, OpenStorageGate.class})
-class AuditTrailAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String FULL_ISSUER = "https://issuer.test/full";
-    static final String READONLY_ISSUER = "https://issuer.test/readonly";
+class AuditTrailAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String FEED = "/v1/activities";
 
-    @Autowired
-    private MockMvc mockMvc;
     @Autowired
     private ObjectMapper objectMapper;
     @Autowired
@@ -95,11 +62,6 @@ class AuditTrailAuthIntegrationTest {
     private SavedQueryRepository savedQueries;
     @Autowired
     private TransactionTemplate transactions;
-
-    @DynamicPropertySource
-    static void dynamicProperties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-    }
 
     @Test
     void refusesAnUnauthenticatedCaller() throws Exception {
@@ -375,7 +337,7 @@ class AuditTrailAuthIntegrationTest {
     }
 
     private static MockHttpServletRequestBuilder authored(MockHttpServletRequestBuilder request, String token) {
-        return request.header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+        return request.header(HttpHeaders.AUTHORIZATION, bearer(token))
                 .contentType(MediaType.APPLICATION_JSON);
     }
 

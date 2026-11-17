@@ -5,7 +5,6 @@ import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
 import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
-import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import org.apache.arrow.flight.CallOption;
 import org.apache.arrow.flight.FlightCallHeaders;
 import org.apache.arrow.flight.FlightClient;
@@ -27,10 +26,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
 import tools.jackson.databind.node.LongNode;
 
 import java.io.ByteArrayInputStream;
@@ -46,8 +41,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Catalog metadata is subject to the same role-based sensitive-column filtering as query results
  * (spec: "Catalog metadata honors the caller's column visibility"). Runs the Flight endpoint in
- * {@code oidc} mode with two locally-minted JWT providers — one granting {@code FULL_ADMIN}, one
- * {@code READ_ONLY_ADMIN} — and asserts that the Arrow schema {@code GetTables} reports for
+ * {@code oidc} mode with two of the shared context's locally-minted JWT providers — one granting
+ * {@code FULL_ADMIN}, one {@code READ_ONLY_ADMIN} — and asserts that the Arrow schema {@code GetTables} reports for
  * {@code dial_usage_log} omits the {@code sensitive} columns for the read-only caller while carrying
  * them for the admin.
  *
@@ -60,28 +55,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * declares (spec: "Every value this requirement declares as supported SHALL be covered by a test that
  * exercises the behaviour"). Column visibility narrows; entity visibility does not.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK, properties = {
-        "poll.enabled=false",
-        "security.mode=oidc",
-        "security.defaults.email-claim=email",
-        "security.defaults.principal-claim=sub",
-        "providers.full.issuer=" + FlightMetadataAuthIntegrationTest.FULL_ISSUER,
-        "providers.full.jwk-set-uri=https://issuer.test/full/jwks",
-        "providers.full.audiences=" + FlightMetadataAuthIntegrationTest.AUDIENCE,
-        "providers.full.role-claims=roles",
-        "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"]}",
-        "providers.readonly.issuer=" + FlightMetadataAuthIntegrationTest.READONLY_ISSUER,
-        "providers.readonly.jwk-set-uri=https://issuer.test/readonly/jwks",
-        "providers.readonly.audiences=" + FlightMetadataAuthIntegrationTest.AUDIENCE,
-        "providers.readonly.role-claims=roles",
-        "providers.readonly.roles-mapping={\"viewer\":[\"READ_ONLY_ADMIN\"]}",
-})
-@Import(TestSecurityConfig.class)
-class FlightMetadataAuthIntegrationTest {
-
-    static final String AUDIENCE = "adas-test";
-    static final String FULL_ISSUER = "https://issuer.test/full";
-    static final String READONLY_ISSUER = "https://issuer.test/readonly";
+class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     /**
      * The entity whose wildcard schema can still show a sensitive column being filtered.
@@ -132,14 +106,6 @@ class FlightMetadataAuthIntegrationTest {
     private BufferAllocator clientAllocator;
     private FlightSqlClient sqlClient;
 
-    @DynamicPropertySource
-    static void properties(DynamicPropertyRegistry registry) {
-        PostgresContainerSupport.registerProperties(registry);
-        ClickHouseContainerSupport.registerProperties(registry);
-        registry.add("flight.enabled", () -> "true");
-        registry.add("flight.port", () -> "0");
-    }
-
     @BeforeEach
     void openClient() {
         clientAllocator = new RootAllocator();
@@ -155,8 +121,8 @@ class FlightMetadataAuthIntegrationTest {
 
     @Test
     void tableSchemaHidesSensitiveColumnsFromReadOnlyCaller() {
-        final List<String> adminFields = tableSchemaFields(SENSITIVE_ENTITY, bearer(fullAdminToken()));
-        final List<String> readOnlyFields = tableSchemaFields(SENSITIVE_ENTITY, bearer(readOnlyToken()));
+        final List<String> adminFields = tableSchemaFields(SENSITIVE_ENTITY, bearerOption(fullAdminToken()));
+        final List<String> readOnlyFields = tableSchemaFields(SENSITIVE_ENTITY, bearerOption(readOnlyToken()));
 
         assertThat(adminFields).containsAll(SENSITIVE_COLUMNS);
         assertThat(readOnlyFields).doesNotContainAnyElementsOf(SENSITIVE_COLUMNS);
@@ -175,8 +141,8 @@ class FlightMetadataAuthIntegrationTest {
      */
     @Test
     void catalogSqlHidesSensitiveColumnsFromReadOnlyCaller() {
-        final List<String> admin = catalogSqlColumnNames(bearer(fullAdminToken()));
-        final List<String> readOnly = catalogSqlColumnNames(bearer(readOnlyToken()));
+        final List<String> admin = catalogSqlColumnNames(bearerOption(fullAdminToken()));
+        final List<String> readOnly = catalogSqlColumnNames(bearerOption(readOnlyToken()));
 
         assertThat(admin).containsAll(ALL_SENSITIVE_COLUMNS);
         assertThat(readOnly).doesNotContainAnyElementsOf(ALL_SENSITIVE_COLUMNS);
@@ -217,7 +183,7 @@ class FlightMetadataAuthIntegrationTest {
         tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(), null,
                 List.of("event_id", "project_id", "request_time")));
         try {
-            final CallOption readOnly = bearer(readOnlyToken());
+            final CallOption readOnly = bearerOption(readOnlyToken());
             assertThat(tableSchemaFields("dial_usage_log", readOnly)).contains("project_id").doesNotContain("deployment");
             assertThat(catalogSqlColumnNames(readOnly)).containsExactlyInAnyOrder("event_id", "project_id", "request_time");
             final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1", readOnly);
@@ -225,7 +191,7 @@ class FlightMetadataAuthIntegrationTest {
                     .containsExactlyInAnyOrder("event_id", "project_id", "request_time");
             assertThatThrownBy(() -> drain("SELECT deployment FROM dial_usage_log LIMIT 1", readOnly)).hasMessageContaining("deployment");
 
-            assertThat(tableSchemaFields("dial_usage_log", bearer(fullAdminToken()))).contains("deployment");
+            assertThat(tableSchemaFields("dial_usage_log", bearerOption(fullAdminToken()))).contains("deployment");
         } finally {
             tableAccess.delete("dial_usage_log", "viewer", null);
         }
@@ -239,8 +205,8 @@ class FlightMetadataAuthIntegrationTest {
         // half is what makes the read-only half meaningful: the statement is valid, the caller is not.
         final String sql = "SELECT \"dial_usage_log_payload.assembled_response\" FROM dial_usage_log LIMIT 1";
 
-        assertThatCode(() -> drain(sql, bearer(fullAdminToken()))).doesNotThrowAnyException();
-        assertThatThrownBy(() -> drain(sql, bearer(readOnlyToken())))
+        assertThatCode(() -> drain(sql, bearerOption(fullAdminToken()))).doesNotThrowAnyException();
+        assertThatThrownBy(() -> drain(sql, bearerOption(readOnlyToken())))
                 .hasMessageContaining("dial_usage_log_payload.assembled_response");
     }
 
@@ -269,7 +235,7 @@ class FlightMetadataAuthIntegrationTest {
         // and MODIFY only. That is exactly the kind of fact that a spec reading cannot pin and only an
         // executed statement can: introduce a per-table read grant and this test fails before a client
         // discovers the lie as a PERMISSION_DENIED on a table its navigator offered.
-        final CallOption readOnly = bearer(readOnlyToken());
+        final CallOption readOnly = bearerOption(readOnlyToken());
         final List<String> listed = listedTableNames(readOnly);
 
         assertThat(listed).contains("dial_usage_log");
@@ -331,9 +297,9 @@ class FlightMetadataAuthIntegrationTest {
         }
     }
 
-    private static CallOption bearer(String token) {
+    private static CallOption bearerOption(String token) {
         final FlightCallHeaders headers = new FlightCallHeaders();
-        headers.insert("authorization", "Bearer " + token);
+        headers.insert("authorization", bearer(token));
         return new HeaderCallOption(headers);
     }
 
