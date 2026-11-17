@@ -118,6 +118,13 @@ public final class EnrichSpec implements PipelineSpec {
     private Integer rateRpm;
 
     /**
+     * Approximate token ceiling the runner trims a group's assembled input to; {@code 0} switches the
+     * trimming off and null means the runner's configured default. Only a {@code group} pipeline carries it.
+     */
+    @JsonProperty("input_token_budget")
+    private Integer inputTokenBudget;
+
+    /**
      * The transform's input bindings, from wherever this spec stores them: the nested list when it has
      * any, and the pre-fold top-level list otherwise.
      *

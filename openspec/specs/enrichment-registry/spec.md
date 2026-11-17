@@ -765,7 +765,7 @@ The system SHALL manage pipelines via `POST /v1/pipelines`, `PATCH /v1/pipelines
 **transform** against a `target`, plus an optional single-entry `inputs`, `trigger.kind`, optional
 `trigger.cron`, `trigger.group_by`, `trigger.ready_when`, `filter`, `enabled`, and an optional nested
 `advanced` block carrying the execution knobs (`rows_per_scan`, `rows_per_call`, `rate_rpm`,
-`sample_fraction`). The pipeline's **grain SHALL be derived** from the target enrichment's
+`sample_fraction`, `input_token_budget`). The pipeline's **grain SHALL be derived** from the target enrichment's
 `grain` and SHALL NOT be re-declared on the pipeline. The pipeline's **read source MAY be declared** as
 its `inputs` entry and SHALL default to the target enrichment's `source_table` when omitted (see "A
 pipeline's read source is declarable"). Each accepted re-declaration SHALL bump a `generation` counter;
@@ -892,10 +892,11 @@ where it was a list would make a body written for the retired list bind cleanly 
 
 **`advanced`** SHALL carry the execution knobs, nested rather than flat so they stay out of the
 required-looking surface of the declaration. Its members SHALL be `rows_per_scan`,
-`rows_per_call`, `rate_rpm` and `sample_fraction`, each optional, and the block itself SHALL be
+`rows_per_call`, `rate_rpm`, `sample_fraction` and `input_token_budget`, each optional, and the block itself SHALL be
 optional. `sample_fraction` SHALL be a fraction in `(0, 1]`: a value above `1` SHALL be rejected with
 HTTP 422 rather than read as a percentage, and `0` SHALL be rejected with HTTP 422 naming
-`enabled: false` as the way to declare a pipeline that evaluates nothing.
+`enabled: false` as the way to declare a pipeline that evaluates nothing. `input_token_budget` SHALL follow the
+rules in "A group pipeline may declare its own input token budget".
 
 The following members SHALL NO LONGER be accepted on this kind, each refused at the binding with
 HTTP 400 `bad_request` naming the field: **`evaluator_name` and `evaluator_version`** (the transform is
@@ -1241,6 +1242,11 @@ by that key.
 
 - **WHEN** a declaration carries `preset: "embeddings"`
 - **THEN** the request is rejected with HTTP 400 `bad_request`, as any value outside the accepted set is
+
+#### Scenario: Advanced carries the input token budget
+
+- **WHEN** an ENRICH `group` pipeline declares `advanced.input_token_budget`
+- **THEN** it is stored with the other knobs and served back under the same name
 
 ### Requirement: An ENRICH pipeline's read source is declarable
 
@@ -3401,9 +3407,67 @@ contract version SHALL therefore be raised to `5` (see [pipeline-registry](../pi
 - **GIVEN** an enabled `dial_app_route` pipeline with `route: "insights"`
 - **WHEN** the runner reads `GET /v1/pipelines?kind=enrich&view=compiled`
 - **THEN** that entry's `transform` carries `preset` `"dial_app_route"`, `model` and `route`
-  `"insights"`, and the response carries `Adas-Contract-Version: 5`
+  `"insights"`, and the response carries `Adas-Contract-Version: 6`, the version this build serves (see
+  [enrichment-runtime](../enrichment-runtime/spec.md))
 
 #### Scenario: A chat-completion transform carries no route member
 
 - **WHEN** a `chat_completion` pipeline is read under either projection
 - **THEN** its `transform` has no `route` member at all, not a `null` one
+
+### Requirement: A group pipeline may declare its own input token budget
+
+`advanced.input_token_budget` SHALL be an optional integer on an `enrich` pipeline whose trigger is `group`. It
+is the approximate token ceiling the Enrichment Runner applies to that pipeline's assembled group input, on top of
+ADAS's own group caps. `0` means the runner does not trim the pipeline's groups, a positive value is the
+pipeline's own ceiling, and absence means the runner's configured default. ADAS SHALL store it as sent and SHALL
+NOT write a default. A null is stored and served as absence, and `0` is a value, served as `0`.
+
+A negative value SHALL be rejected with HTTP 422 `pipeline_validation_failed` naming
+`advanced.input_token_budget`. The runner has no meaning for a negative ceiling, and storing one would leave a
+declaration whose effect is a fallback the author did not choose.
+
+The member SHALL be rejected with HTTP 422 `pipeline_validation_failed` on a pipeline whose trigger is not `group`,
+under the same rule as `trigger.group_by`, `trigger.ready_when` and `trigger.member_select`. Only the group lane
+has an input budget, and a member accepted where it has no effect reads to its author as having taken effect. On
+an `aggregate` pipeline it SHALL be refused as a member of another kind, like every other `advanced` member.
+
+The member SHALL be served inside `advanced` under both `view=source` and `view=compiled`. `advanced` SHALL be
+absent when no knob, this one included, is declared. Catalog export SHALL carry it in the pipeline's source
+projection like every other authored member. Adding it changes the compiled projection's `advanced` shape, which
+the runner contract pins, so the runner contract version SHALL be raised to `6` (see
+[enrichment-runtime](../enrichment-runtime/spec.md)).
+
+#### Scenario: A group pipeline declares a budget
+
+- **WHEN** `POST /v1/pipelines` declares a `group` pipeline with `advanced.input_token_budget: 1000`
+- **THEN** the pipeline is created, and `GET /v1/pipelines/{name}` and the enrich feed carry
+  `advanced.input_token_budget: 1000`
+
+#### Scenario: A zero budget is stored and served
+
+- **WHEN** a `group` pipeline declares `advanced.input_token_budget: 0` and no other knob
+- **THEN** both projections carry `advanced` with `input_token_budget: 0`, not an absent block
+
+#### Scenario: A negative budget is rejected
+
+- **WHEN** a `group` pipeline declares `advanced.input_token_budget: -1`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming `advanced.input_token_budget`,
+  and nothing is stored
+
+#### Scenario: A budget on a schedule pipeline is rejected
+
+- **WHEN** a `schedule` pipeline declares `advanced.input_token_budget`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` naming the member as valid only for a
+  group pipeline
+
+#### Scenario: A budget on an aggregate pipeline is refused as another kind's member
+
+- **WHEN** an `aggregate` pipeline declares `advanced.input_token_budget`
+- **THEN** the request is rejected as declaring a field of the `enrich` kind, naming `advanced.input_token_budget`
+
+#### Scenario: The budget survives catalog export and import
+
+- **GIVEN** a `group` pipeline declaring `advanced.input_token_budget: 0`
+- **WHEN** it is exported and imported into an empty catalog
+- **THEN** the imported pipeline carries `advanced.input_token_budget: 0`

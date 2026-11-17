@@ -15,10 +15,11 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
 - **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
 - **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
-- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `5`, and a runner on
-  the other version is refused, so enrichment pauses until both sides match (§9).
+- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `6`, and a runner on
+  any other version is refused, so enrichment pauses until both sides match (§9, §11).
 - **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
   registered `usage-client-identity-live` applies it by hand (§10).
+- **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§11).
 
 ---
 
@@ -151,8 +152,9 @@ response such as `intent_counts.check`, and otherwise reads the response member 
 nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
 also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
 
-- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `5`, and a
-  runner on the other version is refused until both sides match, so enrichment pauses during the skew.
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `6` in this
+  release (the route preset and the input token budget of §11), and a runner on any other version is refused
+  until both sides match, so enrichment pauses during the skew.
 - **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
   in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
   setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
@@ -185,6 +187,23 @@ A deployment that already registered the pipeline applies it by hand:
 The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
 so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
 
+## 11. Per-pipeline input token budget for group pipelines
+
+The Enrichment Runner trims a group pipeline's assembled input to an approximate token budget before the call, and
+that budget was one runner-wide setting. A `group` pipeline may now declare its own with
+`advanced.input_token_budget` (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
+
+- **`0` switches the runner's trimming off** for that pipeline, for example a `dial_app_route` application that
+  counts tokens and decides what to keep itself. A positive value is the pipeline's own ceiling. Absent keeps the
+  runner's configured default.
+- **Group pipelines only.** On a `schedule` pipeline the member is refused with `422 pipeline_validation_failed`,
+  as `trigger.group_by` is; a patch moving a pipeline from `group` to `schedule` drops it in the same patch. A
+  negative value is refused the same way.
+- **Contract `6`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
+  it (§9).
+- **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
+  runner's default trimming applies again. Roll ADAS and the runner back together.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -193,6 +212,7 @@ so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may b
 | `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§7) |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `5` | A runner on contract `4` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `6` | A runner on any contract other than `6` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
 | Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§10) |
+| `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§11) |

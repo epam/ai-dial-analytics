@@ -155,7 +155,9 @@ class RunnerContractShapeTest {
         shapes.put(MemberOrderDto.class, List.of("column: String", "direction: SortDir"));
         shapes.put(AdvancedRequest.class, List.of(
                 "rows_per_scan: Integer", "rows_per_call: Integer", "rate_rpm: Integer",
-                "sample_fraction: Double"));
+                "sample_fraction: Double",
+                // `input_token_budget` came with the per-pipeline group input budget, which raised VERSION to 6.
+                "input_token_budget: Integer"));
         return shapes;
     }
 

@@ -2602,11 +2602,12 @@ column across every partition per batch, which is the cost the aligned layout re
 carries it from the scanned row to the write row unchanged; a wrong value only leaves that row unmatched under
 the tuple join, and attaches it to no other source row.
 
-The runner contract version this build serves SHALL be `5`. A runner that does not echo the value, or
-cannot decode the `dial_app_route` transform preset (see
-[enrichment-registry](../enrichment-registry/spec.md), "Both projections carry the transform's route"), is
-refused by the exact-match contract check, rather than having its rows or its pipelines refused one by
-one.
+The runner contract version this build serves SHALL be `6`. A runner that does not echo the value, cannot
+decode the `dial_app_route` transform preset (see [enrichment-registry](../enrichment-registry/spec.md), "Both
+projections carry the transform's route"), or does not read `advanced.input_token_budget` (see
+[enrichment-registry](../enrichment-registry/spec.md), "A group pipeline may declare its own input token budget")
+is refused by the exact-match contract check, rather than having its rows or its pipelines refused one by one, or
+a pipeline's declared budget silently ignored.
 
 #### Scenario: The scan returns the partition value of an aligned target
 
@@ -2637,6 +2638,11 @@ one.
 - **WHEN** it is scanned and written back
 - **THEN** the scan rows carry no `__partition_v`, the write-back does not require it, and a row carrying it is
   refused with HTTP 422 `write_column_not_allowed`
+
+#### Scenario: The served contract version is 6
+
+- **WHEN** the runner calls any pipeline endpoint
+- **THEN** the response carries `Adas-Contract-Version: 6`, and a runner declaring `5` is refused
 
 ### Requirement: Only a row-trigger pipeline of the target's own source can write an aligned enrichment
 
