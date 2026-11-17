@@ -37,7 +37,8 @@ public final class ComputedFields {
     /** The stored body rebuilt to the request it was. */
     public static final ComputedField REQUEST_BODY_FULL = new ComputedField("request_body_full", ComputedField.Kind.BODY,
             QueryFieldType.STRING, null, "Request body (rebuilt)",
-            "The request body as the request carried it, rebuilt from its delta chain; projection-only.");
+            "The request body as the request carried it, rebuilt from its delta chain or, for a repeated body stored"
+                    + " empty, read from the row that holds it; projection-only.");
 
     /** What {@link #REQUEST_BODY_FULL} holds. */
     public static final ComputedField REQUEST_BODY_REBUILD = new ComputedField("request_body_rebuild", ComputedField.Kind.STATUS,

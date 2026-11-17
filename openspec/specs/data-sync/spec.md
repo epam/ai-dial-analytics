@@ -1963,7 +1963,6 @@ mapping declares: `_ingested_at` on `dial_usage_log`, `_updated_at` on `dial_usa
   provisioned every ingest table but not `_dial_internal_ingested_blob`
 - **THEN** startup schema validation fails and the service does not start
 
-
 #### Scenario: A pending CREATE migration provisions a replicated table
 
 - **GIVEN** an empty `Replicated` session database
@@ -3550,11 +3549,13 @@ The service SHALL accept an ingest setting `sync.request-body-mode` (`SYNC_REQUE
   setting: every request-delta column except the identity columns SHALL keep its default. A deployment that never
   opts in pays nothing for request-delta storage on its ingest path.
 - **Under `whole-with-path`,** `request_body` SHALL be stored as under `whole`, and a chat request's row SHALL also
-  carry its `request_hash`, so that a row stored whole can be a parent (see "Rebuild equivalence"); every other
-  request-delta column except the identity columns SHALL keep its default.
+  carry its `request_hash`, so that a row stored whole can be a parent (see "Rebuild equivalence"), and the row of a
+  body eligible for a body hash SHALL carry that hash for the same reason (see "A large request body equal to an
+  earlier one is stored once"); every other request-delta column except the identity columns SHALL keep its default.
 - **Under `delta`,** a chat request body (see "A chat request body is stored as its new history and a parent
   link") SHALL be stored in `request_body` cut to what its parent does not supply, and every other body SHALL be
-  stored whole (see "A request body that is not a chat request is stored whole").
+  stored whole (see "A request body that is not a chat request is stored whole"), except one that "A large
+  request body equal to an earlier one is stored once" makes a copy.
 
 The setting SHALL apply to rows written after it takes effect only; it SHALL NOT rewrite, convert or
 re-read rows already stored. Switching from `delta` to either whole mode SHALL leave rows already written in
@@ -3863,7 +3864,9 @@ top-level members (`model`, sampling parameters) and cache markers, which a rebu
 rebuild does need every row of the chain, and a chain MAY span rows that differ in anything outside the scope and the
 history, deployment included. A surface that rebuilds bodies SHALL read the chain under the reader's own access, and
 SHALL report a row whose chain it cannot read in full as incomplete rather than fail the read or widen the reader's
-access.
+access. A copy (see "A large request body equal to an earlier one is stored once") is read differently and to the
+same effect: its rebuild reads one row carrying its body hash and returns that row's `request_body` whole, which
+the hash proves equal to the copy's own body, so it too never carries another request's content.
 
 Parent resolution SHALL consider, in order: earlier chat requests of the same flush (ordered by
 `request_time`), paths this service instance has already written successfully on the current or the previous UTC
@@ -3948,10 +3951,11 @@ names its path as parent (see "Rebuild equivalence").
 The service SHALL record, under `sync.request-body-mode=delta`, every `cache_control` member removed from a
 chat request's history in that row's `request_cache_control`, as a JSON array of entries, each giving the index
 of the history element, the location of the member inside that element, and its value verbatim.
-A row with a parent SHALL carry one further entry, `{"text_blocks":[…]}`, listing the indices of the message
+A chat request's row with a parent SHALL carry one further entry, `{"text_blocks":[…]}`, listing the indices of the message
 elements it inherits that it sent as a bare text block, empty when it sent none: the row storing such a message
 MAY have sent it as the plain string, and the entry is what lets a rebuild return the shape this request sent.
-`request_cache_control` SHALL be `NULL` for a request with no parent that carried no marker. Markers SHALL belong only to
+`request_cache_control` SHALL be `NULL` for a request with no parent that carried no marker, and for a copy (see
+"A large request body equal to an earlier one is stored once"), whose body is not a chat request. Markers SHALL belong only to
 the event that carried them and SHALL NOT be inherited along a chain: a rebuild restores the row's own
 markers into the assembled history and no others. `cache_control` members outside the history (for
 example on `tools`) SHALL stay where they are, in the stored body or in the stored `tools` a request inherits.
@@ -3990,11 +3994,14 @@ newest message on each turn, so the same earlier message would otherwise hash di
 ### Requirement: A request body that is not a chat request is stored whole
 
 The service SHALL store a request body that is not a chat request in `request_body` exactly as it is stored
-today, under either mode, with every request-delta column other than the identity columns at its default. Such a
+under `whole`, under every mode, with every request-delta column other than the identity columns at its default,
+unless, under `whole-with-path` or `delta`, it is eligible for a body hash (see "A large request body equal to an
+earlier one is stored once"). Such a
 body is an MCP JSON-RPC body, an embeddings request (an `input` of strings or token arrays included), a value
 that does not parse as JSON (including a body truncated at 4 MiB), a JSON object naming one member twice, a
-request whose `request_time` carries a UTC offset other than zero (its text day need not be its partition day),
-or a JSON value of any other shape. Such a request SHALL never be a parent. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
+request whose `request_time` is written with a numeric UTC offset, `+00:00` included (its text day need not be its
+partition day),
+or a JSON value of any other shape. Such a request SHALL never be the parent of a chat request. A record with no request body SHALL store `NULL` in `request_body` and in every request-delta
 content column.
 
 #### Scenario: An MCP body is stored whole
@@ -4009,9 +4016,11 @@ content column.
 
 #### Scenario: A truncated chat body is stored whole
 
-- **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`
-- **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, and it is not
-  linked to any parent
+- **WHEN** a chat request body cut at 4 MiB, and therefore not valid JSON, is ingested under `delta`, it holds at
+  least 65,536 UTF-16 code units as stored, and no earlier request of its project, user and UTC day carried the
+  same body
+- **THEN** its row carries the body in `request_body` as the inline-file mode leaves it, its body hash in
+  `request_hash`, and an all-zero `request_parent_hash`
 
 ### Requirement: A rebuilt request body is readable beside the stored one
 
@@ -4024,15 +4033,17 @@ stored: no column, ingest stage or migration is added for them, and ingest SHALL
   `request_parent_hash` chain supplies followed by its own message array elements, put back under the key the
   classification chose; for a row with a parent, each system key and the `tools` member of the root the chain ends
   at; and the row's own cache markers. A rebuilt body SHALL be the same JSON document the request carried — same
-  members and values; key order and whitespace are not preserved — written as compact JSON.
+  members and values; key order and whitespace are not preserved — written as compact JSON. For a copy (see "A
+  large request body equal to an earlier one is stored once") it SHALL instead hold the `request_body` of a row
+  carrying the copy's `request_parent_hash`, byte for byte: that body is not JSON and is never re-written.
 - **`request_body_rebuild`** (`enum` of `stored`, `rebuilt`, `resolvable`, `partial`; nullable) SHALL say what
   `request_body_full` holds:
   - `NULL`, with `request_body_full` `NULL`, for a row with no payload row or a `NULL` `request_body`;
   - `stored`, with `request_body_full` equal to the stored `request_body` byte for byte, for a row whose
     `request_parent_hash` is all-zero and whose `request_cache_control` is `NULL` — a body stored whole under either
     mode, a root without markers, a body that is not a chat request, a row ingested before delta storage;
-  - `rebuilt`, with the rebuilt body, for a row with a parent whose chain reaches a root, or a root carrying cache
-    markers;
+  - `rebuilt`, with the rebuilt body, for a row with a parent whose chain reaches a root, a root carrying cache
+    markers, or a copy whose carrier was found;
   - `resolvable`, only when `request_body_rebuild` is read without `request_body_full`, for a row that would otherwise
     be checked for `rebuilt`: its chain was found, but no body was read (see below);
   - `partial`, with `request_body_full` equal to the stored `request_body` byte for byte, for a rebuild that cannot
@@ -4059,7 +4070,8 @@ A rebuild SHALL return `partial` when: a path on the chain is carried by no row 
 never stored, was dropped early by part-granular expiry, or was orphaned by a re-ingest after a canonical-form, element-hashing or
 inline-file setting change); a bound below is reached before the chain is complete; a rebuild statement fails or the
 read's budget runs out while the rebuild is in progress; or a body on the chain does not have the shape the rebuild
-expects (for example, a stored root that is not a chat request).
+expects (for example, a stored root that is not a chat request, unless it is the carrier of a copy; or a row with
+an empty stored body whose parent is not such a carrier).
 
 **Bounds.** Two settings SHALL bound the work one read spends on rebuilds:
 `query.request-body-rebuild.max-rounds` (`QUERY_REQUEST_BODY_REBUILD_MAX_ROUNDS`, default `8`), the number of
@@ -4174,7 +4186,13 @@ service's other statements, its bound paths and event ids counted rather than pr
 ### Requirement: Pipelines binding the stored body are re-pointed before delta storage is enabled
 
 `request_body` SHALL keep its meaning on every surface, so enabling `SYNC_REQUEST_BODY_MODE=delta` changes what
-every existing reader of `dial_usage_log_payload.request_body` receives for a later chat turn. The release notes for
+every existing reader of `dial_usage_log_payload.request_body` receives for a later chat turn, and for a copy (see
+"A large request body equal to an earlier one is stored once"), whose `request_body` is the empty string. The
+upgrade notes of the release that introduces copies SHALL say so, for deployments already running `delta`, and SHALL
+say that an instance of an earlier release re-ingesting a carrier removes its hash, so a whole UTC day is
+re-ingested on one release, and that an earlier release reads every copy as `partial` with an empty body, so a
+deployment holding copies rolls back to `whole-with-path` on the release that introduces them, not to an earlier
+release. The release notes for
 the request-delta storage SHALL tell operators to re-point every pipeline whose `transform.inputs` binds
 `dial_usage_log_payload.request_body`, and every saved query or other consumer that needs a turn's whole request, to
 `dial_usage_log_payload.request_body_full` before enabling `delta`. ADAS SHALL NOT rewrite a stored pipeline or
@@ -4184,6 +4202,13 @@ saved query to do so.
 
 - **WHEN** an operator reads the release notes' row for request-delta storage
 - **THEN** it names `dial_usage_log_payload.request_body_full` as the field to bind before enabling `delta`
+
+#### Scenario: The upgrade notes name the empty body of a copy
+
+- **WHEN** an operator running `delta` reads the upgrade notes of the release that introduces copies
+- **THEN** they say that a repeated large non-JSON request body is stored with an empty `request_body`, name
+  `dial_usage_log_payload.request_body_full` as the field that returns it, say that a UTC day holding copies
+  is re-ingested whole, on one release, and name `whole-with-path` on that release as the rollback
 
 ### Requirement: A value that fails to coerce to its column's kind is counted and falls back like an absent one
 
@@ -4317,3 +4342,195 @@ the strict reading to a range.
 - **THEN** one WARN line names the table, column, kind, JSON type and blob without the value, the counter
   increases by one thousand, and the next line for that column after the minute reports how many were not
   logged
+
+### Requirement: A large request body equal to an earlier one is stored once
+
+A request body SHALL be **eligible for a body hash** when it is not JSON (a body truncated at 4 MiB and a
+multipart upload are such bodies), holds at least 65,536 UTF-16 code units as ingest is about to store it, that
+is, after the inline-file rewrite, its row has a project or a user, and its `request_time` is a date and time
+written without a UTC offset or with `Z`; a time written with a numeric offset, `+00:00` included, is not eligible. A body is JSON when it is one syntactically valid JSON value with nothing
+but whitespace around it, however
+deeply nested, however long its numbers and strings, and whether or not an object names a member twice. A body
+nested too deeply for ingest to read to its end SHALL be treated as JSON. A client whose conversation has outgrown the 4 MiB body
+limit sends the same cut text on every later turn, so such bodies repeat exactly. A body that is JSON SHALL NOT be
+eligible, whatever its size and shape, a JSON object naming one member twice included: its top-level members stay
+readable from `request_body` on every row. Its **body hash** SHALL be a 128-bit hash of the project, the user, the UTC day of
+`request_time` and the body text exactly as ingest is about to store it, that is, after the inline-file rewrite.
+The body hash SHALL be computed under a seed of its own, apart from the chat prefix hashes. A chat request's parent
+is always a prefix hash of its own history, which no body hash equals, so a chat request never takes a carrier as
+its parent.
+
+Under `whole-with-path`, an eligible row SHALL carry its body hash in `request_hash` and its body whole.
+
+Under `delta`, an eligible row SHALL be stored as one of:
+
+- a **carrier**: `request_body` whole, `request_hash` = its body hash, every other request-delta column except
+  the identity columns at its default;
+- a **copy**: `request_body` the empty string, `request_parent_hash` = its body hash, `request_ancestor_hashes`
+  holding that hash alone, an all-zero `request_hash` and a `NULL` `request_cache_control`.
+
+A row SHALL be a copy only when a carrier of its body hash with a strictly earlier `request_time`, compared as
+instants at millisecond precision, is in the same insert or stored in the payload table; otherwise it SHALL be a
+carrier. Only a row holding the body therefore carries the hash, and the earliest request with a given body is a
+carrier however often its event is re-ingested, so a re-ingested carrier never becomes a copy of itself. Two
+requests with equal bodies and equal `request_time` SHALL both be carriers. A stored carrier SHALL count only when
+the current version of its row carries the hash: a row version that a re-ingest has since replaced SHALL NOT make
+a copy, and neither SHALL the stored row of an event that is in the same insert, which that insert replaces. A
+row with no carrier in its insert SHALL be a carrier whenever the lookup returns no stored one, for example
+because only another instance's concurrent insert holds it, the lookup's bound on hashes per flush is reached, or
+the lookup fails, or is not issued because the flush's lookup for chat parents failed. A failed lookup SHALL be logged and counted and SHALL NOT fail the insert. Each of these costs storage only. When a
+batch is inserted in parts, a copy whose carrier lies in another part SHALL be stored as a carrier instead, so no
+stored copy names a carrier that a refused part kept out of the table.
+
+`dial_usage_log_payload.request_body_full` SHALL return, for a copy, the `request_body` of a row carrying its
+parent hash byte for byte, with `request_body_rebuild` = `rebuilt` (`resolvable` when read without the body),
+read through the same two phases, bounds and partition as any other rebuild. When no row of the partition carries
+the hash, it SHALL return the stored empty body marked `partial` with reason `missing`. `request_body` SHALL keep
+returning the stored empty string.
+
+A copy holds none of its body, so it depends on its carrier more than a chat child does on its parent. What
+"Rebuild equivalence" promises of a parent's path, that a row carrying it exists while the child does, holds for a
+body hash only outside the cases below, which are an operator's to avoid. Re-ingesting a carrier gives its row another hash after a change
+of `sync.inline-files-drop-truncated` or `sync.inline-files-max-size`, and no hash at all under `whole`, with
+`sync.sensitive-columns-enabled=false`, or on a release that predates body hashes or that changes which bodies
+are eligible or how the hash is computed; a copy not re-ingested with it then names a hash no row carries. A carrier whose hash is removed between the lookup that found it and the insert
+of its copy, and a carrier seen on a replica that has not yet received its replacement, orphan a copy the same
+way. Re-ingesting whole UTC days under one configuration and release restores every copy of those days. As for a chat parent,
+part-granular expiry MAY drop a carrier before its copy in the last day of a day's retention.
+
+#### Scenario: A repeated truncated body is stored once
+
+- **WHEN** a body of 70,000 characters that is not valid JSON is ingested under `delta` at `10:00:00.000`, and the
+  same body arrives from the same project and user at `10:00:05.000` on the same UTC day
+- **THEN** the first row carries the body and its body hash in `request_hash`, and the second carries an empty
+  `request_body`, that hash in `request_parent_hash` and as the only element of `request_ancestor_hashes`, and an
+  all-zero `request_hash`
+
+#### Scenario: Equal bodies in one insert are stored once
+
+- **WHEN** two requests of one project and user with equal eligible bodies, `request_time` `10:00:00.000` and
+  `10:00:05.000`, are ingested in one batch that is inserted whole
+- **THEN** the earlier row is a carrier and the later one a copy
+
+#### Scenario: A body exactly at the size bound is hashed
+
+- **WHEN** a body of exactly 65,536 UTF-16 code units that is not JSON is ingested under `delta`, and a body one
+  unit shorter that is not JSON is ingested too
+- **THEN** the first row carries its body hash in `request_hash`, and the second an all-zero `request_hash`
+
+#### Scenario: The size is measured on the body as stored
+
+- **WHEN** a truncated body holds 70,000 characters as received and 40,000 once the inline-file rewrite has
+  removed a file from it
+- **THEN** its row carries the rewritten body and an all-zero `request_hash`
+
+#### Scenario: A body with neither project nor user is not hashed
+
+- **WHEN** two equal eligible-sized bodies that are not JSON arrive with an empty `project_id` and an empty
+  `user_hash`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: A request time with a UTC offset is not hashed
+
+- **WHEN** an eligible-sized body that is not JSON arrives with a `request_time` carrying the offset `+02:00`
+- **THEN** its row carries the body and an all-zero `request_hash`
+
+#### Scenario: A carrier replaced by the same insert does not make a copy
+
+- **WHEN** a carrier is stored, an inline-file setting changes, and one batch then carries that carrier's event,
+  whose body now differs, together with a new request whose body equals the carrier's stored one
+- **THEN** the new request's row holds its body and is a carrier
+
+#### Scenario: A copy reads back whole
+
+- **WHEN** a query projects `dial_usage_log_payload.request_body_full` and `request_body_rebuild` for a copy whose
+  carrier is stored
+- **THEN** the row carries the carrier's body byte for byte and `rebuilt`
+
+#### Scenario: A copy whose carrier is gone is partial
+
+- **WHEN** a copy is read and no row of its partition carries its parent hash
+- **THEN** `request_body_full` is the empty string, `request_body_rebuild` is `partial`, and the value is counted
+  with reason `missing`
+
+#### Scenario: A copy read without its body is resolvable
+
+- **WHEN** a query projects `request_body_rebuild` without `request_body_full` for a copy whose carrier is stored
+- **THEN** the row carries `resolvable`, and no body is read
+
+#### Scenario: A failed lookup stores a carrier
+
+- **WHEN** an eligible body is ingested, no row of its insert carries its hash, and the payload-table lookup fails
+- **THEN** its row holds the body and its hash, the batch is written, and the failure is counted
+
+#### Scenario: A replaced row version is not a carrier
+
+- **WHEN** a carrier was stored, its event was re-ingested under `whole` so that its current row carries no hash,
+  the replaced version is still on disk, and an equal body is then ingested under `delta`
+- **THEN** the new row holds the body and is a carrier
+
+#### Scenario: Valid JSON beyond a parser's usual limits is not hashed
+
+- **WHEN** two equal bodies of 70,000 characters, each one valid JSON array nested 2,000 levels deep, are
+  ingested under `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: A body nested too deeply to read is treated as JSON
+
+- **WHEN** two equal bodies, each 100,001 `[` characters, are ingested under `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: An earlier request arriving later becomes the carrier's peer
+
+- **WHEN** a carrier with `request_time` `10:00:05.000` is stored, and a request with an equal body and
+  `request_time` `10:00:00.000` is ingested afterwards
+- **THEN** the new row is a carrier, and both rows hold the body
+
+#### Scenario: A JSON object naming a member twice is not hashed
+
+- **WHEN** two equal bodies of 70,000 characters, each a JSON object naming one member twice, are ingested under
+  `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: A body below the size bound is not hashed
+
+- **WHEN** two equal bodies of 1,000 characters that are not JSON are ingested under `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: A large JSON body is not hashed
+
+- **WHEN** two equal MCP `tools/call` bodies of 70,000 characters, each valid JSON, are ingested under `delta`
+- **THEN** both rows carry the body and an all-zero `request_hash`
+
+#### Scenario: An equal body of another user, project or day is not a copy
+
+- **WHEN** a body equal to a stored carrier's arrives from another user, another project, or on another UTC day
+- **THEN** its row is a carrier with a different body hash
+
+#### Scenario: A re-ingested carrier stays a carrier
+
+- **WHEN** a carrier and its copy are stored and the carrier's event is ingested again
+- **THEN** the surviving carrier row still holds the body and the hash, and the copy still reads back whole
+
+#### Scenario: Equal bodies at the same instant are both carriers
+
+- **WHEN** two requests with equal eligible bodies and equal `request_time` are ingested
+- **THEN** both rows hold the body
+
+#### Scenario: whole-with-path stamps an eligible body with its hash
+
+- **WHEN** an eligible body is ingested under `whole-with-path`, and under `delta` the same body arrives later
+- **THEN** the first row holds the body and its body hash, and the second is a copy of it
+
+#### Scenario: A copy split from its carrier is stored whole
+
+- **WHEN** a carrier and its copy are prepared in one batch that is then inserted in two parts, one row in each
+- **THEN** both rows hold the body, each with the body hash in `request_hash` and an all-zero
+  `request_parent_hash`
+
+#### Scenario: A failed chat lookup stores the flush's bodies whole
+
+- **WHEN** a flush carries a chat request and an eligible body, and the payload-table lookup for the chat request's
+  parent fails
+- **THEN** the eligible body's row holds the body and its hash, and the table is not asked about its hash
+

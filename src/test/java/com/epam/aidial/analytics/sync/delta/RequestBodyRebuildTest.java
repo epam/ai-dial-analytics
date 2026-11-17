@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.sync.delta;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -197,6 +198,44 @@ class RequestBodyRebuildTest {
     @Test
     void nullBodyStaysNull() {
         assertThat(rebuild(null, ROOT, null).body()).isNull();
+    }
+
+    /** A copy stores no body: the row its parent hash names holds it, and that text is returned untouched. */
+    @Test
+    void copyGetsItsCarriersBodyAsItIs() {
+        root("{\"messages\":[{\"role\": \"user\", \"content\":\"cut");
+
+        RequestBodyRebuild.Result result = rebuild("", ROOT, null);
+
+        assertThat(result.outcome()).isEqualTo(RequestBodyRebuild.Outcome.REBUILT);
+        assertThat(result.body()).isEqualTo("{\"messages\":[{\"role\": \"user\", \"content\":\"cut");
+    }
+
+    @Test
+    void copyWhoseCarrierIsGoneIsPartialAndEmpty() {
+        RequestBodyRebuild.Result result = rebuild("", MISSING, null);
+
+        assertThat(result.outcome()).isEqualTo(RequestBodyRebuild.Outcome.PARTIAL);
+        assertThat(result.reason()).isEqualTo(RequestBodyRebuild.Reason.MISSING);
+        assertThat(result.body()).isEmpty();
+    }
+
+    /** An empty body is a copy only of a row with no parent that holds a body; any other chain is not one. */
+    @Test
+    void emptyBodyUnderAnythingButCarrierIsInvalid() {
+        root("{\"messages\":[{\"content\":\"u1\",\"role\":\"user\"}]}");
+        child(MIDDLE, ROOT, "{\"messages\":[{\"content\":\"a1\",\"role\":\"assistant\"}]}");
+        RequestBodyRebuild.Result underChild = rebuild("", MIDDLE, null);
+
+        stored.clear();
+        root("");
+        RequestBodyRebuild.Result underEmpty = rebuild("", ROOT, null);
+
+        assertThat(List.of(underChild, underEmpty)).allSatisfy(result -> {
+            assertThat(result.outcome()).isEqualTo(RequestBodyRebuild.Outcome.PARTIAL);
+            assertThat(result.reason()).isEqualTo(RequestBodyRebuild.Reason.INVALID);
+            assertThat(result.body()).isEmpty();
+        });
     }
 
     private void root(String body) {

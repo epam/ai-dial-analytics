@@ -991,12 +991,13 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns", hasSize(6)))
                 .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(6)))
-                // V50 extends the seeded description with the delta form.
+                // V50 extends the seeded description with the delta form, V58 with the empty body of a copy.
                 .andExpect(jsonPath("$.columns[?(@.name=='request_body')].description",
                         contains("Raw request body payload. Under delta storage a chat request is re-serialized (keys sorted, no "
                                 + "whitespace) without the cache_control markers of its history, carries only the history "
                                 + "elements its parent request did not have, and leaves out the system keys and tools it "
-                                + "shares with it.")));
+                                + "shares with it; a large body that is not JSON and repeats an earlier one exactly is "
+                                + "stored as an empty string. request_body_full returns the whole body in both cases.")));
         mockMvc.perform(get("/v1/tables/rate_analytics"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns", hasSize(10)))

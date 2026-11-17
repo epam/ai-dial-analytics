@@ -2,14 +2,21 @@ package com.epam.aidial.analytics.sync.delta;
 
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.StreamReadConstraints;
 import tools.jackson.core.StreamReadFeature;
+import tools.jackson.core.exc.StreamConstraintsException;
+import tools.jackson.core.json.JsonFactory;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 
 import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -17,6 +24,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -26,12 +34,13 @@ import java.util.function.Function;
 /**
  * Writes the request-delta columns of payload rows. Specified in {@code openspec/specs/data-sync/spec.md}: "The request
  * body storage mode is configurable", "A chat request body is stored as its new history and a parent link", "A
- * request inherits its parent's tools", "A parent never crosses a UTC day or a user scope", "Cache markers are kept per event" and "A request body that is not a
- * chat request is stored whole".
+ * request inherits its parent's tools", "A parent never crosses a UTC day or a user scope", "Cache markers are kept per event", "A request body that is not a
+ * chat request is stored whole" and "A large request body equal to an earlier one is stored once".
  *
  * <p>Runs once per flush of the payload sink, on the batch about to be inserted, after the mapping (and so after the
  * inline-file rewrite); never under {@link RequestBodyMode#WHOLE}, which parses no body. Under
- * {@link RequestBodyMode#WHOLE_WITH_PATH} it only stamps each chat request with its path and keeps the body: a row
+ * {@link RequestBodyMode#WHOLE_WITH_PATH} it only stamps each chat request with its path (and each body hashed whole
+ * with its hash, see below) and keeps the body: a row
  * stored whole then still supplies its path's history, so a delta row that names it as parent stays rebuildable when
  * its parent is re-ingested under {@code whole-with-path}, and a switch to {@code delta} links onto rows written
  * before it. Under {@link RequestBodyMode#DELTA} it computes the prefix hashes ({@link PathHash}) and takes as
@@ -47,6 +56,18 @@ import java.util.function.Function;
  * <p>The stored body is the request with its history cut to the elements after the parent's. The prefix hashes cover
  * the system keys by name and the {@code tools}, so every request on a chain has the same ones: a child leaves them
  * out, and a rebuild copies them from the chain's root. A request whose tools changed finds no parent and is a root.
+ *
+ * <p>A body that is not a chat request is stored whole, with one exception ("A large request body equal to an earlier
+ * one is stored once"): one of at least {@value #MIN_BODY_LENGTH} UTF-16 code units that is not JSON at all — a chat
+ * body cut at the size limit, typically, which a client then sends again unchanged on every later turn. Such a body
+ * gets a hash of its own ({@link PathHash#body}) in place of a path. The first row with it is its <b>carrier</b>: body
+ * whole, the hash as {@code request_hash}. A later one is a <b>copy</b>: an empty body, the hash as its parent, no
+ * {@code request_hash}, so only a row holding the body carries the hash. A row is a copy only of a carrier with a
+ * strictly earlier {@code request_time}, found among the earlier rows of the flush or in the payload table
+ * ({@link ParentLookup#carriers}, never the {@link PathCache}): the earliest request with a body then holds it in
+ * every version of its row, however often it is re-ingested. A stored carrier whose event is in the batch is ignored,
+ * since this insert replaces it. Under {@code whole-with-path} such a row is only stamped with its hash. JSON is never
+ * stored this way: a copy has no body, and readers extract a JSON body's members.
  *
  * <p>A row with neither a project nor a user has no scope to chain within, so it is stored whole with no path: chaining
  * it would put every such row of every tenant in one scope.
@@ -67,8 +88,8 @@ import java.util.function.Function;
  * link to each other, since they land together. A batch the caller has to split into several inserts no longer lands
  * together, so before splitting it the caller asks {@link Encoding#isolate} to re-root every row linked to a row of
  * another part: each part then links only within itself or to rows already stored, and a part that is not stored leaves
- * no stored child naming its rows. For that the original body of each row linked within the flush is kept until the
- * batch is stored. Only rows of the current or the previous UTC day enter the cache: a
+ * no stored child naming its rows. For that the original body of each row linked within the flush, a copy of a
+ * carrier in the flush included, is kept until the batch is stored. Only rows of the current or the previous UTC day enter the cache: a
  * chain never crosses a day, so an older row can never be the parent of live traffic, and a backfill of past days
  * would otherwise push the live paths out.
  *
@@ -90,6 +111,13 @@ public final class RequestDeltaEncoder {
     /** Ancestor paths kept in {@code request_ancestor_hashes}, nearest first to go: a read hint, so it need not be complete. */
     static final int ANCESTORS_HINT = 128;
 
+    /**
+     * The shortest body, in UTF-16 code units, that is hashed whole: a copy saves its body's length and costs a lookup
+     * candidate, which a short body does not pay for.
+     */
+    static final int MIN_BODY_LENGTH = 65_536;
+
+    static final String EVENT_ID = "event_id";
     static final String REQUEST_BODY = "request_body";
     static final String REQUEST_TIME = "request_time";
     static final String PROJECT_ID = "project_id";
@@ -106,6 +134,24 @@ public final class RequestDeltaEncoder {
     /** The resolution source of a parent found among the earlier requests of the same flush. */
     private static final String FLUSH = "flush";
     private static final String LOOKUP_FAILURES = "ingest.request.delta.lookup.failures";
+
+    /** The nesting depth {@link #json} reads to; the parser keeps one context per open level. */
+    static final int MAX_SCAN_DEPTH = 100_000;
+
+    /**
+     * Decides whether a body the encoder's own mapper refused is JSON at all: no duplicate detection and no limit on
+     * a number, a string or the document, since a repeated member or a long number makes a body awkward, not something
+     * other than JSON. Nesting alone stays bounded, at {@link #MAX_SCAN_DEPTH}.
+     */
+    private static final JsonMapper LENIENT = JsonMapper.builder(JsonFactory.builder()
+            .streamReadConstraints(StreamReadConstraints.builder()
+                    .maxNestingDepth(MAX_SCAN_DEPTH)
+                    .maxNumberLength(Integer.MAX_VALUE)
+                    .maxStringLength(Integer.MAX_VALUE)
+                    .maxNameLength(Integer.MAX_VALUE)
+                    .maxDocumentLength(Long.MAX_VALUE)
+                    .build())
+            .build()).build();
 
     /** Exact floats, and a duplicate member fails the parse: kept, the last copy would silently replace the others. */
     private final JsonMapper mapper = JsonMapper.builder()
@@ -130,8 +176,8 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * @param mode          {@code whole-with-path} stamps chat requests with their path only; {@code delta} also links and
-     *                      splits them. Not {@code whole}, which needs no encoder
+     * @param mode          {@code whole-with-path} stamps chat requests with their path, and bodies hashed whole with
+     *                      their hash, only; {@code delta} also links and splits them. Not {@code whole}, which needs no encoder
      * @param lookup        finds parents stored by earlier flushes, other runs or other instances; unused under
      *                      {@code whole-with-path}
      * @param cacheCapacity how many written paths this instance remembers; unused under {@code whole-with-path}
@@ -153,9 +199,9 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * Writes the request-delta columns of the chat requests among {@code rows}, in place. Under {@code delta} their
-     * {@code request_body} is cut to what the parent does not supply; under {@code whole-with-path} it is kept. Every other row
-     * is left untouched.
+     * Writes the request-delta columns of the chat requests and of the bodies hashed whole among {@code rows}, in place.
+     * Under {@code delta} a chat request's {@code request_body} is cut to what the parent does not supply and a copy's is
+     * emptied; under {@code whole-with-path} every body is kept. Every other row is left untouched.
      *
      * @param rows the payload batch about to be inserted
      * @return what to record once the insert carrying {@code rows} has succeeded
@@ -179,6 +225,11 @@ public final class RequestDeltaEncoder {
         items.sort(Comparator.comparing(Item::time));
 
         Map<UUID, ChainNode> stored = storedParents(items);
+        // A flush whose chat lookup just failed does not wait on the table a second time: its bodies are stored whole.
+        Map<UUID, Long> storedCarriers = stored == null ? Map.of() : storedCarriers(items, rows);
+        stored = stored == null ? Map.of() : stored;
+        // The earliest carrier of each body hash among the rows of this flush visited so far.
+        Map<UUID, Item> flushCarriers = new HashMap<>();
         Map<UUID, ChainNode> written = new HashMap<>();
         // The row whose node `written` holds for each path: the parent row of a request linked within the flush.
         Map<UUID, Map<String, Object>> writtenRows = new HashMap<>();
@@ -187,6 +238,26 @@ public final class RequestDeltaEncoder {
         List<Link> links = new ArrayList<>();
         String oldestCached = LocalDate.now(clock).minusDays(1).toString();
         for (Item item : items) {
+            if (item.wholeBody()) {
+                Item carrier = flushCarriers.get(item.path());
+                Long storedSince = storedCarriers.get(item.path());
+                // Strictly earlier only: the earliest request with a body then holds it in every version of its row.
+                if (carrier != null && carrier.millis < item.millis) {
+                    links.add(new Link(item.row, carrier.row, (String) item.row.get(REQUEST_BODY), item.path()));
+                    item.writeCopy();
+                    count("copy");
+                } else if (storedSince != null && storedSince < item.millis) {
+                    item.writeCopy();
+                    count("copy");
+                } else {
+                    item.stampPath();
+                    if (carrier == null || item.millis < carrier.millis) {
+                        flushCarriers.put(item.path(), item);
+                    }
+                    count("carrier");
+                }
+                continue;
+            }
             Resolution resolution = resolve(item, written, stored);
             Object original = item.row.get(REQUEST_BODY);
             boolean split = item.write(mapper, resolution.parent(), resolution.depth());
@@ -212,7 +283,8 @@ public final class RequestDeltaEncoder {
 
     /**
      * The payload table's answer for the requests that neither an earlier request of the flush nor the cache can link
-     * at all. {@code items} are in time order, so "earlier" matches what {@link #resolve} will see.
+     * at all, or {@code null} when the lookup failed. {@code items} are in time order, so "earlier" matches what
+     * {@link #resolve} will see.
      */
     private Map<UUID, ChainNode> storedParents(List<Item> items) {
         Set<UUID> earlier = new HashSet<>();
@@ -241,11 +313,68 @@ public final class RequestDeltaEncoder {
             registry.counter(LOOKUP_FAILURES, "table", table).increment();
             log.warn("Parent lookup in {} for {} candidate path(s) failed; the requests waiting on it are stored as chain roots",
                     table, candidates.size(), ex);
-            return Map.of();
+            return null;
         }
         Map<UUID, ChainNode> stored = new HashMap<>();
         found.forEach((path, ancestors) -> stored.put(path, ChainNode.stored(path, ancestors)));
         return stored;
+    }
+
+    /**
+     * The earliest stored carrier of each body hash the flush asks about, in epoch milliseconds. A carrier whose event is
+     * in {@code rows} is left out: this insert replaces that row, so what it carries now says nothing about what the
+     * table will hold. A failed lookup finds none, so its rows keep their bodies.
+     */
+    private Map<UUID, Long> storedCarriers(List<Item> items, List<Map<String, Object>> rows) {
+        Set<UUID> hashes = new LinkedHashSet<>();
+        Set<String> days = new LinkedHashSet<>();
+        for (Item item : items) {
+            if (item.wholeBody() && (hashes.contains(item.path()) || hashes.size() < MAX_TABLE_CANDIDATES)) {
+                hashes.add(item.path());
+                days.add(item.day());
+            }
+        }
+        if (hashes.isEmpty()) {
+            return Map.of();
+        }
+        List<ParentLookup.Carrier> found;
+        try {
+            found = lookup.carriers(days, hashes);
+        } catch (RuntimeException ex) {
+            registry.counter(LOOKUP_FAILURES, "table", table).increment();
+            log.warn("Carrier lookup in {} for {} body hash(es) failed; the requests waiting on it are stored with their bodies",
+                    table, hashes.size(), ex);
+            return Map.of();
+        }
+        Set<String> flushed = new HashSet<>();
+        // Compared in one letter case: a mapping is free to render its event ids in either.
+        rows.forEach(row -> flushed.add(String.valueOf(row.get(EVENT_ID)).toLowerCase(Locale.ROOT)));
+        Map<UUID, Long> earliest = new HashMap<>();
+        for (ParentLookup.Carrier carrier : found) {
+            if (!flushed.contains(carrier.eventId().toLowerCase(Locale.ROOT))) {
+                earliest.merge(carrier.hash(), carrier.timeMillis(), Math::min);
+            }
+        }
+        return earliest;
+    }
+
+    /**
+     * Whether {@code body} is one JSON value and nothing else, read as tokens so no tree is built. A body nested past
+     * {@link #MAX_SCAN_DEPTH} is taken to be JSON without being read to its end: it is then stored whole, which costs
+     * space at worst, where reading on would cost memory for every level.
+     */
+    static boolean json(String body) {
+        try (JsonParser parser = LENIENT.createParser(body)) {
+            if (parser.nextToken() == null) {
+                return false;
+            }
+            parser.skipChildren();
+            return parser.nextToken() == null;
+        } catch (StreamConstraintsException ex) {
+            return true;
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     private Resolution resolve(Item item, Map<UUID, ChainNode> written, Map<UUID, ChainNode> stored) {
@@ -339,10 +468,12 @@ public final class RequestDeltaEncoder {
         private void reroot(Link link) {
             Map<String, Object> row = link.child();
             ChatRequest request = ChatRequest.parse(mapper, link.original(), true);
+            row.put(REQUEST_HASH, link.path().toString());
             row.put(REQUEST_PARENT_HASH, NO_PARENT.toString());
             row.put(REQUEST_ANCESTOR_HASHES, List.of());
             if (request == null) {
-                // Parsed twice already, so this cannot happen; should it, the row is stored as it was sent, a root.
+                // A copy takes its body back and becomes a carrier. A chat request was parsed twice already, so it
+                // cannot get here; should it, the row is stored as it was sent, a root.
                 row.put(REQUEST_BODY, link.original());
                 row.put(REQUEST_CACHE_CONTROL, null);
                 return;
@@ -379,7 +510,8 @@ public final class RequestDeltaEncoder {
     }
 
     /**
-     * One chat request of the batch: its row and its prefix hashes. The split body is not kept; {@link #write} parses
+     * One chat request of the batch, with its row and its prefix hashes, or one body hashed whole, whose single hash
+     * stands where a chat request's path does. The split body is not kept; {@link #write} parses
      * the body again (see the class note on memory).
      */
     private static final class Item {
@@ -389,11 +521,16 @@ public final class RequestDeltaEncoder {
         /** {@code p0..pn}, two longs each, so a hash costs 16 bytes rather than a {@link UUID} object and its slot. */
         private final long[] prefixes;
         private final int systemCount;
+        /** For a body hashed whole, its {@code request_time} in epoch milliseconds; {@link #CHAT} for a chat request. */
+        private final long millis;
 
-        private Item(Map<String, Object> row, String time, UUID[] prefixes, int systemCount) {
+        private static final long CHAT = Long.MIN_VALUE;
+
+        private Item(Map<String, Object> row, String time, UUID[] prefixes, int systemCount, long millis) {
             this.row = row;
             this.time = time;
             this.systemCount = systemCount;
+            this.millis = millis;
             this.prefixes = new long[prefixes.length * 2];
             for (int k = 0; k < prefixes.length; k++) {
                 this.prefixes[2 * k] = prefixes[k].getMostSignificantBits();
@@ -401,7 +538,10 @@ public final class RequestDeltaEncoder {
             }
         }
 
-        /** The row as a chat request, or {@code null} when its body is stored whole. */
+        /**
+         * The row as a chat request or as a body hashed whole, or {@code null} when its body is stored whole and
+         * unhashed.
+         */
         static Item of(JsonMapper mapper, Map<String, Object> row) {
             if (!(row.get(REQUEST_BODY) instanceof String body) || !(row.get(REQUEST_TIME) instanceof String time) || !utcText(time)) {
                 return null;
@@ -409,13 +549,50 @@ public final class RequestDeltaEncoder {
             if (unscoped(row)) {
                 return null;
             }
+            String scope = scope(row);
             ChatRequest request = ChatRequest.parse(mapper, body, false);
             if (request == null) {
+                Long millis = body.length() < MIN_BODY_LENGTH ? null : millis(time);
+                // A JSON body is never hashed whole: a copy stores no body, and readers extract a JSON body's members.
+                if (millis == null || json(body)) {
+                    return null;
+                }
+                return new Item(row, time, new UUID[] {PathHash.body(scope, time.substring(0, 10), body)}, 0, millis);
+            }
+            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.tools(), request.hashedHistory()),
+                    request.systemCount(), CHAT);
+        }
+
+        /**
+         * {@code time} as epoch milliseconds, or {@code null} when it does not read as a date and time. Compared as
+         * instants, never as text: the payload table renders a stored time its own way, and a rendering that ordered a
+         * re-ingested row after its own stored version would make it a copy of itself.
+         */
+        static Long millis(String time) {
+            String iso = time.replace(' ', 'T');
+            try {
+                return LocalDateTime.parse(iso.endsWith("Z") ? iso.substring(0, iso.length() - 1) : iso)
+                        .toInstant(ZoneOffset.UTC).toEpochMilli();
+            } catch (DateTimeException ex) {
                 return null;
             }
-            String scope = scope(row);
-            return new Item(row, time, PathHash.prefixes(scope, time.substring(0, 10), request.tools(), request.hashedHistory()),
-                    request.systemCount());
+        }
+
+        /** Whether the row is a body hashed whole, whose one hash is its {@link #path()}; a chat request otherwise. */
+        boolean wholeBody() {
+            return millis != CHAT;
+        }
+
+        /**
+         * Stores the row as a copy of the carrier of its body hash: no body, the hash as its parent, and no path of its
+         * own, so a row carrying the hash always holds the body.
+         */
+        void writeCopy() {
+            String hash = path().toString();
+            row.put(REQUEST_BODY, "");
+            row.put(REQUEST_PARENT_HASH, hash);
+            row.put(REQUEST_ANCESTOR_HASHES, List.of(hash));
+            row.put(REQUEST_CACHE_CONTROL, null);
         }
 
         /**

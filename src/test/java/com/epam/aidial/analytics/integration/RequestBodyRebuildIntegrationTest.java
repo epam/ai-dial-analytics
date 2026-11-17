@@ -358,6 +358,90 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
         assertThat(status).isPositive().isLessThan(size / 16);
     }
 
+    /** A large body that is not JSON, sent again unchanged: stored once, and read back whole from the row that holds it. */
+    @Test
+    void copyReadsBackItsCarriersBodyAndSurvivesTheCarriersReingest() throws Exception {
+        String cut = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "x".repeat(70_000);
+        raw("t1", "10:00:00.000", cut);
+        Map<String, Object> copy = raw("t2", "10:00:05.000", cut);
+
+        assertThat(copy.get("request_body")).isEqualTo("");
+        assertThat(storedBody("t2")).isEmpty();
+        JsonNode row = hop("t2", "10:00:05.000");
+        assertThat(row.get(FULL).asString()).isEqualTo(cut);
+        assertThat(row.get(STATUS).asString()).isEqualTo("rebuilt");
+        assertThat(read("t2", STATUS).get(STATUS).asString()).isEqualTo("resolvable");
+
+        raw("t1", "10:00:00.000", cut);
+        raw("t2", "10:00:05.000", cut);
+
+        assertThat(storedBody("t1")).isEqualTo(cut);
+        assertThat(storedBody("t2")).isEmpty();
+        assertThat(hop("t2", "10:00:05.000").get(FULL).asString()).isEqualTo(cut);
+    }
+
+    /**
+     * A carrier re-ingested without its hash, its replaced version still on disk: the carrier lookup reads current
+     * versions only, so an equal body ingested then keeps its own body rather than point at one the table is losing.
+     */
+    @Test
+    void replacedCarrierVersionMakesNoCopy() {
+        String cut = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "y".repeat(70_000);
+        execute("SYSTEM STOP MERGES " + PAYLOAD);
+        try {
+            raw("t1", "10:00:00.000", cut);
+            writer.insert(PAYLOAD, List.of(payloadRow("t1", fixtureTime("10:00:00.000"), cut)));
+            int day = Integer.parseInt(FIXTURE_DATE.replace("-", ""));
+            String hash = queryScalar("SELECT toString(max(request_hash)) AS h FROM " + PAYLOAD + " WHERE trace_id = 't1'", "h");
+            assertThat(queryText(inline(ClickHouseParentLookup.statement(PAYLOAD), RequestChainReader.parameters(day, "paths", List.of(hash)))))
+                    .as("the replaced version is still readable without FINAL").contains(hash);
+
+            Map<String, Object> later = raw("t2", "10:00:05.000", cut);
+
+            assertThat(later.get("request_body")).isEqualTo(cut);
+            assertThat(later.get("request_hash")).isEqualTo(hash);
+            assertThat(queryText("EXPLAIN indexes = 1 " + inline(ClickHouseParentLookup.carrierStatement(PAYLOAD),
+                    RequestChainReader.parameters(day, "paths", List.of(hash)))))
+                    .as("the FINAL read is narrowed by partition and by the candidate events' primary key")
+                    .contains("Partition", "PrimaryKey", "(event_id in");
+        } finally {
+            execute("SYSTEM START MERGES " + PAYLOAD);
+        }
+    }
+
+    /**
+     * A stored carrier whose event comes back in the same insert with another body is about to be replaced, so the equal
+     * body beside it keeps its own text. Were the stored row counted, that body would be stored empty and then lose its
+     * carrier to this very insert.
+     */
+    @Test
+    void carrierReplacedByTheSameInsertMakesNoCopy() throws Exception {
+        String cut = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "z".repeat(70_000);
+        String other = "{\"messages\":[{\"role\":\"user\",\"content\":\"" + "w".repeat(70_000);
+        raw("t1", "10:00:00.000", cut);
+
+        Map<String, Object> replaced = payloadRow("t1", fixtureTime("10:00:00.000"), other);
+        Map<String, Object> equal = payloadRow("t2", fixtureTime("10:00:05.000"), cut);
+        List<Map<String, Object>> batch = new ArrayList<>(List.of(replaced, equal));
+        RequestDeltaEncoder.Encoding encoding = newEncoder(RequestBodyMode.DELTA).encode(batch);
+        writer.insert(PAYLOAD, batch);
+        encoding.written();
+        usageRow("t2", fixtureTime("10:00:05.000"));
+
+        assertThat(equal.get("request_body")).isEqualTo(cut);
+        assertThat(storedBody("t1")).isEqualTo(other);
+        assertThat(storedBody("t2")).isEqualTo(cut);
+        assertThat(hop("t2", "10:00:05.000").get(STATUS).asString()).isEqualTo("stored");
+    }
+
+    /** One request with a body that is not a chat request, through the encoder and writer, and its usage-log row. */
+    private Map<String, Object> raw(String traceId, String timeOfDay, String body) {
+        Map<String, Object> row = payloadRow(traceId, fixtureTime(timeOfDay), body);
+        write(newEncoder(RequestBodyMode.DELTA), row);
+        usageRow(traceId, fixtureTime(timeOfDay));
+        return row;
+    }
+
     private static String readBytes(String condition) {
         return "SELECT toString(max(read_bytes)) AS b FROM system.query_log WHERE type = 'QueryFinish' AND " + condition;
     }

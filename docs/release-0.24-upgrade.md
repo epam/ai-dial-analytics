@@ -16,15 +16,17 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
 - **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
 - **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `6`, and a runner on
-  any other version is refused, so enrichment pauses until both sides match (§9, §13).
+  any other version is refused, so enrichment pauses until both sides match (§9, §14).
 - **An enrichment's read access follows its source table.** A migration removes its own read-side grants and row
   policies, so check who gains and loses access before upgrading (§10).
 - **Table access is managed one role at a time** at `/v1/tables/{name}/access?role=`, with new column policies. The
   old access and row-policy endpoints are removed (§11).
 - **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
   registered `usage-client-identity-live` applies it by hand (§12).
-- **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§13).
-- **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§14).
+- **Under `SYNC_REQUEST_BODY_MODE=delta`, a repeated large request body that is not JSON is stored once**, so later
+  rows repeating it have an empty `request_body` (§13).
+- **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
+- **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
 
 ---
 
@@ -174,7 +176,7 @@ nullable columns may be absent from the response (see [`enrichment-registry`](..
 also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
 
 - **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `6` in this
-  release (the route preset and the input token budget of §13), and a runner on any other version is refused
+  release (the route preset and the input token budget of §14), and a runner on any other version is refused
   until both sides match, so enrichment pauses during the skew.
 - **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
   in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
@@ -323,7 +325,28 @@ A deployment that already registered the pipeline applies it by hand:
 The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
 so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
 
-## 13. Per-pipeline input token budget for group pipelines
+## 13. Request-delta storage: a repeated large body is stored once
+
+This applies only under `SYNC_REQUEST_BODY_MODE=delta` or `whole-with-path`.
+
+Under `delta`, a request body of 65,536 characters (UTF-16 code units) or more that is not JSON, such as a chat body cut at the 4 MiB
+limit, is now stored once per project, user and UTC day. A later request repeating it exactly is stored with an
+empty `request_body`. Read `dial_usage_log_payload.request_body_full` for the body, as for a later chat turn (see
+[`data-sync`](../openspec/specs/data-sync/spec.md), "A large request body equal to an earlier one is stored once").
+A JSON body is never stored empty, so `json_extract_*` over `request_body` reads as before. A text function over
+`request_body` (`length`, `LIKE`, a regular expression) sees the empty string on such a row, where it saw the cut
+text before.
+
+Such an empty row holds nothing of its own, so two rules matter once any exist:
+
+- **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
+  by a 0.23 instance, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
+  `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
+  after it; they read `partial` with an empty body until the day is re-ingested.
+- **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
+  empty body.
+
+## 14. Per-pipeline input token budget for group pipelines
 
 The Enrichment Runner trims a group pipeline's assembled input to an approximate token budget before the call, and
 that budget was one runner-wide setting. A `group` pipeline may now declare its own with
@@ -342,10 +365,10 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
 - **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
   runner's default trimming applies again. Roll ADAS and the runner back together.
 
-## 14. Catalog bundle format version 3
+## 15. Catalog bundle format version 3
 
 `POST /v1/catalog/export` now writes `format_version: 3`, because a bundle may carry an `enrich` transform's `route`
-(§9) and `advanced.input_token_budget` (§13) (see
+(§9) and `advanced.input_token_budget` (§14) (see
 [`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `3`, whatever its
 pipelines use.
 
@@ -368,5 +391,6 @@ pipelines use.
 | Role-keyed access API, column policies (breaking) | Old access and row-policy calls are gone; snapshots carry `roles`; hidden columns are absent and refused `403 column_not_entitled` | Move clients using the table in §11; name the cursor columns in a restricted runner's list; delete column policies before a rollback (§11) |
 | Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§11) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
-| `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§13) |
-| Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§14) |
+| Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
+| `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
+| Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
