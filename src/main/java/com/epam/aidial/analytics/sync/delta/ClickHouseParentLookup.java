@@ -11,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * The {@link ParentLookup} over the payload table, on the writer credential like the rest of ingest's own reads.
@@ -26,6 +27,10 @@ import java.util.UUID;
  * {@code RequestDeltaEncoder.MAX_TABLE_CANDIDATES} paths in chunks of {@value QueryParameterChunks#SIZE}, so its lookup can take up to
  * about 17 times {@link #TIMEOUT_SECONDS}. A query that times out ends the lookup, and its requests are stored as chain
  * roots.
+ *
+ * <p>{@link #carriers} is the one read here that does use {@code FINAL} ({@link #carrierStatement}): a row may store
+ * no body at all on the strength of what it returns. It is a second lookup of the flush, chunked and bounded like the
+ * first, and the encoder does not issue it when the first one failed.
  */
 public final class ClickHouseParentLookup implements ParentLookup {
 
@@ -38,10 +43,34 @@ public final class ClickHouseParentLookup implements ParentLookup {
 
     private final UsageLogWriter writer;
     private final String sql;
+    private final String carrierSql;
 
     public ClickHouseParentLookup(UsageLogWriter writer, String table) {
         this.writer = writer;
         this.sql = statement(table);
+        this.carrierSql = carrierStatement(table);
+    }
+
+    /**
+     * The carrier lookup statement for {@code table}, with the parameters of {@link #statement}. Only a current row
+     * version may count, and a replaced one can still show the hash, so the read has two steps in one statement: the
+     * inner one finds the events with any version carrying a hash, through the hash skip index and without
+     * {@code FINAL}; the outer one reads those events by {@code event_id}, the sorting key, with {@code FINAL},
+     * deduplicated inside the partition, and keeps the ones whose current version still carries a hash. Skip indexes
+     * are turned off for the {@code FINAL} read, so the answer does not depend on how a server version or profile
+     * lets a skip index narrow such a read; the primary key does the pruning.
+     */
+    public static String carrierStatement(String table) {
+        String name = "`" + table.replace("`", "``") + "`";
+        String window = " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
+                + " AND toYYYYMMDD(request_time) IN (SELECT toUInt32(arrayJoin(splitByChar(',', {days:String}))))"
+                + " AND request_hash IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))";
+        return "SELECT toString(request_hash) AS path, toString(event_id) AS id,"
+                + " toUnixTimestamp64Milli(request_time) AS time_ms"
+                + " FROM " + name + " FINAL" + window
+                + " AND event_id IN (SELECT event_id FROM " + name + window + ")"
+                + " SETTINGS max_execution_time = " + TIMEOUT_SECONDS + ", do_not_merge_across_partitions_select_final = 1,"
+                + " use_skip_indexes_if_final = 0";
     }
 
     /**
@@ -62,8 +91,32 @@ public final class ClickHouseParentLookup implements ParentLookup {
 
     @Override
     public Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths) {
+        Map<UUID, List<UUID>> found = new HashMap<>();
+        query(sql, days, paths, row -> {
+            String ancestors = row.getString("ancestors");
+            List<UUID> lineage = new ArrayList<>();
+            if (ancestors != null && !ancestors.isEmpty()) {
+                for (String ancestor : ancestors.split(",")) {
+                    lineage.add(UUID.fromString(ancestor));
+                }
+            }
+            found.put(UUID.fromString(row.getString("path")), lineage);
+        });
+        return found;
+    }
+
+    @Override
+    public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+        List<Carrier> found = new ArrayList<>();
+        query(carrierSql, days, hashes, row -> found.add(
+                new Carrier(UUID.fromString(row.getString("path")), row.getString("id"), row.getLong("time_ms"))));
+        return found;
+    }
+
+    /** Runs {@code statement} over {@code paths} in chunks, bounded to the partitions of {@code days}. */
+    private void query(String statement, Collection<String> days, Collection<UUID> paths, Consumer<GenericRecord> each) {
         if (days.isEmpty() || paths.isEmpty()) {
-            return Map.of();
+            return;
         }
         LocalDate first = null;
         LocalDate last = null;
@@ -76,24 +129,13 @@ public final class ClickHouseParentLookup implements ParentLookup {
         }
         List<String> candidates = new ArrayList<>(paths.size());
         paths.forEach(path -> candidates.add(path.toString()));
-        Map<UUID, List<UUID>> found = new HashMap<>();
         for (List<String> chunk : QueryParameterChunks.of(candidates)) {
             Map<String, Object> params = Map.of(
                     "from", first + " 00:00:00.000",
                     "to", last.plusDays(1) + " 00:00:00.000",
                     "days", String.join(",", partitions),
                     "paths", String.join(",", chunk));
-            for (GenericRecord row : writer.query(sql, params)) {
-                String ancestors = row.getString("ancestors");
-                List<UUID> lineage = new ArrayList<>();
-                if (ancestors != null && !ancestors.isEmpty()) {
-                    for (String ancestor : ancestors.split(",")) {
-                        lineage.add(UUID.fromString(ancestor));
-                    }
-                }
-                found.put(UUID.fromString(row.getString("path")), lineage);
-            }
+            writer.query(statement, params).forEach(each);
         }
-        return found;
     }
 }

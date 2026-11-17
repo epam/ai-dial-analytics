@@ -139,6 +139,38 @@ class RequestDeltaIngestTest {
         assertThat(row.get("request_hash")).isNotNull();
     }
 
+    /**
+     * A body is hashed whole on its length as stored: one cut at the size limit inside an inline file is long as
+     * received, short once the rewrite has cut the half file off, and is then stored as it is on every row.
+     */
+    @Test
+    void bodyShortenedByTheInlineFileRewriteIsNotHashedWhole(@TempDir Path baseDir) throws Exception {
+        String cutInsideFile = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"" + "t".repeat(30_000)
+                + "\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64," + "A".repeat(4_200_000) + ">>";
+        String stillLong = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"" + "u".repeat(70_000);
+        Path blob = baseDir.resolve(BUCKET).resolve(BLOB_KEY);
+        Files.createDirectories(blob.getParent());
+        try (OutputStream out = new GZIPOutputStream(Files.newOutputStream(blob))) {
+            out.write(String.join("\n",
+                    line("t1", "/openai/deployments/m/chat/completions", "2026-01-15T10:00:00.000", cutInsideFile),
+                    line("t2", "/openai/deployments/m/chat/completions", "2026-01-15T10:00:05.000", cutInsideFile),
+                    line("t3", "/openai/deployments/m/chat/completions", "2026-01-15T10:00:10.000", stillLong),
+                    line("t4", "/openai/deployments/m/chat/completions", "2026-01-15T10:00:15.000", stillLong)).getBytes(StandardCharsets.UTF_8));
+        }
+
+        List<Map<String, Object>> rows = ingest(baseDir, RequestBodyMode.DELTA, InlineFilesPolicy.dropAll()).rowsFor("dial_usage_log_payload");
+
+        assertThat(rows).hasSize(4);
+        assertThat(rows.subList(0, 2)).allSatisfy(row -> {
+            assertThat((String) row.get("request_body")).hasSizeBetween(30_000, 40_000);
+            assertThat(row).doesNotContainKeys("request_hash", "request_parent_hash");
+        });
+        // The same flush does hash a body that is still long once stored: the first keeps it, the second is its copy.
+        assertThat(rows.get(2).get("request_body")).isEqualTo(stillLong);
+        assertThat(rows.get(3).get("request_body")).isEqualTo("");
+        assertThat(rows.get(3).get("request_parent_hash")).isEqualTo(rows.get(2).get("request_hash")).isNotNull();
+    }
+
     private RecordingWriter ingest(Path baseDir, RequestBodyMode mode) throws Exception {
         return ingest(baseDir, mode, InlineFilesPolicy.keep());
     }

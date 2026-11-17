@@ -5,7 +5,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** Finds stored request paths in the payload table, for the parents neither the flush nor the cache knows. */
+/**
+ * Finds stored request paths in the payload table, for the parents neither the flush nor the cache knows, and the stored
+ * carriers of body hashes.
+ */
 @FunctionalInterface
 public interface ParentLookup {
 
@@ -21,4 +24,25 @@ public interface ParentLookup {
      * @return the paths found, each with its stored ancestors (root first)
      */
     Map<UUID, List<UUID>> find(Collection<String> days, Collection<UUID> paths);
+
+    /**
+     * A stored row holding a body under its body hash.
+     *
+     * @param hash       the body hash, the row's {@code request_hash}
+     * @param eventId    the row's {@code event_id}
+     * @param timeMillis its {@code request_time}, in epoch milliseconds
+     */
+    record Carrier(UUID hash, String eventId, long timeMillis) {}
+
+    /**
+     * Returns the rows stored on one of {@code days} whose current version carries one of {@code hashes}. Unlike
+     * {@link #find}, a replaced row version must not be returned: it shows a body the table is about to lose. The
+     * default finds none, so every row asking is stored with its body.
+     *
+     * @param days   the UTC days ({@code yyyy-MM-dd}) the hashes were computed under
+     * @param hashes the body hashes
+     */
+    default List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
+        return List.of();
+    }
 }
