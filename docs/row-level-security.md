@@ -1,156 +1,119 @@
-# Row-level security
+# Row- and column-level security
 
-A **row policy** narrows which rows of a table a provider role reads. It is attached to a raw provider
-role on one table, the same way the per-table grant lists are, and it is managed by a caller holding
-`TABLE_GRANT`. The behaviour is specified in
-[`openspec/specs/table-access-control/spec.md`](../openspec/specs/table-access-control/spec.md); this page
-is the operator's guide.
+For administrators who limit which rows and columns a role sees, and for developers of clients that manage table
+access. The full contract, with every rule and error code, is
+[`openspec/specs/table-access-control/spec.md`](../openspec/specs/table-access-control/spec.md).
 
-## Worked example: role `team-x` sees project `X-PRJ-1`
+## Concepts
+
+- **One entry per role.** A table's access is one entry per raw provider role:
+  `{"privileges": [...], "rows": ..., "columns": ...}`. `privileges` are the per-table grants (`get`, `read`,
+  `sensitive`, `write`, `modify`), `rows` is a **row policy** and `columns` a **column policy**.
+- **Who manages it:** a caller holding `TABLE_GRANT`. `permissions.grant` on `GET /v1/tables/{name}` says whether the
+  caller holds it.
+- **A policy narrows, it never grants.** The role still needs a read path (a global `TABLE_READ`, a bundle or a `read`
+  grant). To narrow a role that reads through a global mapping, store an entry with `"privileges": []` and the policy.
+- **`*`** stands for every authenticated caller (see [Everyone](#everyone-the--grantee)).
+- **Enrichments follow their source.** The source's entries decide an enrichment's rows and columns. An enrichment's
+  own entry holds only `write` and `modify`.
+- **Aggregate targets need their own entries.** Their pipelines read the whole source, so no policy carries over.
+- **Not narrowed:** row inserts, pipelines' own background reads, and everything in `none` security mode.
+
+## The API
+
+| Call | Does |
+|---|---|
+| `GET /v1/tables/{name}/access` | Every role's entry, the table's `generation` and `ineffective_grants` |
+| `GET /v1/tables/{name}/access?role={role}` | One role's entry; `404` when it has none |
+| `PUT /v1/tables/{name}/access?role={role}` | Replaces the role's **whole** entry: `{"generation", "privileges", "rows", "columns"}` |
+| `DELETE /v1/tables/{name}/access?role={role}` | Removes the entry; optional `&generation=<n>` makes it conditional |
+
+- **URL-encode the role:** group `/analytics/viewers` is `?role=%2Fanalytics%2Fviewers`.
+- **A `PUT` replaces the whole entry.** Send the parts you do not change as you read them. An empty entry is removed.
+- **Send the `generation` you read.** The `PUT` is refused `409 access_conflict` only when that role changed since your
+  read; read again and reapply. An unchanged `PUT` answers `200`, so a retry is safe.
+- **Writes to one table take turns.** One that waits past `TABLES_LOCK_TIMEOUT` (default `10s`) gets
+  `409 table_busy`; retry it.
+
+## Example: role `team-x` sees project `X-PRJ-1`
 
 ```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/team-x" \
+GEN=$(curl -s "$ADAS/v1/tables/dial_usage_log/access" -H "Authorization: Bearer $TOKEN" | jq .generation)
+curl -X PUT "$ADAS/v1/tables/dial_usage_log/access?role=team-x" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"filter": {"op": "in", "args": [
-        {"type": "field", "name": "project_id"},
-        {"type": "array", "items": [{"type": "value", "value_type": "string", "value": "X-PRJ-1"}]}]}}'
+  -d "{\"generation\": $GEN, \"privileges\": [\"read\"], \"rows\": {\"where\": \"project_id IN ('X-PRJ-1')\"}}"
 ```
 
-The `filter` is the structured query's own filter grammar (the `filter` of `POST /v1/queries/execute`),
-over the table's own columns. Every reader carrying `team-x` now sees only `X-PRJ-1` rows of
-`dial_usage_log` — through the DSL, SQL, both CSV exports and Flight SQL, in every join, subquery and
-`UNION` — and `GET /v1/tables/dial_usage_log` reports `permissions.rows_restricted: true` to it.
+`where` is what you would write after `WHERE`; it is stored and returned as the equivalent structured `filter`.
+Readers carrying `team-x` now see only `X-PRJ-1` rows on every query surface, and `GET /v1/tables/dial_usage_log`
+reports `permissions.rows_restricted: true` to them. A policy may use the table's own columns, scalar functions and
+relative time, but no aggregates, subqueries or enrichment fields. Prefer ordering-key columns: the predicate runs on
+every read.
 
-`GET /v1/tables/{name}/row-policies` lists a table's policies; `DELETE .../row-policies/{role}` removes one.
+**Several roles combine with OR.** A caller in `team-x` and `team-y` sees both teams' rows. A caller who also holds a
+role that reads the table with **no** policy sees every row, so give that role a policy too.
 
-### The same policy written as SQL
+## Column policies
 
-Instead of `filter`, a policy can be given as `where`: the condition you would write after `WHERE`.
+`columns` is an allowlist: `null` means every column, `[]` is `422`.
 
-```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/team-x" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"where": "project_id IN ('\''X-PRJ-1'\'')"}'
+```json
+{"generation": 7, "privileges": ["read"], "columns": ["model", "project_id", "dial_usage_log_payload.request_body"]}
 ```
 
-The text is an input format. It is translated to a `filter`, and that filter is what is stored, returned
-and enforced, so the response shows the tree and not your SQL. Everything a `filter` may not hold is
-refused in SQL too: subqueries, other tables, aggregates. A table that cannot be queried on its own, such
-as an enrichment, takes `filter` only.
+- Names are the exposed column names, case-sensitive. Enrichment columns are listed on the source as
+  `<enrichment>.<column>`.
+- A hidden column is absent everywhere, revision snapshots included, and referencing it fails as an unknown field.
+- `sensitive` still applies on top: a sensitive column needs the policy **and** the clearance.
+- A rename updates every list. A drop that would empty a list is refused `409 column_in_column_policy`.
+- `permissions.columns_restricted` is `true` when a policy hides at least one column from the caller.
 
-## The rules, briefly
+**Gaining a column-restricted role can hide columns.** A column shows when a role with no row policy allows it, or
+when every role the caller reads through allows it. So a caller with role `A` (rows of project `P1`, all columns) who
+gains role `B` (all rows, `"columns": ["x"]`) sees only `x`. List `A`'s columns on `B`, or leave `B` without a column
+policy; giving `B` a row policy does not help.
 
-- **A policy narrows; it never grants.** The role still needs a read path — a global `TABLE_READ`, a
-  bundle, or a `read` grant on the table. A policy on a role with none of those confers nothing.
-- **A policy applies to its role whatever path that role reads by.** A role mapped to `READ_ONLY_ANALYTIC`
-  (global read) is confined by its own policy exactly like a per-table grantee. You do **not** need to
-  remap a role to narrow it.
-- **No policy, no confinement.** A caller none of whose roles has a policy on a table sees every row it
-  can read there.
-- **Several policies combine with OR.** A caller in `team-x` and `team-y` sees both teams' rows.
-- **A reading role without a policy lifts the confinement.** A caller in `team-x` (policy) and `analysts`
-  sees every row when `analysts` may read the table — a `read` grant on it, or a mapping to global
-  `TABLE_READ` — and has no policy there. So to narrow someone who also holds a broad role, give the broad
-  role a policy too.
-- **Unrelated roles count for nothing.** A caller's IdP groups and Core roles that give no read on the table
-  never lift a confinement, whether or not they have a policy.
-- **Writes are not narrowed.** A confined role holding `write` may insert any row.
+### Pipelines and export
 
-## Derived tables are not covered — set their policies too
-
-Enrichment and aggregate targets are populated by pipelines that read the whole source. **A policy on the
-source does not propagate**: a role confined on `dial_usage_log` that can read an aggregate of it sees every
-project's totals there. For each derived table a confined role may read, either:
-
-- store a policy for the role on that table (e.g. `project_id IN (...)` on an aggregate grouped by
-  `project_id`), or
-- leave the role without a read path to it.
-
-A confined caller also cannot arm, preview or refresh a pipeline over a table it is confined on, nor use
-the pipeline data plane over it (`403 row_policy_confined`): a pipeline would read those rows unfiltered on
-its behalf.
-
-## Keep the predicate cheap
-
-The predicate runs on every read of the table by a confined caller. Filter on **ordering-key columns**
-where you can: on `dial_usage_log`, `project_id` leads the sort key, so a project policy prunes the scan as
-well as any `WHERE project_id …` would. A predicate wrapping a column in a function (`lower(col) = …`) or
-filtering a non-key column reads more of the table.
-
-A policy may use scalar functions and the relative time functions (`now`, `date_add`, `date_sub` — e.g.
-"the last 90 days"); it may not use aggregate or window functions, subqueries or enrichment fields, nor
-any `param` other than the two caller values below. A column a policy filters on cannot be dropped or renamed, nor left out or given another type when a
-failed table's schema is posted again, until the policy is changed (`409 column_in_row_policy`).
+Pipeline authoring, the runner and catalog export refuse a hidden column with `403 column_not_entitled`. A restricted
+runner's list must also name the columns it reads back: on `dial_usage_log`, `event_id`, `_ingested_at` and, for an
+aligned target, `request_time`.
 
 ## Own rows: comparing a column with the caller
 
-A policy may compare a `string` column with a value of the caller reading the table: `caller.user_hash`
-(the hash DIAL Core writes to `user_hash`; it needs the `logging-*` settings in
-[`configuration.md`](configuration.md)) or `caller.project` (the project of a project API key). One policy
-on one role then gives every caller its own rows:
+A policy may compare a `string` column with `caller.user_hash` (needs the `logging-*` settings in
+[`configuration.md`](configuration.md)) or `caller.project` (the project of a project API key), using `=` or `!=`:
 
-```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/user" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"filter": {"op": "eq", "args": [
-        {"type": "field", "name": "user_hash"},
-        {"type": "param", "name": "caller.user_hash"}]}}'
+```json
+{"generation": 7, "privileges": ["read"], "rows": {"where": "user_hash = caller.user_hash"}}
 ```
 
-Written as SQL, the same policy is `{"where": "user_hash = caller.user_hash"}`.
-
-A caller value is allowed only as one side of `eq` or `ne` against a `string` column. A caller without the
-value matches no row, also under `ne` and `not`; an `or` with another branch still applies, so
-`user_hash = caller.user_hash OR project_id = caller.project` serves users and project keys alike. Roles
-that should read every row simply get no policy.
+A caller without the value matches no row.
 
 ## Everyone: the `*` grantee
 
-When users share no common role, name `*` instead of a role. It stands for every authenticated caller, in
-a table's read-side grant lists (`get`, `read`, `sensitive`; never `write` or `modify`) and as the subject
-of a row policy. Two calls give every user their own rows of a table and leave administrators unconfined:
+`*` may hold `get`, `read` and `sensitive` (`write` and `modify` are `422`), with `rows` and `columns`. Storing the
+own-rows entry above for `*` gives every user their own rows, while administrators, whose global read has no policy,
+still see everything. Keep the `rows` on it: a `read` for `*` without `rows` lets every caller read every row and lifts
+every other role's row policies.
 
-```bash
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/row-policies/*" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"filter": {"op": "eq", "args": [
-        {"type": "field", "name": "user_hash"},
-        {"type": "param", "name": "caller.user_hash"}]}}'
-curl -X PUT "$ADAS/v1/tables/dial_usage_log/access" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"read": ["*"]}'
-```
+`ineffective_grants`, in the `PUT` response and both `GET`s, warns without failing:
 
-Store the policy first. A `read` grant to `*` with no `*` policy lets every caller read every row, and
-lifts the policies of every other role on the table, because every caller then carries a role that reads
-with no policy. The grant is accepted, and its response reports it under `ineffective_grants` with reason
-`lifts_row_policies`.
+| Reason | Means |
+|---|---|
+| `already_global` | The role already holds this privilege globally |
+| `sensitive_without_verb` | `sensitive` for a role that can neither get, read nor modify the table or modify one of its enrichments |
+| `lifts_row_policies` | `read` for `*` without `rows` while another role has `rows`: those policies confine no one |
+| `lifts_column_policies` | `read` for `*` without `rows` or `columns` while another role has `columns` |
+| `everyone_reads_all_rows` | `read` for `*` without `rows`: every caller reads every row (shown while the entry stays) |
 
-The rules above apply to `*` as to any role. A caller sees the rows of the `*` policy plus those of the
-policies on its own roles, and a caller one of whose roles reads the table with no policy (an
-administrator's global read, or a `read` grant by name) sees every row. So a user meant to be confined
-must have no other unpolicied way to read the table.
+## Watch out for
 
-## Seeing a policy applied
-
-ADAS enforces policies by sending ClickHouse the `additional_table_filters` setting with each read. To see
-it on the server:
-
-```sql
-SELECT event_time, query, Settings['additional_table_filters'] AS row_filter
-FROM system.query_log
-WHERE type = 'QueryFinish' AND has(mapKeys(Settings), 'additional_table_filters')
-ORDER BY event_time DESC
-LIMIT 10;
-```
-
-ADAS's own debug log names the confined tables (never the predicate), and the query span carries the
-`adas.row_policy.tables` attribute. When a policy references a caller value the caller does not have, the
-log names it and the span carries `adas.row_policy.unknown.<name>` (for example
-`adas.row_policy.unknown.caller.user_hash`), never the value itself.
-
-## Before rolling back
-
-A build without this feature ignores the `row_policies` column, so a rollback silently stops enforcing
-every stored policy. Remove the policies — or the confined roles' read paths — first if a rollback must not
-widen reads.
+- **Aggregate targets.** A role confined on `dial_usage_log` that can read an aggregate of it sees every project's
+  totals there, unless the aggregate has its own entry for the role.
+- **Derived values.** An enrichment value computed from other rows may summarise rows the caller cannot read.
+- **Checking a policy.** Read `GET /v1/tables/{name}` as the caller: `permissions.rows_restricted`,
+  `columns_restricted` and the listed columns show what applies. In ClickHouse, row policies appear as the
+  `additional_table_filters` setting in `system.query_log`.
+- **Rollback.** An older build ignores column policies, so a rollback reveals the columns they hide. Delete them
+  first if that must not happen.

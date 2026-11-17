@@ -47,7 +47,8 @@ visibility applied in every block.
 Security follows the per-endpoint privilege policy: in `oidc` mode the caller needs `TABLE_READ` on every
 table the statement resolves, held globally or granted on that table; a `sensitive` column is invisible
 without the `TABLE_SENSITIVE` clearance on the table that owns it and is reported as an unknown
-column.
+column. An enrichment column's read and clearance are its source's: whoever may read a source reads its
+enrichments' columns, and the source's clearance covers their sensitive ones.
 
 ### CSV results
 

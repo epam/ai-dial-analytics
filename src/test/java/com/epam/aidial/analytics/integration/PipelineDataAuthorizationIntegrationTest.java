@@ -19,6 +19,7 @@ import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -101,40 +102,49 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
     }
 
     /**
-     * Merges one key of {@code table}'s grant list. Absent keys keep their stored value, so granting the
-     * source's {@code read} does not disturb the target's {@code write} and vice versa.
+     * Sets {@code role}'s entry on {@code table} to the one privilege {@code key}. Other roles' entries are
+     * untouched, so granting the source's {@code read} does not disturb the target's {@code write} and vice versa.
      *
      * <p>{@code dial_usage_log} and {@code rate_analytics} are {@code system} tables, and the read-side keys
      * are storable on one — which is the whole point of moving the system-table refusal from the object to
      * the keys. A blanket refusal would make this test unwritable.
      */
     private void grant(String table, String key, String role) throws Exception {
-        mockMvc.perform(put("/v1/tables/" + table + "/access")
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=" + role)
                         .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"" + key + "\":[\"" + role + "\"]}"))
+                        .content("{\"generation\":" + access(table).get("generation") + ",\"privileges\":[\"" + key + "\"]}"))
                 .andExpect(status().isOk());
     }
 
+    /** {@code table}'s whole access read: {@code generation} and {@code roles}. */
+    private Map<String, Object> access(String table) throws Exception {
+        return JsonPath.read(mockMvc.perform(get("/v1/tables/" + table + "/access")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(), "$");
+    }
+
     /**
-     * Revokes every read-side grant on a shared system table, so one test cannot leak into the next.
+     * Removes {@code role}'s entry on {@code table} when it has one, so one test cannot leak into the next.
      *
      * <p>Asserted, not fire-and-forget. {@code dial_usage_log} and {@code rate_analytics} are seeded rows
      * shared with the rest of the suite rather than data this class owns, so a revoke that silently failed
      * would hand the next test a grant it never made — and that test would pass for the wrong reason.
      */
-    private void revokeReads(String table) throws Exception {
-        mockMvc.perform(put("/v1/tables/" + table + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"get\":[],\"read\":[],\"sensitive\":[]}"))
-                .andExpect(status().isOk());
+    @SuppressWarnings("unchecked")
+    private void revoke(String table, String role) throws Exception {
+        if (((Map<String, Object>) access(table).get("roles")).containsKey(role)) {
+            mockMvc.perform(delete("/v1/tables/" + table + "/access?role=" + role)
+                            .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                    .andExpect(status().isNoContent());
+        }
     }
 
     @AfterEach
     void tearDown() throws Exception {
-        revokeReads(DEFAULT_READ_SOURCE);
-        revokeReads("rate_analytics");
+        revoke(DEFAULT_READ_SOURCE, WRITER_ROLE);
+        revoke("rate_analytics", WRITER_ROLE);
         mockMvc.perform(delete("/v1/tables/" + ENRICHMENT).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
     }
 
@@ -155,6 +165,7 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
                 .andExpect(jsonPath("$.error").value("pipeline_access_denied"));
 
         // Source read alone is not enough either: the pipeline writes its target.
+        revoke(ENRICHMENT, WRITER_ROLE);
         grant(ENRICHMENT, "write", "someone-else");
         grant(DEFAULT_READ_SOURCE, "read", WRITER_ROLE);
         mockMvc.perform(runnerPost("/v1/pipelines/" + pipelineName + "/scan").header(HttpHeaders.AUTHORIZATION, bearer(runner()))

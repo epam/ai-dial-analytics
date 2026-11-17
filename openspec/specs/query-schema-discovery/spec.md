@@ -26,7 +26,9 @@ NOT be listed as queryable entities — enrichments are surfaced only as flatten
 source (see the base-schema requirement). Each catalog item SHALL carry the entity wire `name` and a
 boolean `supports_final`: `true` when the entity is final-capable — its source is `upsert_by_key`, or it has
 an active enrichment the caller may read (`TABLE_READ`, the bar execution resolves the entity at, whatever
-bar the listing itself filters at) — and `false` otherwise, so a caller can tell where a structured
+bar the listing itself filters at; an enrichment's read is its source's, see
+[table-access-control](../table-access-control/spec.md), so a caller that may read the source may read each of its
+active enrichments) — and `false` otherwise, so a caller can tell where a structured
 query's `"final": true` and a SQL `FINAL` are legal and where they are rejected with `illegal_final` (see
 [structured-query](../structured-query/spec.md) "Read result deduplication"). `supports_final` is also what
 an absent `final` resolves to. It SHALL NOT reveal an enrichment the caller cannot read, and an enrichment
@@ -54,10 +56,16 @@ Entities SHALL be listed in stable alphabetical order by name.
 
 #### Scenario: An enrichment the caller cannot read does not make the entity final-capable
 
-- **WHEN** a caller holds `list` and `get` but not `read` on the only enrichment of an `append` source it may
-  read, and calls `GET /v1/queries/entities`
-- **THEN** that source's item carries `"supports_final": false`, matching execution, where the enrichment is
-  not joined and `"final": true` is rejected with `illegal_final`
+- **WHEN** a caller holds `list` and `get` but not `read` on an `append` source whose only enrichment is active, and
+  so may not read that enrichment either, and calls `GET /v1/queries/entities`
+- **THEN** that source's item carries `"supports_final": false`, matching translation, where `"final": true` is
+  rejected with `illegal_final`
+
+#### Scenario: A reader of the source makes an enriched append source final-capable
+
+- **WHEN** a caller holding `read` on an `append` source and nothing on its active enrichment calls
+  `GET /v1/queries/entities`
+- **THEN** that source's item carries `"supports_final": true`
 
 ### Requirement: Instance-independent base schema
 
@@ -82,12 +90,23 @@ row-mode `select` on `POST /v1/queries/execute`, or a SQL `SELECT *` — so the 
 and SHALL NOT hide the field: it is a transfer-cost hint, so the field is returned to every caller who
 may see it, carrying the flag, and stays selectable by name.
 
-The returned schema SHALL be filtered per owning table: for a caller holding no
-`TABLE_SENSITIVE` on the table that owns a given column,
-fields whose column is `sensitive` SHALL be omitted from the response entirely (hidden, not merely
-flagged), so such a caller cannot tell a sensitive field from a non-existent one. For an entitled
-caller — or when security is disabled (`security.mode=none`) — all fields SHALL be returned, each
-carrying its `sensitive` flag so an admin can see which columns are restricted.
+The returned schema SHALL be filtered per owning table, by the clearance and by column visibility:
+for a caller holding no `TABLE_SENSITIVE` on the table that owns a given column, fields whose column
+is `sensitive` SHALL be omitted from the response entirely (hidden, not merely flagged), so such a
+caller cannot tell a sensitive field from a non-existent one; and a field whose column is hidden from
+the caller by a column policy (see [table-access-control](../table-access-control/spec.md), "Column
+visibility by caller role"), or a computed field over such a column, SHALL be omitted the same way.
+All fields SHALL be returned, each carrying its `sensitive` flag so an admin can see which columns are
+restricted, only to a caller from whom neither the clearance nor a column policy hides a column of
+the entity, and to every caller when security is disabled (`security.mode=none`).
+
+#### Scenario: A field hidden by a column policy is omitted for an entitled caller
+
+- **GIVEN** a caller holding `TABLE_SENSITIVE` on `dial_usage_log` whose only governing role on it
+  carries `read` and `columns` `["model", "project_id"]`
+- **WHEN** it calls `GET /v1/queries/entities/schema/dial_usage_log`
+- **THEN** the response lists `model` and `project_id` and no other field of the source or of its
+  enrichments, exactly as if the omitted columns did not exist
 
 #### Scenario: Base schema lists the entity's flat fields
 
@@ -512,9 +531,10 @@ picker or validate a filter from discovery alone, rather than sampling the data 
 `SELECT DISTINCT`.
 
 `enum_values` SHALL follow the same visibility rules as the rest of a field's metadata: a field
-hidden from the caller (a `sensitive` column read without `TABLE_SENSITIVE` on its owning table)
-does not appear at
-all, and therefore neither does its domain.
+hidden from the caller — a `sensitive` column read without `TABLE_SENSITIVE` on its owning table, or
+a column a column policy hides (see [table-access-control](../table-access-control/spec.md), "Hidden
+columns are absent from every read surface") — does not appear at all, and therefore neither does its
+domain.
 
 #### Scenario: Enum field lists its domain
 

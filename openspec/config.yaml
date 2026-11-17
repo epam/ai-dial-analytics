@@ -195,6 +195,15 @@ context: |
   `AbstractClickHouseIntegrationTest` / `AbstractPostgresIntegrationTest` (singleton Testcontainers
   via `@DynamicPropertySource`). **Each test owns its data — truncate + insert, never a shared
   fixture** — or you get order-dependent flakes against the shared container.
+  JWT-only OIDC REST and Flight auth tests extend `AbstractOidcAuthIntegrationTest`; api-key,
+  Flight basic-auth and actuator tests keep their own context. **Every distinct
+  context costs heap and a JDBC pool**: `@SpringBootTest`/`@TestPropertySource` properties, a
+  `@DynamicPropertySource` method, `@Import`s and `@MockitoBean`/`@MockitoSpyBean` fields are all part
+  of the context-cache key, and the cache is capped (`src/test/resources/spring.properties`), so a
+  forked context also evicts and rebuilds others. Add a property or spy a subclass needs to its
+  base's shared set when it is inert for the rest; fork only for a property that changes behaviour
+  the other classes assert. A provider is never inert: its role names join the one role-name lookup
+  every class sees, so pick names no other class grants, writes policies for, or puts on a token.
 
   ## Operational invariants
 
@@ -217,20 +226,28 @@ context: |
     table absent from the catalog will not appear under `/v1/queries` — that is not a discovery bug.
   - **Authorization is a privilege, held globally or granted per table.** Eighteen `Privilege` values;
     six are table-scoped (`TABLE_LIST`/`GET`/`READ`/`SENSITIVE`/`WRITE`/`MODIFY`) and a caller's
-    effective access is the union of what it holds globally and what a table's `access` lists grant its
-    raw provider roles — five keys, since `TABLE_LIST` is global-or-implied and has none. The three read
+    effective access is the union of what it holds globally and what a table's role-keyed access entries
+    (`/v1/tables/{name}/access?role={role}`: `privileges`, `rows`, `columns`, under one per-table `generation`)
+    grant its raw provider roles — five privilege keys, since `TABLE_LIST` is global-or-implied and has none.
+    The entry is a view over the `access`, `row_policies` and `column_policies` documents. For an
+    enrichment the read-side lists and the clearance are its source's (`GoverningAccess`, shared by the
+    evaluator and the reported permissions): it stores only `write` and `modify`, and its own `modify`
+    still implies `get` on it. The three read
     rungs form a ladder, derived at check time and never written into
-    a stored list; `TABLE_WRITE` implies nothing. `TABLE_SENSITIVE` is a **clearance, not a rung**: it
+    a stored entry; `TABLE_WRITE` implies nothing. `TABLE_SENSITIVE` is a **clearance, not a rung**: it
     implies nothing and extends `GET`/`READ`/`MODIFY` on the same table to its sensitive columns, so a
     sensitive column needs the verb *and* the clearance. Where the surface has already enforced its verb
     bar, `SensitiveColumnAccess.maySeeSensitive` (clearance alone) is right; a path with no verb bar of
     its own (pipeline authoring, runner guards) must use `mayReadSensitive` (read and clearance). `FULL_ADMIN` and the other three bundles exist only in
     `roles-mapping` and are expanded at parse time — **no gate may branch on a bundle name**.
   - **Read exposure is decided per owning table, at one chokepoint.** `CatalogQueryService.buildModel`
-    applies both the read bar and the `sensitive` filter where each column's owning table is in hand, so
-    discovery, DSL, SQL, translation and Flight agree and a flattened entity can legitimately expose a
-    source's sensitive columns and hide an enrichment's. **Route every new read surface through it**, or
-    it bypasses both filters with nothing failing. The bar is an explicit parameter
+    applies the read bar, the `sensitive` filter and column visibility (the per-caller visible-column
+    decision `SensitiveColumnAccess` derives from column policies) where each column's owning table is in
+    hand, so discovery, DSL, SQL, translation and Flight agree. An enrichment's read bar, clearance and
+    column policies are its source's, so a flattened entity no longer exposes a source's sensitive columns
+    while hiding an enrichment's. The other clearance consumers (catalog read, `column_count`, schema
+    lookup, import `prev`, pipeline guards, export) apply the same visibility decision. **Route every new
+    read surface through it**, or it bypasses every filter with nothing failing. The bar is an explicit parameter
     (`findModel(entity, bar)`): `TABLE_READ` to execute, `TABLE_GET` to translate or validate,
     `TABLE_LIST` to list.
   - **Row policies are enforced by ClickHouse, at a second chokepoint.** Every user read must execute
@@ -254,7 +271,8 @@ context: |
     *named* the table; the pipeline data plane is the one carve-out (the table comes from a stored
     declaration the caller is already entitled to read) and answers `403 pipeline_access_denied` — or
     `403 row_policy_confined`, which the registry's arm/preview/refresh endpoints also answer, when a row
-    policy confines the caller on a table the pipeline reads.
+    policy confines the caller on a table the pipeline reads, or `403 column_not_entitled` when a column
+    policy hides a column the pipeline reads from the caller.
   - **Two migration roots**, each scoped so neither sees the other's: `db/migration/postgres` (Boot
     Flyway, catalog `DataSource`) and `db/migration/clickhouse` (programmatic
     `ClickHouseMigrationRunner`, writer credential). A file in the wrong folder silently never runs.
@@ -271,8 +289,9 @@ context: |
     (`openspec/specs/clickhouse-replication/spec.md`).
   - **`security.mode` is `oidc` or `none`, default `none`.** In `none` every authorization check
     fails open — the endpoint gates, per-table grants, pipeline authorization, saved-query ownership,
-    sensitive-column masking, row policies — and the Flight port is unauthenticated; only the
-    `system`-table guard (and the validation of stored grants and row policies) still holds. An authorization test run in the default profile passes for the wrong reason.
+    sensitive-column masking, row policies, column policies — and the Flight port is unauthenticated; only
+    the `system`-table guard (and the validation of stored grants, row policies and column policies, the
+    access generation check and the enrichment refusal `enrichment_follows_source`) still holds. An authorization test run in the default profile passes for the wrong reason.
   - **The mode is resolved once, by `SecurityMode`.** It matches case-insensitively and **fails startup**
     on any other value; bean conditions go through `@ConditionalOnSecurityMode` and runtime gates through
     `SecurityModeResolver`, so nothing re-derives it from the raw property. Do not add a bean condition

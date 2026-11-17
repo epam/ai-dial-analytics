@@ -23,7 +23,6 @@ aggregation, which this capability deliberately does not provide.
 Because ADAS is itself the writer here, this is the only path that can record **how far an enrichment has
 been materialized** — which is what every dependent rollup's freshness clamp reads.
 ## Requirements
-
 ### Requirement: SQL-computed transforms
 
 The system SHALL support an `enrich` pipeline whose `transform` declares `type: "sql"` — a deterministic,
@@ -531,18 +530,27 @@ confused deputy: a materialize reads the source, so a write grant on a small der
 read of the table it derives from.
 
 Independently of those grants, the sensitive-column rule SHALL be re-applied against the **calling**
-identity over the columns the pipeline's expressions and filter reference, per owning table, and a
+identity over the columns the pipeline's expressions and filter reference, the target's grain key, and the read
+source's `version_column` and `identity_column`, whose values the `nextCursor` carries readably, per owning table, and a
 non-entitled caller SHALL be rejected with HTTP 403 `sensitive_column_not_entitled` — so a runner
 without `TABLE_SENSITIVE` on the table that owns the column cannot cause sensitive data to be read
-and derived even though no body is returned to it.
+and derived even though no body is returned to it. The scan already judges those two cursor columns the same way.
 
 Because a `sensitive` column is *hidden* from a non-entitled caller's schema view, such a caller cannot
 parse an expression that reads one: validation would fail first with an unknown-column error. The system
 SHALL NOT surface that as a 422 "invalid expression"; when a governed-expression validation fails for a
 caller who may not read the source's sensitive columns, it SHALL be reported as HTTP 403
-`sensitive_column_not_entitled` instead. An entitled caller's validation failure SHALL be reported
-accurately, so a genuinely broken declaration (e.g. a source column dropped since registration) still reaches
-the caller who can act on it.
+`sensitive_column_not_entitled` instead.
+
+A column a column policy hides from the calling identity (see
+[table-access-control](../table-access-control/spec.md), "Column visibility by caller role" and "Pipeline and export
+paths refuse a hidden column") is hidden from its schema view the same way. A reference to one SHALL be refused with
+HTTP 403 `column_not_entitled`, checked before the clearance, and a governed-expression validation failure SHALL be
+re-attributed to `column_not_entitled` when the read source or one of its active enrichments has a column hidden from
+the caller by a column policy, otherwise to `sensitive_column_not_entitled` as above. Only a caller from whom no column
+of those tables is hidden — by the clearance or by a column policy — SHALL have its validation failure reported
+accurately, so a genuinely broken declaration (e.g. a source column dropped since registration) still reaches the
+caller who can act on it.
 
 `from` and `to` SHALL carry the same shape and `(from, to]` semantics as the scan's bounded window
 (see [enrichment-runtime](../enrichment-runtime/spec.md)); `limit` SHALL bound the window's row count,
@@ -589,6 +597,20 @@ calling the row scan on a `sql` pipeline, SHALL be rejected with HTTP 422
 - **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on the read source and `TABLE_WRITE`
   on the target — each globally or by grant — or any caller in `none` mode, calls the same `materialize`
 - **THEN** the derivation runs normally
+
+#### Scenario: A sensitive version column needs the clearance to materialize
+
+- **GIVEN** a read source whose `version_column` is `sensitive`
+- **WHEN** a caller holding `TABLE_READ` on the read source without the clearance, and `TABLE_WRITE` on the target,
+  calls `materialize` for a pipeline whose expressions read no sensitive column
+- **THEN** the request is rejected with HTTP 403 and error code `sensitive_column_not_entitled`
+
+#### Scenario: A caller from which a column policy hides a column the expressions read cannot materialize
+
+- **WHEN** a caller holding `TABLE_READ` and the clearance on the read source and `TABLE_WRITE` on the target, from
+  which a column policy hides a source column the pipeline's expression reads, calls `materialize`
+- **THEN** the request is rejected with HTTP 403 and error code `column_not_entitled`, not with a 422 about an invalid
+  expression
 
 #### Scenario: A bounded window materializes only its range
 
@@ -1177,3 +1199,4 @@ materialize after the hold is released SHALL resume from the runner's committed 
 - **WHEN** a relayout aligns the target and releases its hold before the call reaches its `INSERT … SELECT`
 - **THEN** the response is HTTP 503 `table_relayout_in_progress`, no row is written, and the next materialize
   writes the rows with their source rows' partition value
+

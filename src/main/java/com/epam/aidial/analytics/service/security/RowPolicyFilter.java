@@ -225,15 +225,20 @@ public class RowPolicyFilter {
             return List.of();
         }
         for (final String role : roles) {
-            if (!policies.containsKey(role) && readsTable(role, access, globalRead)) {
+            if (!policies.containsKey(role) && readsTable(role, access, globalRead, rolePrivileges)) {
                 return List.of();
             }
         }
         return matching;
     }
 
-    /** Whether {@code role} by itself confers a read of the table: a {@code read} grant, or a global mapping. */
-    private boolean readsTable(String role, TableAccess access, boolean globalRead) {
+    /**
+     * Whether {@code role} by itself confers a read of the table: a {@code read} grant, or a global mapping while the
+     * caller holds {@code TABLE_READ} globally. Shared with column visibility ({@link SensitiveColumnAccess}), so the
+     * roles that lift confinement and the roles that govern columns cannot drift. Static, because the query model
+     * this filter depends on consults column visibility.
+     */
+    public static boolean readsTable(String role, TableAccess access, boolean globalRead, ProviderRolePrivileges rolePrivileges) {
         return TableCallerPermissions.isGranted(access, Privilege.TABLE_READ, Set.of(role))
                 || globalRead && rolePrivileges.holdsGlobally(role, Privilege.TABLE_READ);
     }

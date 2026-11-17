@@ -43,7 +43,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * it), and imported.
  *
  * <p>The fixture is a source, an enrichment of it, a sensitive enrichment of {@code dial_usage_log} with grants
- * on both, an aggregate target, two enrich pipelines and an aggregate pipeline whose only reference to the
+ * on both (read-side on the source, write on the enrichment), an aggregate target, two enrich pipelines and an aggregate pipeline whose only reference to the
  * enrichment is inside its filter and group key.
  */
 class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
@@ -85,9 +85,10 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 [{"source_name":"sentiment","name":"sentiment","type":"string"},
                  {"source_name":"total","name":"total","type":"long","nullable":true},
                  {"source_name":"events","name":"events","type":"long"}]""", "[\"sentiment\"]");
-        putAccess(BASE, "{\"read\":[\"" + READERS + "\"]}");
-        putAccess(SYSTEM, "{\"read\":[\"" + READERS + "\"],\"sensitive\":[\"" + READERS + "\"]}");
-        putAccess(DUL, "{\"read\":[\"" + READERS + "\"],\"sensitive\":[\"" + READERS + "\"]}");
+        putAccess(BASE, READERS, "read");
+        putAccess(SYSTEM, READERS, "read", "sensitive");
+        // An enrichment's read side is its source's; only its write and modify privileges are its own.
+        putAccess(DUL, READERS, "write");
         createPipeline("{\"name\":\"" + SENT_LIVE + "\",\"kind\":\"enrich\",\"target\":\"" + SENT + "\","
                 + Transforms.sql().output("sentiment", "lower('POS')").member()
                 + ",\"trigger\":{\"kind\":\"schedule\"},\"enabled\":true}");
@@ -104,8 +105,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     @AfterEach
     void cleanUp() throws Exception {
         forget();
-        mockMvc.perform(put("/v1/tables/" + SYSTEM + "/access").contentType(MediaType.APPLICATION_JSON)
-                .content(accessBody(systemAccess)));
+        restoreAccess(SYSTEM, systemAccess);
     }
 
     // --- 8.1 fresh promotion ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
             assertThat(declaration(pipelinesAfter.get(pipeline))).isEqualTo(declaration(pipelinesBefore.get(pipeline)));
         }
         assertThat(json.readTree(access(SYSTEM))).isEqualTo(json.readTree(
-                "{\"get\":[],\"read\":[\"" + READERS + "\"],\"sensitive\":[\"" + READERS + "\"],\"write\":[],\"modify\":[]}"));
+                "{\"" + READERS + "\":{\"privileges\":[\"read\",\"sensitive\"],\"rows\":null,\"columns\":null}}"));
         for (final String pipeline : List.of(SENT_LIVE, DUL_LIVE, ROLLUP)) {
             mockMvc.perform(patch("/v1/pipelines/" + pipeline).contentType(MediaType.APPLICATION_JSON)
                             .content("{\"enabled\":true}"))
@@ -392,8 +392,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tables[?(@.name == '" + DUL + "')].status").value(hasItem("created")));
 
-        assertThat(json.readTree(access(DUL))).isEqualTo(json.readTree(
-                "{\"get\":[],\"read\":[],\"sensitive\":[],\"write\":[],\"modify\":[]}"));
+        assertThat(json.readTree(access(DUL))).isEqualTo(json.readTree("{}"));
         assertThat(access(SYSTEM)).isEqualTo(systemBefore);
     }
 
@@ -550,7 +549,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void skipImportLeavesDifferingSystemGrantsByteIdentical() throws Exception {
         final String bundle = exportFixture();
-        putAccess(SYSTEM, "{\"read\":[\"" + READERS + "\",\"cx-extra\"],\"sensitive\":[\"" + READERS + "\"]}");
+        putAccess(SYSTEM, "cx-extra", "read");
         final String before = access(SYSTEM);
 
         importCall("/v1/catalog/import", bundle, null, "SKIP_IF_EXISTS")
@@ -718,24 +717,48 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         mockMvc.perform(delete("/v1/pipelines/" + name)).andExpect(status().isNoContent());
     }
 
-    private void putAccess(String table, String body) throws Exception {
-        mockMvc.perform(put("/v1/tables/" + table + "/access").contentType(MediaType.APPLICATION_JSON).content(body))
+    /** Replaces {@code role}'s entry on {@code table} with {@code privileges}, at the table's current generation. */
+    private void putAccess(String table, String role, String... privileges) throws Exception {
+        final ObjectNode body = json.createObjectNode().put("generation", generation(table));
+        final ArrayNode keys = body.putArray("privileges");
+        List.of(privileges).forEach(keys::add);
+        putEntry(table, role, body);
+    }
+
+    private void putEntry(String table, String role, ObjectNode body) throws Exception {
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=" + role).contentType(MediaType.APPLICATION_JSON).content(body.toString()))
                 .andExpect(status().isOk());
     }
 
-    private String access(String table) throws Exception {
+    private String fullAccess(String table) throws Exception {
         return mockMvc.perform(get("/v1/tables/" + table + "/access")).andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
     }
 
-    /** A GET access document as a PUT body: the same five lists. */
-    private String accessBody(String accessJson) {
-        final JsonNode read = json.readTree(accessJson);
-        final ObjectNode body = json.createObjectNode();
-        for (final String key : List.of("get", "read", "sensitive", "write", "modify")) {
-            body.set(key, read.has(key) ? read.get(key) : json.createArrayNode());
+    private long generation(String table) throws Exception {
+        return json.readTree(fullAccess(table)).get("generation").asLong();
+    }
+
+    /** {@code table}'s role entries, without the generation (which a column change on an enrichment may move). */
+    private String access(String table) throws Exception {
+        return json.readTree(fullAccess(table)).get("roles").toString();
+    }
+
+    /** Puts {@code table}'s role entries back to those of {@code savedAccess}, a whole GET access document. */
+    private void restoreAccess(String table, String savedAccess) throws Exception {
+        final JsonNode saved = json.readTree(savedAccess).get("roles");
+        for (final Map.Entry<String, JsonNode> entry : json.readTree(access(table)).properties()) {
+            if (!saved.has(entry.getKey())) {
+                mockMvc.perform(delete("/v1/tables/" + table + "/access?role=" + entry.getKey())).andExpect(status().isNoContent());
+            } else if (!saved.get(entry.getKey()).equals(entry.getValue())) {
+                putEntry(table, entry.getKey(), ((ObjectNode) saved.get(entry.getKey()).deepCopy()).put("generation", generation(table)));
+            }
         }
-        return body.toString();
+        for (final Map.Entry<String, JsonNode> entry : saved.properties()) {
+            if (!json.readTree(access(table)).has(entry.getKey())) {
+                putEntry(table, entry.getKey(), ((ObjectNode) entry.getValue().deepCopy()).put("generation", generation(table)));
+            }
+        }
     }
 
     private int lastRevision() {

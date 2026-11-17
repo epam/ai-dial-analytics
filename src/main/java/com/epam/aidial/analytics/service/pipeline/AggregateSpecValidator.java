@@ -21,7 +21,6 @@ import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionDto;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionGroup;
@@ -118,14 +117,14 @@ public class AggregateSpecValidator {
     public AggregateSpecValidator(TableDefinitionRepository definitions, PipelineRepository pipelines,
             QueryFunctionCatalog functionCatalog, FilterSqlValidator filterValidator, SensitiveProjectionGuard sensitiveGuard,
             EntityFieldResolver entityFields, EnrichmentFreshness freshness, PipelineSpecCodec specCodec,
-            SensitiveGrantInvariant sensitiveGrants, AggregateSqlReader sqlReader) {
+            AggregateSqlReader sqlReader) {
         this.definitions = definitions;
         this.functionCatalog = functionCatalog;
         this.filterValidator = filterValidator;
         this.sensitiveGuard = sensitiveGuard;
         this.entityFields = entityFields;
         this.specCodec = specCodec;
-        this.governance = new AggregateGovernance(definitions, pipelines, freshness, sensitiveGuard, sensitiveGrants);
+        this.governance = new AggregateGovernance(definitions, pipelines, freshness, sensitiveGuard);
         this.sqlValidator = new AggregateSqlValidator(
                 governance, entityFields, functionCatalog, sensitiveGuard, definitions, sqlReader);
     }
@@ -177,11 +176,6 @@ public class AggregateSpecValidator {
 
         final Set<String> referenced = referencedInputColumns(spec, inputTable, filterSql);
         governance.enforceSensitive(inputTable, input, referenced, operation);
-        governance.requireSensitiveGrantsNotWidened(targetDefinition, inputTable);
-        // After the entitlement gate, deliberately: a caller who may not see a sensitive enrichment column
-        // should be told that, not told about the shape of the pipeline that writes it.
-        governance.requireSensitiveGrantsNotWidened(
-                targetDefinition, AggregateGovernance.referencedEnrichmentsOf(input, referenced));
         governance.requireAggregatableEnrichments(inputTable, input, referenced);
         return new Validated(inputDefinition, targetDefinition);
     }
@@ -360,10 +354,10 @@ public class AggregateSpecValidator {
     /**
      * As {@link #referencedEnrichments(PipelineDeclaration)}, but <b>refusing</b> rather than degrading.
      *
-     * <p>The degradation above is right for a diagnostic and for a delete guard, and wrong for the grant
-     * rule: "this declaration cannot be read" and "this declaration reads no enrichment" are the same
-     * answer to the caller, and under the subset rule the second one <em>accepts a grant the rule exists
-     * to refuse</em>. A caller that cannot tolerate that ambiguity asks this one instead.
+     * <p>The degradation above is right for a diagnostic and for a delete guard, and wrong for the catalog
+     * export: "this declaration cannot be read" and "this declaration reads no enrichment" are the same
+     * answer to the caller, and the second would leave the enrichments it reads out of the export. A caller
+     * that cannot tolerate that ambiguity asks this one instead.
      */
     @Transactional(readOnly = true)
     public Set<String> referencedEnrichmentsOrThrow(PipelineDeclaration declaration) {

@@ -9,7 +9,6 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * The union of every configured {@code roles-mapping} — {@code security.defaults}, each
@@ -36,7 +35,7 @@ import java.util.stream.Collectors;
  * a widening from "{@code oidc} only" to every mode that no capability declares. Grants are inert in
  * {@code none} mode in any case, so the advice this bean provides has nothing to be right about.
  *
- * <p>The visible consequence is that {@code PUT /v1/tables/{name}/access} reports no
+ * <p>The visible consequence is that {@code PUT /v1/tables/{name}/access?role={role}} reports no
  * {@code already_global} ineffective grant in {@code none} mode. An operator staging grants on a
  * {@code none}-mode instance before switching to {@code oidc} loses that advice — accepted, because the
  * alternative is refusing to boot over a property the mode ignores.
@@ -75,14 +74,6 @@ public class ProviderRolePrivileges {
     /** Whether {@code providerRole} already holds {@code privilege} over every table. */
     public boolean holdsGlobally(String providerRole, Privilege privilege) {
         return privilegesOf(providerRole).contains(privilege);
-    }
-
-    /** Every configured role name that holds {@code privilege} over every table. */
-    public Set<String> rolesHoldingGlobally(Privilege privilege) {
-        return byRole.entrySet().stream()
-                .filter(entry -> entry.getValue().contains(privilege))
-                .map(Map.Entry::getKey)
-                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static void absorb(Map<String, Set<Privilege>> into, Map<String, Set<Privilege>> mapping) {

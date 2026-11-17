@@ -43,6 +43,7 @@ public class CatalogSchemaWriter {
     private final PipelineGenerationBump pipelineGenerations;
     private final TableLimitsProperties limits;
     private final RowPolicyService rowPolicies;
+    private final ColumnPolicyRewriter columnPolicyRewriter;
 
     /**
      * Persists a new table definition as identity only (status {@code PENDING} — no columns, no grain, no
@@ -75,13 +76,25 @@ public class CatalogSchemaWriter {
      */
     @Transactional
     public void persistSchema(String name, DefineSchemaInput draft) {
-        final TableDefinitionEntity definition = definitions.findById(name)
+        // Locked as the first load of each row, the enrichment's before its source's, so the column policies decided on
+        // below are the ones this transaction commits against.
+        final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // A column the re-defined schema no longer declares is dropped by name: a re-define carries no rename, and the
+        // table holds no data, so a name it keeps is not a new column.
+        final List<String> dropped = undeclared(name, draft);
+        // With nothing dropped no list can change, so the source is not locked: a first define (the import preview's
+        // included) leaves the source row free for its own writers.
+        final TableDefinitionEntity policyOwner = definition.getType() != TableType.ENRICHMENT ? definition
+                : dropped.isEmpty() ? null
+                : definitions.findForUpdate(definition.getSourceTable()).orElse(null);
         // Checked before the policy guard, so an invalid column gets its own error and not the guard's.
         if (draft.columns() != null) {
             draft.columns().forEach(TableColumnRules::requireValidUserColumn);
         }
         requireRowPolicyColumnsKept(definition, draft);
+        final Map<String, List<String>> columnPolicies = !columnPolicyRewriter.hasPolicies(policyOwner) ? null
+                : columnPolicyRewriter.plan(policyOwner, policyOwner == definition ? "" : name + ".", name, dropped, List.of());
         if (definition.getType() == TableType.ENRICHMENT) {
             persistEnrichmentSchema(definition, draft);
         } else {
@@ -91,6 +104,21 @@ public class CatalogSchemaWriter {
         // just written, and a refusal rolls this transaction back.
         columns.flush();
         rowPolicies.requireStillValid(definition);
+        if (policyOwner != null) {
+            columnPolicyRewriter.apply(policyOwner, columnPolicies);
+        }
+    }
+
+    /** The exposed names of {@code table}'s stored columns that {@code draft} no longer declares. */
+    private List<String> undeclared(String table, DefineSchemaInput draft) {
+        final Set<String> declared = new HashSet<>();
+        if (draft.columns() != null) {
+            draft.columns().forEach(col -> declared.add(col.name()));
+        }
+        return columns.findByTableNameOrderByOrdinal(table).stream()
+                .map(ColumnMappingEntity::getName)
+                .filter(column -> !declared.contains(column))
+                .toList();
     }
 
     /**
@@ -346,8 +374,8 @@ public class CatalogSchemaWriter {
             Change<String> description, Change<Boolean> sensitive, Change<Boolean> heavy) {}
 
     /**
-     * Applies all catalog changes of one live schema PATCH in a single transaction, after the
-     * orchestrating service has issued the (single, all-or-nothing) ClickHouse {@code ALTER}: column
+     * Applies all catalog changes of one live schema PATCH to {@code definition}, which the orchestrating service has
+     * locked in the transaction this joins, after it has issued the (single, all-or-nothing) ClickHouse {@code ALTER}: column
      * drops, renames (a rename of the TTL-referenced column also renames the stored TTL column,
      * mirroring ClickHouse rewriting the physical TTL expression), appends, metadata updates, and the
      * TTL merge-patch (a present {@code ttl} change sets or — with a null value — clears it).
@@ -361,12 +389,15 @@ public class CatalogSchemaWriter {
      * and the signal to go and read it cannot be committed separately.
      */
     @Transactional
-    public void applyPatch(String tableName, List<String> drops, List<RenameWrite> renames,
+    public void applyPatch(TableDefinitionEntity definition, List<String> drops, List<RenameWrite> renames,
             List<AppendWrite> adds, List<MetadataWrite> updates, Change<TtlInput> ttl) {
-        final TableDefinitionEntity definition = definitions.findById(tableName)
-                .orElseThrow(() -> new TableNotFoundException("table '" + tableName + "' not found"));
+        final String tableName = definition.getName();
         for (final String drop : drops) {
             removeColumn(tableName, drop);
+        }
+        if (!drops.isEmpty()) {
+            // Hibernate flushes inserts before deletes: an add reusing a dropped exposed name would hit the unique key.
+            columns.flush();
         }
         boolean versionRepointed = false;
         for (final RenameWrite rename : renames) {
@@ -544,7 +575,7 @@ public class CatalogSchemaWriter {
      */
     @Transactional
     public void setTagOrder(String tableName, List<String> tags) {
-        final TableDefinitionEntity definition = definitions.findById(tableName)
+        final TableDefinitionEntity definition = definitions.findForUpdate(tableName)
                 .orElseThrow(() -> new TableNotFoundException("table '" + tableName + "' not found"));
         definition.setTagOrder(tags == null || tags.isEmpty() ? null : tags);
         definitions.save(definition);
@@ -552,7 +583,7 @@ public class CatalogSchemaWriter {
 
     @Transactional
     public TableDefinitionEntity markStatus(String name, TableStatus status) {
-        final TableDefinitionEntity definition = definitions.findById(name)
+        final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
         definition.setStatus(status);
         return definitions.save(definition);

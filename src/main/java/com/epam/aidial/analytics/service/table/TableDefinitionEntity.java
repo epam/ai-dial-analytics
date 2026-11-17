@@ -12,6 +12,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.envers.Audited;
+import org.hibernate.envers.NotAudited;
 import org.hibernate.type.SqlTypes;
 
 import java.util.ArrayList;
@@ -172,6 +173,34 @@ public class TableDefinitionEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "row_policies", nullable = false)
     private String rowPolicies = "{}";
+
+    /**
+     * Per-role column policies as JSON text ({@code {"<role>": ["col", "enrichment.col"]}}); read and written
+     * through {@code ColumnPolicyCodec}, never parsed here. Text for the reason {@link #rowPolicies} is, and because
+     * a mapped {@code List<String>} through Hibernate's JSON type has re-typed unrelated columns.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "column_policies", nullable = false)
+    private String columnPolicies = "{}";
+
+    /**
+     * The table's access generation: bumped by every access write that changes an entry and by a schema change that
+     * rewrites a column policy, carried by {@code PUT}/{@code DELETE /v1/tables/{name}/access?role=}. Not audited, so a
+     * bump alone records no revision; writers serialise on the row lock ({@code TableDefinitionRepository#findForUpdate}).
+     */
+    @NotAudited
+    @Column(name = "access_generation", nullable = false)
+    private long accessGeneration;
+
+    /**
+     * For each role, the {@link #accessGeneration} at which its entry last changed, a removed entry included, as JSON
+     * text ({@code {"<role>": <generation>}}) read through {@code RoleGenerationCodec}: a write conflicts only when its
+     * own role changed after the generation it carries. Not audited, like the generation it records.
+     */
+    @NotAudited
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "access_role_generations", nullable = false)
+    private String accessRoleGenerations = "{}";
 
     /**
      * Guards every modifying {@code /v1/tables} operation. A {@code system} table is protected from

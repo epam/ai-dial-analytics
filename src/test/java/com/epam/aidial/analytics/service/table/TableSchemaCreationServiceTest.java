@@ -2,11 +2,10 @@ package com.epam.aidial.analytics.service.table;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
-import com.epam.aidial.analytics.exception.SensitiveGrantWidensException;
 import com.epam.aidial.analytics.exception.SystemTableException;
+import com.epam.aidial.analytics.exception.TableBusyException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableValidationException;
-import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,10 +52,6 @@ class TableSchemaCreationServiceTest {
     @Mock
     private ClickHouseTypeMapper typeMapper;
     @Mock
-    private PipelineRepository pipelines;
-    @Mock
-    private PipelineInputDependents pipelineReads;
-    @Mock
     private com.epam.aidial.analytics.service.security.SensitiveColumnAccess sensitiveAccess;
     @Mock
     private com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector inspector;
@@ -66,10 +61,7 @@ class TableSchemaCreationServiceTest {
     @BeforeEach
     void setUp() {
         service = new TableSchemaCreationService(definitions, columns, writer, catalogService,
-                ddlExecutor, ddlRenderer, typeMapper,
-                new com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant(
-                        definitions, columns, pipelines, pipelineReads, org.mockito.Mockito.mock(com.epam.aidial.analytics.web.security.ProviderRolePrivileges.class)),
-                sensitiveAccess, inspector);
+                ddlExecutor, ddlRenderer, typeMapper, sensitiveAccess, inspector);
         org.mockito.Mockito.lenient().when(sensitiveAccess.maySeeSensitive(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(true);
     }
@@ -144,27 +136,22 @@ class TableSchemaCreationServiceTest {
     }
 
     @Test
-    @DisplayName("defining a sensitive column is refused while the grants already launder it")
-    void defineSchemaWithSensitiveColumnHonoursTheSubsetRule() {
-        // The third way a table first comes to carry a sensitive column, and the one that left the whole
-        // invariant bypassable through the front door: grant sensitive on a PENDING enrichment while
-        // it has no columns at all (accepted, because the pair has nothing to protect), then define a
-        // schema that declares one. Nothing downstream would have refused it, and the next pipeline
-        // registration would fail over a grant edit made days earlier.
-        final TableDefinitionEntity enrichment = enrichment("usage_pii", TableStatus.PENDING, "dial_usage_log");
-        enrichment.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("analysts"));
-        given(definitions.findById("usage_pii")).willReturn(Optional.of(enrichment));
-        given(definitions.findById("dial_usage_log"))
-                .willReturn(Optional.of(source("dial_usage_log", TableStatus.ACTIVE, List.of("id"))));
+    @DisplayName("defining a sensitive column is not bounded by what the table derives from")
+    void defineSchemaWithSensitiveColumnIsNotBoundedByItsInputs() {
+        // A source cleared for a role that nothing it is filled from clears: its own clearance decides who reads it.
+        final TableDefinitionEntity rollup = source("usage_by_claims", TableStatus.PENDING, List.of("user_id"));
+        rollup.getAccess().setRolesFor(Privilege.TABLE_SENSITIVE, List.of("analysts"));
+        given(definitions.findById("usage_by_claims")).willReturn(Optional.of(rollup));
+        final ColumnMappingEntity claims = column("usage_by_claims", "claims", QueryFieldType.STRING);
+        claims.setSensitive(true);
+        given(columns.findByTableNameOrderByOrdinal("usage_by_claims"))
+                .willReturn(List.of(column("usage_by_claims", "user_id", QueryFieldType.STRING), claims));
 
-        assertThatThrownBy(() -> service.defineSchema("usage_pii", enrichmentInput(
-                List.of(col("user_id", QueryFieldType.STRING),
-                        sensitiveCol("claims", QueryFieldType.STRING)),
-                "user_id")))
-                .isInstanceOf(SensitiveGrantWidensException.class)
-                .hasMessageContaining("dial_usage_log");
-        verify(writer, never()).persistSchema(any(), any());
-        verify(ddlExecutor, never()).execute(any());
+        service.defineSchema("usage_by_claims", sourceInput(
+                List.of(col("user_id", QueryFieldType.STRING), sensitiveCol("claims", QueryFieldType.STRING)),
+                List.of("user_id")));
+
+        verify(writer).persistSchema(eq("usage_by_claims"), any());
     }
 
     @Test
@@ -308,6 +295,28 @@ class TableSchemaCreationServiceTest {
         verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
         verify(writer).markStatus("widget_metrics", TableStatus.FAILED);
         verify(writer, never()).markStatus("widget_metrics", TableStatus.ACTIVE);
+    }
+
+    @Test
+    void busyActiveFlipDropsTheCreatedTableSoTheRetrySucceeds() {
+        given(definitions.findById("widget_metrics"))
+                .willReturn(Optional.of(source("widget_metrics", TableStatus.PENDING, List.of("widget_id"))));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "widget_id", QueryFieldType.STRING)));
+        given(typeMapper.toDdlType(QueryFieldType.STRING, null, null, false)).willReturn("String");
+        given(ddlRenderer.renderCreate(any(), any())).willReturn("CREATE TABLE widget_metrics ...");
+        given(ddlRenderer.renderDrop("widget_metrics")).willReturn("DROP TABLE IF EXISTS `widget_metrics`");
+        given(writer.markStatus("widget_metrics", TableStatus.ACTIVE)).willThrow(new TableBusyException("busy")).willReturn(null);
+        given(writer.markStatus("widget_metrics", TableStatus.FAILED)).willThrow(new TableBusyException("busy"));
+        final DefineSchemaInput input = sourceInput(List.of(col("widget_id", QueryFieldType.STRING)), List.of("widget_id"));
+
+        assertThatThrownBy(() -> service.defineSchema("widget_metrics", input)).isInstanceOf(TableBusyException.class);
+        verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
+
+        service.defineSchema("widget_metrics", input);
+        verify(ddlExecutor, org.mockito.Mockito.times(2)).execute("CREATE TABLE widget_metrics ...");
+        verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_metrics`");
+        verify(writer, org.mockito.Mockito.times(2)).markStatus("widget_metrics", TableStatus.ACTIVE);
     }
 
     @Test

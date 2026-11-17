@@ -89,7 +89,9 @@ public class TableController {
                     + "duplicates, overwrites or reorders. `model`, `group_version` and `truncated` stay "
                     + "empty on an enrichment computed by a `sql` transform, which makes no model call and "
                     + "has no group. The retired `evaluator_version` is not injected: nothing has written "
-                    + "it since the evaluator was folded into its pipeline.")
+                    + "it since the evaluator was folded into its pipeline. Re-defining a PENDING or FAILED table "
+                    + "without a column a column policy lists prunes it from that list; one that would empty a list "
+                    + "is refused 409 `column_in_column_policy` before any CREATE. 409 `table_busy` when another change to the table holds it past the lock timeout (retry).")
     public TableDto defineSchema(
             @Parameter(description = "Table name") @PathVariable String name,
             @Valid @RequestBody DefineSchemaRequest request) {
@@ -117,8 +119,14 @@ public class TableController {
                     + "the end of the given revision — the columns, ordering key and grain it had then, "
                     + "excluding columns dropped by then. 404 if the table did not exist at that revision "
                     + "or the revision is unknown. Revision ids come from the activity feed. A caller holding "
-                    + "TABLE_GRANT (every caller in `none` mode) additionally receives the table's `access` "
-                    + "lists and `row_policies` as of that revision.")
+                    + "TABLE_GRANT (every caller in `none` mode) additionally receives the table's access "
+                    + "entries as `roles`, as of that revision. A column is hidden when that revision's column "
+                    + "policies or the current ones of the table's life containing it hide it from the caller: the live "
+                    + "table's while that life runs, otherwise those it had when it was deleted, so a table created again "
+                    + "under the same name never judges an earlier one's revisions. An enrichment's columns are judged "
+                    + "by its source's: the source's own life while the enrichment's runs, otherwise the source as it "
+                    + "stood just before the enrichment was deleted. Every column is hidden when no state of the table "
+                    + "or of its source is recorded.")
     public TableDto snapshot(
             @Parameter(description = "Table name", example = "dial_usage_log") @PathVariable String name,
             @Parameter(description = "Revision id, as carried by an activity") @PathVariable String revision) {
@@ -134,7 +142,8 @@ public class TableController {
     @PutMapping("/{name}")
     @RequiresPrivilege(value = Privilege.TABLE_MODIFY, table = "name")
     @Operation(summary = "Update a table definition",
-            description = "Updates catalog metadata only: the description and the per-table tag ordering.")
+            description = "Updates catalog metadata only: the description and the per-table tag ordering. 409 "
+                    + "`table_busy` when another change to the table holds it past the lock timeout (retry).")
     public TableDto update(
             @Parameter(description = "Table name") @PathVariable String name,
             @Valid @RequestBody UpdateTableRequest request) {
@@ -149,7 +158,10 @@ public class TableController {
             description = "Drops the ClickHouse table. Blocked (409) if a source still has enrichments, or "
                     + "if a pipeline reads this table as its input — that dependency breaks here rather "
                     + "than at the pipeline's next refresh. A pipeline whose *target* this is goes with the "
-                    + "table instead: it exists only to fill it.")
+                    + "table instead: it exists only to fill it. Deleting an enrichment prunes its "
+                    + "`<enrichment>.<column>` names from its source's column policies (bumping the source's access "
+                    + "generation), and is refused 409 `column_in_column_policy` when a list would empty. 409 "
+                    + "`table_busy` when another change to the table holds it past the lock timeout (retry).")
     public void delete(@Parameter(description = "Table name") @PathVariable String name) {
         catalogService.delete(name);
     }
@@ -177,7 +189,13 @@ public class TableController {
                     + "hand: a startup reconciler adds it to every enrichment an `enrich` pipeline targets. "
                     + "On an `llm` target, a patch that edits a column's `description` bumps the targeting "
                     + "pipeline's `generation`, because an output's prose defaults to that description and "
-                    + "it is therefore a live input to the composed prompt.")
+                    + "it is therefore a live input to the composed prompt. A column a column policy hides from "
+                    + "the caller is unknown to it (422), and while the stored TTL is on such a column any `ttl` "
+                    + "member is refused 403 `column_not_entitled`. A rename rewrites the column policies naming the "
+                    + "column and a drop prunes them (each bumping the access generation of the table whose lists "
+                    + "change, the source's for an enrichment column); a drop that would empty a list is refused 409 "
+                    + "`column_in_column_policy` before any ALTER, after the row-policy guard (409 `column_in_row_policy`)."
+                    + " 409 `table_busy` when another change to the table holds it past the lock timeout (retry).")
     public TableDto patchSchema(
             @Parameter(description = "Table name") @PathVariable String name,
             @Valid @RequestBody PatchSchemaRequest request) {

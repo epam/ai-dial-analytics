@@ -258,6 +258,10 @@ public class MaterializeService {
         Set<String> referenced = new LinkedHashSet<>(filter.columns());
         expressions.values().forEach(analysis -> referenced.addAll(analysis.columns()));
         referenced.add(grainKey);
+        // The signed (not encrypted) nextCursor carries the window-end version and identity readably, so they are read
+        // for the caller and judged too, mapped to their catalog columns' exposed names.
+        referenced.add(cursorColumns.version());
+        referenced.add(cursorColumns.identity());
         sensitiveGuard.enforceEntity(source, referenced, "materialize");
 
         // A windowed call is a backfill: it rewrites values for source rows a consumer may already have
@@ -511,9 +515,11 @@ public class MaterializeService {
      *               for the caller, which the preview does
      * @param bound  the bound a materialize of this declaration would clamp to; null when it joins no enrichment
      * @param newest the newest sampled position; null for an empty sample
+     * @param versionVisible whether the read source's version column is in the caller's model, so a note may print
+     *               versions as instants
      */
     public record Class1Preview(StructuredQuery portable, List<PreviewColumn> columns, List<Map<String, Object>> rows,
-            EnrichmentFreshness.Bound bound, SampledPosition newest) {}
+            EnrichmentFreshness.Bound bound, SampledPosition newest, boolean versionVisible) {}
 
     /**
      * The Class-1 dry run behind {@code POST /v1/pipelines/{name}/preview}: what this pipeline would
@@ -604,7 +610,8 @@ public class MaterializeService {
             rows.add(stripped);
         }
         return new Class1Preview(portableQuery(source, grainKey, expressions, filter.filter()),
-                previewColumns(declaration, grainKey, expressions, model.bindings()), rows, bound.orElse(null), newest);
+                previewColumns(declaration, grainKey, expressions, model.bindings()), rows, bound.orElse(null), newest,
+                model.exposesSourceColumn(cursorColumns.version()));
     }
 
     /**
