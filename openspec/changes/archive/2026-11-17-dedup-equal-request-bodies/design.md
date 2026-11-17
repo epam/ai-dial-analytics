@@ -48,17 +48,18 @@ written with a numeric offset.
 
 **Stored carriers are looked up deduplicated, in a statement of their own.** The chat lookup stays as it is: any
 row version carrying a path yields the same history. A carrier is different, since a replaced version that still
-shows the hash holds a body the table is about to lose. The carrier statement therefore reads `FINAL`,
-deduplicated inside the partition, and returns the hash, `event_id` and `request_time` of each current row
-version carrying one of the hashes; a hash normally has one carrier, since later equal bodies are copies.
-It still goes through the hash skip index: with `use_skip_indexes_if_final_exact_mode` on, the server widens the
-index's selection to every granule that shares a primary-key range with it, so the current version of an event is
-read even when only its replaced version matches the index. A probe on the supported server versions confirmed
-both halves: with the mode on, a re-ingested event's replaced version is not returned; with it off, it is. The
-mode is on by default; the statement sets it explicitly, with `use_skip_indexes_if_final`, so a profile cannot
-turn the guarantee off. Alternative rejected: confirming each found carrier by `event_id` in a second read, which
-the exact mode makes redundant. What remains is the window between the lookup and the insert, and replica lag;
-the spec names both.
+shows the hash holds a body the table is about to lose. The carrier statement therefore has two steps. The inner
+one finds the events with any version carrying one of the hashes, through the hash skip index and without
+`FINAL`. The outer one reads those events by `event_id`, the sorting key, with `FINAL`, deduplicated inside the
+partition, and returns the hash, `event_id` and `request_time` of each whose current version still carries one of
+the hashes; a hash normally has one carrier, since later equal bodies are copies. Skip indexes are turned off for
+the `FINAL` read (`use_skip_indexes_if_final = 0`), so the primary key does the pruning and the answer does not
+depend on how a server version or profile lets a skip index narrow a `FINAL` read. A probe on the oldest and the
+newest supported server versions confirmed it: a re-ingested event's replaced version is not returned, a current
+carrier is, and the outer read touches only the granules of the candidate events. Alternative rejected: one
+`FINAL` read through the skip index with `use_skip_indexes_if_final_exact_mode` set, which is correct where the
+setting exists but is refused as an unknown setting by the oldest supported server version. What remains is the
+window between the lookup and the insert, and replica lag; the spec names both.
 
 **A stored row whose event is in the flush never counts.** The encoder drops, from what the lookup returned, every
 carrier whose `event_id` belongs to any row of the batch, eligible or not. The insert replaces those rows, so what
@@ -129,7 +130,8 @@ current text, it replaces the description only while it is still that text, so a
   same exposure chat chains accept.
 - [One more read per flush that carries an eligible body] → bounded by the lookup's execution-time limit; a
   failure makes carriers.
-- [A server profile that turns the exact mode off] → the statement sets it itself.
+- [A server profile that changes how skip indexes narrow a `FINAL` read] → the statement turns them off for
+  that read.
 - [The read side's chain lookup reads `FINAL` through the same index without setting the mode] → it relies on the
   default and re-resolves a stale link; left as it is, outside this change.
 

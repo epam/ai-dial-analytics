@@ -52,21 +52,25 @@ public final class ClickHouseParentLookup implements ParentLookup {
     }
 
     /**
-     * The carrier lookup statement for {@code table}, with the parameters of {@link #statement}. It reads {@code FINAL},
-     * deduplicated inside the partition, so only a current row version is returned. The two skip-index settings are
-     * set rather than left to the server's defaults: with the exact mode on, the read widens the hash index's selection
-     * to every granule sharing a primary-key range with it, so the current version of an event is read even when only
-     * its replaced version matches the index. With it off, the replaced version would be returned as current.
+     * The carrier lookup statement for {@code table}, with the parameters of {@link #statement}. Only a current row
+     * version may count, and a replaced one can still show the hash, so the read has two steps in one statement: the
+     * inner one finds the events with any version carrying a hash, through the hash skip index and without
+     * {@code FINAL}; the outer one reads those events by {@code event_id}, the sorting key, with {@code FINAL},
+     * deduplicated inside the partition, and keeps the ones whose current version still carries a hash. Skip indexes
+     * are turned off for the {@code FINAL} read, so the answer does not depend on how a server version or profile
+     * lets a skip index narrow such a read; the primary key does the pruning.
      */
     public static String carrierStatement(String table) {
-        return "SELECT toString(request_hash) AS path, toString(event_id) AS event_id,"
-                + " toUnixTimestamp64Milli(request_time) AS time_ms"
-                + " FROM `" + table.replace("`", "``") + "` FINAL"
-                + " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
+        String name = "`" + table.replace("`", "``") + "`";
+        String window = " WHERE request_time >= {from:DateTime64(3, 'UTC')} AND request_time < {to:DateTime64(3, 'UTC')}"
                 + " AND toYYYYMMDD(request_time) IN (SELECT toUInt32(arrayJoin(splitByChar(',', {days:String}))))"
-                + " AND request_hash IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))"
+                + " AND request_hash IN (SELECT toUUID(arrayJoin(splitByChar(',', {paths:String}))))";
+        return "SELECT toString(request_hash) AS path, toString(event_id) AS id,"
+                + " toUnixTimestamp64Milli(request_time) AS time_ms"
+                + " FROM " + name + " FINAL" + window
+                + " AND event_id IN (SELECT event_id FROM " + name + window + ")"
                 + " SETTINGS max_execution_time = " + TIMEOUT_SECONDS + ", do_not_merge_across_partitions_select_final = 1,"
-                + " use_skip_indexes_if_final = 1, use_skip_indexes_if_final_exact_mode = 1";
+                + " use_skip_indexes_if_final = 0";
     }
 
     /**
@@ -105,7 +109,7 @@ public final class ClickHouseParentLookup implements ParentLookup {
     public List<Carrier> carriers(Collection<String> days, Collection<UUID> hashes) {
         List<Carrier> found = new ArrayList<>();
         query(carrierSql, days, hashes, row -> found.add(
-                new Carrier(UUID.fromString(row.getString("path")), row.getString("event_id"), row.getLong("time_ms"))));
+                new Carrier(UUID.fromString(row.getString("path")), row.getString("id"), row.getLong("time_ms"))));
         return found;
     }
 

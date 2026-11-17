@@ -401,7 +401,9 @@ class RequestBodyRebuildIntegrationTest extends AbstractClickHouseIntegrationTes
             assertThat(later.get("request_body")).isEqualTo(cut);
             assertThat(later.get("request_hash")).isEqualTo(hash);
             assertThat(queryText("EXPLAIN indexes = 1 " + inline(ClickHouseParentLookup.carrierStatement(PAYLOAD),
-                    RequestChainReader.parameters(day, "paths", List.of(hash))))).contains("Partition", "idx_request_hash");
+                    RequestChainReader.parameters(day, "paths", List.of(hash)))))
+                    .as("the FINAL read is narrowed by partition and by the candidate events' primary key")
+                    .contains("Partition", "PrimaryKey", "(event_id in");
         } finally {
             execute("SYSTEM START MERGES " + PAYLOAD);
         }

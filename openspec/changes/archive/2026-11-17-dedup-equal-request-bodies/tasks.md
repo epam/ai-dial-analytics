@@ -1,7 +1,7 @@
 ## 1. Body hash and lookup
 
 - [x] 1.1 Add the body hash to `PathHash` under its own seed (scope, day, text)
-- [x] 1.2 Extend `ParentLookup` with a carrier lookup taking the days and the body hashes and returning each carrier found as hash, `event_id` and `request_time` in epoch milliseconds, defaulting to "none found"; implement it in `ClickHouseParentLookup` as its own statement: `FINAL`, deduplicated inside the partition, `use_skip_indexes_if_final` and `use_skip_indexes_if_final_exact_mode` set to 1, chunked and time-bounded like the chat lookup; adapt the test `Table` lookup
+- [x] 1.2 Extend `ParentLookup` with a carrier lookup taking the days and the body hashes and returning each carrier found as hash, `event_id` and `request_time` in epoch milliseconds, defaulting to "none found"; implement it in `ClickHouseParentLookup` as its own statement: candidate events by hash without `FINAL`, then those events by `event_id` with `FINAL`, deduplicated inside the partition, with `use_skip_indexes_if_final` set to 0, chunked and time-bounded like the chat lookup; adapt the test `Table` lookup
 
 ## 2. Ingest
 
