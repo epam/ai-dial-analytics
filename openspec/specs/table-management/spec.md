@@ -3748,8 +3748,8 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 ### Requirement: Column policies follow a rename and refuse an emptying drop
 
-A column policy (see [table-access-control](../table-access-control/spec.md), "Per-role column policies") names
-columns, so a schema change SHALL keep every stored policy pointing at the columns it meant and SHALL never widen one.
+A schema change SHALL keep every stored column policy pointing at the columns it meant and SHALL never widen one. A
+column policy (see [table-access-control](../table-access-control/spec.md), "Per-role column policies") names columns.
 
 **Rename.** A `PATCH /v1/tables/{name}/schema` that renames a column SHALL rewrite every entry on the table whose
 `columns` lists it to the new name, in the same transaction and the same audit revision as the rename. Renaming a
@@ -3884,11 +3884,11 @@ added later under it.
 
 ### Requirement: Writes to one table definition wait a bounded time for each other
 
-Every request that writes a table's definition — an access `PUT` or `DELETE` (see
-[table-access-control](../table-access-control/spec.md), "Role-keyed access API"), a metadata update
-(`PUT /v1/tables/{name}`), a schema definition (`POST /v1/tables/{name}/schema`), a schema `PATCH` and a table
-`DELETE` — SHALL take turns with the other writes of the same definition, and of its source's where it rewrites the
-source's column policies, so none of them writes back state another committed meanwhile. A write that finds another
+Every request that writes a table's definition SHALL take turns with the other writes of the same definition, and of
+its source's where it rewrites the source's column policies, so none of them writes back state another committed
+meanwhile. These requests are an access `PUT` or `DELETE` (see [table-access-control](../table-access-control/spec.md),
+"Role-keyed access API"), a metadata update (`PUT /v1/tables/{name}`), a schema definition
+(`POST /v1/tables/{name}/schema`), a schema `PATCH` and a table `DELETE`. A write that finds another
 holding the definition SHALL wait for it at most the configured lock timeout (`tables.lock-timeout`, ten seconds by
 default). When the wait expires the request SHALL be refused with HTTP 409 and machine code `table_busy`, whose
 message says another change to the table is in progress; it SHALL change nothing, so it MAY be retried as sent, and

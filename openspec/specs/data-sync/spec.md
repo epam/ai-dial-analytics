@@ -4557,7 +4557,7 @@ The service SHALL persist the spending-limits check a producer reports for a req
 
 ### Requirement: Absent spending-limit fields read NULL
 
-All five spending-limit columns are `Nullable`. A record that carries no spending-limits object, which the producer
+All five spending-limit columns SHALL be `Nullable`. A record that carries no spending-limits object, which the producer
 omits on every row but a token caller's model call whose limits it checked (an API key caller, a row that is not
 a model's, a pass whose limits it does not check), SHALL store NULL in all five
 and SHALL be ingested normally. A record that reports some fields SHALL store those and NULL for the rest, and a
