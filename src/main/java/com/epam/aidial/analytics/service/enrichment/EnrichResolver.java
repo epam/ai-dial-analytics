@@ -1,7 +1,6 @@
 package com.epam.aidial.analytics.service.enrichment;
 
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
-import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.support.ResponseSchemaComposer;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
@@ -133,12 +132,8 @@ public class EnrichResolver {
      */
     private Map<String, Object> composeSchema(PipelineEntity pipeline,
             EnrichSpec.TransformSpec transform, List<ColumnMappingEntity> targetColumns) {
-        if (transform == null || transform.getType() != TransformType.LLM) {
-            return null;
-        }
         return schemaComposer.composeFor(transform,
-                targetColumns != null ? targetColumns
-                        : columns.findByTableNameOrderByOrdinal(pipeline.getTarget()),
+                () -> targetColumns != null ? targetColumns : columns.findByTableNameOrderByOrdinal(pipeline.getTarget()),
                 pipeline.getTarget());
     }
 

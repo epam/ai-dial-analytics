@@ -2,12 +2,16 @@ package com.epam.aidial.analytics.service.enrichment.support;
 
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
+import com.epam.aidial.analytics.service.enrichment.model.TransformType;
+import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -333,6 +337,45 @@ class ResponseSchemaComposerTest {
         assertThat(propertyOf(schema, "labels"))
                 .containsEntry("type", "object")
                 .containsEntry("additionalProperties", Map.of("type", "string"));
+    }
+
+    private static EnrichSpec.TransformSpec transform(TransformType type, TransformPreset preset, TransformOutput... outputs) {
+        final EnrichSpec.TransformSpec transform = new EnrichSpec.TransformSpec();
+        transform.setType(type);
+        transform.setPreset(preset);
+        transform.setOutputs(outputs.length == 0 ? null : List.of(outputs));
+        return transform;
+    }
+
+    /** A declaration that composes nothing never asks for the target's columns, so the read costs no catalog query. */
+    @Test
+    void composeForComposesNothingWithoutReadingTheTarget() {
+        final Supplier<List<ColumnMappingEntity>> untouched = () -> {
+            throw new AssertionError("target columns read for a declaration that composes nothing");
+        };
+        final EnrichSpec.TransformSpec stored = transform(TransformType.LLM, null, prose("payload", "…"));
+        stored.setResponseSchema(Map.of("type", "object"));
+
+        assertThat(composer.composeFor(null, untouched, "widget_insights")).isNull();
+        assertThat(composer.composeFor(transform(TransformType.SQL, null, prose("payload", "…")), untouched,
+                "widget_insights")).isNull();
+        assertThat(composer.composeFor(stored, untouched, "widget_insights")).isNull();
+        assertThat(composer.composeFor(transform(TransformType.LLM, null), untouched, "widget_insights")).isNull();
+    }
+
+    /** The preset picks the mapping: a route composes a document column, a model is refused it. */
+    @Test
+    void composeForAppliesTheRouteMappingByPreset() {
+        final Supplier<List<ColumnMappingEntity>> columns =
+                () -> List.of(documentColumn("intent_counts", QueryFieldType.OBJECT));
+
+        assertThat(propertyOf(composer.composeFor(transform(TransformType.LLM, TransformPreset.DIAL_APP_ROUTE,
+                prose("intent_counts", "…")), columns, "widget_insights"), "intent_counts"))
+                .containsEntry("type", "object");
+        assertThatThrownBy(() -> composer.composeFor(transform(TransformType.LLM, TransformPreset.CHAT_COMPLETION,
+                prose("intent_counts", "…")), columns, "widget_insights"))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("chat_completion");
     }
 
     @Test

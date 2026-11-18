@@ -699,7 +699,7 @@ public class EnrichSpecValidator {
      * naming the output and the column.
      */
     private void requireComposableSchema(EnrichSpec.TransformSpec transform, TableDefinitionEntity target) {
-        schemaComposer.composeFor(transform, columns.findByTableNameOrderByOrdinal(target.getName()), target.getName());
+        schemaComposer.composeFor(transform, () -> columns.findByTableNameOrderByOrdinal(target.getName()), target.getName());
     }
 
     /**

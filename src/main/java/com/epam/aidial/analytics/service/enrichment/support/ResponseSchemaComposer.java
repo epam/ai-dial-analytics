@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Composes an {@code llm} transform's JSON response schema from the <b>pipeline's</b> target enrichment
@@ -77,7 +78,8 @@ public class ResponseSchemaComposer {
      * transform (no response to constrain), a declaration storing its own {@code response_schema} (which wins while
      * present), or one declaring no {@code outputs}. The one statement of when composition applies, shared by the
      * arming gate, which lets a refusal out as a 422, and by the read paths, which decide for themselves what a
-     * refusal means there.
+     * refusal means there. {@code targetColumns} is asked only when composition applies, so a declaration that
+     * composes nothing costs its caller no catalog read.
      *
      * <p><b>This reads {@code outputs} only, and deliberately not through the output-shape accessor.</b> A folded
      * declaration carrying {@code output_vars} and no stored {@code response_schema} calls the model unconstrained,
@@ -86,13 +88,13 @@ public class ResponseSchemaComposer {
      * @throws PipelineValidationException as {@link #compose(List, List, String, boolean)}
      */
     public Map<String, Object> composeFor(
-            EnrichSpec.TransformSpec transform, List<ColumnMappingEntity> targetColumns, String targetName) {
+            EnrichSpec.TransformSpec transform, Supplier<List<ColumnMappingEntity>> targetColumns, String targetName) {
         if (transform == null || transform.getType() != TransformType.LLM
                 || transform.getResponseSchema() != null
                 || transform.getOutputs() == null || transform.getOutputs().isEmpty()) {
             return null;
         }
-        return compose(transform.getOutputs(), targetColumns, targetName,
+        return compose(transform.getOutputs(), targetColumns.get(), targetName,
                 transform.getPreset() == TransformPreset.DIAL_APP_ROUTE);
     }
 
