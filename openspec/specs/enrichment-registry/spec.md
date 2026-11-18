@@ -2009,6 +2009,16 @@ enrichment and its `transform.outputs`, at pipeline registration, patch and read
 on the pipeline because the pipeline is the only object there is: it names both the target and the
 transform, and binding the two is definitionally its job. The table SHALL stay ignorant of transforms.
 
+**A refusal of composition SHALL be raised by the static gate**, on every gated request of "Static
+governance gate on arming and execution", as HTTP 422 `pipeline_validation_failed` carrying the
+composer's message. A write that leaves the pipeline disabled stores the declaration without complaint,
+as it does for every other gate check. The read paths compose the same schema with the same rule, but
+cannot refuse: a target whose columns drifted under an armed declaration must not fail a listing for
+every other pipeline in it, so a read that cannot compose serves the entry with no `response_schema`
+and logs a warning for an armed pipeline. The gate is what keeps that state from being armed in the
+first place. Without it, a pipeline whose schema never composed would be armed and its model called
+unconstrained.
+
 Composition SHALL be driven by the `outputs` **keys**, with each key's structure looked up on the
 target column of the same name:
 
@@ -2025,8 +2035,30 @@ target column of the same name:
 The type mapping SHALL be: `string` → `{"type": "string"}`; `enum` → `{"type": "string", "enum":
 [...]}`; `integer` and `long` → `{"type": "integer"}`; `double` and `decimal` → `{"type": "number"}`;
 `boolean` → `{"type": "boolean"}`; `timestamp` → `{"type": "string"}` with **no `format`** (strict
-schema mode rejects one); `array` → `{"type": "array", "items": <element_type mapped>}`. A column of
-any other type — `map`, `json` — SHALL be rejected with HTTP 422 naming the column and its type.
+schema mode rejects one); `array` → `{"type": "array", "items": <element_type mapped>}`.
+
+For a `dial_app_route` transform the mapping SHALL also cover the two document types: `object` →
+`{"type": "object"}`, open, with no `properties` and no `additionalProperties`, so any JSON object
+validates; and `map` → `{"type": "object", "additionalProperties": {"type": "string"}}`, which is exactly
+what a `Map(String, String)` column can store. A route is not held to the schema by `response_format`. The
+runner validates the object it assembled from the outputs' sources, and an open object is valid JSON Schema.
+The application's response decides the document's keys, so a key the application leaves out is simply
+absent from the stored document rather than written as a zero or an empty string.
+
+Neither column type can be nullable (ClickHouse has no `Nullable(JSON)` or `Nullable(Map)`), so under the
+route nullability rule below an output bound to either is always **required** and never accepts `null`. An
+empty document is written as `{}`. A value that evaluates to nothing is left out of the assembled object and
+fails validation, so the unit is dead-lettered at `validate` instead of being written as a row the column
+cannot store. A `source` that may filter every member away therefore has to yield `{}` itself, for example
+`$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone evaluates to nothing when no
+member passes.
+
+For a `chat_completion` transform, an output bound to an `object` or `map` column SHALL be rejected with
+HTTP 422 `pipeline_validation_failed`. The message SHALL name the output, the column, its type and the
+`chat_completion` preset, and SHALL say that a route transform or a scalar column can carry it. Strict
+mode requires every object in the schema to declare its properties and close `additionalProperties`, and
+neither column type declares an inner shape to compose them from. A column of any other type with no
+mapping above SHALL be rejected the same way under either preset.
 
 The `description` default SHALL be applied **at composition time and SHALL NOT be written into the
 stored declaration**, so that the column remains the single authority for a fact the author did not
@@ -2145,10 +2177,56 @@ schema produced them.
 - **THEN** the composed schema carries those values as the property's `enum`, and the domain is
   enforced at the model boundary rather than at insert
 
-#### Scenario: A column type with no strict-mode representation is rejected
+#### Scenario: A chat completion output bound to a document column is rejected
 
-- **WHEN** an output resolves to a target column of type `map` or `json`
-- **THEN** the pipeline registration is rejected with HTTP 422 naming the column and its type
+- **WHEN** a `chat_completion` transform declares an output resolving to a target column of type
+  `object` or `map`, and the pipeline is registered with `enabled: true`
+- **THEN** the request is rejected with HTTP 422 `pipeline_validation_failed` whose message names the
+  output, the column, its type and the `chat_completion` preset
+
+#### Scenario: A schema that cannot compose is refused when armed, not when drafted
+
+- **GIVEN** an `llm` declaration whose schema cannot be composed against its target
+- **WHEN** it is written with `enabled: false`, and then patched to `enabled: true`
+- **THEN** the first write stores the draft, and the second is rejected with HTTP 422
+  `pipeline_validation_failed` carrying the composer's message, leaving the pipeline disabled
+
+#### Scenario: A route output bound to an object column composes an open object
+
+- **GIVEN** a `dial_app_route` transform whose output `intent_counts` binds an `object` column of the same
+  name
+- **WHEN** the pipeline is registered and read with `view=compiled`
+- **THEN** registration succeeds, the composed property is `{"type": "object"}` with no `properties` member,
+  and `intent_counts` is listed in `required`
+
+#### Scenario: A route output bound to a map column composes a string-valued object
+
+- **GIVEN** a `dial_app_route` transform whose output `labels` binds a `map` column of the same name
+- **WHEN** its schema is composed
+- **THEN** the property is `{"type": "object", "additionalProperties": {"type": "string"}}` and `labels`
+  is listed in `required`
+
+#### Scenario: A route writes a sparse object as the application returned it
+
+- **GIVEN** an armed `dial_app_route` pipeline whose output `intent_counts` binds an `object` column, with
+  `source` `$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`
+- **WHEN** the route answers `{"intent_counts": {"fix": 2, "plan": 0, "create": 1}}` and the row is written
+- **THEN** the stored document holds the members `fix` and `create` only, and reading
+  `json_extract_int(intent_counts, 'plan')` yields `0`, the extracting type's default for an absent path
+
+#### Scenario: An all-zero object is written as an empty document
+
+- **GIVEN** the same pipeline
+- **WHEN** the route answers `{"intent_counts": {"fix": 0, "plan": 0}}`
+- **THEN** the row is written with `intent_counts` stored as `{}`
+
+#### Scenario: An object output that evaluates to nothing is dead-lettered
+
+- **GIVEN** a `dial_app_route` output `intent_counts` bound to an `object` column, with `source`
+  `$sift(intent_counts, function($v){ $v != 0 })`
+- **WHEN** the route answers with every member of `intent_counts` equal to `0`
+- **THEN** the assembled object lacks the required `intent_counts`, and the unit is dead-lettered at stage
+  `validate` with the raw route body, and no row is written
 
 #### Scenario: A timestamp property carries no format
 

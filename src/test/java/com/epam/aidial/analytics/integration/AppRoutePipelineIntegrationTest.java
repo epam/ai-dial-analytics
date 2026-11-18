@@ -25,6 +25,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 
+import static com.epam.aidial.analytics.integration.RunnerCalls.runnerPost;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
@@ -146,6 +147,68 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                     .satisfies(entry -> assertThat(entry).doesNotContainKey("source"));
             assertThat(outputs).filteredOn(entry -> "intent_counts__check".equals(entry.get("name"))).singleElement()
                     .satisfies(entry -> assertThat(entry).containsEntry("source", "intent_counts.check"));
+        } finally {
+            mockMvc.perform(delete("/v1/pipelines/" + PIPELINE));
+            mockMvc.perform(delete("/v1/tables/" + target));
+        }
+    }
+
+    /**
+     * An {@code object} column binds a route output as an open, required object, and the runner's write-back
+     * stores the sparse document it assembled; the same binding is refused for a model, naming the preset.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void objectColumnBindsRouteOutputAndStoresTheSparseDocument() throws Exception {
+        final String target = "ar_counts";
+        IntegrationTables.enrichment(mockMvc, target, SOURCE, "widget_id",
+                "[{\"source_name\":\"intent_counts\",\"name\":\"intent_counts\",\"type\":\"object\"}]");
+        try {
+            final String retarget = "\"target\":\"" + target + "\"";
+            final String chat = body(Transforms.llm().output("intent_counts", "Turns per intent."), true)
+                    .replace("\"target\":\"" + ENRICHMENT + "\"", retarget);
+            mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(chat))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                    .andExpect(jsonPath("$.message").value(containsString("intent_counts")))
+                    .andExpect(jsonPath("$.message").value(containsString("chat_completion")));
+
+            // The refusal belongs to arming: the same declaration is stored as a draft, and enabling it is refused.
+            mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(chat.replace("\"enabled\":true",
+                            "\"enabled\":false")))
+                    .andExpect(status().isCreated());
+            mockMvc.perform(patch("/v1/pipelines/" + PIPELINE).contentType(JSON).content("{\"enabled\":true}"))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                    .andExpect(jsonPath("$.message").value(containsString("chat_completion")));
+            mockMvc.perform(get("/v1/pipelines/" + PIPELINE)).andExpect(jsonPath("$.enabled").value(false));
+            mockMvc.perform(delete("/v1/pipelines/" + PIPELINE)).andExpect(status().is2xxSuccessful());
+
+            allowInsights();
+            final Transforms.Builder transform = Transforms.llm().model("insights-app").preset("dial_app_route")
+                    .route("insights").outputObject("intent_counts",
+                            "{\"source\":\"$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])\"}");
+            mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(body(transform, true)
+                            .replace("\"target\":\"" + ENRICHMENT + "\"", retarget)))
+                    .andExpect(status().isCreated());
+            final String compiled = mockMvc.perform(get("/v1/pipelines/" + PIPELINE + "?view=compiled"))
+                    .andReturn().getResponse().getContentAsString();
+            assertThat((List<String>) JsonPath.read(compiled, "$.response_schema.required"))
+                    .containsExactly("intent_counts");
+            assertThat((Map<String, Object>) JsonPath.read(compiled, "$.response_schema.properties.intent_counts"))
+                    .containsEntry("type", "object")
+                    .doesNotContainKeys("properties", "additionalProperties");
+
+            mockMvc.perform(runnerPost("/v1/pipelines/" + PIPELINE + "/rows").contentType(JSON)
+                            .content("{\"rows\":[{\"widget_id\":\"w-1\",\"intent_counts\":{\"fix\":2,\"create\":1}},"
+                                    + "{\"widget_id\":\"w-2\",\"intent_counts\":{}}]}"))
+                    .andExpect(status().isOk());
+            assertThat(queryScalar("SELECT toString(JSONExtractInt(toJSONString(intent_counts), 'fix')) AS c FROM "
+                    + target + " FINAL WHERE widget_id = 'w-1'", "c")).isEqualTo("2");
+            assertThat(queryScalar("SELECT toString(JSONExtractInt(toJSONString(intent_counts), 'plan')) AS c FROM "
+                    + target + " FINAL WHERE widget_id = 'w-1'", "c")).isEqualTo("0");
+            assertThat(queryScalar("SELECT toJSONString(intent_counts) AS c FROM " + target
+                    + " FINAL WHERE widget_id = 'w-2'", "c")).isEqualTo("{}");
         } finally {
             mockMvc.perform(delete("/v1/pipelines/" + PIPELINE));
             mockMvc.perform(delete("/v1/tables/" + target));

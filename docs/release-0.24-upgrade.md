@@ -27,6 +27,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   rows repeating it have an empty `request_body` (§13).
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
 - **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
+- **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
+  route outputs may bind `object` and `map` columns (§16).
 
 ---
 
@@ -376,6 +378,27 @@ pipelines use.
   Upgrade the target before promoting from an upgraded environment.
 - **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
 
+## 16. Route outputs may bind `object` and `map` columns; arming composes the schema
+
+A `dial_app_route` output may now bind an `object` column, stored as the JSON document the route's `source`
+yields, or a `map` column of strings. Neither column can be nullable, so such an output is always required. A
+`source` that filters members, for example dropping zero counts, must still yield `{}`:
+`$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone yields nothing when every member is
+zero, and the unit is then dead-lettered. A `chat_completion` output bound to either type is refused (see
+[`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
+
+Arming now composes each `llm` pipeline's response schema, so a declaration whose schema cannot be composed is
+refused with `422 pipeline_validation_failed` when it is enabled or its declaration is patched while enabled. A
+draft is still stored. Before, such a pipeline armed and was served with no `response_schema`.
+
+- **Before upgrading, find armed pipelines this would refuse.** In `GET /v1/pipelines?kind=enrich&view=compiled`,
+  an enabled `llm` entry with no `response_schema` either stores none and declares no `outputs` (unaffected), or
+  failed to compose: `POST /v1/pipelines/{name}/preview` names the output and column. Fix the output or the
+  column before its next patch.
+- **Rollback.** An earlier build cannot compose an `object` or `map` route output, so the pipeline is served with
+  no `response_schema`. Re-declare such outputs onto scalar columns, or disable the pipeline, before rolling
+  back.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -393,4 +416,5 @@ pipelines use.
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
+| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Preview armed `llm` pipelines served without a `response_schema` and fix them before their next patch; before a rollback, move object/map route outputs to scalar columns (§16) |
 | Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |

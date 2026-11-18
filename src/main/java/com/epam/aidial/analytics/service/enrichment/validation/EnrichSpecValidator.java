@@ -22,6 +22,7 @@ import com.epam.aidial.analytics.service.enrichment.support.CursorColumns;
 import com.epam.aidial.analytics.service.enrichment.support.EnrichmentTypeMapping;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFieldResolver;
 import com.epam.aidial.analytics.service.enrichment.support.EntityFields;
+import com.epam.aidial.analytics.service.enrichment.support.ResponseSchemaComposer;
 import com.epam.aidial.analytics.service.enrichment.support.ScanSourceMetadata;
 import com.epam.aidial.analytics.service.enrichment.support.SensitiveProjectionGuard;
 import com.epam.aidial.analytics.service.enrichment.support.TargetOutputColumns;
@@ -135,6 +136,7 @@ public class EnrichSpecValidator {
     private final PipelineSpecCodec specCodec;
     private final RelayoutStateStore relayouts;
     private final AppRoutesSettingService appRoutes;
+    private final ResponseSchemaComposer schemaComposer;
 
     /**
      * Runs the gate for a populated (not yet persisted) ENRICH declaration. Throws on the first failure.
@@ -174,6 +176,7 @@ public class EnrichSpecValidator {
             checkBoundBindings(declaration, entity, source, referenced, clearance);
             parseJsonata(declaration, transform);
             validateTemplatePlaceholders(declaration, transform);
+            requireComposableSchema(transform, target);
         }
         requireSoundEnrichmentReads(declaration, source, entity, referenced);
         // The grain key is read by every derivation and stored as the target's key, so a sensitive one is
@@ -687,6 +690,16 @@ public class EnrichSpecValidator {
                     + ") is not listed in the 'app-routes' instance setting; an administrator allows it with"
                     + " PUT /v1/settings/app-routes before the pipeline can be enabled");
         }
+    }
+
+    /**
+     * The response schema composes for the target as it stands. The read paths compose the same schema and, on a
+     * failure, serve the pipeline without one rather than fail a listing, so a refusal left to them would arm a
+     * pipeline whose model is called unconstrained. Asked here, the composer's refusal reaches the author as a 422
+     * naming the output and the column.
+     */
+    private void requireComposableSchema(EnrichSpec.TransformSpec transform, TableDefinitionEntity target) {
+        schemaComposer.composeFor(transform, columns.findByTableNameOrderByOrdinal(target.getName()), target.getName());
     }
 
     /**

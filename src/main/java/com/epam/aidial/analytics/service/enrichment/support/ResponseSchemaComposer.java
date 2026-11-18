@@ -2,6 +2,9 @@ package com.epam.aidial.analytics.service.enrichment.support;
 
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
+import com.epam.aidial.analytics.service.enrichment.model.TransformType;
+import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.apache.commons.lang3.StringUtils;
@@ -70,6 +73,30 @@ public class ResponseSchemaComposer {
     private static final String NULL = "null";
 
     /**
+     * The composed schema for {@code transform}, or null when it composes none: no transform, a {@code sql}
+     * transform (no response to constrain), a declaration storing its own {@code response_schema} (which wins while
+     * present), or one declaring no {@code outputs}. The one statement of when composition applies, shared by the
+     * arming gate, which lets a refusal out as a 422, and by the read paths, which decide for themselves what a
+     * refusal means there.
+     *
+     * <p><b>This reads {@code outputs} only, and deliberately not through the output-shape accessor.</b> A folded
+     * declaration carrying {@code output_vars} and no stored {@code response_schema} calls the model unconstrained,
+     * and composing a schema for it would send a {@code response_format} where none was sent before.
+     *
+     * @throws PipelineValidationException as {@link #compose(List, List, String, boolean)}
+     */
+    public Map<String, Object> composeFor(
+            EnrichSpec.TransformSpec transform, List<ColumnMappingEntity> targetColumns, String targetName) {
+        if (transform == null || transform.getType() != TransformType.LLM
+                || transform.getResponseSchema() != null
+                || transform.getOutputs() == null || transform.getOutputs().isEmpty()) {
+            return null;
+        }
+        return compose(transform.getOutputs(), targetColumns, targetName,
+                transform.getPreset() == TransformPreset.DIAL_APP_ROUTE);
+    }
+
+    /**
      * The composed schema for one pipeline's (target, transform) pair, driven by the {@code outputs}
      * <b>keys</b> with each key's structure looked up on the target column of the same name.
      *
@@ -90,24 +117,30 @@ public class ResponseSchemaComposer {
     }
 
     /**
-     * As {@link #compose(List, List, String)}, and with {@code nullableFromColumn} true for a {@code dial_app_route}
-     * transform, whose schema follows each column's nullability: a nullable column's property also accepts
-     * {@code null} and is not required, so a field the route omits is written as NULL rather than refusing the row.
+     * As {@link #compose(List, List, String)}, and with {@code route} true for a {@code dial_app_route} transform.
+     * A route is not held to the schema by {@code response_format} at all; the runner only validates the object it
+     * assembled from the outputs' sources. That relaxes two strict-mode rules, and only those two:
      *
-     * <p>A model's schema cannot do that. Strict mode requires every property, so there an output the model may
-     * leave empty is spelled as a sentinel plus a {@code jsonata} mapping it to NULL. A route is not held to the
-     * schema by {@code response_format} at all; the runner only validates what it assembled, so the column, which
-     * says whether NULL is storable, is the right authority for whether the field may be absent.
+     * <ul>
+     *   <li><b>Nullability follows the column.</b> A nullable column's property also accepts {@code null} and is not
+     *       required, so a field the route omits is written as NULL rather than refusing the row. A model's schema
+     *       cannot do that: strict mode requires every property, so there an output the model may leave empty is
+     *       spelled as a sentinel plus a {@code jsonata} mapping it to NULL.</li>
+     *   <li><b>A document column composes.</b> {@code object} becomes an open {@code {"type": "object"}} and
+     *       {@code map} an object of strings. Strict mode needs every object closed over declared properties, and
+     *       neither column type declares an inner shape, so a model cannot be asked for one; a route can return
+     *       one. Neither column can be nullable, so such an output is always required.</li>
+     * </ul>
      */
     public Map<String, Object> compose(List<TransformOutput> outputs, List<ColumnMappingEntity> targetColumns,
-                                       String targetName, boolean nullableFromColumn) {
+                                       String targetName, boolean route) {
         Map<String, Object> properties = new LinkedHashMap<>();
         List<String> required = new ArrayList<>(outputs.size());
         for (TransformOutput output : outputs) {
             ColumnMappingEntity column =
                     TargetOutputColumns.requireExposed(output.getName(), targetColumns, targetName);
-            Map<String, Object> property = property(output, column, targetName);
-            if (nullableFromColumn && column.isNullable()) {
+            Map<String, Object> property = property(output, column, targetName, route);
+            if (route && column.isNullable()) {
                 allowNull(property);
             } else {
                 required.add(output.getName());
@@ -121,7 +154,7 @@ public class ResponseSchemaComposer {
         // would have been the wrong source there anyway — an enrichment column is nullable because a row may not
         // be labelled yet, while a schema field is required because the model must answer. A field that may
         // legitimately be absent is spelled as a sentinel value plus a jsonata mapping it to NULL. A route
-        // transform (nullableFromColumn) is the exception described on this method.
+        // transform is the exception described on this method.
         schema.put("required", required);
         schema.put("properties", properties);
         schema.put("additionalProperties", false);
@@ -153,8 +186,8 @@ public class ResponseSchemaComposer {
      * it asks no model anything, and its string is an expression rather than prose.
      */
     private static Map<String, Object> property(
-            TransformOutput output, ColumnMappingEntity column, String targetName) {
-        Map<String, Object> property = typeOf(output, column, targetName);
+            TransformOutput output, ColumnMappingEntity column, String targetName, boolean route) {
+        Map<String, Object> property = typeOf(output, column, targetName, route);
         final String description = StringUtils.isNotBlank(output.getProse())
                 ? output.getProse()
                 : column.getDescription();
@@ -170,9 +203,13 @@ public class ResponseSchemaComposer {
      *
      * <p>{@code timestamp} carries <b>no {@code format}</b>: strict mode rejects the keyword, so a
      * timestamp property is a plain string and the value is parsed on the write side, as it already is.
+     *
+     * <p>{@code object} and {@code map} compose only for a route ({@link #compose(List, List, String, boolean)}):
+     * {@code object} as an open object with no {@code properties}, since the column declares none, and {@code map}
+     * as an object whose values are strings, which is all a {@code Map(String, String)} can store.
      */
     private static Map<String, Object> typeOf(
-            TransformOutput output, ColumnMappingEntity column, String targetName) {
+            TransformOutput output, ColumnMappingEntity column, String targetName, boolean route) {
         Map<String, Object> property = new LinkedHashMap<>();
         QueryFieldType type = column.getType();
         switch (type) {
@@ -189,10 +226,22 @@ public class ResponseSchemaComposer {
                 property.put(TYPE, ARRAY);
                 property.put("items", items(column, targetName));
             }
+            case OBJECT, MAP -> {
+                if (!route) {
+                    throw new PipelineValidationException("transform output '" + output.getName()
+                            + "' resolves to column '" + column.getName() + "' on '" + targetName + "', whose type "
+                            + type.code() + " cannot be produced by the chat_completion preset: strict mode needs every"
+                            + " object to declare its properties, and the column declares none. Bind it from a"
+                            + " dial_app_route transform, or write the members to scalar columns");
+                }
+                property.put(TYPE, OBJECT);
+                if (type == QueryFieldType.MAP) {
+                    property.put("additionalProperties", Map.of(TYPE, STRING));
+                }
+            }
             default -> throw new PipelineValidationException("transform output '" + output.getName()
                     + "' resolves to column '" + column.getName() + "' on '" + targetName + "', whose type "
-                    + type.code() + " has no JSON Schema representation under strict mode; a model cannot be"
-                    + " asked to produce it");
+                    + type.code() + " has no JSON Schema representation");
         }
         applyDeclaredDomain(output, column, property, targetName);
         return property;

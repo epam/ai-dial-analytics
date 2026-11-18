@@ -50,6 +50,13 @@ class ResponseSchemaComposerTest {
         return column;
     }
 
+    /** An object or map column, which the catalog always resolves non-nullable. */
+    private static ColumnMappingEntity documentColumn(String name, QueryFieldType type) {
+        final ColumnMappingEntity column = column(name, type);
+        column.setNullable(false);
+        return column;
+    }
+
     private static TransformOutput prose(String name, String text) {
         final TransformOutput output = new TransformOutput();
         output.setName(name);
@@ -215,15 +222,17 @@ class ResponseSchemaComposerTest {
     }
 
     @Test
-    void columnTypeWithNoStrictModeRepresentationIsRefusedNamingIt() {
-        for (final QueryFieldType unrepresentable : List.of(QueryFieldType.MAP, QueryFieldType.OBJECT)) {
+    void documentColumnIsRefusedForModelNamingItAndThePreset() {
+        for (final QueryFieldType document : List.of(QueryFieldType.MAP, QueryFieldType.OBJECT)) {
             assertThatThrownBy(() -> composer.compose(
                     List.of(prose("payload", "…")),
-                    List.of(column("payload", unrepresentable)),
+                    List.of(documentColumn("payload", document)),
                     "widget_insights"))
                     .isInstanceOf(PipelineValidationException.class)
                     .hasMessageContaining("payload")
-                    .hasMessageContaining(unrepresentable.code());
+                    .hasMessageContaining("whose type " + document.code())
+                    .hasMessageContaining("chat_completion")
+                    .hasMessageContaining("dial_app_route");
         }
     }
 
@@ -295,6 +304,35 @@ class ResponseSchemaComposerTest {
         assertThat(propertyOf(schema, "cost")).containsEntry("type", List.of("number", "null"));
         assertThat((List<Object>) propertyOf(schema, "sentiment").get("enum"))
                 .containsExactly("negative", "positive", null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeObjectColumnComposesOpenRequiredObject() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("intent_counts", "Turns per intent; zero counts omitted.")),
+                List.of(documentColumn("intent_counts", QueryFieldType.OBJECT)),
+                "widget_insights", true);
+
+        assertThat((List<String>) schema.get("required")).containsExactly("intent_counts");
+        assertThat(propertyOf(schema, "intent_counts"))
+                .containsEntry("type", "object")
+                .containsEntry("description", "Turns per intent; zero counts omitted.")
+                .doesNotContainKeys("properties", "additionalProperties");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeMapColumnComposesRequiredObjectOfStrings() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("labels", "…")),
+                List.of(documentColumn("labels", QueryFieldType.MAP)),
+                "widget_insights", true);
+
+        assertThat((List<String>) schema.get("required")).containsExactly("labels");
+        assertThat(propertyOf(schema, "labels"))
+                .containsEntry("type", "object")
+                .containsEntry("additionalProperties", Map.of("type", "string"));
     }
 
     @Test
