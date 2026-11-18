@@ -42,6 +42,11 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     private static final String ENRICHMENT = "grant_rev_enrichment";
     /** A provider role holding {@code TABLE_GET} globally, so it reaches a deleted table's revisions. */
     private static final String DRAFTER = "drafter";
+    private static final String USAGE = "dial_usage_log";
+    // Roles no other class names: every test class shares the catalog, and several write dial_usage_log's access.
+    private static final String SYS_EARLIER = "sysrev-earlier";
+    private static final String SYS_LATER = "sysrev-later";
+    private static final String SYS_CONFINED = "sysrev-confined";
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -440,6 +445,80 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         } finally {
             drop(table);
         }
+    }
+
+    // --- a system table's revisions: its creation is not in the trail, its columns are not tracked ---
+
+    @Test
+    void systemTableAccessChangesAreReadableAtTheirRevisions() throws Exception {
+        try {
+            putEntry(USAGE, SYS_EARLIER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+            final int earlier = tableUpdates(USAGE).getFirst();
+            putEntry(USAGE, SYS_LATER, "\"privileges\":[\"read\"],\"rows\":" + projectIn("P1").replace("\"project\"", "\"project_id\"")).andExpect(status().isOk());
+            final int later = tableUpdates(USAGE).getFirst();
+
+            snapshot(USAGE, earlier, fullAdmin())
+                    .andExpect(jsonPath("$.system").value(true))
+                    .andExpect(jsonPath("$.roles['" + SYS_EARLIER + "'].privileges[0]").value("read"))
+                    .andExpect(jsonPath("$.roles['" + SYS_LATER + "']").doesNotExist());
+            snapshot(USAGE, later, fullAdmin())
+                    .andExpect(jsonPath("$.system").value(true))
+                    .andExpect(jsonPath("$.roles['" + SYS_LATER + "'].privileges[0]").value("read"))
+                    .andExpect(jsonPath("$.roles['" + SYS_LATER + "'].rows.filter.args[0].name").value("project_id"))
+                    .andExpect(jsonPath("$.columns").doesNotExist())
+                    .andExpect(jsonPath("$.ordering_key").isNotEmpty());
+            snapshot(USAGE, later, viewer())
+                    .andExpect(jsonPath("$.roles").doesNotExist())
+                    .andExpect(jsonPath("$.columns").doesNotExist());
+        } finally {
+            removeEntry(USAGE, SYS_LATER);
+            removeEntry(USAGE, SYS_EARLIER);
+        }
+    }
+
+    @Test
+    void systemTableSnapshotJudgesColumnsRestrictedWithoutColumns() throws Exception {
+        try {
+            putEntry(USAGE, SYS_CONFINED, "\"privileges\":[\"read\"],\"columns\":[\"event_id\"]").andExpect(status().isOk());
+            final int revision = tableUpdates(USAGE).getFirst();
+
+            snapshot(USAGE, revision, caller(SYS_CONFINED))
+                    .andExpect(jsonPath("$.columns").doesNotExist())
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+            snapshot(USAGE, revision, fullAdmin()).andExpect(jsonPath("$.permissions.columns_restricted").value(false));
+        } finally {
+            removeEntry(USAGE, SYS_CONFINED);
+        }
+    }
+
+    @Test
+    void systemTableRevisionBeforeItsFirstRecordedStateIsNotFound() throws Exception {
+        final String table = "sysrev_seeded";
+        // Seeded as a migration seeds a system table: a live row and no audit row, so its first recorded state is known.
+        jdbc.update("INSERT INTO table_definition (name, type, status, write_mode, system, ordering_key) "
+                + "VALUES (?, 'SOURCE', 'ACTIVE', 'APPEND', true, '{k}')", table);
+        try {
+            putEntry(SOURCE, SYS_EARLIER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+            final int before = tableUpdates(SOURCE).getFirst();
+            putEntry(table, SYS_EARLIER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+            final int first = tableUpdates(table).getFirst();
+
+            mockMvc.perform(get(BASE + "/" + table + "/revision/" + before).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error").value("revision_not_found"));
+            snapshot(table, first, fullAdmin())
+                    .andExpect(jsonPath("$.roles['" + SYS_EARLIER + "'].privileges[0]").value("read"))
+                    .andExpect(jsonPath("$.columns").doesNotExist());
+        } finally {
+            jdbc.update("DELETE FROM audit_activity WHERE resource_id = ?", table);
+            jdbc.update("DELETE FROM table_definition_aud WHERE name = ?", table);
+            jdbc.update("DELETE FROM table_definition WHERE name = ?", table);
+        }
+    }
+
+    /** Best effort: the entry is absent when the test failed before writing it. */
+    private void removeEntry(String table, String role) throws Exception {
+        mockMvc.perform(delete(BASE + "/" + table + "/access?role=" + role).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
     }
 
     private void createEnrichment(String enrichment, String source) throws Exception {

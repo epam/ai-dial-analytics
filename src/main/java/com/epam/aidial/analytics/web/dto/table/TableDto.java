@@ -93,7 +93,7 @@ public record TableDto(
                 + "the columns list is returned sorted by this ordering.")
         @JsonProperty("tag_order") List<String> tagOrder,
 
-        @Schema(description = "Exposed columns (single-get only)")
+        @Schema(description = "Exposed columns (single-get only; absent on a system table's revision snapshot, whose columns are not tracked)")
         List<ColumnDto> columns,
 
         @Schema(description = "Number of exposed columns (list only; single-get carries `columns` instead)",

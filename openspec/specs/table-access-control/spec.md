@@ -1810,7 +1810,9 @@ as recorded at the deletion that ended it. Once the enrichment's life has ended,
 they stood just before that deletion, so a later enrichment of the same name, granted columns on the source, does not
 judge an earlier life's revisions. When no recorded state of the table or of its source can be found, every column of
 the snapshot SHALL be hidden. A snapshot's `permissions.columns_restricted` SHALL be
-judged over the revision's own columns.
+judged over the revision's own columns, except on a system table's snapshot, which carries none and reports it `true`
+exactly when a column policy, the revision's or the current one, confines the caller (see
+[audit-trail](../audit-trail/spec.md), "Historical table snapshots").
 
 #### Scenario: Every query surface omits a hidden column
 

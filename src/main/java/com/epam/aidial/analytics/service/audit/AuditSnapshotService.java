@@ -37,17 +37,23 @@ public class AuditSnapshotService {
      * <p>A revision that does not exist and a revision at which this table did not exist (before its
      * creation, or at/after its deletion) are the same answer to the caller — no point-in-time state —
      * so both raise {@link RevisionNotFoundException}.
+     *
+     * <p>A {@code system} table, as the revision records it, is exempt from the creation guard: a migration creates it,
+     * and the API never changes its columns, so the trail holds only its definition row. Its view carries {@code null}
+     * columns, meaning not tracked, rather than a list the trail cannot vouch for.
      */
     @Transactional(readOnly = true)
     public TableSnapshot snapshot(String name, int revision) {
         final AuditReader reader = AuditReaderFactory.get(entityManager);
         AuditSnapshotGuards.requireExistingRevision(reader, revision);
-        AuditSnapshotGuards.requireCreationWithinTheTrail(
-                reader, TableDefinitionEntity.class, name, revision, "table '" + name + "'");
         final TableDefinitionEntity definition = reader.find(TableDefinitionEntity.class, name, revision);
         if (definition == null) {
             throw new RevisionNotFoundException(
                     "table '" + name + "' did not exist at revision " + revision);
+        }
+        if (!definition.isSystem()) {
+            AuditSnapshotGuards.requireCreationWithinTheTrail(
+                    reader, TableDefinitionEntity.class, name, revision, "table '" + name + "'");
         }
         final Life life = lifeAt(reader, name, revision);
         TableDefinitionEntity sourceLife = null;
@@ -60,7 +66,8 @@ public class AuditSnapshotService {
                 sourceLife = lifeAt(reader, definition.getSourceTable(), revision).state();
             }
         }
-        return new TableSnapshot(new TableView(definition, columnsAt(reader, name, revision)), life.state(), sourceLife);
+        final List<ColumnMappingEntity> columns = definition.isSystem() ? null : columnsAt(reader, name, revision);
+        return new TableSnapshot(new TableView(definition, columns), life.state(), sourceLife);
     }
 
     /**

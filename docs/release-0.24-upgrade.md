@@ -27,6 +27,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   rows repeating it have an empty `request_body` (§13).
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
 - **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
+- **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§16).
 
 ---
 
@@ -376,6 +377,24 @@ pipelines use.
   Upgrade the target before promoting from an upgraded environment.
 - **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
 
+## 16. Revision snapshots of system tables
+
+`GET /v1/tables/{name}/revision/{revision}` answered `404 revision_not_found` at every revision of `dial_usage_log`,
+`rate_analytics` and `dial_usage_log_payload`: a migration creates them, so their creation is not in the audit trail.
+It now answers `200` at every revision from the first recorded state of the table's definition, so the access edits
+already recorded on these tables become readable, with no backfill (see
+[`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
+
+- **No `columns` member.** The trail does not track a system table's columns, so the snapshot leaves the member out
+  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those recorded at
+  the revision, and `roles` is served under the usual `TABLE_GRANT` bar. A history client such as the Admin UI must
+  not assume `columns` is present.
+- **`permissions.columns_restricted`** is `true` whenever a column policy confines the caller, one that lists every
+  column included.
+- A revision before the table's first recorded state still answers `404 revision_not_found`, as does every revision
+  of a non-system table created before the trail.
+- **Rollback.** An older build answers `404` for these tables again. No data changes.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -394,3 +413,4 @@ pipelines use.
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
 | Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
+| System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§16) |
