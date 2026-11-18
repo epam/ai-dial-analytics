@@ -27,6 +27,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
   rows repeating it have an empty `request_body` (§13).
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
 - **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
+- **Five spending-limit columns on `dial_usage_log`** from ClickHouse `V18`, which an operator with migrations
+  disabled applies before starting the new build (§16).
 
 ---
 
@@ -376,6 +378,23 @@ pipelines use.
   Upgrade the target before promoting from an upgraded environment.
 - **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
 
+## 16. Spending-limit columns on `dial_usage_log`
+
+DIAL Core reports the spending-limits check of a token caller's model call as a `spending_limits` object. ADAS
+stores it in five nullable columns of `dial_usage_log`, tagged `cost`: `spending_limits_mode`, `budget_cost_object`,
+`budget_outcome`, `budget_policy` and `budget_assignment` (see
+[`data-sync`](../openspec/specs/data-sync/spec.md), "Reported spending limits are persisted").
+
+- **Migrations.** ClickHouse `V18` adds the columns with `ALTER ADD COLUMN`, a metadata-only change that needs no
+  new grant. Postgres `V59` adds their catalog rows. With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply `V18` by hand
+  **before** starting the new build: startup validation refuses a mapping whose columns the table lacks.
+- **Deploy order does not matter.** Until DIAL Core reports the object, the five columns read `NULL`, the same as
+  for a call budgets do not apply to.
+- **Rows ingested earlier read `NULL`** until their blobs are re-ingested.
+- **A refused call has no row.** `budget_outcome` `no_budget` and `exhausted` appear in shadow mode only.
+- **Rollback.** A 0.23 build does not declare the columns, so it ignores them and they read `NULL` on the rows it
+  ingests.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -394,3 +413,4 @@ pipelines use.
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
 | Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
+| Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL` | With migrations disabled, apply `V18` before starting the new build (§16) |

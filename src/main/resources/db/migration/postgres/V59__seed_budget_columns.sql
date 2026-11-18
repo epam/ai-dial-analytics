@@ -25,7 +25,7 @@ VALUES ('dial_usage_log', 'spending_limits_mode', 'spending_limits_mode', 'strin
             || 'ingested before the column existed until they are re-ingested.',
         'Budget policy', 'cost', FALSE, FALSE, 44),
        ('dial_usage_log', 'budget_assignment', 'budget_assignment', 'string', NULL, TRUE,
-        'Path of the policy assignment that granted the budget, <cost object>/<id>. NULL for a policy that '
-            || 'applies by itself, unless budget_outcome is paid, and on rows ingested before the column existed '
-            || 'until they are re-ingested.',
+        'Path of the policy assignment that granted the budget, <cost object>/<id>. NULL unless budget_outcome '
+            || 'is paid, for a policy that applies by itself, and on rows ingested before the column existed until '
+            || 'they are re-ingested.',
         'Budget assignment', 'cost', FALSE, FALSE, 45);
