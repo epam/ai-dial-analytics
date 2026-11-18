@@ -367,6 +367,58 @@ class MappingEngineTest {
     }
 
     @Test
+    void carriesTheReportedSpendingLimitsAndNullWhenBudgetsDidNotApply() {
+        // SAMPLE carries no spending_limits object, which the producer omits whenever budgets did not apply: all NULL.
+        assertThat(engine.toRow(jsonMapper.readTree(SAMPLE), "f"))
+                .containsEntry("spending_limits_mode", null)
+                .containsEntry("budget_cost_object", null)
+                .containsEntry("budget_outcome", null)
+                .containsEntry("budget_policy", null)
+                .containsEntry("budget_assignment", null);
+
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
+                "\"mode\":\"enforce\",\"cost_object\":\"statgpt\",\"outcome\":\"paid\",\"policy\":\"engineering-pro\","
+                        + "\"assignment\":\"statgpt/a1\"")), "f"))
+                .containsEntry("spending_limits_mode", "enforce")
+                .containsEntry("budget_cost_object", "statgpt")
+                .containsEntry("budget_outcome", "paid")
+                .containsEntry("budget_policy", "engineering-pro")
+                .containsEntry("budget_assignment", "statgpt/a1");
+
+        // A policy that applies by itself has no assignment, and a token without a project leaves project_id
+        // empty while the producer charges its default cost object: the cost object is not taken from the project.
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("",
+                "\"mode\":\"shadow\",\"cost_object\":\"ORG\",\"outcome\":\"paid\",\"policy\":\"ORG/personal\"")), "f"))
+                .containsEntry("project_id", "")
+                .containsEntry("budget_cost_object", "ORG")
+                .containsEntry("budget_policy", "ORG/personal")
+                .containsEntry("budget_assignment", null);
+
+        // No budget could pay in shadow mode: the outcome without a policy.
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
+                "\"mode\":\"shadow\",\"cost_object\":\"statgpt\",\"outcome\":\"exhausted\"")), "f"))
+                .containsEntry("budget_outcome", "exhausted")
+                .containsEntry("budget_policy", null);
+
+        // Spending limits off: the mode alone.
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt", "\"mode\":\"off\"")), "f"))
+                .containsEntry("spending_limits_mode", "off")
+                .containsEntry("budget_cost_object", null)
+                .containsEntry("budget_outcome", null);
+
+        // A blank value is absent, and an outcome this service has never seen is stored as reported.
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
+                "\"mode\":\"shadow\",\"cost_object\":\"statgpt\",\"outcome\":\"deferred\",\"policy\":\"\"")), "f"))
+                .containsEntry("budget_outcome", "deferred")
+                .containsEntry("budget_policy", null);
+    }
+
+    private static String withSpendingLimits(String project, String fields) {
+        return SAMPLE.replace("\"project\":{\"id\":\"statgpt\"},",
+                "\"project\":{\"id\":\"" + project + "\"},\"spending_limits\":{" + fields + "},");
+    }
+
+    @Test
     void carriesTheReportedRouteAndNullWhenNoRouteServedTheRequest() {
         // SAMPLE is a chat completion, which no route serves: the producer omits both fields, and NULL is
         // the "not a route request" signal rather than an empty string.
@@ -562,7 +614,8 @@ class MappingEngineTest {
                 "total_tokens", "cached_prompt_tokens", "cache_creation_tokens", "reasoning_tokens",
                 "number_request_messages", "total_price", "deployment_price", "operation_duration_ms",
                 "response_status", "success", "request_method", "request_uri", "mcp_method", "mcp_tool_call_name",
-                "request_body_bytes", "response_body_bytes", "route_name", "route_type");
+                "request_body_bytes", "response_body_bytes", "route_name", "route_type", "spending_limits_mode",
+                "budget_cost_object", "budget_outcome", "budget_policy", "budget_assignment");
     }
 
     @Test

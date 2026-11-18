@@ -102,7 +102,7 @@ The remaining columns are grouped by how they are used in a query:
 |---|---|
 | `identifier` | the keys/correlation ids that identify one interaction (and its response) — used to filter-to-one, join, dedup, or trace: `chat_id`, `trace_id`, `core_span_id`, `core_parent_span_id`, `event_id`, `response_id` (on `rate_analytics`, `chat_id`/`event_id`/`response_id`) |
 | `token-usage` | prompt / completion / total / cached / cache-creation / reasoning token counts |
-| `cost` | `total_price`, `deployment_price` |
+| `cost` | `total_price`, `deployment_price`, and the spending-limits check of a model call: `spending_limits_mode`, `budget_cost_object`, `budget_outcome`, `budget_policy`, `budget_assignment` (NULL when budgets did not apply) |
 | `performance` | `operation_duration_ms` |
 | `request` | the request side: `request_method`, `request_uri`, `mcp_method`, `mcp_tool_call_name`, `number_request_messages`, `request_body_bytes`, and `"dial_usage_log_payload.jwt_claims"`, `"dial_usage_log_payload.request_tags"`, `"dial_usage_log_payload.request_body"` on the payload enrichment (and the user-submitted `rate`/`rate_raw`/`comment` on `rate_analytics`) |
 | `response` | the response side: `response_status`, `success`, `response_upstream_uri`, `response_body_bytes`, and `"dial_usage_log_payload.response_body"`, `"dial_usage_log_payload.assembled_response"` on the payload enrichment |

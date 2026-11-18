@@ -44,7 +44,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 // It was already so; provenance injection merely made the dependency visible by adding
                 // five columns to every enrichment created through the API. That is why this filters
                 // rather than asserting the 39-field total the pre-split test could safely assert.
-                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(36)))
+                // 36 plus the five spending-limit columns V59 registered.
+                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(41)))
                 // The five that moved and the cache markers (V50), under the qualified names the grain join publishes them at,
                 // plus the two computed rebuild fields the service appends after them.
                 .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(8)))
@@ -93,9 +94,11 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='deployment')].tag", contains("deployment")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_tokens')].tag", contains("token-usage")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].tag", contains("cost")))
+                .andExpect(jsonPath("$.fields[?(@.tag=='cost')].name", containsInAnyOrder("total_price", "deployment_price",
+                        "spending_limits_mode", "budget_cost_object", "budget_outcome", "budget_policy", "budget_assignment")))
                 // Column descriptions backfilled by the migration are surfaced on the flat schema, and
-                // every one of the 44 fields (36 own, 6 payload, 2 computed) carries a non-empty description.
-                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(44)))
+                // every one of the 49 fields (41 own, 6 payload, 2 computed) carries a non-empty description.
+                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(49)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].description",

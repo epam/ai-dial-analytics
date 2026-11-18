@@ -979,11 +979,11 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void seededSystemTablesExposeColumnDescriptions() throws Exception {
         // 34 after V38 re-keyed the five verbatim-content columns onto dial_usage_log_payload, plus the two
-        // route columns V49 registered.
+        // route columns V49 registered and the five spending-limit columns V59 registered.
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(36)))
-                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(36)))
+                .andExpect(jsonPath("$.columns", hasSize(41)))
+                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(41)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")));
         // The moved rows kept their descriptions: V38 re-keys them rather than re-declaring them.
@@ -1027,11 +1027,31 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     @Test
+    void seededSpendingLimitColumnsAreNullableCostAttributes() throws Exception {
+        // V59 registers the five columns V18 appended. Nullable matches LowCardinality(Nullable(String)) —
+        // NULL is "budgets did not apply to the request" — and the tag groups them with the prices.
+        String budget = "@.name=='spending_limits_mode' || @.name=='budget_cost_object' || @.name=='budget_outcome'"
+                + " || @.name=='budget_policy' || @.name=='budget_assignment'";
+        mockMvc.perform(get("/v1/tables/dial_usage_log"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].type", contains("string", "string", "string", "string", "string")))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].nullable", contains(true, true, true, true, true)))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].tag", contains("cost", "cost", "cost", "cost", "cost")))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].sensitive", contains(false, false, false, false, false)))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].heavy", contains(false, false, false, false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='spending_limits_mode')].display_name", contains("Spending limits mode")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_outcome')].display_name", contains("Budget outcome")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_cost_object')].display_name", contains("Budget cost object")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_policy')].display_name", contains("Budget policy")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_assignment')].display_name", contains("Budget assignment")));
+    }
+
+    @Test
     void seededSystemTablesExposeColumnDisplayNames() throws Exception {
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(36)))
-                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(36)))
+                .andExpect(jsonPath("$.columns", hasSize(41)))
+                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(41)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].display_name", contains("Event ID")));
         mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
                 .andExpect(status().isOk())
