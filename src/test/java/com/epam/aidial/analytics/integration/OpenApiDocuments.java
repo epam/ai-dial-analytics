@@ -95,8 +95,8 @@ final class OpenApiDocuments {
     }
 
     /**
-     * The JSON pointer of the first place two documents differ, walking object members in sorted key order and
-     * array elements in order; empty when they are equal.
+     * The RFC 6901 pointer of the first place two documents differ, walking object members in sorted key order and
+     * array elements in order; empty when they are equal. A difference at the root is the empty pointer {@code ""}.
      */
     static Optional<String> firstDifference(JsonNode expected, JsonNode actual) {
         return firstDifference(expected, actual, "");
@@ -129,7 +129,7 @@ final class OpenApiDocuments {
             }
             return expected.size() == actual.size() ? Optional.empty() : Optional.of(pointer + "/" + common);
         }
-        return expected.equals(actual) ? Optional.empty() : Optional.of(pointer.isEmpty() ? "/" : pointer);
+        return expected.equals(actual) ? Optional.empty() : Optional.of(pointer);
     }
 
     /** RFC 6901 escaping, so a path key such as {@code /v1/queries} reads {@code ~1v1~1queries}. */

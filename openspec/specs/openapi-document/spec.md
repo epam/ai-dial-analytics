@@ -34,7 +34,8 @@ only by the regenerate command (`./gradlew updateOpenApi`) and never edited by h
 
 The committed document SHALL be normalised so that the same code always gives the same bytes, whatever the
 host, port, JVM or bean scan order. Every JSON object's keys SHALL be sorted lexicographically, and array
-order SHALL be kept as springdoc emits it. The top-level `servers` member SHALL be removed. The file SHALL be
+order SHALL be kept as the service serves it. The served top-level `tags` SHALL be sorted by name, because
+springdoc's own order for them is hash order. The top-level `servers` member SHALL be removed. The file SHALL be
 UTF-8 JSON, pretty-printed with two-space indentation, and end with a single newline. Normalisation SHALL NOT
 add, drop or rewrite any other member, so the file is semantically equal to the served document apart from
 `servers`.
@@ -43,6 +44,11 @@ add, drop or rewrite any other member, so the file is semantically equal to the 
 
 - **WHEN** `./gradlew updateOpenApi` runs twice on the same commit, on different machines or ports
 - **THEN** both runs write byte-identical files
+
+#### Scenario: A tag description changes
+
+- **WHEN** a change edits the description of one tag and regenerates the file
+- **THEN** the top-level `tags` stay in name order, and the diff touches only that tag's description
 
 #### Scenario: The servers member is not committed
 
@@ -81,7 +87,15 @@ security schemes in every deployment that serves it, whatever the authentication
 `DISABLE_SWAGGER_AUTHORIZATION` setting, or feature and integration settings. A handler SHALL NOT be added to
 or removed from the document by a configuration property. Configuration decides only whether the document is
 served (`API_DOCS_ENABLED`) and whether reading it needs a credential (owned by the `authentication`
-capability). That is what lets one committed file stand for every deployment of a release.
+capability). That is what lets one committed file stand for every deployment of a release. The build SHALL
+fail, naming the controller, when the context the document is generated from does not register a
+`@RestController` of the application.
+
+#### Scenario: A controller the document's context leaves out
+
+- **WHEN** a change adds a `@RestController` that the PostgreSQL-backed test context does not register, for
+  example one gated by a property that context turns off
+- **THEN** `./gradlew build` fails, naming the controller
 
 #### Scenario: Authentication mode does not change the document
 
@@ -125,8 +139,9 @@ serves, so a generator emits one client class per resource. Every declaration of
 the same description, so the published description doesn't depend on scan order. Tag names SHALL name the
 resource only. Stability notes such as "experimental" belong in the description, not the name. The query
 surfaces under `/v1/queries` (structured query, SQL, CSV export, translation, SQL validation and schema
-discovery) SHALL share the tag `Queries`. The build SHALL fail on an operation with no tag or with more than
-one tag, and on a tag name declared with two different descriptions.
+discovery) SHALL share the tag `Queries`, and no operation outside `/v1/queries` SHALL carry it. The build SHALL
+fail on an operation with no tag or with more than one tag, on a tag name declared with two different
+descriptions, and on an operation whose path and `Queries` tag disagree.
 
 #### Scenario: A controller without a tag
 
@@ -140,6 +155,11 @@ one tag, and on a tag name declared with two different descriptions.
 - **THEN** each carries exactly the tag `Queries`, the top-level `tags` declares `Queries` once with a
   description that states the surface is experimental, and no operation carries
   `Structured Queries (experimental)`
+
+#### Scenario: A query endpoint declares another tag
+
+- **WHEN** a change adds an operation under `/v1/queries` whose controller declares a tag other than `Queries`
+- **THEN** `./gradlew build` fails, naming the operation
 
 #### Scenario: One tag name declared with two descriptions
 
@@ -181,13 +201,15 @@ when a runner data-plane handler or an OTLP ingest handler is not marked, or whe
 ### Requirement: Preview operations are marked x-preview
 
 Operations that are part of the client API but may still change SHALL carry the operation-level extension
-`x-preview: true`, published as a JSON boolean. These are exactly the operations tagged `Queries`: structured
-query, SQL, CSV export, translation, SQL validation and schema discovery under `/v1/queries`. All other
+`x-preview: true`, published as a JSON boolean. These are exactly the operations under `/v1/queries`, which are
+the operations tagged `Queries`: structured query, SQL, CSV export, translation, SQL validation and schema
+discovery. All other
 operations SHALL NOT carry it. This is the extension DIAL Core uses for endpoints still under development, so
 a client generator built against both services can treat ADAS preview operations the same way. Declaring a
 `/v1/queries` operation stable means removing its `x-preview` in a change that also updates this requirement.
 No operation SHALL carry both `x-preview` and `x-internal`. The build SHALL fail when a `Queries` operation is
-not marked, when any other operation is marked, or when an operation carries both extensions.
+not marked, when an operation under `/v1/queries` is not marked whatever its tag, when any other operation is
+marked, or when an operation carries both extensions.
 
 #### Scenario: The query surfaces are marked preview
 
@@ -202,8 +224,9 @@ not marked, when any other operation is marked, or when an operation carries bot
 
 #### Scenario: A new query endpoint is preview by construction
 
-- **WHEN** a change adds a handler to a controller tagged `Queries` without the `x-preview` marking
-- **THEN** `./gradlew build` fails, naming the handler
+- **WHEN** a change adds a handler to a controller tagged `Queries`, or an operation under `/v1/queries` with
+  any tag, without the `x-preview` marking
+- **THEN** `./gradlew build` fails, naming the handler or operation
 
 #### Scenario: An operation marked both preview and internal
 

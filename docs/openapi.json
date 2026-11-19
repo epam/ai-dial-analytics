@@ -13722,52 +13722,52 @@
   ],
   "tags": [
     {
-      "description": "Per-instance settings.",
-      "name": "Settings"
-    },
-    {
-      "description": "Store and share dashboards of query widgets.",
-      "name": "Dashboards"
-    },
-    {
-      "description": "Store and reuse named Query Builder state.",
-      "name": "Saved queries"
-    },
-    {
-      "description": "Run structured (DSL) and SQL queries, export results as CSV, translate between DSL and SQL, and discover the queryable schema. Experimental — may change.",
-      "name": "Queries"
-    },
-    {
-      "description": "OTLP/HTTP JSON export endpoints exposed by a sink.",
-      "name": "OTLP ingest"
-    },
-    {
-      "description": "Operator-triggered backfill of a bounded UTC date range.",
-      "name": "Data-sync backfill"
+      "description": "What changed in the table catalog, when, and by whom.",
+      "name": "Audit trail"
     },
     {
       "description": "Export and import tables, columns, grants and pipelines.",
       "name": "Catalog transfer"
     },
     {
+      "description": "Store and share dashboards of query widgets.",
+      "name": "Dashboards"
+    },
+    {
+      "description": "Operator-triggered backfill of a bounded UTC date range.",
+      "name": "Data-sync backfill"
+    },
+    {
       "description": "Failed ingests still outstanding, and requeueing them for retry.",
       "name": "Data-sync failures"
+    },
+    {
+      "description": "OTLP/HTTP JSON export endpoints exposed by a sink.",
+      "name": "OTLP ingest"
     },
     {
       "description": "Provision OpenTelemetry landing zones and their ClickHouse tables.",
       "name": "OTLP sinks"
     },
     {
-      "description": "Read and replace a table's per-role access entries.",
-      "name": "Table access"
-    },
-    {
-      "description": "What changed in the table catalog, when, and by whom.",
-      "name": "Audit trail"
-    },
-    {
       "description": "Declare and operate pipelines: in-DB rollups and enrichments.",
       "name": "Pipelines"
+    },
+    {
+      "description": "Run structured (DSL) and SQL queries, export results as CSV, translate between DSL and SQL, and discover the queryable schema. Experimental — may change.",
+      "name": "Queries"
+    },
+    {
+      "description": "Store and reuse named Query Builder state.",
+      "name": "Saved queries"
+    },
+    {
+      "description": "Per-instance settings.",
+      "name": "Settings"
+    },
+    {
+      "description": "Read and replace a table's per-role access entries.",
+      "name": "Table access"
     },
     {
       "description": "Manage the catalog of ClickHouse tables and their column mappings.",

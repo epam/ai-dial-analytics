@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,12 +39,7 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
     private static final String ACCESS_PATH = "/v1/tables/{name}/access";
     private static final String PREVIEW = OpenApiMarkings.PREVIEW;
     private static final String INTERNAL = OpenApiMarkings.INTERNAL;
-    private static final List<String[]> QUERY_OPERATIONS = List.of(
-            new String[] {"post", "/v1/queries/execute"},
-            new String[] {"post", "/v1/queries/execute-sql"},
-            new String[] {"post", "/v1/queries/execute-csv"},
-            new String[] {"post", "/v1/queries/translate"},
-            new String[] {"get", "/v1/queries/entities"});
+    private static final String QUERIES_PATH = "/v1/queries/";
 
     /**
      * The default has to be published, not merely true. Both reads carry {@code view}, and a consumer that
@@ -161,16 +157,27 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
         assertThat(suffixed).as("operations with a collision suffix").isEmpty();
     }
 
-    /** The query surfaces share one tag, declared once, whose description carries the experimental status. */
+    /**
+     * The query surfaces share one tag, declared once, whose description carries the experimental status. The set
+     * is derived from the path, not from the tag: an operation under {@code /v1/queries/} that declares another tag
+     * fails here, and so does a {@code Queries} operation outside that path.
+     */
     @Test
     void querySurfacesShareTheQueriesTag() throws Exception {
         final JsonNode document = document();
 
-        for (final String[] op : QUERY_OPERATIONS) {
-            assertThat(strings(operation(document, op[0], op[1]).path("tags")))
-                    .as("tags of %s %s", op[0], op[1])
-                    .containsExactly("Queries");
-        }
+        final List<String> violations = new ArrayList<>();
+        forEachOperation(document, (name, op) -> {
+            final boolean query = isQueryOperation(name);
+            final List<String> tags = strings(op.path("tags"));
+            if (query && !tags.equals(List.of("Queries"))) {
+                violations.add(name + " is under " + QUERIES_PATH + " but publishes tags " + tags);
+            } else if (!query && tags.contains("Queries")) {
+                violations.add(name + " publishes the Queries tag but is not under " + QUERIES_PATH);
+            }
+        });
+        assertThat(violations).as("operations whose path and Queries tag disagree").isEmpty();
+        assertThat(queryOperations(document)).as("the query surfaces must be found, or this test passes vacuously").hasSizeGreaterThanOrEqualTo(5);
         final List<JsonNode> declared = new ArrayList<>();
         document.path("tags").forEach(tag -> {
             if ("Queries".equals(tag.path("name").asString())) {
@@ -208,15 +215,25 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
         assertThat(violations).as("operations without exactly one declared tag").isEmpty();
     }
 
-    /** {@code x-preview} is the boolean {@code true} on the query surfaces and absent on stable client operations. */
+    /**
+     * {@code x-preview} is the boolean {@code true} on every operation under {@code /v1/queries/} and absent on every
+     * other operation, so a new query endpoint without the marking fails whatever tag it declares.
+     */
     @Test
     void querySurfacesAreMarkedPreview() throws Exception {
         final JsonNode document = document();
 
-        for (final String[] op : QUERY_OPERATIONS) {
-            final JsonNode preview = operation(document, op[0], op[1]).path(PREVIEW);
-            assertThat(preview.isBoolean() && preview.asBoolean()).as("%s %s carries x-preview: true as a boolean", op[0], op[1]).isTrue();
-        }
+        final List<String> violations = new ArrayList<>();
+        forEachOperation(document, (name, op) -> {
+            final boolean query = isQueryOperation(name);
+            final JsonNode preview = op.path(PREVIEW);
+            if (query && !(preview.isBoolean() && preview.asBoolean())) {
+                violations.add(name + " is under " + QUERIES_PATH + " but does not carry x-preview: true as a boolean");
+            } else if (!query && op.has(PREVIEW)) {
+                violations.add(name + " carries x-preview but is not under " + QUERIES_PATH);
+            }
+        });
+        assertThat(violations).as("operations whose path and x-preview disagree").isEmpty();
         for (final String[] op : List.of(new String[] {"get", LIST_PATH}, new String[] {"post", "/v1/saved-queries"},
                 new String[] {"get", "/v1/dashboards"})) {
             assertThat(operation(document, op[0], op[1]).has(PREVIEW)).as("%s %s carries no x-preview", op[0], op[1]).isFalse();
@@ -242,6 +259,33 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
                 new String[] {"post", "/v1/queries/execute"}, new String[] {"post", "/v1/otel/sinks"})) {
             assertThat(operation(document, op[0], op[1]).has(INTERNAL)).as("%s %s carries no x-internal", op[0], op[1]).isFalse();
         }
+    }
+
+    /**
+     * The top-level tags are in name order, which is the heading order Swagger UI shows. springdoc's own order is
+     * hash order, so without the sort it would move when a tag's description changes.
+     */
+    @Test
+    void topLevelTagsAreSortedByName() throws Exception {
+        final List<String> names = new ArrayList<>();
+        document().path("tags").forEach(tag -> names.add(tag.path("name").asString()));
+
+        assertThat(names).isSortedAccordingTo(Comparator.naturalOrder()).hasSizeGreaterThan(1);
+    }
+
+    /** Whether a {@code "<method> <path>"} operation name is under {@code /v1/queries/}. */
+    private static boolean isQueryOperation(String name) {
+        return name.substring(name.indexOf(' ') + 1).startsWith(QUERIES_PATH);
+    }
+
+    private static List<String> queryOperations(JsonNode document) {
+        final List<String> operations = new ArrayList<>();
+        forEachOperation(document, (name, op) -> {
+            if (isQueryOperation(name)) {
+                operations.add(name);
+            }
+        });
+        return operations;
     }
 
     private static JsonNode operation(JsonNode document, String method, String path) {

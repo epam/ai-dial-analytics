@@ -9,15 +9,10 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.annotation.AnnotatedElementUtils;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-import org.springframework.core.io.support.ResourcePatternResolver;
-import org.springframework.core.type.classreading.CachingMetadataReaderFactory;
-import org.springframework.core.type.classreading.MetadataReaderFactory;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
-import org.springframework.web.bind.annotation.RestController;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -39,8 +34,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * suffix. Each rule fails naming the handler. See {@code openspec/specs/openapi-document/spec.md}.
  */
 class OpenApiAnnotationGuardTest {
-
-    private static final String APPLICATION_PACKAGE = "com/epam/aidial/analytics";
 
     /** lowerCamelCase, which also excludes springdoc's {@code _<digits>} collision suffix. */
     private static final Pattern LOWER_CAMEL = Pattern.compile("[a-z][a-zA-Z0-9]*");
@@ -220,22 +213,7 @@ class OpenApiAnnotationGuardTest {
     }
 
     private static List<Class<?>> controllers() throws Exception {
-        final ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-        final MetadataReaderFactory readers = new CachingMetadataReaderFactory(resolver);
-        final List<Class<?>> classes = new ArrayList<>();
-        for (final var resource : resolver.getResources("classpath*:" + APPLICATION_PACKAGE + "/**/*.class")) {
-            final String className = readers.getMetadataReader(resource).getClassMetadata().getClassName();
-            final Class<?> type;
-            try {
-                type = Class.forName(className);
-            } catch (Throwable notLoadable) {
-                continue;
-            }
-            if (AnnotatedElementUtils.hasAnnotation(type, RestController.class) && type.getEnclosingClass() == null) {
-                classes.add(type);
-            }
-        }
-        classes.sort(Comparator.comparing(Class::getName));
+        final List<Class<?>> classes = ApplicationControllers.scan();
         assertThat(classes).as("the scan must find the controllers, or this test passes vacuously").hasSizeGreaterThanOrEqualTo(15);
         return classes;
     }

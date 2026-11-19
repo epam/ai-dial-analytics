@@ -42,8 +42,9 @@
       properties. It compares the normalised document with `docs/openapi.json` and reports the first differing
       JSON pointer and `./gradlew updateOpenApi`. With `-Dopenapi.update=true` it writes the file instead. A
       missing file fails the test
-- [x] 3.3 Add a guard that the handler methods in `RequestMappingHandlerMapping` and the operations in the
-      document are the same set, so a controller missing from the PostgreSQL-only context fails the build
+- [x] 3.3 Add a guard that every `@RestController` a classpath scan finds is registered in the PostgreSQL-only
+      context, and that the handler methods in `RequestMappingHandlerMapping` and the operations in the document
+      are the same set, so a controller missing from that context fails the build
 - [x] 3.4 Register the `updateOpenApi` Gradle `Test` task. It runs only the snapshot test with
       `openapi.update=true`, carries the same JVM args as `test`, and is never up-to-date
 - [x] 3.5 Run `./gradlew updateOpenApi`, commit `docs/openapi.json`, and check that a second run leaves the
@@ -51,8 +52,8 @@
 
 ## 4. OpenAPI version and lint
 
-- [x] 4.1 Record which OpenAPI version (`openapi` member) springdoc emits here by default. Ask the SDK
-      maintainers on the issue whether their generator takes it. If it needs 3.0, pin
+- [x] 4.1 Record which OpenAPI version (`openapi` member) springdoc emits here by default. Check whether
+      the target client generator accepts that version. If it needs 3.0, pin
       `springdoc.api-docs.version` to `openapi_3_0` in `application.yml` following the configuration
       conventions, add its one-line row to the springdoc table in `docs/configuration.md`, and regenerate the
       file. Otherwise add no property

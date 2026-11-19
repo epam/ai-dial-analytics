@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.web.openapi.ApplicationControllers;
 import io.swagger.v3.oas.annotations.Hidden;
 import io.swagger.v3.oas.annotations.Operation;
 import org.junit.jupiter.api.Test;
@@ -58,14 +59,35 @@ class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegration
         }
         final Optional<String> difference = OpenApiDocuments.firstDifference(OpenApiDocuments.parseCommitted(committed), served);
         throw new AssertionError(file + " no longer matches the document the code serves"
-                + difference.map(pointer -> " (first difference at " + pointer + ")").orElse(" (formatting only)")
+                + difference.map(pointer -> pointer.isEmpty() ? " (the documents differ at the root)" : " (first difference at " + pointer + ")")
+                        .orElse(" (formatting only)")
                 + ". Run " + OpenApiDocuments.REGENERATE_COMMAND + " and commit the result.");
     }
 
     /**
-     * Every published handler of the application is in the document, and nothing else is. The document is built
-     * over the PostgreSQL-only context, so a controller missing from that context would otherwise be dropped from
-     * the committed file without anything failing.
+     * The document's context registers every {@code @RestController} of the application. The document is built over
+     * the PostgreSQL-only context, so a controller that context leaves out (one gated by a property it turns off,
+     * say) would be missing from both the handler mapping and the document, and {@code updateOpenApi} would drop
+     * its operations from the committed file without anything failing. The classpath scan is the side that does not
+     * depend on the context.
+     */
+    @Test
+    void documentContextRegistersEveryApplicationController() throws Exception {
+        final Set<String> registered = new TreeSet<>();
+        handlerMapping.getHandlerMethods().values().forEach(handler -> registered.add(handler.getBeanType().getName()));
+        final Set<String> missing = new TreeSet<>();
+        for (final Class<?> controller : ApplicationControllers.scan()) {
+            if (!registered.contains(controller.getName())) {
+                missing.add(controller.getName());
+            }
+        }
+        assertThat(missing).as("controllers the document's context does not register, so the document would leave them out").isEmpty();
+    }
+
+    /**
+     * Every handler the context registers is in the document, and nothing else is: springdoc neither drops a
+     * registered handler nor publishes one the context does not map. Together with the test above, every handler of
+     * the application is published.
      */
     @Test
     void documentPublishesExactlyTheApplicationHandlers() throws Exception {

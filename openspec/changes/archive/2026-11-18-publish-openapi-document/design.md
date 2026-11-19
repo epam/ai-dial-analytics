@@ -13,8 +13,8 @@ Current state relevant to client generation:
   springdoc separates them with `_1`, `_2` suffixes in scan order. `PipelineController.listPipelines` was
   already renamed for this reason. Only one handler declares an `operationId`.
 - **Tags** exist on every controller: thirteen tags, one per resource. The six `/v1/queries` controllers share
-  `Structured Queries (experimental)`, but declare it with two different descriptions. The top-level `tags`
-  entry springdoc publishes therefore depends on which controller it scans first.
+  `Structured Queries (experimental)`, but declare it with two different descriptions. springdoc publishes one
+  top-level tag per distinct name and description, so the document lists that tag twice.
 - **Non-client operations**: the OTLP receivers (`OtelIngestController`) and the Enrichment Runner data plane
   (`PipelineDataController`, every `POST` except the `@RunnerContractExempt` `preview` and `refresh`).
 - **CI** runs the shared `ai-dial-ci` reusable workflows. PR CI runs `./gradlew check`.
@@ -95,8 +95,11 @@ The normaliser sorts object keys recursively, keeps array order, drops the top-l
 two-space pretty JSON with a trailing newline. Normalising in the test rather than through
 `springdoc.writer-with-order-by-keys` keeps runtime output and configuration unchanged. A consumer that
 compares the runtime document with the file compares parsed JSON, not bytes. Array order is kept because
-springdoc emits it deterministically from annotation order, and because sorting `enum`, `parameters` or
-`oneOf` would change meaning: the `pipeline-registry` spec relies on enum order.
+sorting `enum`, `parameters` or `oneOf` would change meaning: the `pipeline-registry` spec relies on enum order.
+The one array springdoc does not emit deterministically is the top-level `tags`: it collects them through a
+`HashSet`, so their order is hash order and moves when a description changes. An `OpenApiCustomizer` sorts them
+by name in the served document, so the file and Swagger UI share one stable order and the normaliser still
+touches no array.
 
 On a mismatch the test reports the first differing JSON pointer and the regenerate command. It does not dump
 the whole diff, which is what `git diff` after `updateOpenApi` is for.
@@ -121,8 +124,9 @@ explicit, an id change has to be a visible edit to the annotation.
 ### Tags: one per operation, one description per tag, `Queries` renamed
 
 The guard asserts that every operation has exactly one tag and every tag is declared with a description. It
-also asserts that every `@Tag` declaring the same name declares the same description, because springdoc keeps
-whichever declaration it meets first.
+also asserts that every `@Tag` declaring the same name declares the same description, because springdoc
+publishes one top-level tag per distinct name and description, so a second description would list the tag
+twice.
 
 `Structured Queries (experimental)` becomes `Queries` on all six `/v1/queries` controllers, with one shared
 description, held in a constant so the six can't drift apart again: "Run structured (DSL) and SQL queries,
@@ -199,8 +203,10 @@ That lint found three defects, now fixed in the annotations:
 - **Renaming colliding operation ids breaks clients generated from a runtime document** → No committed
   contract existed, so the break happens once, before the first published file. The proposal flags it as
   **BREAKING** and the release notes list the old → new ids.
-- **The PostgreSQL-only context might not register a controller** whose dependencies are ClickHouse-only beans
-  → The handler-set guard described under the first decision fails in that case. The fix is to make the
+- **The PostgreSQL-only context might not register a controller**, because its dependencies are ClickHouse-only
+  beans or a property the context turns off gates it → A guard compares the controllers the context registers
+  with every `@RestController` a classpath scan finds, and fails naming the missing one. A second guard checks
+  that the registered handlers and the document's operations are the same set. The fix is to make the
   document's context complete, never to accept a partial file.
 - **Renaming the query tag changes the Swagger UI grouping** → The operations stay together under `Queries`.
   Only the heading changes, and the release notes mention it.
