@@ -652,6 +652,15 @@ The catalog SHALL be exact in both directions:
   does not accept as function names, SHALL NOT appear as a `name` or alias. Their SQL spellings are the
   operator entries `+`, `-`, `*`, `/`, `%` (and `mod` for `%`).
 
+The two caller values (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values in SQL") SHALL be
+listed as `function` entries named `caller.user_hash` and `caller.project`, with no aliases, `group` `scalar`,
+`returns` `string`, `distinct_supported` false, `deterministic` false, an empty `args` array, the `signature`
+`caller.user_hash()` or `caller.project()`, `dsl_function` `null`
+(each lowers onto the DSL `param` of its name), a `description` stating that the value is the executing caller's and
+may only be compared with `=` or `<>` against a `string` column in a filter, and an `example` filtering on it. Every
+other rule of this requirement applies to them, so their `example`s SHALL be accepted by the SQL surface, and any
+internal operator name the surface uses to carry them is an internal marker and SHALL NOT be listed.
+
 The catalog lists spellings that compute a value. The predicate and statement grammar — comparisons,
 `IN`, `BETWEEN`, `IS NULL`, `AND`/`OR`/`NOT`, joins and set operations — is not listed. It is
 documented in `docs/sql-reference.md`.
@@ -686,6 +695,13 @@ other.
   that only the `'%text%'` contains pattern is accepted, with `not like` and `not ilike` as their aliases
 - **AND** `||` appears as an `operator` entry with `dsl_function` `concat`, carrying `concat`'s
   `group`, `returns`, `distinct_supported` and `deterministic`, and two `expression` args `a` and `b`
+
+#### Scenario: Caller values are listed
+
+- **WHEN** a client lists the SQL function catalog
+- **THEN** `caller.project` and `caller.user_hash` appear as `function` entries with `returns` `string`,
+  `deterministic` false, an empty `args` array and `dsl_function` `null`, each with an `example` such as
+  `SELECT count(*) FROM "dial_usage_log" WHERE "user_hash" = caller.user_hash()`
 
 #### Scenario: Synonyms are listed as aliases of one entry
 

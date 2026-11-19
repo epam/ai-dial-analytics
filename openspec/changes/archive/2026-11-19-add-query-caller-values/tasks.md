@@ -43,4 +43,4 @@
 
 ## 6. Verification
 
-- [ ] 6.1 `./gradlew clean build` passes
+- [x] 6.1 `./gradlew clean build` passes
