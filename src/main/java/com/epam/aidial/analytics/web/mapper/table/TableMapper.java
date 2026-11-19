@@ -267,8 +267,10 @@ public class TableMapper {
         // applies; a revision is judged by the policies on its snapshot and those of the table's life containing it (the
         // live table, or its state at the deletion that ended that life), a column either hides staying hidden; an
         // enrichment's, by the source state that speaks for its life. Every column is hidden when a state is missing.
+        // A system table's revision snapshot tracks no columns: null omits the member rather than asserting none.
+        final boolean untracked = view.columns() == null;
         final boolean cleared = sensitiveAccess.maySeeSensitive(entity.getName());
-        List<ColumnMappingEntity> ordered = view.columns().stream()
+        List<ColumnMappingEntity> ordered = untracked ? List.of() : view.columns().stream()
                 .filter(col -> cleared || !col.isSensitive())
                 .filter(col -> visibility.allows(col.getName()))
                 .toList();
@@ -278,7 +280,7 @@ public class TableMapper {
                             tagOrder, ColumnMappingEntity::getTag, ColumnMappingEntity::getName))
                     .toList();
         }
-        final List<ColumnDto> columns = ordered.stream()
+        final List<ColumnDto> columns = untracked ? null : ordered.stream()
                 .map(col -> new ColumnDto(
                         col.getSourceName(), col.getName(), col.getType(), col.getElementType(),
                         col.getEnumValues(), col.isNullable(),

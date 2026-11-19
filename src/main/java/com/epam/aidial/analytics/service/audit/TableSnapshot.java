@@ -10,7 +10,7 @@ import com.epam.aidial.analytics.service.table.TableView;
  * source's own life containing the revision. A revision's column visibility is judged by those states, never by a
  * lookup of the name.
  *
- * @param view       the table at the revision
+ * @param view       the table at the revision; its columns are {@code null}, not tracked, for a system table
  * @param life       the table's life state, or {@code null} when none is recorded
  * @param sourceLife an enrichment's source state; {@code null} for any other table, or when none is recorded
  */
