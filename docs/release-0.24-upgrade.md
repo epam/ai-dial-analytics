@@ -30,6 +30,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Five spending-limit columns on `dial_usage_log`** from ClickHouse `V18`, which an operator with migrations
   disabled applies before starting the new build (§16).
 - **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§17).
+- **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
+  route outputs may bind `object` and `map` columns (§18).
 
 ---
 
@@ -432,6 +434,33 @@ already recorded on these tables become readable, with no backfill (see
   of a non-system table created before the trail.
 - **Rollback.** An older build answers `404` for these tables again. No data changes.
 
+## 18. Route outputs may bind `object` and `map` columns; arming composes the schema
+
+A `dial_app_route` output may now bind an `object` column, stored as the JSON document the route's `source`
+yields, or a `map` column of strings. Neither column can be nullable, so such an output is always required. A
+`source` that filters members, for example dropping zero counts, must still yield `{}`, and should yield nothing
+when the response lacks the member:
+`$exists(intent_counts) ? $merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone yields
+nothing when every member is zero, and the unit is then dead-lettered. Without the `$exists` guard, a response
+missing `intent_counts` would be stored as `{}` instead. A `chat_completion` output bound to either type is
+refused (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
+
+Arming now composes each `llm` pipeline's response schema, so a declaration whose schema cannot be composed is
+refused with `422 pipeline_validation_failed` when it is enabled or its declaration is patched while enabled. A
+draft is still stored. Before, such a pipeline was accepted when armed, was then left out of the runner's feed and refused
+on a compiled read, so it never ran. Nothing that runs today starts failing: the refusal moves to arming, where the
+author sees it.
+
+- **Before upgrading, find armed pipelines that never ran for this reason.** Compare the names in
+  `GET /v1/pipelines?kind=enrich&enabled=true` with those in `GET /v1/pipelines?kind=enrich&enabled=true&view=compiled`.
+  The missing names include these pipelines, and incomplete declarations too. Confirm each with
+  `GET /v1/pipelines/{name}?view=compiled`, which answers `422` saying its outputs compose to no response schema,
+  or with `POST /v1/pipelines/{name}/preview`, which names the output and the column. ADAS also logs
+  an ERROR containing `compose to no response schema` for each one. Fix the output or the column before the
+  pipeline's next patch; a catalog import preview reports such a pipeline as `armable: false`, unless the target already has it enabled.
+- **Rollback.** A build older than 0.24 cannot read a `dial_app_route` pipeline at all (§9), so follow §9:
+  re-declare each route pipeline as `chat_completion` on scalar columns, or delete it, before rolling back.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -452,3 +481,4 @@ already recorded on these tables become readable, with no backfill (see
 | Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
 | Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
 | System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
+| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |
