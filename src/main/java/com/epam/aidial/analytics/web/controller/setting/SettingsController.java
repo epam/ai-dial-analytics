@@ -50,7 +50,8 @@ public class SettingsController {
 
     @GetMapping("/sessions-source")
     @RequiresPrivilege(Privilege.SETTINGS_READ)
-    @Operation(summary = "Read the sessions-source setting",
+    @Operation(operationId = "getSessionsSource",
+            summary = "Read the sessions-source setting",
             description = "The stored setting as written, with the time and author of its last write.")
     @ApiResponse(responseCode = "200", description = "Stored setting",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = SessionsSourceSettingDto.class)))
@@ -62,7 +63,8 @@ public class SettingsController {
 
     @PutMapping("/sessions-source")
     @RequiresPrivilege(Privilege.SETTINGS_WRITE)
-    @Operation(summary = "Replace the sessions-source setting",
+    @Operation(operationId = "replaceSessionsSource",
+            summary = "Replace the sessions-source setting",
             description = "Create-or-replace the whole setting. base_table must be an ACTIVE source table; every bound "
                     + "role must name a field of its entity schema, as the caller sees it, whose type fits the role "
                     + "(session_id, project, title: string; time: timestamp; cost: decimal, integer or long; turns: "
@@ -82,7 +84,8 @@ public class SettingsController {
 
     @GetMapping("/app-routes")
     @RequiresPrivilege(Privilege.SETTINGS_READ)
-    @Operation(summary = "Read the app-routes setting",
+    @Operation(operationId = "getAppRoutes",
+            summary = "Read the app-routes setting",
             description = "The DIAL application routes an enrichment pipeline may call, as written, with the time and "
                     + "author of the last write.")
     @ApiResponse(responseCode = "200", description = "Stored setting",
@@ -95,7 +98,8 @@ public class SettingsController {
 
     @PutMapping("/app-routes")
     @RequiresPrivilege(Privilege.SETTINGS_WRITE)
-    @Operation(summary = "Replace the app-routes setting",
+    @Operation(operationId = "replaceAppRoutes",
+            summary = "Replace the app-routes setting",
             description = "Create-or-replace the whole allowlist of (deployment, route) pairs, compared exactly and "
                     + "case-sensitively. Each route uses the transform.route grammar. A write dropping a pair that an "
                     + "enabled pipeline calls is refused; disable the pipeline first.")

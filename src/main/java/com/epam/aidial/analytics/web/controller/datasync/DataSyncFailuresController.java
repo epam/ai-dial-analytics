@@ -54,7 +54,8 @@ public class DataSyncFailuresController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "List outstanding failures",
+    @Operation(operationId = "listDataSyncFailures",
+            summary = "List outstanding failures",
             description = "Returns the failed blobs and days that are still pending or parked, newest failure first, with how many "
                     + "matched in all and per state, and whether the retry sweep runs. Resolved subjects are not listed.")
     @ApiResponse(responseCode = "200", description = "Outstanding failures (an empty `failures` array when none match)",
@@ -76,7 +77,8 @@ public class DataSyncFailuresController {
 
     @PostMapping("/retry")
     @RequiresPrivilege(Privilege.DATA_SYNC_OPERATE)
-    @Operation(summary = "Requeue failures",
+    @Operation(operationId = "requeueDataSyncFailures",
+            summary = "Requeue failures",
             description = "Requeues every outstanding failure the body selects, resetting its attempts, so the next retry sweep "
                     + "attempts it, and reports whether that sweep runs. Members are ANDed; at least one is required.")
     @ApiResponse(responseCode = "200", description = "How many failures were requeued",

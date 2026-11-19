@@ -64,7 +64,8 @@ public class TableController {
     @PostMapping
     @RequiresPrivilege(Privilege.TABLE_CREATE)
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Create a table definition (identity only)",
+    @Operation(operationId = "createTable",
+            summary = "Create a table definition (identity only)",
             description = "Records the table identity as PENDING and issues no ClickHouse DDL. Define its "
                     + "physical schema and materialize it via POST /{name}/schema. Columns and physical keys "
                     + "are not accepted here (422).")
@@ -74,7 +75,8 @@ public class TableController {
 
     @PostMapping("/{name}/schema")
     @RequiresPrivilege(value = Privilege.TABLE_MODIFY, table = "name")
-    @Operation(summary = "Define and materialize a table's schema",
+    @Operation(operationId = "defineTableSchema",
+            summary = "Define and materialize a table's schema",
             description = "Sets the complete physical schema (columns plus physical keys — ordering_key/"
                     + "partition_by for a source, grain_key/cardinality for an enrichment — and an optional "
                     + "row-expiry ttl) of a "
@@ -100,21 +102,24 @@ public class TableController {
 
     @GetMapping
     @RequiresPrivilege(value = Privilege.TABLE_LIST, deferred = true)
-    @Operation(summary = "List table definitions", description = "Returns all table definitions, ordered by name.")
+    @Operation(operationId = "listTables",
+            summary = "List table definitions", description = "Returns all table definitions, ordered by name.")
     public TableListDto list() {
         return mapper.toListDto(catalogService.list());
     }
 
     @GetMapping("/{name}")
     @RequiresPrivilege(value = Privilege.TABLE_GET, table = "name")
-    @Operation(summary = "Get a table definition", description = "Returns the definition and its exposed columns.")
+    @Operation(operationId = "getTable",
+            summary = "Get a table definition", description = "Returns the definition and its exposed columns.")
     public TableDto get(@Parameter(description = "Table name", example = "dial_usage_log") @PathVariable String name) {
         return mapper.toDto(catalogService.get(name));
     }
 
     @GetMapping("/{name}/revision/{revision}")
     @RequiresPrivilege(value = Privilege.TABLE_GET, table = "name")
-    @Operation(summary = "Get a table definition as it stood at a revision",
+    @Operation(operationId = "getTableRevision",
+            summary = "Get a table definition as it stood at a revision",
             description = "Returns the same shape as GET /{name}, reconstructed from the audit trail at "
                     + "the end of the given revision — the columns, ordering key and grain it had then, "
                     + "excluding columns dropped by then. 404 if the table did not exist at that revision "
@@ -141,7 +146,8 @@ public class TableController {
 
     @PutMapping("/{name}")
     @RequiresPrivilege(value = Privilege.TABLE_MODIFY, table = "name")
-    @Operation(summary = "Update a table definition",
+    @Operation(operationId = "updateTable",
+            summary = "Update a table definition",
             description = "Updates catalog metadata only: the description and the per-table tag ordering. 409 "
                     + "`table_busy` when another change to the table holds it past the lock timeout (retry).")
     public TableDto update(
@@ -154,7 +160,8 @@ public class TableController {
     @DeleteMapping("/{name}")
     @RequiresPrivilege(Privilege.TABLE_DELETE)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Delete a table definition",
+    @Operation(operationId = "deleteTable",
+            summary = "Delete a table definition",
             description = "Drops the ClickHouse table. Blocked (409) if a source still has enrichments, or "
                     + "if a pipeline reads this table as its input — that dependency breaks here rather "
                     + "than at the pipeline's next refresh. A pipeline whose *target* this is goes with the "
@@ -168,7 +175,8 @@ public class TableController {
 
     @PatchMapping("/{name}/schema")
     @RequiresPrivilege(value = Privilege.TABLE_MODIFY, table = "name")
-    @Operation(summary = "Evolve a materialized table's schema",
+    @Operation(operationId = "patchTableSchema",
+            summary = "Evolve a materialized table's schema",
             description = "Applies add/drop/rename column operations and the optional ttl merge-patch (set/replace "
                     + "with a full object, remove with {}) as ONE multi-command ClickHouse ALTER statement — "
                     + "validated by ClickHouse as a whole, so it is rejected or applied in its entirety — plus "
@@ -206,7 +214,8 @@ public class TableController {
     @RequiresPrivilege(value = Privilege.TABLE_WRITE, table = "name")
     @ApiResponse(responseCode = "503", description = "`table_relayout_in_progress`: the table is being relaid out by "
             + "ADAS and holds its writers for a minute or two; retry the same request shortly")
-    @Operation(summary = "Write rows into a table",
+    @Operation(operationId = "writeTableRows",
+            summary = "Write rows into a table",
             description = "Inserts rows (each keyed by physical column name) into the table's ClickHouse table "
                     + "using the writer credential. The minimal data-write surface for populating sources and "
                     + "enrichments; the table must be ACTIVE. A row of an enrichment aligned with its source "

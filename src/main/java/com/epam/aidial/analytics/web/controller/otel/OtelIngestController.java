@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.web.controller.otel;
 import com.epam.aidial.analytics.service.otel.OtelIngestService;
 import com.epam.aidial.analytics.service.otel.OtelSignal;
 import com.epam.aidial.analytics.web.dto.otel.OtlpExportResponse;
+import com.epam.aidial.analytics.web.openapi.ApiInternal;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
@@ -40,13 +41,15 @@ import tools.jackson.databind.JsonNode;
 @RequestMapping("/v1/otel/sink/{sinkName}/v1")
 @RequiredArgsConstructor
 @Tag(name = "OTLP ingest", description = "OTLP/HTTP JSON export endpoints exposed by a sink.")
+@ApiInternal
 public class OtelIngestController {
 
     private final OtelIngestService ingestService;
 
     @PostMapping(path = "/logs", consumes = MediaType.APPLICATION_JSON_VALUE)
     @RequiresPrivilege(value = Privilege.TABLE_WRITE, deferred = true)
-    @Operation(summary = "Export logs to a sink",
+    @Operation(operationId = "exportOtelLogs",
+            summary = "Export logs to a sink",
             description = "Accepts an OTLP/HTTP JSON ExportLogsServiceRequest and lands one row per log "
                     + "record. Returns an empty partial_success — the batch is accepted whole or rejected "
                     + "whole. 404 if the sink is unknown or does not land logs; 409 if its table is gone or "
@@ -60,7 +63,8 @@ public class OtelIngestController {
 
     @PostMapping(path = "/traces", consumes = MediaType.APPLICATION_JSON_VALUE)
     @RequiresPrivilege(value = Privilege.TABLE_WRITE, deferred = true)
-    @Operation(summary = "Export traces to a sink",
+    @Operation(operationId = "exportOtelTraces",
+            summary = "Export traces to a sink",
             description = "Accepts an OTLP/HTTP JSON ExportTraceServiceRequest and lands one row per span. "
                     + "Span events and links are stored as compact JSON text columns.")
     public OtlpExportResponse traces(
@@ -72,7 +76,8 @@ public class OtelIngestController {
 
     @PostMapping(path = "/metrics", consumes = MediaType.APPLICATION_JSON_VALUE)
     @RequiresPrivilege(value = Privilege.TABLE_WRITE, deferred = true)
-    @Operation(summary = "Export metrics to a sink",
+    @Operation(operationId = "exportOtelMetrics",
+            summary = "Export metrics to a sink",
             description = "Accepts an OTLP/HTTP JSON ExportMetricsServiceRequest and lands one row per data "
                     + "point, discriminated by metric_type. Exemplars are not stored.")
     public OtlpExportResponse metrics(

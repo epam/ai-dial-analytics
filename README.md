@@ -161,6 +161,19 @@ All functional endpoints live under `/v1`. Errors share one JSON shape:
 
 The OpenAPI document is served at `/v3/api-docs`.
 
+### Generating a client
+
+The same document is committed as [`docs/openapi.json`](docs/openapi.json) (OpenAPI 3.1). To generate a client
+for a release, read that file at the release tag. Every operation has a stable, unique `operationId` and exactly
+one tag. Two extensions tell a generator what to expect:
+
+- `x-preview: true`: part of the client API, but may still change (the `Queries` operations).
+- `x-internal: true`: called by a machine producer, not by clients (the OTLP receivers and the Enrichment
+  Runner data plane). A generator can skip these.
+
+A change that alters the API also regenerates the file with `./gradlew updateOpenApi`. The build fails if the
+file is out of date. See [openapi-document](openspec/specs/openapi-document/spec.md).
+
 ## Monitoring
 
 The actuator serves on the API port, 5000, unless `MANAGEMENT_SERVER_PORT` moves it to a port of its own. Its

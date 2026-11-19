@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.service.query.StructuredQueryService;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.repository.QueryResultPage;
 import com.epam.aidial.analytics.web.dto.query.SqlQueryRequestDto;
+import com.epam.aidial.analytics.web.openapi.ApiPreview;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
@@ -35,9 +36,8 @@ import java.nio.charset.StandardCharsets;
  */
 @RestController
 @RequiredArgsConstructor
-@Tag(
-        name = "Structured Queries (experimental)",
-        description = "Execute structured queries against analytics data. Experimental — may change.")
+@Tag(name = QueryApiTag.NAME, description = QueryApiTag.DESCRIPTION)
+@ApiPreview
 public class QueryCsvController {
 
     static final String EXECUTE_CSV_PATH = "/v1/queries/execute-csv";
@@ -54,7 +54,8 @@ public class QueryCsvController {
 
     @PostMapping(EXECUTE_CSV_PATH)
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
-    @Operation(
+    @Operation(operationId = "executeQueryCsv",
+            
             summary = "Execute a structured query, returning CSV",
             description = "Runs the structured query exactly as `/v1/queries/execute` does — same request body,"
                     + " validation, default limit 100 and maximum limit 1000 (a higher limit is rejected, never"
@@ -79,7 +80,8 @@ public class QueryCsvController {
 
     @PostMapping(EXECUTE_SQL_CSV_PATH)
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
-    @Operation(
+    @Operation(operationId = "executeSqlCsv",
+            
             summary = "Execute an ad-hoc SQL SELECT, returning CSV",
             description = "Runs the statement exactly as `/v1/queries/execute-sql` does — same SQL subset,"
                     + " governance, limits, `INFORMATION_SCHEMA` handling and errors — and returns the result as"

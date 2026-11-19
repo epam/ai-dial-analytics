@@ -52,7 +52,8 @@ public class ActivityController {
 
     @PostMapping
     @RequiresPrivilege(Privilege.AUDIT_READ)
-    @Operation(summary = "List activities",
+    @Operation(operationId = "listActivities",
+            summary = "List activities",
             description = "Paged, sorted and filtered. Filters are a flat AND-list over an allow-listed "
                     + "column set; a range is two filters on the same column. With no sorts the feed is "
                     + "ordered newest first, so paging is stable.")
@@ -66,7 +67,8 @@ public class ActivityController {
 
     @GetMapping("/{activityId}")
     @RequiresPrivilege(Privilege.AUDIT_READ)
-    @Operation(summary = "Get one activity",
+    @Operation(operationId = "getActivity",
+            summary = "Get one activity",
             description = "Returns the single feed entry with this identifier.")
     public AuditActivityDto get(
             @Parameter(description = "Activity identifier, as returned by the listing")

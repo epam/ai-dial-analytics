@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.springframework.context.annotation.Bean;
@@ -31,7 +32,8 @@ public class OpenApiConfiguration {
                 .info(new Info()
                         .title("AI DIAL Analytics API")
                         .description("Gateway between analytics consumers and the underlying data stores.")
-                        .version("v1"))
+                        .version("v1")
+                        .license(new License().name("Apache 2.0").identifier("Apache-2.0")))
                 .components(new Components()
                         .addSecuritySchemes(API_KEY_SCHEME, new SecurityScheme()
                                 .type(SecurityScheme.Type.APIKEY)
@@ -43,9 +45,7 @@ public class OpenApiConfiguration {
                                 .type(SecurityScheme.Type.HTTP)
                                 .scheme("bearer")
                                 .bearerFormat("JWT")
-                                .in(SecurityScheme.In.HEADER)
-                                .name(HttpHeaders.AUTHORIZATION)
-                                .description("OIDC bearer token (JWT or opaque) sent in the Authorization header.")))
+                                .description("OIDC bearer token (JWT or opaque) sent in the " + HttpHeaders.AUTHORIZATION + " header.")))
                 // Two separate requirements express OR: a request may authenticate with either scheme.
                 .addSecurityItem(new SecurityRequirement().addList(API_KEY_SCHEME))
                 .addSecurityItem(new SecurityRequirement().addList(BEARER_SCHEME));

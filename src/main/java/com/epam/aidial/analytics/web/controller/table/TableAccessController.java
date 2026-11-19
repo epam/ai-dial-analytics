@@ -63,7 +63,8 @@ public class TableAccessController {
 
     @GetMapping(params = "role")
     @RequiresPrivilege(Privilege.TABLE_GRANT)
-    @Operation(summary = "List a table's access entries, or read one role's entry",
+    @Operation(operationId = "getTableAccess",
+            summary = "List a table's access entries, or read one role's entry",
             description = "Without `role`, returns `{generation, roles, ineffective_grants}`: every role's entry on the table, "
                     + "keyed and sorted by role, the table's access `generation`, and every entry's report grouped by role in "
                     + "that order; 403 without TABLE_GRANT, then 404 for an unknown table. "
@@ -71,7 +72,7 @@ public class TableAccessController {
                     + "entry, the generation and that entry's report; 400 for a blank or repeated role, 403 without "
                     + "TABLE_GRANT, then 404 for an unknown table, then 404 when the role has no entry. `ineffective_grants` "
                     + "is the report a PUT returns, judged on the entries as stored at the read, and `[]` when empty.",
-            parameters = @Parameter(name = "role", in = ParameterIn.QUERY, description = ROLE_OR_LIST))
+            parameters = @Parameter(name = "role", in = ParameterIn.QUERY, description = ROLE_OR_LIST, schema = @Schema(type = "string")))
     @ApiResponse(responseCode = "200", description = "Every entry without `role`, one role's entry with it",
             content = @Content(schema = @Schema(oneOf = {AccessEntriesDto.class, AccessEntryDto.class})))
     public AccessEntryDto get(
@@ -82,7 +83,8 @@ public class TableAccessController {
 
     @PutMapping
     @RequiresPrivilege(Privilege.TABLE_GRANT)
-    @Operation(summary = "Replace one role's access entry",
+    @Operation(operationId = "replaceTableAccess",
+            summary = "Replace one role's access entry",
             description = "Replaces the role's whole entry: absent or null `privileges` means none, absent `rows` or "
                     + "`columns` means null, and no other role's entry changes. An entry left with no privileges, no `rows` "
                     + "and no `columns` is removed. `generation` is the table's generation as last read: a PUT that would "
@@ -115,7 +117,8 @@ public class TableAccessController {
     @DeleteMapping
     @RequiresPrivilege(Privilege.TABLE_GRANT)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Remove one role's access entry",
+    @Operation(operationId = "deleteTableAccess",
+            summary = "Remove one role's access entry",
             description = "Removes the role's entry (privileges, rows and columns) and increments the table's access "
                     + "generation. `generation` is optional: without it the entry is removed whatever changed since it was "
                     + "read; with it, a value above the table's generation or older than the role's last change is refused "
