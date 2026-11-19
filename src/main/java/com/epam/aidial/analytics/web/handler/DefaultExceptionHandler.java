@@ -13,8 +13,8 @@ import com.epam.aidial.analytics.exception.CatalogBundleMalformedException;
 import com.epam.aidial.analytics.exception.CatalogBundleVersionUnsupportedException;
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
 import com.epam.aidial.analytics.exception.CatalogImportConflictException;
-import com.epam.aidial.analytics.exception.CatalogImportForbiddenException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
+import com.epam.aidial.analytics.exception.CatalogTransferForbiddenException;
 import com.epam.aidial.analytics.exception.ClickHouseQueryException;
 import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import com.epam.aidial.analytics.exception.ColumnInColumnPolicyException;
@@ -725,8 +725,8 @@ public class DefaultExceptionHandler {
     }
 
     @ResponseStatus(HttpStatus.FORBIDDEN)
-    @ExceptionHandler(CatalogImportForbiddenException.class)
-    public ErrorView handleCatalogImportForbidden(HttpServletRequest req, CatalogImportForbiddenException ex) {
+    @ExceptionHandler(CatalogTransferForbiddenException.class)
+    public ErrorView handleCatalogTransferForbidden(HttpServletRequest req, CatalogTransferForbiddenException ex) {
         return new ErrorView(req, HttpStatus.FORBIDDEN, "forbidden", ex.getMessage());
     }
 

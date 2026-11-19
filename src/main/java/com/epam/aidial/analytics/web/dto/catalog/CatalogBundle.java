@@ -8,10 +8,12 @@ import jakarta.validation.constraints.NotNull;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
- * A catalog bundle: user tables and pipelines in request shape, plus the names of the system tables they
- * depend on. {@code format_version} is raised whenever the shape of any member changes, a new enum value
+ * A catalog bundle: user tables and pipelines in request shape, the names of the system tables they depend on
+ * or whose access the bundle carries, and, when exported with {@code include_access}, the covered tables' access
+ * entries. {@code format_version} is raised whenever the shape of any member changes, a new enum value
  * included, so an older ADAS refuses a newer bundle by version rather than by an unknown field.
  */
 public record CatalogBundle(
@@ -27,15 +29,26 @@ public record CatalogBundle(
         @Schema(description = "Objects an export-everything left out")
         List<@NotNull @Valid SkippedObject> skipped,
 
-        @Schema(description = "System tables the bundle's objects depend on, by name: import requires each to "
-                + "exist on the target and never creates or changes one", example = "[\"dial_usage_log\"]")
+        @Schema(description = "System tables the bundle's objects depend on or whose access it carries, by name: import "
+                + "requires each to exist on the target and never creates one or changes its definition",
+                example = "[\"dial_usage_log\"]")
         @JsonProperty("required_system_tables") List<@NotBlank String> requiredSystemTables,
 
         @Schema(description = "User tables, in dependency order")
         List<@NotNull @Valid BundleTable> tables,
 
         @Schema(description = "Pipelines")
-        List<@NotNull @Valid BundlePipeline> pipelines) {
+        List<@NotNull @Valid BundlePipeline> pipelines,
+
+        @Schema(description = "Present only when exported with include_access: table -> role -> entry, for every covered "
+                + "table, system tables included. Imported only with include_access=true")
+        Map<String, @NotNull Map<String, @NotNull @Valid BundleAccessEntry>> access) {
+
+    /** A bundle with no {@code access} member. */
+    public CatalogBundle(String format, Integer formatVersion, Instant exportedAt, List<SkippedObject> skipped,
+            List<String> requiredSystemTables, List<BundleTable> tables, List<BundlePipeline> pipelines) {
+        this(format, formatVersion, exportedAt, skipped, requiredSystemTables, tables, pipelines, null);
+    }
 
     /** The {@code format} every bundle carries. */
     public static final String FORMAT = "adas-catalog";
@@ -50,7 +63,8 @@ public record CatalogBundle(
      *       bundle with the readable newer-format 422 rather than the strict binder's unknown-field 400.</li>
      *   <li>{@code 3} — adds an {@code enrich} transform's {@code route} and the {@code dial_app_route} preset, and a
      *       {@code group} pipeline's {@code advanced.input_token_budget}.</li>
+     *   <li>{@code 4} — adds the top-level {@code access} member.</li>
      * </ul>
      */
-    public static final int FORMAT_VERSION = 3;
+    public static final int FORMAT_VERSION = 4;
 }

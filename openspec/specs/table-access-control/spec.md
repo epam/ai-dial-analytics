@@ -8,7 +8,8 @@ access **entry** per raw provider role: the table privileges it grants (`get`, `
 by the data store on every user read, and a **column policy** that narrows which columns it sees. An enrichment's
 entries carry only `write` and `modify`: its read-side access, rows and columns are its source's. Entries are matched
 against the caller's provider roles at request time and managed one role at a time through the `TABLE_GRANT`-gated
-role-keyed access API, guarded by one optimistic-locking **access generation** per table. This complements the
+role-keyed access API, guarded by one optimistic-locking **access generation** per table, or promoted between
+environments by a catalog import that asks for them (see [catalog-export-import](../catalog-export-import/spec.md)). This complements the
 method-level authorization defined by [authentication](../authentication/spec.md) and governs the per-table endpoints
 of [table-management](../table-management/spec.md).
 ## Requirements
@@ -271,8 +272,9 @@ caller, **after** implication is applied:
 values. It counts among the read-side flags. A consumer SHALL derive "reads sensitive values" as `read && sensitive`,
 "sees sensitive columns" as `get && sensitive`, and "may change them or the flag" as `modify && sensitive`.
 `grant` SHALL NOT change what the caller may do: the access API keeps its own `TABLE_GRANT` check.
-`rows_restricted` and `columns_restricted` SHALL NOT disclose the policies themselves; those are readable only through
-the access API.
+`rows_restricted` and `columns_restricted` SHALL NOT disclose the policies themselves; those are readable only where `TABLE_GRANT`
+is required: through the access API, a revision snapshot (see [audit-trail](../audit-trail/spec.md)), and a catalog export or import
+called with `include_access` (see [catalog-export-import](../catalog-export-import/spec.md), "Access export" and "Access import").
 
 The reporting SHALL share its role-matching, implication, row-policy and column-visibility evaluation with the
 evaluation used for enforcement so the two cannot diverge. Reporting SHALL NOT change enforcement behaviour.
@@ -571,19 +573,6 @@ moment the deployment switches to `oidc`, when refusing it would be too late.
 
 - **WHEN** the service runs in `none` mode and an entry whose policy names a column the table does not store is `PUT`
 - **THEN** the request is refused `422 validation_error`
-
-### Requirement: Catalog import writes no grants
-
-A catalog import SHALL write no access entry on any table: a created table starts with none and a `system` table's
-entries are never touched, as defined by [catalog-export-import](../catalog-export-import/spec.md) ("Import order and
-no grants"). Access is each environment's own policy, so granting access on an imported table stays an operator action
-through `PUT /v1/tables/{name}/access?role=<role>`, on the table itself for a source and on its source for an enrichment,
-whose read-side access is its source's.
-
-#### Scenario: Imported table starts ungranted
-
-- **WHEN** a table that has entries on the source environment is exported and imported
-- **THEN** the target's table has no entry, and the target's `dial_usage_log` entries are unchanged
 
 ### Requirement: Caller values in row policies
 
@@ -1374,7 +1363,10 @@ a role whose list it left as it was keeps its mark. Such operations are a rename
 `PATCH /v1/tables/{name}/schema`, a re-define through `POST /v1/tables/{name}/schema` that drops a listed column, and
 the delete of an enrichment. For an enrichment's column and for an enrichment's delete, those entries are its
 **source's** (they name the column as `<enrichment>.<column>`), so the source's generation and marks move and the
-enrichment's do not. Nothing else SHALL change a generation or a mark: a `PUT` that changes no entry, a description
+enrichment's do not. A catalog import called with `include_access=true` (see
+[catalog-export-import](../catalog-export-import/spec.md), "Access import") SHALL move them exactly as a `PUT` of each
+entry it imports would, while carrying and checking no client `generation`: by one, setting that role's mark, for each
+entry it changes, and not at all for an entry equal to the stored one. Nothing else SHALL change a generation or a mark: a `PUT` that changes no entry, a description
 update, a schema operation that rewrites no entry, a row write and a pipeline change leave them as they were, so none
 of them makes a concurrent access edit conflict. A refused request SHALL change nothing.
 
@@ -1484,6 +1476,13 @@ The generation and the marks SHALL NOT be part of the audited state, of a revisi
   and its enrichment `deployment_ref` at access `generation` 1
 - **WHEN** `deployment_ref`'s column `display_name` is renamed to `label`
 - **THEN** `dial_usage_log` is at `generation` 5 and `deployment_ref` still at `generation` 1
+
+#### Scenario: A catalog import moves the generation as PUTs would
+
+- **GIVEN** a table at access `generation` 3 with entries for roles `X` and `Y`
+- **WHEN** a catalog import with `include_access=true` replaces `X`'s entry and carries an entry for `Y` equal to the stored one
+- **THEN** the table is at `generation` 4, a `PUT` of a different entry for `X` carrying `generation` 3 answers `409 access_conflict`,
+  and a `PUT` of a different entry for `Y` carrying `generation` 3 answers `200`
 
 ### Requirement: Per-role column policies
 
@@ -2166,3 +2165,27 @@ any decision of the access API, and the reads keep their `TABLE_GRANT` check and
   global privilege
 - **WHEN** a caller holding `TABLE_GRANT` reads the access configuration of each
 - **THEN** both carry `"ineffective_grants": []`
+
+### Requirement: Catalog import writes access only on request
+
+A catalog import SHALL write no access entry on any table unless it is called with `include_access=true`: without it, a created table
+starts with none and a `system` table's entries are never touched, as defined by
+[catalog-export-import](../catalog-export-import/spec.md) ("Import order and access"). With it, the import upserts each role entry the
+bundle carries onto the target table, system tables included, as that capability's "Access import" defines, through the same body
+rules as `PUT /v1/tables/{name}/access?role=<role>`, so an import can store only what a `PUT` could. Access is each environment's own
+policy unless the operator asks for it to travel, so granting access on an imported table otherwise stays an operator action through
+`PUT /v1/tables/{name}/access?role=<role>`, on the table itself for a source and on its source for an enrichment, whose read-side
+access is its source's.
+
+#### Scenario: Imported table starts ungranted
+
+- **WHEN** a table that has entries on the source environment is imported without `include_access`, whether or not it was exported
+  with it
+- **THEN** the target's table has no entry, and the target's `dial_usage_log` entries are unchanged
+
+#### Scenario: Imported access obeys the PUT rules
+
+- **WHEN** a bundle whose `access` gives `*` the `write` privilege on a user table `t` is imported with `include_access=true`
+- **THEN** that access entry is `FAIL` with a problem naming `validation_error`, the import is `422` with `error`
+  `catalog_import_invalid`, and `t`'s access is unchanged
+

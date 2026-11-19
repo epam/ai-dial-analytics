@@ -44,7 +44,7 @@ public record AccessEntryReplacedDto(
                 + "everyone_reads_all_rows (a read for '*' with no row policy on a table that is not an enrichment). Empty, "
                 + "never absent, when nothing is reported.";
 
-        static List<IneffectiveGrantDto> of(List<IneffectiveGrant> grants) {
+        public static List<IneffectiveGrantDto> of(List<IneffectiveGrant> grants) {
             return grants.stream()
                     .map(grant -> new IneffectiveGrantDto(grant.role(), PrivilegeScope.grantKey(grant.privilege()),
                             grant.reason().code(), grant.message()))

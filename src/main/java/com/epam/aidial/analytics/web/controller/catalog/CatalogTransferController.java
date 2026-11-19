@@ -41,7 +41,7 @@ import java.time.format.DateTimeFormatter;
  */
 @RestController
 @RequestMapping("/v1/catalog")
-@Tag(name = "Catalog transfer", description = "Export and import tables, columns, grants and pipelines.")
+@Tag(name = "Catalog transfer", description = "Export and import tables, columns and pipelines, and on request their access.")
 public class CatalogTransferController {
 
     private static final DateTimeFormatter FILE_TIMESTAMP =
@@ -53,7 +53,13 @@ public class CatalogTransferController {
 
     private static final String POLICY_DESCRIPTION = "What to do with a bundle object that already exists: "
             + "FAIL_IF_EXISTS refuses the import (409), SKIP_IF_EXISTS keeps the existing object unchanged and imports "
-            + "the rest. OVERWRITE is refused (422): import never changes an existing object.";
+            + "the rest. OVERWRITE is refused (422): import never changes an existing object's definition, columns or "
+            + "pipeline. An existing access entry never conflicts: with include_access, the bundle's entries are written "
+            + "under either policy.";
+
+    private static final String INCLUDE_ACCESS_DESCRIPTION = "Also write the bundle's access entries, per role, onto "
+            + "created, existing and system tables alike, never removing one; requires TABLE_GRANT. Default false: the "
+            + "bundle's access member is ignored.";
 
     private final CatalogExportService exportService;
     private final CatalogImportService importService;
@@ -74,8 +80,10 @@ public class CatalogTransferController {
                     + "tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left "
                     + "out. Each table needs TABLE_GET, and one with sensitive columns the caller may not see is "
                     + "refused (403 `sensitive_column_not_entitled`), and one with a column a column policy hides from the "
-                    + "caller is refused 403 `column_not_entitled`, checked across every bundle table first. Grants, row "
-                    + "policies and column policies never travel: each environment sets its own.")
+                    + "caller is refused 403 `column_not_entitled`, checked across every bundle table first. Access "
+                    + "(privileges, row policies and column policies) travels only with `include_access: true`, which "
+                    + "requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, and "
+                    + "an enrichment a column policy names joins the export.")
     public ResponseEntity<CatalogBundle> export(@Valid @RequestBody(required = false) ExportRequest request) {
         final CatalogBundle bundle = exportService.export(request);
         final String filename = "adas-catalog-" + FILE_TIMESTAMP.format(bundle.exportedAt()) + ".json";
@@ -89,7 +97,8 @@ public class CatalogTransferController {
     @RequiresPrivilege(Privilege.REGISTRY_READ)
     @Operation(summary = "Preview a catalog export (writes nothing)",
             description = "Takes the export body and returns the objects the bundle would carry, each with the reason "
-                    + "it is included, plus the system tables it would require and the objects left out.")
+                    + "it is included, plus the system tables it would require and the objects left out. With "
+                    + "`include_access: true`, `access` lists each table's roles and what stays behind (`left_behind`).")
     public ExportPreview exportPreview(@Valid @RequestBody(required = false) ExportRequest request) {
         return exportService.preview(request);
     }
@@ -99,22 +108,26 @@ public class CatalogTransferController {
     @Operation(summary = "Preview a catalog import (writes nothing)",
             description = "Runs the import's validation pass — the real create services inside a rolled-back "
                     + "transaction, then the arm-time pipeline checks — and returns what an import would do with each "
-                    + "object. Answers 200 whenever the bundle parses, problems included.")
+                    + "object, and with `include_access=true` with each access entry under `access`. Answers 200 "
+                    + "whenever the bundle parses, problems included.")
     public ImportPreview importPreview(
             @Parameter(description = "The bundle file, as exported") @RequestPart("file") MultipartFile file,
             @Parameter(description = POLICY_DESCRIPTION, required = true)
             @RequestParam("resolution_policy") ResolutionPolicy resolutionPolicy,
             @Parameter(description = ACKNOWLEDGE_DESCRIPTION)
-            @RequestParam(value = "acknowledge_reused_names", defaultValue = "false") boolean acknowledgeReusedNames) {
-        return importService.preview(bytes(file), acknowledgeReusedNames, resolutionPolicy);
+            @RequestParam(value = "acknowledge_reused_names", defaultValue = "false") boolean acknowledgeReusedNames,
+            @Parameter(description = INCLUDE_ACCESS_DESCRIPTION)
+            @RequestParam(value = "include_access", defaultValue = "false") boolean includeAccess) {
+        return importService.preview(bytes(file), acknowledgeReusedNames, resolutionPolicy, includeAccess);
     }
 
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @RequiresPrivilege(Privilege.TABLE_CREATE)
     @Operation(summary = "Import a catalog bundle (writes)",
             description = "Runs the same validation pass as the preview and, only if it finds no problem, creates each "
-                    + "object in dependency order as its own step: tables, without grants, then pipelines, always "
-                    + "disabled. On a failure part-way it deletes again what it created. 409 catalog_import_conflict "
+                    + "object in dependency order as its own step: tables, then pipelines, always disabled, and, with "
+                    + "`include_access=true`, the bundle's access entries last, in one transaction; without it no access "
+                    + "is written. On a failure part-way it deletes again what it created. 409 catalog_import_conflict "
                     + "under FAIL_IF_EXISTS when an object exists; 422 catalog_import_invalid when the pass finds a "
                     + "problem — the preview reports each one.")
     public ImportResult importBundle(
@@ -122,8 +135,10 @@ public class CatalogTransferController {
             @Parameter(description = POLICY_DESCRIPTION, required = true)
             @RequestParam("resolution_policy") ResolutionPolicy resolutionPolicy,
             @Parameter(description = ACKNOWLEDGE_DESCRIPTION)
-            @RequestParam(value = "acknowledge_reused_names", defaultValue = "false") boolean acknowledgeReusedNames) {
-        return importService.apply(bytes(file), acknowledgeReusedNames, resolutionPolicy);
+            @RequestParam(value = "acknowledge_reused_names", defaultValue = "false") boolean acknowledgeReusedNames,
+            @Parameter(description = INCLUDE_ACCESS_DESCRIPTION)
+            @RequestParam(value = "include_access", defaultValue = "false") boolean includeAccess) {
+        return importService.apply(bytes(file), acknowledgeReusedNames, resolutionPolicy, includeAccess);
     }
 
     /**

@@ -20,13 +20,17 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -341,18 +345,18 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         importCall("/v1/catalog/import/preview", blankName.toString(), null, "SKIP_IF_EXISTS")
                 .andExpect(status().isBadRequest());
 
-        assertThat(bundle.get("format_version").asInt()).isEqualTo(3);
+        assertThat(bundle.get("format_version").asInt()).isEqualTo(4);
         final ObjectNode newer = bundle.deepCopy();
-        newer.put("format_version", 4);
-        newer.put("added_in_v4", true);
+        newer.put("format_version", 5);
+        newer.put("added_in_v5", true);
         importCall("/v1/catalog/import", newer.toString(), null, "SKIP_IF_EXISTS")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("catalog_bundle_version_unsupported"))
-                .andExpect(jsonPath("$.message").value(containsString("format_version 4")));
+                .andExpect(jsonPath("$.message").value(containsString("format_version 5")));
 
-        // Version-1 and version-2 bundles — this shape carries neither `sql` nor a route or input token budget —
-        // still read, and plan as before.
-        for (int version : new int[] {1, 2}) {
+        // Version-1 to version-3 bundles — this shape carries neither `sql`, a route, an input token budget nor
+        // access — still read, and plan as before.
+        for (int version : new int[] {1, 2, 3}) {
             final ObjectNode older = bundle.deepCopy();
             older.put("format_version", version);
             importCall("/v1/catalog/import/preview", older.toString(), null, "SKIP_IF_EXISTS")
@@ -386,6 +390,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void grantsNeverTravel() throws Exception {
         final String bundle = exportTables(DUL);
+        assertThat(json.readTree(bundle).has("access")).isFalse();
         assertThat(json.readTree(bundle).get("tables").get(0).has("access")).isFalse();
         assertThat(json.readTree(bundle).has("access_omitted")).isFalse();
         forget();
@@ -497,7 +502,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
 
             final ObjectNode bundle = (ObjectNode) json.readTree(
                     export("{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + pipeline + "\"}]}"));
-            assertThat(bundle.get("format_version").asInt()).isEqualTo(3);
+            assertThat(bundle.get("format_version").asInt()).isEqualTo(4);
             assertThat(names(bundle.get("tables"), "table")).contains(BASE, SENT, target);
             final JsonNode bundled = pipeline(bundle, pipeline);
             assertThat(bundled.get("sql").asString()).isEqualTo(SQL_DECLARATION);
@@ -637,6 +642,495 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     private String exportFixture() throws Exception {
         return export("{\"components\":[{\"type\":\"table\",\"name\":\"" + ROLL + "\"},"
                 + "{\"type\":\"table\",\"name\":\"" + DUL + "\"}]}");
+    }
+
+    // --- access ---------------------------------------------------------------------------------------
+
+    @Test
+    void accessRoundTripsWithTheEnrichmentItsColumnPolicyNames() throws Exception {
+        putEntryJson(BASE, "cx-analysts", "{\"privileges\":[\"read\"],\"rows\":{\"where\":\"label = 'a'\"},"
+                + "\"columns\":[\"event_id\",\"label\",\"" + SENT + ".sentiment\"]}");
+        final String body = "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\"}],\"include_access\":true}";
+        mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[?(@.name == '" + SENT + "')].reason").value(hasItem("column policy of " + BASE)))
+                .andExpect(jsonPath("$.objects[?(@.name == '" + SENT_LIVE + "')].reason").value(hasItem("targets " + SENT)))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].roles[*]").value(contains("cx-analysts", READERS)));
+        final String bundle = export(body);
+        final JsonNode exported = json.readTree(bundle);
+        assertThat(exported.get("format_version").asInt()).isEqualTo(4);
+        assertThat(names(exported.get("tables"), "table")).containsExactlyInAnyOrder(BASE, SENT);
+        final JsonNode analysts = exported.get("access").get(BASE).get("cx-analysts");
+        assertThat(analysts.get("rows").get("filter").isObject()).isTrue();
+        assertThat(analysts.has("columns")).isTrue();
+        assertThat(exported.get("access").get(BASE).get(READERS).get("rows").isNull()).isTrue();
+        final String before = access(BASE);
+
+        forget();
+        final ResultActions imported = importAccess("/v1/catalog/import", bundle, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.access[*].status", everyItem(is("created"))))
+                .andExpect(jsonPath("$.access[*].role").value(contains("cx-analysts", READERS)));
+        assertThat(access(BASE)).isEqualTo(before);
+
+        final long generation = generation(BASE);
+        importAccess("/v1/catalog/import", bundle, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[*].import_action", everyItem(is("SKIP"))))
+                .andExpect(jsonPath("$.access[*].status", everyItem(is("skipped"))));
+        assertThat(generation(BASE)).isEqualTo(generation);
+    }
+
+    @Test
+    void accessLandsOnTheSystemTablePerRoleAndMovesTheGenerationAsPutsWould() throws Exception {
+        final String bundle = accessOnly("{\"" + READERS + "\":{\"privileges\":[\"read\"],\"rows\":null,\"columns\":null},"
+                + "\"cx-new\":{\"privileges\":[\"get\"]},\"cx-kept\":{\"privileges\":[\"get\"]}}");
+        putAccess(SYSTEM, "cx-kept", "get");
+        putAccess(SYSTEM, "cx-other", "read");
+        final String otherBefore = json.readTree(access(SYSTEM)).get("cx-other").toString();
+        final long generation = generation(SYSTEM);
+
+        importAccess("/v1/catalog/import/preview", bundle, "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-new')].import_action").value(hasItem("CREATE")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-new')].prev").value(hasItem(nullValue())))
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].import_action").value(hasItem("REPLACE")))
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].prev.privileges[*]").value(contains("read", "sensitive")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-new')].ineffective_grants[*]").isEmpty());
+        importCall("/v1/catalog/import", bundle, null, "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access").isEmpty());
+        assertThat(generation(SYSTEM)).isEqualTo(generation);
+
+        final String importId = importId(importAccess("/v1/catalog/import", bundle, "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-new')].status").value(hasItem("created")))
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].status").value(hasItem("replaced")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-kept')].status").value(hasItem("skipped"))));
+        assertThat(generation(SYSTEM)).isEqualTo(generation + 2);
+        final JsonNode roles = json.readTree(access(SYSTEM));
+        assertThat(roles.get(READERS).get("privileges").toString()).isEqualTo("[\"read\"]");
+        assertThat(roles.get("cx-new").get("privileges").toString()).isEqualTo("[\"get\"]");
+        assertThat(roles.get("cx-kept").get("privileges").toString()).isEqualTo("[\"get\"]");
+        // A role the bundle does not name keeps its entry.
+        assertThat(roles.get("cx-other").toString()).isEqualTo(otherBefore);
+        assertThat(types(filtered(importActivities(importId), "Table", SYSTEM))).containsExactly("Update");
+        // The import moved only the marks of the roles it changed, as PUTs would have.
+        putEntryAt(SYSTEM, READERS, "{\"privileges\":[\"get\"]}", generation).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("access_conflict"));
+        putEntryAt(SYSTEM, "cx-new", "{\"privileges\":[\"read\"]}", generation).andExpect(status().isConflict());
+        putEntryAt(SYSTEM, "cx-kept", "{\"privileges\":[\"get\",\"read\"]}", generation).andExpect(status().isOk());
+        putAccess(SYSTEM, "cx-kept", "get");
+
+        final int lastRevision = lastRevision();
+        final long afterImport = generation(SYSTEM);
+        importAccess("/v1/catalog/import", bundle, "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[*].status", everyItem(is("skipped"))));
+        assertThat(generation(SYSTEM)).isEqualTo(afterImport);
+        assertThat(lastRevision()).isEqualTo(lastRevision);
+    }
+
+    @Test
+    void exportPreviewReportsWhatStaysBehind() throws Exception {
+        storedAccess(BASE, access -> {
+            ((ArrayNode) access.get("read")).add("*").add("READ_ONLY_ANALYTIC");
+            ((ArrayNode) access.get("write")).add("*");
+        });
+        jdbc.update("UPDATE table_definition SET column_policies = CAST(? AS jsonb) WHERE name = ?",
+                "{\"READ_ONLY_ANALYTIC\":[\"label\",\"" + SENT + ".sentiment\"]}", BASE);
+        storedAccess(SENT, access -> {
+            ((ArrayNode) access.get("read")).add("cx-left");
+            ((ArrayNode) access.get("write")).add("cx-left");
+        });
+        // A leftover row policy on the enrichment, in the stored form a PUT on the source writes.
+        putEntryJson(BASE, "cx-left", "{\"privileges\":[\"read\"],\"rows\":{\"where\":\"label = 'a'\"}}");
+        jdbc.update("UPDATE table_definition SET row_policies = (SELECT row_policies FROM table_definition WHERE name = ?) "
+                + "WHERE name = ?", BASE, SENT);
+        mockMvc.perform(delete("/v1/tables/" + BASE + "/access?role=cx-left")).andExpect(status().isNoContent());
+        storedAccess(SYSTEM, access -> ((ArrayNode) access.get("write")).add(READERS));
+        final String body = "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\"},{\"type\":\"table\",\"name\":\""
+                + SENT + "\"},{\"type\":\"table\",\"name\":\"" + SYSTEM + "\"}],\"include_access\":true}";
+
+        mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].roles[*]").value(contains("*", READERS)))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == '*')].error")
+                        .value(hasItem("validation_error")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == '*')].entry.privileges[*]")
+                        .value(contains("write")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == 'READ_ONLY_ANALYTIC')].error")
+                        .value(hasItem("validation_error")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == 'READ_ONLY_ANALYTIC')].entry.privileges[*]")
+                        .value(contains("read")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == 'READ_ONLY_ANALYTIC')].entry.columns[*]")
+                        .value(contains(SENT + ".sentiment", "label")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + SENT + "')].left_behind[?(@.role == 'cx-left')].error")
+                        .value(hasItem("enrichment_follows_source")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + SENT + "')].left_behind[?(@.role == 'cx-left')].entry.privileges[*]")
+                        .value(contains("read")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + SENT + "')].left_behind[?(@.role == 'cx-left')].entry.rows.filter")
+                        .value(hasItem(notNullValue())))
+                .andExpect(jsonPath("$.access[?(@.table == '" + SYSTEM + "')].left_behind[?(@.role == '" + READERS + "')].error")
+                        .value(hasItem("table_is_system")))
+                .andExpect(jsonPath("$.required_system_tables[*].name").value(hasItem(SYSTEM)));
+        final JsonNode bundle = json.readTree(export(body));
+        assertThat(bundle.get("access").get(BASE).get("*").get("privileges").toString()).isEqualTo("[\"read\"]");
+        assertThat(bundle.get("access").get(BASE).has("READ_ONLY_ANALYTIC")).isFalse();
+        assertThat(bundle.get("access").get(SENT).get("cx-left").toString())
+                .isEqualTo("{\"privileges\":[\"write\"],\"rows\":null,\"columns\":null}");
+        assertThat(bundle.get("access").get(SYSTEM).get(READERS).get("privileges").toString()).isEqualTo("[\"read\",\"sensitive\"]");
+
+        // Without the flag the preview carries no access member.
+        mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\"}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access").doesNotExist());
+        // A left-behind entry naming an enrichment pulls nothing in.
+        final JsonNode alone = json.readTree(export("{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE
+                + "\"}],\"include_access\":true}"));
+        assertThat(names(alone.get("tables"), "table")).containsExactly(BASE);
+    }
+
+    @Test
+    void skippedEnrichmentLeavesOnlyTheEntryNamingItBehind() throws Exception {
+        putEntryJson(BASE, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"event_id\",\"" + SENT + ".sentiment\"]}");
+        jdbc.update("UPDATE table_definition SET status = 'FAILED' WHERE name = ?", SENT);
+        try {
+            mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content("{\"include_access\":true}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.objects[*].name").value(hasItem(BASE)))
+                    .andExpect(jsonPath("$.skipped[?(@.name == '" + SENT + "')].reason").value(hasItem("failed")))
+                    .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].roles[*]").value(contains(READERS)))
+                    .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].left_behind[?(@.role == 'cx-analysts')].error")
+                            .value(hasItem("dependency_skipped")));
+            mockMvc.perform(post("/v1/catalog/export").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\"}],\"include_access\":true}"))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("catalog_export_invalid"))
+                    .andExpect(jsonPath("$.message").value(containsString(SENT)));
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", SENT);
+        }
+    }
+
+    @Test
+    void exportingEverythingCoversSystemTablesNothingReaches() throws Exception {
+        forget();
+        mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content("{\"include_access\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.required_system_tables[?(@.name == '" + SYSTEM + "')].reason").value(hasItem("access")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + SYSTEM + "')].roles[*]").value(hasItem(READERS)));
+        mockMvc.perform(post("/v1/catalog/export").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"components\":[{\"type\":\"table\",\"name\":\"" + SYSTEM + "\"}],\"include_access\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables").isEmpty())
+                .andExpect(jsonPath("$.pipelines").isEmpty())
+                .andExpect(jsonPath("$.required_system_tables[*]").value(contains(SYSTEM)))
+                .andExpect(jsonPath("$.access." + SYSTEM + "['" + READERS + "'].privileges[*]")
+                        .value(contains("read", "sensitive")));
+        mockMvc.perform(post("/v1/catalog/export").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"components\":[{\"type\":\"table\",\"name\":\"dial_usage_log_payload\"}],\"include_access\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.required_system_tables[*]").value(contains("dial_usage_log_payload")))
+                .andExpect(jsonPath("$.access").isEmpty());
+    }
+
+    @Test
+    void importValidatesAccessWithThePutRules() throws Exception {
+        putEntryJson(BASE, "cx-ordered", "{\"privileges\":[\"get\",\"read\"],\"columns\":[\"event_id\",\"label\"]}");
+        final ObjectNode bundle = (ObjectNode) json.readTree(export("{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE
+                + "\"}],\"include_access\":true}"));
+        final ObjectNode reordered = bundle.deepCopy();
+        ((ObjectNode) reordered.get("access").get(BASE)).set("cx-ordered",
+                json.readTree("{\"privileges\":[\"read\",\"get\"],\"columns\":[\"label\",\"event_id\"]}"));
+        importAccess("/v1/catalog/import/preview", reordered.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-ordered')].import_action").value(hasItem("SKIP")));
+        forget();
+
+        // Without the flag the access member is ignored: the created table has no entry.
+        importCall("/v1/catalog/import", bundle.toString(), null, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access").isEmpty());
+        assertThat(json.readTree(access(BASE))).isEqualTo(json.readTree("{}"));
+        forget();
+
+        assertAccessFails(withEntry(bundle, "cx-x", "{\"privileges\":[]}"), "validation_error: ");
+        assertAccessFails(withEntry(bundle, "*", "{\"privileges\":[\"write\"]}"), "validation_error: ");
+        assertAccessFails(withEntry(bundle, "cx-x", "{\"privileges\":[\"read\"],\"columns\":[\"zzz\"]}"), "zzz");
+        assertBundleProblem(withEntry(withEntry(bundle, "cx-a", "{\"privileges\":[\"read\"]}"), " cx-a", "{\"privileges\":[\"get\"]}"),
+                "trim to role 'cx-a'");
+        assertBundleProblem(withEntry(bundle, " ", "{\"privileges\":[\"read\"]}"), "blank role key");
+        final ObjectNode nowhere = bundle.deepCopy();
+        ((ObjectNode) nowhere.get("access")).set("cx_nowhere", json.readTree("{\"r\":{\"privileges\":[\"read\"]}}"));
+        assertBundleProblem(nowhere, "'cx_nowhere'");
+        final ObjectNode withoutAccess = bundle.deepCopy();
+        withoutAccess.remove("access");
+        assertBundleProblem(withoutAccess, "no access member");
+        final ObjectNode nullAccess = bundle.deepCopy();
+        nullAccess.putNull("access");
+        assertBundleProblem(nullAccess, "no access member");
+        importCall("/v1/catalog/import/preview", nullAccess.toString(), null, "SKIP_IF_EXISTS").andExpect(status().isOk());
+
+        for (final String nulled : List.of("{\"" + BASE + "\":null}", "{\"" + BASE + "\":{\"r\":null}}",
+                "{\"" + BASE + "\":{\"r\":{\"privileges\":[\"read\"],\"extra\":1}}}")) {
+            final ObjectNode invalid = bundle.deepCopy();
+            invalid.set("access", json.readTree(nulled));
+            importAccess("/v1/catalog/import/preview", invalid.toString(), "SKIP_IF_EXISTS").andExpect(status().isBadRequest());
+            importCall("/v1/catalog/import/preview", invalid.toString(), null, "SKIP_IF_EXISTS").andExpect(status().isBadRequest());
+        }
+
+        importAccess("/v1/catalog/import/preview", withEntry(bundle, "cx-x", "{\"privileges\":[\"read\"],\"rows\":{\"where\":\"label = 'a'\"}}").toString(),
+                        "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-x')].next.rows.filter").value(hasItem(notNullValue())))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-x')].next.rows.where").isEmpty());
+        importAccess("/v1/catalog/import/preview", withEntry(bundle, "*", "{\"privileges\":[\"read\"]}").toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == '*')].ineffective_grants[*].reason").value(hasItem("everyone_reads_all_rows")));
+    }
+
+    @Test
+    void previewWithAccessArmsAgainstTheAccessItWouldWrite() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(export("{\"include_access\":true}"));
+        importAccess("/v1/catalog/import/preview", bundle.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].import_action").value(hasItem("SKIP")));
+        forget();
+
+        importAccess("/v1/catalog/import/preview", withEntry(bundle, "*", "{\"privileges\":[\"write\"]}").toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[*].armable", everyItem(is(true))))
+                .andExpect(jsonPath("$.access[?(@.role == '*')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[*].ineffective_grants[*]").isEmpty());
+
+        final ObjectNode refused = bundle.deepCopy();
+        for (final JsonNode table : refused.get("tables")) {
+            if (table.get("table").get("name").asString().equals(BASE)) {
+                ((ObjectNode) table.get("schema").get("columns").get(1)).put("name", "bad name");
+            }
+        }
+        importAccess("/v1/catalog/import/preview", refused.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].import_action", everyItem(is("FAIL"))))
+                .andExpect(jsonPath("$.access[?(@.table == '" + BASE + "')].problems[*]").value(hasItem(containsString(BASE))));
+
+        final ObjectNode missingSystem = bundle.deepCopy();
+        ((ArrayNode) missingSystem.get("required_system_tables")).add("cx_no_such_system_table");
+        ((ObjectNode) missingSystem.get("access")).set("cx_no_such_system_table", json.readTree("{\"r\":{\"privileges\":[\"read\"]}}"));
+        importAccess("/v1/catalog/import/preview", missingSystem.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.required_system_tables[?(@.name == 'cx_no_such_system_table')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.table == 'cx_no_such_system_table')].import_action").value(hasItem("FAIL")));
+        importAccess("/v1/catalog/import", missingSystem.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    @Test
+    void failedAccessStepRollsEverythingBack() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportTables(BASE));
+        bundle.set("access", json.readTree("{\"" + BASE + "\":{\"" + READERS + "\":{\"privileges\":[\"read\"]}},\"" + SYSTEM
+                + "\":{\"cx-new\":{\"privileges\":[\"get\"]}}}"));
+        ((ArrayNode) bundle.get("required_system_tables")).add(SYSTEM);
+        final ObjectNode two = (ObjectNode) json.readTree(exportTables(BASE, SENT));
+        two.set("access", bundle.get("access"));
+        two.set("required_system_tables", bundle.get("required_system_tables"));
+        forget();
+        final String systemBefore = fullAccess(SYSTEM);
+        // The access write on the created table fails only once the table is committed, as it is in the import's
+        // access step, never inside the validation pass, which creates the table in its own transaction.
+        jdbc.execute("CREATE OR REPLACE FUNCTION cx_fail_access() RETURNS trigger AS $$ BEGIN "
+                + "IF NEW.name = '" + BASE + "' AND NEW.access::text IS DISTINCT FROM OLD.access::text "
+                + "AND NOT (OLD.xmin = pg_current_xact_id()::xid) THEN RAISE EXCEPTION 'cx access refused'; END IF; "
+                + "RETURN NEW; END $$ LANGUAGE plpgsql");
+        jdbc.execute("CREATE TRIGGER cx_fail_access BEFORE UPDATE ON table_definition FOR EACH ROW EXECUTE FUNCTION cx_fail_access()");
+        try {
+            importAccess("/v1/catalog/import", bundle.toString(), "SKIP_IF_EXISTS")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.outcome").value("rolled_back"))
+                    .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].status").value(hasItem("rolled_back")))
+                    .andExpect(jsonPath("$.access[*].status", everyItem(is("rolled_back"))))
+                    .andExpect(jsonPath("$.access[*].problems[*]", everyItem(containsString("writing the access failed"))));
+        } finally {
+            jdbc.execute("DROP TRIGGER IF EXISTS cx_fail_access ON table_definition");
+            jdbc.execute("DROP FUNCTION IF EXISTS cx_fail_access()");
+        }
+        mockMvc.perform(get("/v1/tables/" + BASE)).andExpect(status().isNotFound());
+        assertThat(fullAccess(SYSTEM)).isEqualTo(systemBefore);
+
+        // A failure before the access step leaves every access entry unattempted.
+        execute("CREATE TABLE " + SENT + " (x UInt8) ENGINE = Memory");
+        importAccess("/v1/catalog/import", two.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("rolled_back"))
+                .andExpect(jsonPath("$.access[*].status", everyItem(is("skipped"))))
+                .andExpect(jsonPath("$.access[*].problems[*]", everyItem(containsString("not attempted"))))
+                .andExpect(jsonPath("$.access[*].problems[*]", everyItem(containsString("table '" + SENT + "'"))));
+        assertThat(fullAccess(SYSTEM)).isEqualTo(systemBefore);
+    }
+
+    @Test
+    void systemTableAccessFollowsTheClosureAndPullsInWhatItsColumnPoliciesName() throws Exception {
+        mockMvc.perform(post("/v1/catalog/export").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + DUL_LIVE + "\"}],\"include_access\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.required_system_tables[*]").value(hasItem(SYSTEM)))
+                .andExpect(jsonPath("$.access." + SYSTEM + "['" + READERS + "'].privileges[*]").value(contains("read", "sensitive")));
+
+        final String payload = "dial_usage_log_payload";
+        final String ownColumn = firstColumn(SYSTEM);
+        final String payloadColumn = payload + "." + firstColumn(payload);
+        putEntryJson(SYSTEM, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"" + ownColumn + "\",\"" + DUL + ".note\",\""
+                + payloadColumn + "\"]}");
+        final String body = "{\"components\":[{\"type\":\"table\",\"name\":\"" + SYSTEM + "\"}],\"include_access\":true}";
+        mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[?(@.name == '" + DUL + "')].reason").value(hasItem("column policy of " + SYSTEM)))
+                .andExpect(jsonPath("$.objects[?(@.name == '" + DUL_LIVE + "')].reason").value(hasItem("targets " + DUL)))
+                .andExpect(jsonPath("$.required_system_tables[?(@.name == '" + payload + "')].reason")
+                        .value(hasItem("column policy of " + SYSTEM)));
+        final String bundle = export(body);
+
+        forget();
+        // Deleting the enrichment took its column out of the policy here, so the import replaces the entry, and it
+        // can only do so because the bundle brings the enrichment along.
+        importAccess("/v1/catalog/import", bundle, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + DUL + "')].status").value(hasItem("created")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-analysts')].status").value(hasItem("replaced")));
+        assertThat(json.readTree(access(SYSTEM)).get("cx-analysts"))
+                .isEqualTo(json.readTree(bundle).get("access").get(SYSTEM).get("cx-analysts"));
+    }
+
+    @Test
+    void exportingEverythingLeavesSystemTableUnportableStateBehind() throws Exception {
+        putEntryJson(SYSTEM, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"" + firstColumn(SYSTEM) + "\",\"" + DUL
+                + ".note\"]}");
+        storedAccess(SYSTEM, access -> ((ArrayNode) access.get("write")).add(READERS));
+        jdbc.update("UPDATE table_definition SET status = 'FAILED' WHERE name = ?", DUL);
+        try {
+            mockMvc.perform(post("/v1/catalog/export/preview").contentType(MediaType.APPLICATION_JSON).content("{\"include_access\":true}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.skipped[?(@.name == '" + DUL + "')].reason").value(hasItem("failed")))
+                    .andExpect(jsonPath("$.access[?(@.table == '" + SYSTEM + "')].roles[*]").value(not(hasItem("cx-analysts"))))
+                    .andExpect(jsonPath("$.access[?(@.table == '" + SYSTEM + "')].left_behind[?(@.role == 'cx-analysts')].error")
+                            .value(hasItem("dependency_skipped")))
+                    .andExpect(jsonPath("$.access[?(@.table == '" + SYSTEM + "')].left_behind[?(@.role == '" + READERS + "')].error")
+                            .value(hasItem("table_is_system")));
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", DUL);
+        }
+    }
+
+    @Test
+    void accessLandsOnSkippedExistingTableAndNeverRemovesAnEntry() throws Exception {
+        final ObjectNode bundle = withEntry((ObjectNode) json.readTree(export("{\"components\":[{\"type\":\"table\",\"name\":\""
+                + BASE + "\"}],\"include_access\":true}")), "cx-x", "{\"privileges\":[\"get\"]}");
+        final JsonNode tableBefore = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse().getContentAsString());
+
+        importAccess("/v1/catalog/import", bundle.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("SKIP")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-x')].status").value(hasItem("created")))
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].status").value(hasItem("skipped")));
+        final JsonNode tableAfter = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse().getContentAsString());
+        assertThat(tableAfter.get("columns")).isEqualTo(tableBefore.get("columns"));
+        assertThat(tableAfter.get("description")).isEqualTo(tableBefore.get("description"));
+        assertThat(json.readTree(access(BASE)).get("cx-x").get("privileges").toString()).isEqualTo("[\"get\"]");
+
+        final String readersBefore = json.readTree(access(BASE)).get(READERS).toString();
+        final ObjectNode emptied = withEntry(bundle, READERS, "{\"privileges\":[]}");
+        importAccess("/v1/catalog/import/preview", emptied.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.role == '" + READERS + "')].problems[*]")
+                        .value(hasItem(containsString("DELETE /v1/tables/{name}/access?role="))));
+        importAccess("/v1/catalog/import", emptied.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+        assertThat(json.readTree(access(BASE)).get(READERS).toString()).isEqualTo(readersBefore);
+
+        // A bundle edited to drop the enrichment its access names fails that entry, naming the column.
+        final ObjectNode lacking = withEntry(bundle, "cx-y", "{\"privileges\":[\"read\"],\"columns\":[\"event_id\",\"" + SENT + ".sentiment\"]}");
+        forget();
+        importAccess("/v1/catalog/import/preview", lacking.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-y')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-y')].problems[*]").value(hasItem(containsString(SENT + ".sentiment"))));
+        importAccess("/v1/catalog/import", lacking.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent());
+    }
+
+    private String firstColumn(String table) throws Exception {
+        return json.readTree(mockMvc.perform(get("/v1/tables/" + table)).andExpect(status().isOk()).andReturn().getResponse()
+                .getContentAsString()).get("columns").get(0).get("name").asString();
+    }
+
+    private ResultActions putEntryAt(String table, String role, String members, long generation) throws Exception {
+        return mockMvc.perform(put("/v1/tables/" + table + "/access?role=" + role).contentType(MediaType.APPLICATION_JSON)
+                .content(((ObjectNode) json.readTree(members)).put("generation", generation).toString()));
+    }
+
+    /** A bundle requiring {@code dial_usage_log} and carrying only {@code roles} as its access, with no table or pipeline. */
+    private String accessOnly(String roles) {
+        return "{\"format\":\"adas-catalog\",\"format_version\":4,\"required_system_tables\":[\"" + SYSTEM + "\"],"
+                + "\"tables\":[],\"pipelines\":[],\"access\":{\"" + SYSTEM + "\":" + roles + "}}";
+    }
+
+    /** {@code bundle} with {@code role}'s entry on {@code BASE} set to {@code entry}. */
+    private ObjectNode withEntry(ObjectNode bundle, String role, String entry) {
+        final ObjectNode copy = bundle.deepCopy();
+        ((ObjectNode) copy.get("access").get(BASE)).set(role, json.readTree(entry));
+        return copy;
+    }
+
+    private void assertAccessFails(ObjectNode bundle, String problem) throws Exception {
+        importAccess("/v1/catalog/import/preview", bundle.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[*].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[*].problems[*]").value(hasItem(containsString(problem))));
+        importAccess("/v1/catalog/import", bundle.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+        mockMvc.perform(get("/v1/tables/" + BASE)).andExpect(status().isNotFound());
+    }
+
+    private void assertBundleProblem(ObjectNode bundle, String problem) throws Exception {
+        importAccess("/v1/catalog/import/preview", bundle.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.validation_errors[*]").value(hasItem(containsString(problem))));
+        importAccess("/v1/catalog/import", bundle.toString(), "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    private ResultActions importAccess(String path, String bundle, String policy) throws Exception {
+        return importCall(path, bundle, Map.of("include_access", "true"), policy);
+    }
+
+    /** Puts {@code role}'s whole entry on {@code table} as {@code members}, at the table's current generation. */
+    private void putEntryJson(String table, String role, String members) throws Exception {
+        putEntry(table, role, ((ObjectNode) json.readTree(members)).put("generation", generation(table)));
+    }
+
+    /** Rewrites {@code table}'s stored grant lists in place, as an earlier build could have left them. */
+    private void storedAccess(String table, Consumer<ObjectNode> change) {
+        final ObjectNode access = (ObjectNode) json.readTree(jdbc.queryForObject("SELECT access::text FROM table_definition "
+                + "WHERE name = ?", String.class, table));
+        for (final String key : List.of("get", "read", "sensitive", "write", "modify")) {
+            if (!access.has(key)) {
+                access.putArray(key);
+            }
+        }
+        change.accept(access);
+        jdbc.update("UPDATE table_definition SET access = CAST(? AS jsonb) WHERE name = ?", access.toString(), table);
     }
 
     private String exportTables(String... tables) throws Exception {

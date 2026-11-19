@@ -24,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -33,6 +34,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Predicate;
 
 /**
  * A table's access configuration as one entry per raw provider role, {@code {privileges, rows, columns}}: a view over
@@ -42,8 +44,9 @@ import java.util.TreeSet;
  * definition's row lock. A write conflicts only when its own role changed after the generation it carries (see
  * {@code openspec/specs/table-access-control/spec.md}, "Access configuration generation").
  *
- * <p>Every rule here constrains what may be stored, so it applies in {@code none} mode too. Authorization sits at the
- * web layer ({@code TABLE_GRANT} on every method).
+ * <p>Every rule here constrains what may be stored, so it applies in {@code none} mode too. Authorization sits with the
+ * callers: the web layer ({@code TABLE_GRANT} on every endpoint) and the catalog transfer, which checks
+ * {@code TABLE_GRANT} itself before it calls {@link #portable}, {@link #importEntryFor} or {@link #importEntries}.
  */
 @Service
 @RequiredArgsConstructor
@@ -123,6 +126,23 @@ public class TableAccessService {
 
     /** A {@code rows} member as sent: one of {@code filter} and {@code where}. */
     public record RowsRequest(FilterNode filter, String where) {}
+
+    /** What a catalog import did with one role's entry. */
+    public enum ImportStatus { CREATED, REPLACED, SKIPPED }
+
+    /** A part of a stored entry an export leaves behind, and the error code a {@code PUT} of it would answer. */
+    public record LeftBehind(String role, AccessEntry entry, String error) {}
+
+    /** A table's entries as an export carries them, sorted by role, and what it leaves behind, by role then step. */
+    public record PortableAccess(Map<String, AccessEntry> entries, List<LeftBehind> leftBehind) {}
+
+    /** The {@code error} code a refusal of a {@code PUT}'s body checks answers with. */
+    public static String errorCode(RuntimeException refusal) {
+        if (refusal instanceof EnrichmentFollowsSourceException) {
+            return "enrichment_follows_source";
+        }
+        return refusal instanceof SystemTableException ? "table_is_system" : "validation_error";
+    }
 
     /** Every role's entry on {@code table}, each reported on as stored now. */
     @Transactional(readOnly = true)
@@ -205,6 +225,174 @@ public class TableAccessService {
         }
         write(definition, key, EMPTY);
         bump(definition, key);
+    }
+
+    /**
+     * The entry a {@code PUT} of {@code body} for {@code role} would store on {@code definition}, or the {@code PUT}'s
+     * refusal: the enrichment check, then the body checks, with no lock, generation or conflict check. Deliberately not
+     * {@code @Transactional}: an export calls it inside its read-only transaction and expects refusals, which escaping a
+     * transactional proxy would mark that transaction rollback-only.
+     */
+    public AccessEntry entryFor(TableDefinitionEntity definition, String role, EntryRequest body) {
+        requireNoReadSideOnEnrichment(definition, body);
+        return validated(definition, role, body);
+    }
+
+    /**
+     * As {@link #entryFor}, refusing an entry with no privilege and no policy: a {@code PUT} of one removes the role,
+     * and an import never removes an entry.
+     */
+    public AccessEntry importEntryFor(TableDefinitionEntity definition, String role, EntryRequest body) {
+        final AccessEntry entry = entryFor(definition, role, body);
+        if (entry.isEmpty()) {
+            throw new TableValidationException("the entry of role '" + StringUtils.trimToEmpty(role) + "' on table '"
+                    + definition.getName() + "' carries no privilege and no policy, and an import never removes an entry; "
+                    + "remove one with DELETE /v1/tables/{name}/access?role=");
+        }
+        return entry;
+    }
+
+    /**
+     * Writes a catalog import's entries, {@code table -> role -> body}, in one transaction: each table locked in the
+     * codebase's lock order (enrichments before sources, then by name), each entry checked as {@link #importEntryFor}
+     * does, an entry equal to the stored one left as it is, and every other one written with the generation and the
+     * role's mark moved as a {@code PUT} would, with no client generation. Roles the map does not name keep their entry.
+     *
+     * @return per table and trimmed role, what was done
+     */
+    @Transactional
+    public Map<String, Map<String, ImportStatus>> importEntries(Map<String, Map<String, EntryRequest>> bodies) {
+        // The lock order comes from a projection: loading the rows first would make each lock below return the
+        // stale managed copy, and the write would then overwrite a change committed in between.
+        final List<TableDefinitionRepository.NameAndType> found = definitions.findTypes(bodies.keySet());
+        if (found.size() != bodies.size()) {
+            final Set<String> missing = new TreeSet<>(bodies.keySet());
+            found.forEach(table -> missing.remove(table.getName()));
+            throw new TableNotFoundException("table '" + missing.iterator().next() + "' not found");
+        }
+        final List<String> order = found.stream()
+                .sorted(Comparator.<TableDefinitionRepository.NameAndType>comparingInt(table -> table.getType() == TableType.ENRICHMENT ? 0 : 1)
+                        .thenComparing(TableDefinitionRepository.NameAndType::getName))
+                .map(TableDefinitionRepository.NameAndType::getName)
+                .toList();
+        // Every row is locked before any entry is checked: a check may load other definitions (a `where` translation
+        // reads the catalog), and a row loaded that way before its own lock would be returned stale by the lock.
+        final Map<String, TableDefinitionEntity> locked = new LinkedHashMap<>();
+        for (final String table : order) {
+            locked.put(table, lock(table));
+        }
+        final Map<String, Map<String, ImportStatus>> statuses = new TreeMap<>();
+        for (final Map.Entry<String, TableDefinitionEntity> lockedTable : locked.entrySet()) {
+            final String table = lockedTable.getKey();
+            final TableDefinitionEntity definition = lockedTable.getValue();
+            final Map<String, ImportStatus> tableStatuses = new TreeMap<>();
+            for (final Map.Entry<String, EntryRequest> roleEntry : new TreeMap<>(bodies.get(table)).entrySet()) {
+                final String key = StringUtils.trimToEmpty(roleEntry.getKey());
+                final AccessEntry entry = importEntryFor(definition, key, roleEntry.getValue());
+                final AccessEntry stored = entries(definition).get(key);
+                if (entry.equals(stored)) {
+                    tableStatuses.put(key, ImportStatus.SKIPPED);
+                    continue;
+                }
+                write(definition, key, entry);
+                bump(definition, key);
+                tableStatuses.put(key, stored == null ? ImportStatus.CREATED : ImportStatus.REPLACED);
+            }
+            statuses.put(table, tableStatuses);
+        }
+        // A later native read in the same transaction (the arm-time row-policy check) must see these writes.
+        definitions.flush();
+        return statuses;
+    }
+
+    /**
+     * The ineffective-grant report of {@code role}'s stored entry on {@code table}, judged on the table's entries as
+     * stored now, as a {@code PUT} of that entry would return it; empty when the role has no entry. Joins the caller's
+     * transaction, if any.
+     */
+    public List<IneffectiveGrant> ineffectiveGrants(String table, String role) {
+        final TableDefinitionEntity definition = require(table);
+        final Map<String, AccessEntry> entries = entries(definition);
+        final AccessEntry entry = entries.get(role);
+        return entry == null ? List.of() : reportIneffective(definition, entries, role, entry);
+    }
+
+    /**
+     * {@code definition}'s stored entries reduced to what a {@code PUT} on this ADAS accepts now, in the order of
+     * {@code openspec/specs/catalog-export-import/spec.md} ("Access export"): an enrichment keeps only {@code write} and
+     * {@code modify}; a {@code *} entry and every entry of a system table drop {@code write} and {@code modify}; what a
+     * {@code PUT}'s body checks still refuse is left behind; an entry naming an enrichment {@code skippedEnrichment}
+     * accepts is left behind ({@code dependency_skipped}); an emptied entry is omitted. Every removed part is reported,
+     * by role and then in step order. Not {@code @Transactional}, as {@link #entryFor}.
+     */
+    public PortableAccess portable(TableDefinitionEntity definition, Predicate<String> skippedEnrichment) {
+        final Map<String, AccessEntry> kept = new LinkedHashMap<>();
+        final List<LeftBehind> leftBehind = new ArrayList<>();
+        for (final Map.Entry<String, AccessEntry> stored : entries(definition).entrySet()) {
+            final String role = stored.getKey();
+            AccessEntry entry = stored.getValue();
+            if (definition.getType() == TableType.ENRICHMENT) {
+                final AccessEntry readSide = new AccessEntry(entry.privileges().stream().filter(READ_SIDE_GRANTS::contains).toList(),
+                        entry.rows(), entry.columns());
+                entry = new AccessEntry(entry.privileges().stream().filter(PrivilegeScope::isModifying).toList(), null, null);
+                leaveBehind(definition, role, readSide, leftBehind);
+            }
+            if (definition.isSystem() || SecurityClaimsExtractor.ANYONE.equals(role)) {
+                final AccessEntry modifying = new AccessEntry(entry.privileges().stream().filter(PrivilegeScope::isModifying).toList(),
+                        null, null);
+                entry = new AccessEntry(entry.privileges().stream().filter(privilege -> !PrivilegeScope.isModifying(privilege)).toList(),
+                        entry.rows(), entry.columns());
+                leaveBehind(definition, role, modifying, leftBehind);
+            }
+            if (!entry.isEmpty()) {
+                try {
+                    entry = entryFor(definition, role, body(entry));
+                } catch (TableValidationException | SystemTableException | EnrichmentFollowsSourceException ex) {
+                    leftBehind.add(new LeftBehind(role, entry, errorCode(ex)));
+                    entry = EMPTY;
+                }
+            }
+            if (entry.columns() != null && entry.columns().stream().anyMatch(name -> name.indexOf('.') > 0
+                    && skippedEnrichment.test(name.substring(0, name.indexOf('.'))))) {
+                leftBehind.add(new LeftBehind(role, entry, "dependency_skipped"));
+                entry = EMPTY;
+            }
+            if (!entry.isEmpty()) {
+                kept.put(role, entry);
+            }
+        }
+        return new PortableAccess(kept, List.copyOf(leftBehind));
+    }
+
+    /** The enrichments the column policies of {@code entries} name, as {@code <enrichment>.<column>}. */
+    public static Set<String> enrichmentsNamed(Map<String, AccessEntry> entries) {
+        final Set<String> named = new TreeSet<>();
+        entries.values().forEach(entry -> {
+            if (entry.columns() != null) {
+                entry.columns().stream().filter(name -> name.indexOf('.') > 0).forEach(name -> named.add(name.substring(0, name.indexOf('.'))));
+            }
+        });
+        return named;
+    }
+
+    /** {@code entry} as a {@code PUT} body, with no generation. */
+    public static EntryRequest body(AccessEntry entry) {
+        return new EntryRequest(null, entry.privileges().stream().map(PrivilegeScope::grantKey).toList(),
+                entry.rows() == null ? null : new RowsRequest(entry.rows().filter(), null), entry.columns());
+    }
+
+    /** Records {@code part} as left behind, with the code a {@code PUT}'s body checks give it, unless it is empty. */
+    private void leaveBehind(TableDefinitionEntity definition, String role, AccessEntry part, List<LeftBehind> leftBehind) {
+        if (part.isEmpty()) {
+            return;
+        }
+        String error = "validation_error";
+        try {
+            entryFor(definition, role, body(part));
+        } catch (TableValidationException | SystemTableException | EnrichmentFollowsSourceException ex) {
+            error = errorCode(ex);
+        }
+        leftBehind.add(new LeftBehind(role, part, error));
     }
 
     /** The entry a {@code PUT} would store: the role, then the system refusal, then the remaining body checks. */

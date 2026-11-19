@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -28,9 +29,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * Catalog transfer authorization in {@code oidc} mode: per-table visibility and sensitive clearance on export,
- * grants never exported, and the gates import repeats because it calls the create services
- * in-process.
+ * Catalog transfer authorization in {@code oidc} mode: per-table visibility and sensitive clearance on export, access
+ * exported and imported only on request and only with {@code TABLE_GRANT}, and the gates import repeats because it
+ * calls the create services in-process.
  */
 class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -223,6 +224,100 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         mockMvc.perform(get("/v1/tables/" + LABELS).header(HttpHeaders.AUTHORIZATION, bearer(caller("readers"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.permissions.read").value(true));
+    }
+
+    // --- access ---------------------------------------------------------------------------------------
+
+    @Test
+    void exportingAccessNeedsTableGrantBeforeTheSelection() throws Exception {
+        final String withAccess = "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\"}],\"include_access\":true}";
+        for (final String path : List.of("/v1/catalog/export", "/v1/catalog/export/preview")) {
+            send(post(path), caller(EXPORTER), withAccess)
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("forbidden"));
+        }
+        send(post("/v1/catalog/export"), caller(EXPORTER),
+                "{\"components\":[{\"type\":\"pipeline\",\"name\":\"does_not_exist\"}],\"include_access\":true}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"));
+        send(post("/v1/catalog/export"), roles(EXPORTER, "granter"), withAccess)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access." + PLAIN + "." + EXPORTER + ".privileges[0]").value("get"));
+        // Without the flag nothing about access changes.
+        export(caller(EXPORTER), PLAIN).andExpect(status().isOk()).andExpect(jsonPath("$.access").doesNotExist());
+    }
+
+    @Test
+    void importingAccessNeedsTableGrantBeforeTheCollisionCheck() throws Exception {
+        final String bundle = send(post("/v1/catalog/export"), fullAdmin(),
+                "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\"}],\"include_access\":true}")
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+
+        for (final String path : List.of("/v1/catalog/import", "/v1/catalog/import/preview")) {
+            upload(path, bundle, caller("importer"), "FAIL_IF_EXISTS", true)
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("forbidden"));
+        }
+        upload("/v1/catalog/import", bundle, caller("importer"), "FAIL_IF_EXISTS", false)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("catalog_import_conflict"));
+        // An access-only import still needs the endpoint's TABLE_CREATE.
+        upload("/v1/catalog/import/preview", bundle, caller("granter"), "SKIP_IF_EXISTS", true)
+                .andExpect(status().isForbidden());
+        upload("/v1/catalog/import/preview", bundle, roles("importer", "granter"), "SKIP_IF_EXISTS", true)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[0].role").value(EXPORTER))
+                .andExpect(jsonPath("$.access[0].import_action").value("SKIP"));
+    }
+
+    @Test
+    void anImportedRowPolicyThatConfinesTheImporterIsReportedAtArmTime() throws Exception {
+        send(post("/v1/pipelines"), fullAdmin(), "{\"name\":\"cxa-draft\",\"kind\":\"aggregate\",\"target\":\"" + HIDDEN + "\","
+                + "\"inputs\":[\"" + PLAIN + "\"]}")
+                .andExpect(status().isCreated());
+        final String exported = send(post("/v1/catalog/export"), fullAdmin(),
+                "{\"components\":[{\"type\":\"pipeline\",\"name\":\"cxa-draft\"}],\"include_access\":true}")
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        mockMvc.perform(delete("/v1/pipelines/cxa-draft").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+        final ObjectNode bundle = (ObjectNode) JsonMapper.builder().build()
+                .readTree(exported);
+        // `registry` reads globally, so only a row policy of its own confines it.
+        ((ObjectNode) bundle.get("access").get(PLAIN)).set("registry", JsonMapper.builder().build()
+                .readTree("{\"privileges\":[\"read\"],\"rows\":{\"where\":\"k = 'x'\"}}"));
+        final String importer = roles("registry", "importer", "granter");
+
+        upload("/v1/catalog/import/preview", bundle.toString(), importer, "SKIP_IF_EXISTS", true)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].armable").value(false))
+                .andExpect(jsonPath("$.pipelines[0].arm_problems[*]").value(org.hamcrest.Matchers.hasItem(
+                        org.hamcrest.Matchers.containsString("a row policy confines the caller's reads of table '" + PLAIN + "'"))));
+        // When another entry fails, none is applied: arming judges the target without the bundle's access.
+        ((ObjectNode) bundle.get("access").get(PLAIN)).set("*", JsonMapper.builder().build().readTree("{\"privileges\":[\"write\"]}"));
+        upload("/v1/catalog/import/preview", bundle.toString(), importer, "SKIP_IF_EXISTS", true)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == '*')].import_action").value(org.hamcrest.Matchers.hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[*].ineffective_grants[*]").isEmpty())
+                .andExpect(jsonPath("$.pipelines[0].arm_problems[*]").value(org.hamcrest.Matchers.everyItem(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("row policy")))));
+        upload("/v1/catalog/import/preview", bundle.toString(), importer, "SKIP_IF_EXISTS", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].arm_problems[*]").value(org.hamcrest.Matchers.everyItem(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("row policy")))));
+    }
+
+    private ResultActions upload(String path, String bundle, String token, String policy, boolean includeAccess) throws Exception {
+        return mockMvc.perform(multipart(path)
+                .file(new MockMultipartFile("file", "b.json", MediaType.APPLICATION_JSON_VALUE, bundle.getBytes(StandardCharsets.UTF_8)))
+                .param("resolution_policy", policy)
+                .param("include_access", String.valueOf(includeAccess))
+                .header(HttpHeaders.AUTHORIZATION, bearer(token)));
+    }
+
+    /** A caller on the full issuer carrying {@code roles}, so holding their mappings together. */
+    private static String roles(String... roles) {
+        return JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
+                Map.of("sub", String.join("-", roles) + "-user", "roles", List.of(roles), "email", "multi@test"));
     }
 
     private void table(String name, String columns) throws Exception {

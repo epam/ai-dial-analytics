@@ -40,7 +40,7 @@ public record ImportEntry(
         @JsonProperty("reused_name") Boolean reusedName,
 
         @Schema(description = "Import result only: `created`, `skipped`, `rolled_back`, `rollback_failed` or "
-                + "`failed`")
+                + "`failed`. Access entries report theirs in `access`")
         String status) {
 
     /** This entry with {@code status} set. */

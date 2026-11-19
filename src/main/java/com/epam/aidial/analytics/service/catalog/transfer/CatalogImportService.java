@@ -1,14 +1,16 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.exception.CatalogImportConflictException;
-import com.epam.aidial.analytics.exception.CatalogImportForbiddenException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
+import com.epam.aidial.analytics.exception.CatalogTransferForbiddenException;
 import com.epam.aidial.analytics.exception.ResolutionPolicyUnsupportedException;
 import com.epam.aidial.analytics.service.audit.AuditImportScope;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.ImportStatus;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
@@ -30,6 +32,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -43,13 +47,15 @@ import java.util.stream.Stream;
  * DDL cannot share a PostgreSQL transaction, and each created object must be its own audit revision under the
  * importing user, tagged with the import id (see {@link AuditImportScope}). Every collision is checked up front; then
  * each object is created in import order (sources, then
- * enrichments, then pipelines, always disabled; no grants). On the first
+ * enrichments, then pipelines, always disabled), and, with {@code include_access}, the bundle's access entries are
+ * written last, in one transaction. On the first
  * failure, what this import created is deleted again in reverse order. That compensation is best effort: a crash
  * mid-import, or a ClickHouse drop that runs before a catalog delete fails, can leave an object behind, and
  * re-running the bundle with {@code SKIP_IF_EXISTS} converges on it.
  *
- * <p><b>Import never mutates an existing object.</b> System tables included: a required system table is
- * checked by name, and its grants are neither compared nor written.
+ * <p><b>Import never mutates an existing object's definition, columns or pipeline.</b> A required system table is
+ * checked by name. Only an import with {@code include_access}, which needs {@code TABLE_GRANT}, writes access entries,
+ * onto created, existing and system tables alike: per role, never removing one.
  */
 @Slf4j
 @Service
@@ -78,10 +84,11 @@ public class CatalogImportService {
     private final SecurityModeResolver securityMode;
     private final SecurityClaimsExtractor claims;
     private final AuditImportScope importScope;
+    private final TableAccessService tableAccess;
 
     /** What importing {@code file} would do. Writes nothing; problems are reported, not thrown. */
-    public ImportPreview preview(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy) {
-        final ImportPlan plan = prepare(file, acknowledgeReusedNames, policy);
+    public ImportPreview preview(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy, boolean includeAccess) {
+        final ImportPlan plan = prepare(file, acknowledgeReusedNames, policy, includeAccess);
         validator.validate(plan);
         return plan.toPreview();
     }
@@ -91,8 +98,8 @@ public class CatalogImportService {
      * finds a problem, and otherwise the per-object outcome. Conflicts are checked before the validation pass,
      * which a refused import need not pay for.
      */
-    public ImportResult apply(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy) {
-        final ImportPlan plan = prepare(file, acknowledgeReusedNames, policy);
+    public ImportResult apply(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy, boolean includeAccess) {
+        final ImportPlan plan = prepare(file, acknowledgeReusedNames, policy, includeAccess);
         if (plan.hasConflicts()) {
             final String existing = plan.all().filter(PlannedObject::isConflict)
                     .map(planned -> planned.kind().code() + " '" + planned.name() + "'")
@@ -103,32 +110,36 @@ public class CatalogImportService {
         validator.validate(plan);
         if (plan.hasProblems()) {
             final long refused = plan.all().filter(PlannedObject::failed).count();
+            final long refusedAccess = plan.access().stream().filter(PlannedAccess::failed).count();
             throw new CatalogImportInvalidException("the bundle cannot be imported: " + refused + " object(s) refused"
-                    + (plan.validationErrors().isEmpty() ? "" : " and " + plan.validationErrors().size()
+                    + (refusedAccess == 0 ? "" : ", " + refusedAccess + " access entr" + (refusedAccess == 1 ? "y" : "ies")
+                    + " refused") + (plan.validationErrors().isEmpty() ? "" : " and " + plan.validationErrors().size()
                     + " bundle-level problem(s)") + "; nothing was written" + PREVIEW_POINTER);
         }
         return applyPlan(plan, sha256(file), policy);
     }
 
     /** The authorized plan, before the validation pass. */
-    private ImportPlan prepare(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy) {
+    private ImportPlan prepare(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy, boolean includeAccess) {
         if (policy == ResolutionPolicy.OVERWRITE) {
             throw new ResolutionPolicyUnsupportedException("resolution_policy OVERWRITE is not supported: import never "
-                    + "changes an existing object; use SKIP_IF_EXISTS and change existing objects through their own "
-                    + "endpoints");
+                    + "changes an existing object's definition, columns or pipeline; use SKIP_IF_EXISTS and change existing "
+                    + "objects through their own endpoints");
         }
         final CatalogBundle bundle = parser.parseBundle(file);
-        final ImportPlan plan = planner.plan(bundle, acknowledgeReusedNames, policy, targetReader.read(bundle));
-        authorize(plan);
+        final ImportPlan plan = planner.plan(bundle, acknowledgeReusedNames, policy, targetReader.read(bundle, includeAccess),
+                includeAccess);
+        authorize(plan, includeAccess);
         return plan;
     }
 
     /**
      * The endpoint gates of the services import calls in-process, which it bypasses: define-schema's global
      * {@code TABLE_MODIFY}, pipeline registration's {@code REGISTRY_ADMIN}, and {@code TABLE_SENSITIVE}
-     * for a sensitive column, which on a table with no grants only the global clearance can satisfy.
+     * for a sensitive column, which on a table with no grants only the global clearance can satisfy; then, for an
+     * import with access, the access API's {@code TABLE_GRANT}. All before the collision check.
      */
-    private void authorize(ImportPlan plan) {
+    private void authorize(ImportPlan plan, boolean includeAccess) {
         if (!securityMode.isEnforced()) {
             return;
         }
@@ -147,11 +158,14 @@ public class CatalogImportService {
         if (sensitive) {
             require(Privilege.TABLE_SENSITIVE, "declaring sensitive columns on tables it creates");
         }
+        if (includeAccess) {
+            require(Privilege.TABLE_GRANT, "writing access entries");
+        }
     }
 
     private void require(Privilege privilege, String what) {
         if (!claims.hasPrivilege(privilege)) {
-            throw new CatalogImportForbiddenException("importing this bundle means " + what + ", which requires the "
+            throw new CatalogTransferForbiddenException("importing this bundle means " + what + ", which requires the "
                     + privilege + " privilege");
         }
     }
@@ -194,13 +208,25 @@ public class CatalogImportService {
                 failedAt = pipeline;
             }
         }
+        boolean accessFailed = false;
         if (failedAt != null) {
+            final String stoppedAt = failedAt.kind().code() + " '" + failedAt.name() + "'";
+            plan.access().forEach(entry -> {
+                entry.status(SKIPPED);
+                entry.problems().add("not attempted: the import stopped at " + stoppedAt);
+            });
             compensate(createdPipelines, createdTables, failedAt);
+        } else if (!plan.access().isEmpty()) {
+            accessFailed = !importAccess(plan);
+            if (accessFailed) {
+                compensate(createdPipelines, createdTables, null);
+            }
         }
-        final String outcome = failedAt == null ? COMPLETED
+        final String outcome = failedAt == null && !accessFailed ? COMPLETED
                 : plan.all().anyMatch(planned -> ROLLBACK_FAILED.equals(planned.status())) ? ROLLBACK_FAILED : ROLLED_BACK;
-        final String objects = plan.all()
-                .map(planned -> planned.kind().code() + ":" + planned.name() + "=" + planned.status())
+        final String objects = Stream.concat(plan.all()
+                        .map(planned -> planned.kind().code() + ":" + planned.name() + "=" + planned.status()),
+                        plan.access().stream().map(entry -> "access:" + entry.table() + "/" + entry.role() + "=" + entry.status()))
                 .collect(Collectors.joining(", "));
         if (COMPLETED.equals(outcome)) {
             log.info("catalog_import import_id={} bundle_sha256={} resolution_policy={} outcome={} objects=[{}]", importId,
@@ -210,7 +236,26 @@ public class CatalogImportService {
                     bundleHash, policy, outcome, objects);
         }
         return new ImportResult(importId, outcome, ImportPlan.entries(plan.systemTables()), ImportPlan.entries(plan.tables()),
-                ImportPlan.entries(plan.pipelines()), List.copyOf(plan.envSpecific()));
+                ImportPlan.entries(plan.pipelines()), List.copyOf(plan.envSpecific()), plan.accessEntries());
+    }
+
+    /**
+     * Writes every access entry in one transaction, after every object, as one audit revision under the open import
+     * scope. Returns false when it fails, which writes none of them and marks each entry rolled back.
+     */
+    private boolean importAccess(ImportPlan plan) {
+        try {
+            final Map<String, Map<String, ImportStatus>> written = tableAccess.importEntries(CatalogImportValidator.bodies(plan));
+            plan.access().forEach(entry -> entry.status(written.get(entry.table()).get(entry.role()).name().toLowerCase(Locale.ROOT)));
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Catalog import: writing the access failed; compensating", ex);
+            plan.access().forEach(entry -> {
+                entry.status(ROLLED_BACK);
+                entry.problems().add("rolled back: writing the access failed: " + describe(ex));
+            });
+            return false;
+        }
     }
 
     /** Creates one table and its schema; each its own committed step. */
