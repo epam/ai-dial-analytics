@@ -14,7 +14,9 @@ resolve per execution"). Here the other operand MAY be any expression of type `s
 and holds no caller value — a column, a grouped column, an output alias, a column of a derived table or a common table
 expression, or a computed expression such as `lower(user_hash)` — typed by the structured-query rule whether or not
 the planner folds a derived table into its enclosing block; an aggregate there is accepted only where the statement
-may hold one, in `HAVING`. A cast to a character
+may hold one, in `HAVING`. Where the planner folds a derived table in, a reference to its literal column stands for
+the literal and reads no column; a derived table kept as a block of its own, by a `LIMIT` for example, keeps the
+reference a column. A cast to a character
 type written around a caller value is the caller value itself, as for any operand that is already text (see "Text
 composition and value rendering in the SQL subset"). A cast to any other type, or one the comparison with a
 non-string column needs, makes the caller value misplaced, and so does every other position the structured-query
@@ -94,8 +96,8 @@ whatever it spells, including `'caller.user_hash()'`.
   caller.project()`, filters a common table expression's computed column `lower(user_hash) AS h` with
   `h = caller.user_hash()`, or filters `CAST(prompt_tokens AS VARCHAR) = caller.user_hash()`
 - **THEN** each statement is accepted, and `HAVING m = caller.user_hash()` over `max(event_id) AS m`, a `uuid`, is
-  rejected `400 bad_request` naming the caller value, as is `k = caller.user_hash()` over a derived table's literal
-  column `'x' AS k` — on `POST /v1/queries/execute-sql` and when a saved query's `sql` body is validated alike
+  rejected `400 bad_request` naming the caller value, as is `k = caller.user_hash()` over the literal column `'x' AS k`
+  of a derived table with no `LIMIT`, which the planner folds in — on `POST /v1/queries/execute-sql` and when a saved query's `sql` body is validated alike
 
 #### Scenario: A caller value inside a subquery and a join
 

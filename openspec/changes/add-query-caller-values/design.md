@@ -120,8 +120,10 @@ whitespace, by `(`, which today it would mark into a parse error, and the unmark
 **3. Placement is checked twice: structurally before SQL translation, by type over the query.** Before
 `RexToExprTranslator` translates anything, a pre-pass walks every Rex tree it receives — filters, join conditions,
 projections, sort and group expressions, and the plans of subqueries — and finds each caller operator. After
-stripping the casts that leave a value as it is (a written character cast, which arrives as `TO_STRING_CAST`, and
-identity casts), the operator's parent must be `EQUALS` or `NOT_EQUALS` against a column reference, and that
+stripping the casts that leave a text value as it is (a written character cast of a text operand, which arrives as
+`TO_STRING_CAST`, and identity casts; a written cast of a non-text operand stays, as the `to_string` it translates
+to), the operator's parent must be `EQUALS` or `NOT_EQUALS` against a `string` expression whose translation reads a
+column, and that
 comparison must be reached from a filter root (`WHERE`, `HAVING`, `ON`) through `AND`, `OR` and `NOT` alone. Anything
 else raises the placement message there and then: a cast to another type (how a comparison with a non-string column
 arrives), a `LIKE` pattern, `IS [NOT] NULL`, a function or literal-only argument, a projection, a `CASE` condition, or
