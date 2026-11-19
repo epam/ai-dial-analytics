@@ -1,7 +1,7 @@
 # ADAS 0.24 — upgrade notes
 
-What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
-follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
+What an environment has to do to move from **0.23.1** to **0.24**. An environment on an earlier build, 0.23.0
+included, first follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md), through its 0.23.1 section (§8).
 
 This release runs ADAS on replicated ClickHouse storage, on every deployment, a single server included
 ([`clickhouse-replication.md`](clickhouse-replication.md)). That makes it more than a redeploy:
@@ -345,7 +345,8 @@ text before.
 Such an empty row holds nothing of its own, so two rules matter once any exist:
 
 - **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
-  by a 0.23 instance, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
+  by a 0.23 instance, under `whole`, with `request_body` left out of ingest (`SYNC_SENSITIVE_COLUMNS`, see
+  [`release-0.23-upgrade.md`](release-0.23-upgrade.md) §8), or after a change of
   `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
   after it; they read `partial` with an empty body until the day is re-ingested.
 - **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
