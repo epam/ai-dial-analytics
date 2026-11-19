@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -123,6 +124,25 @@ class ResponseSchemaComposerTest {
                 .hasMessageContaining("sentiment")
                 .hasMessageContaining("enum_values")
                 .hasMessageContaining("one authority");
+    }
+
+    @Test
+    void nullMemberInValuesIsRefusedNotThrownAsNullPointer() {
+        assertThatThrownBy(() -> composer.compose(
+                List.of(withValues("tone", "…", Arrays.asList("positive", null))),
+                List.of(column("tone", QueryFieldType.STRING)),
+                "widget_insights"))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("output 'tone' declares a null member in values");
+    }
+
+    @Test
+    void blankMemberInValuesStillComposesAsBefore() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(withValues("tone", "…", List.of("positive", ""))),
+                List.of(column("tone", QueryFieldType.STRING)),
+                "widget_insights");
+        assertThat(propertyOf(schema, "tone")).containsEntry("enum", List.of("positive", ""));
     }
 
     @Test

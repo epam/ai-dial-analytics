@@ -14,8 +14,9 @@ as it does for every other gate check. The read paths compose the same schema wi
 refusal there does not fail the read: a target whose columns drifted under an armed declaration must not
 fail a listing for every other pipeline in it. Such a pipeline is instead left out of the compiled feed
 and refused on a compiled read (scenario "A pipeline whose outputs compose to no schema is omitted from
-the feed"), so it never runs. The gate moves that refusal to arming, where the author sees it. Without
-it, a pipeline whose schema never composed would arm with 201 and then silently never run.
+the feed", and `pipeline-registry`'s "A pipeline read selects an authored or a compiled projection"), so it
+never runs. The gate moves that refusal to arming, where the author sees it. Without it, a pipeline whose
+schema never composed would be accepted when armed and then silently never run.
 
 Composition SHALL be driven by the `outputs` **keys**, with each key's structure looked up on the
 target column of the same name:

@@ -69,7 +69,7 @@ the composer. `EnrichSpecValidator` only resolved each output to a column. The r
 (`EnrichResolver.composedSchemaOf`) compose the schema but swallow a refusal and log it, so that a drifted
 target cannot fail a whole listing. `PipelineService` then leaves such a pipeline out of the compiled feed
 and answers 422 on its compiled read. The result was that every composer refusal (an object column under
-`chat_completion`, `values` on an enum column, an array with no `element_type`) armed with 201, and the
+`chat_completion`, `values` on an enum column, an array with no `element_type`) was accepted when armed, and the
 pipeline then silently never ran. The spec already said such a declaration is rejected. Two changes fix
 that:
 - The gate now calls `ResponseSchemaComposer.composeFor` on every gated request, so the refusal is a 422
@@ -77,8 +77,10 @@ that:
 - `ResponseSchemaComposer.composes` is the one statement of when composition applies (`llm`, no stored
   schema, `outputs` declared). The gate and the resolver call it through `composeFor`, and
   `PipelineService` asks it for the feed omission and the compiled-read refusal, so they cannot disagree.
-- Composing at arming reaches `List.copyOf(values)`, which throws on a `null` member, so the gate now
-  refuses a null or blank `values` member as a 422 before composition runs.
+- Composing at arming reaches `List.copyOf(values)`, which throws on a `null` member, so the composer
+  refuses a `null` member itself as a `PipelineValidationException`. The arming gate, both preview paths
+  and the read-path log all get the same message. A blank member stays accepted, because it composed and
+  ran before.
 
 Rejected: refusing on reads, because one drifted target would fail `GET /v1/pipelines` for every other
 pipeline. Also rejected: leaving the gap to a separate change, because this change's own refusal scenario

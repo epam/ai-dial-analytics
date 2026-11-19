@@ -21,15 +21,15 @@ must then be stored, zeros included, and a new key needs a new column.
   and suggests either `dial_app_route` or a scalar column.
 - The arming gate now composes the response schema, so every composer refusal is the HTTP 422 the spec
   already promised on a gated request. Before, registration only resolved outputs to columns; a schema that
-  could not compose armed with 201, was then left out of the compiled feed and refused on a compiled read,
+  could not compose was accepted when armed, was then left out of the compiled feed and refused on a compiled read,
   so it never ran. An armed pipeline in that state is refused on its next declaration patch. A draft is
   still stored.
-- An `llm` output's `values` with a `null` or blank member is refused with 422 at arming. Composing at
-  arming would otherwise turn it into a 500.
+- An `llm` output's `values` with a `null` member is refused with 422 by composition, at arming and on
+  preview. It used to throw, which arming would have turned into a 500. A blank member composes as before.
 - The spec's wording is corrected to name the catalog types as they are declared (`object`, `map`), not
   `json`.
-- **BREAKING**: arming is stricter. An `llm` declaration whose schema does not compose, which armed with
-  201 before, is now refused with 422 when enabled or patched while enabled. Such a pipeline never ran, so
+- **BREAKING**: arming is stricter. An `llm` declaration whose schema does not compose, which was accepted
+  when armed before, is now refused with 422 when enabled or patched while enabled. Such a pipeline never ran, so
   nothing that runs stops running. Every other declaration accepted before composes the same schema it
   did before, and a route may now bind `object` and `map` columns.
 
@@ -43,13 +43,15 @@ must then be stored, zeros included, and a new key needs a new column.
 
 - `enrichment-registry`: in "The response schema is composed from the target and the transform", the type
   mapping gains `object` and `map` for the `dial_app_route` preset, and the refusal is narrowed to
-  `chat_completion`.
+  `chat_completion`; a `null` member of `values` is refused by composition. In "ENRICH pipeline declaration
+  binding a transform to a target enrichment", the `values` member rule names that refusal and gains the
+  scenario "An llm output declaring a null member in values is refused when armed".
 
 ## Impact
 
 - Code: `ResponseSchemaComposer` (type mapping, refusal message, and `composes`/`composeFor`, the one rule
-  for when composition applies). `EnrichSpecValidator` composes the schema at arming and refuses a null or
-  blank `values` member. `EnrichResolver` and `PipelineService` (feed omission, compiled read) ask the same
+  for when composition applies). `ResponseSchemaComposer` refuses a `null` `values` member.
+  `EnrichSpecValidator` composes the schema at arming. `EnrichResolver` and `PipelineService` (feed omission, compiled read) ask the same
   rule. Tests: `ResponseSchemaComposerTest`, a pipeline registration/gate test, and a write-path test for
   object and map values on an enrichment's columns.
 - API: `POST`/`PATCH /v1/pipelines` accept object and map outputs on a route, and refuse at arming an

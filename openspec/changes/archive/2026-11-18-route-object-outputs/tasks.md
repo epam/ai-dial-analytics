@@ -3,7 +3,7 @@
 - [x] 1.1 In `ResponseSchemaComposer`, make the route flag preset-meaningful (rename `nullableFromColumn` or pass the `TransformPreset`) and update `EnrichResolver.composeSchema` and the Javadoc accordingly
 - [x] 1.2 Map `OBJECT` → `{"type": "object"}` and `MAP` → `{"type": "object", "additionalProperties": {"type": "string"}}` for the route preset; both stay required, because the catalog never lets either column be nullable
 - [x] 1.3 Keep refusing `OBJECT`/`MAP` for `chat_completion` with a message naming the output, column, type and the `chat_completion` preset, and pointing at `dial_app_route` or a scalar column; leave the generic refusal for any other unmapped type
-- [x] 1.4 Run composition in the arming gate: `ResponseSchemaComposer.composeFor` holds the when-to-compose rule, `EnrichResolver` and `EnrichSpecValidator.validate` (llm branch) both call it, so a composer refusal is a 422 on every gated request
+- [x] 1.4 Run composition in the arming gate: `ResponseSchemaComposer.composes` holds the when-to-compose rule and `composeFor` delegates to it; `EnrichResolver` and `EnrichSpecValidator.validate` (llm branch) both call `composeFor`, so a composer refusal is a 422 on every gated request
 
 ## 2. Tests
 

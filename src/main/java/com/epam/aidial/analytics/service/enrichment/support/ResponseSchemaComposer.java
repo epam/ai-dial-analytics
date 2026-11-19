@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
@@ -307,6 +308,12 @@ public class ResponseSchemaComposer {
             TransformOutput output, ColumnMappingEntity column, Map<String, Object> property, String targetName) {
         if (output.getValues() == null || output.getValues().isEmpty()) {
             return;
+        }
+        // Refused here rather than at write so every path that composes - the arming gate, the preview and
+        // the read paths - gets the same message instead of List.copyOf's NullPointerException below.
+        if (output.getValues().stream().anyMatch(Objects::isNull)) {
+            throw new PipelineValidationException("transform output '" + output.getName() + "' declares a null"
+                    + " member in values; every member is a value the field may take");
         }
         if (column.getEnumValues() != null && !column.getEnumValues().isEmpty()) {
             throw new PipelineValidationException("transform output '" + output.getName() + "' declares values"

@@ -630,10 +630,6 @@ public class EnrichSpecValidator {
                         + " transform; an llm output is prose, optionally with values or jsonata");
             }
             final boolean hasValues = output.getValues() != null && !output.getValues().isEmpty();
-            if (hasValues && output.getValues().stream().anyMatch(StringUtils::isBlank)) {
-                throw new PipelineValidationException(what + " declares a null or blank member in values; every"
-                        + " member is a value the field may take");
-            }
             if (hasValues && StringUtils.isNotBlank(output.getJsonata())) {
                 throw new PipelineValidationException(what + " declares both values and jsonata; an output"
                         + " carries at most one of them");

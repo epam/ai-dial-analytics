@@ -182,6 +182,11 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                     .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
                     .andExpect(jsonPath("$.message").value(containsString("chat_completion")));
             mockMvc.perform(get("/v1/pipelines/" + PIPELINE)).andExpect(jsonPath("$.enabled").value(false));
+            // A complete declaration that does not compose is refused on a compiled read, not served empty.
+            mockMvc.perform(get("/v1/pipelines/" + PIPELINE + "?view=compiled"))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
+                    .andExpect(jsonPath("$.message").value(containsString("compose to no response schema")));
             mockMvc.perform(delete("/v1/pipelines/" + PIPELINE)).andExpect(status().is2xxSuccessful());
 
             allowInsights();
@@ -262,14 +267,17 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
                     .isEqualTo("calm");
             mockMvc.perform(runnerPost("/v1/pipelines/" + PIPELINE + "/rows").contentType(JSON)
                             .content("{\"rows\":[{\"widget_id\":\"w-2\",\"labels\":{\"tone\":null}}]}"))
-                    .andExpect(status().isUnprocessableContent());
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("validation_error"));
+            assertThat(queryScalar("SELECT count() AS c FROM " + target + " FINAL WHERE widget_id = 'w-2'", "c"))
+                    .isEqualTo("0");
         } finally {
             mockMvc.perform(delete("/v1/pipelines/" + PIPELINE));
             mockMvc.perform(delete("/v1/tables/" + target));
         }
     }
 
-    /** A null member in an output's values is refused at arming as a 422; composing it would otherwise throw. */
+    /** A null member in an output's values is refused at arming as a 422 by the composer, not thrown as a 500. */
     @Test
     void nullMemberInValuesIsRefusedWhenArmed() throws Exception {
         final String target = "ar_tone";
@@ -282,7 +290,7 @@ class AppRoutePipelineIntegrationTest extends AbstractClickHouseIntegrationTest 
             mockMvc.perform(post("/v1/pipelines").contentType(JSON).content(armed))
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.error").value("pipeline_validation_failed"))
-                    .andExpect(jsonPath("$.message").value(containsString("output 'tone'")));
+                    .andExpect(jsonPath("$.message").value(containsString("output 'tone' declares a null member in values")));
         } finally {
             mockMvc.perform(delete("/v1/pipelines/" + PIPELINE));
             mockMvc.perform(delete("/v1/tables/" + target));

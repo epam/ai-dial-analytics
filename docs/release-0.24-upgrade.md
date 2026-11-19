@@ -447,7 +447,7 @@ refused (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.
 
 Arming now composes each `llm` pipeline's response schema, so a declaration whose schema cannot be composed is
 refused with `422 pipeline_validation_failed` when it is enabled or its declaration is patched while enabled. A
-draft is still stored. Before, such a pipeline armed with `201`, was then left out of the runner's feed and refused
+draft is still stored. Before, such a pipeline was accepted when armed, was then left out of the runner's feed and refused
 on a compiled read, so it never ran. Nothing that runs today starts failing: the refusal moves to arming, where the
 author sees it.
 
@@ -456,8 +456,8 @@ author sees it.
   The missing names include these pipelines, and incomplete declarations too. Confirm each with
   `GET /v1/pipelines/{name}?view=compiled`, which answers `422` saying its outputs compose to no response schema,
   or with `POST /v1/pipelines/{name}/preview`, which names the output and the column. ADAS also logs
-  `omitting pipeline '…' from the enrich feed` at ERROR for each one. Fix the output or the column before the
-  pipeline's next patch; a catalog import preview reports such a pipeline as `armable: false`.
+  an ERROR containing `compose to no response schema` for each one. Fix the output or the column before the
+  pipeline's next patch; a catalog import preview reports such a pipeline as `armable: false`, unless the target already has it enabled.
 - **Rollback.** A build older than 0.24 cannot read a `dial_app_route` pipeline at all (§9), so follow §9:
   re-declare each route pipeline as `chat_completion` on scalar columns, or delete it, before rolling back.
 

@@ -847,8 +847,9 @@ into a response schema. The shape SHALL be dispatched on `type`:
   no route to name and a stored one would be a value nothing reads; a disabled draft is stored as written.
   Each `outputs` value SHALL be either a **string** (the
   prose the model is told about that output) or an object `{prose, values?, jsonata?, source?}` carrying **at
-  most one** of `values` or `jsonata`. At the gated requests, every member of `values` SHALL be a non-blank
-  string: a `null` or blank member is not a value the field may take. `source` is the `dial_app_route` member described in "A route output
+  most one** of `values` or `jsonata`. Wherever the response schema is composed (the gated requests, the
+  preview, the compiled reads), a `null` member of `values` SHALL be refused naming the output: it is not a
+  value the field may take. A blank string is a member like any other. `source` is the `dial_app_route` member described in "A route output
   reads its value from the route's response with source". `prose` SHALL be **optional**, defaulting to the target column's
   `description` — see "The response schema is composed from the target and the transform", which
   already takes an output's type, enum domain and enum order from the same column. An absent value, a
@@ -1050,7 +1051,7 @@ by that key.
   prose for that output, and the composed `response_schema` carries the column's `description` as that
   property's `description`
 
-#### Scenario: An llm output declaring a null or blank member in values is refused when armed
+#### Scenario: An llm output declaring a null member in values is refused when armed
 
 - **WHEN** `POST /v1/pipelines` is called with `enabled: true` and an `llm` transform whose output on a
   `string` column declares `values: ["positive", null]`
@@ -2024,8 +2025,9 @@ as it does for every other gate check. The read paths compose the same schema wi
 refusal there does not fail the read: a target whose columns drifted under an armed declaration must not
 fail a listing for every other pipeline in it. Such a pipeline is instead left out of the compiled feed
 and refused on a compiled read (scenario "A pipeline whose outputs compose to no schema is omitted from
-the feed"), so it never runs. The gate moves that refusal to arming, where the author sees it. Without
-it, a pipeline whose schema never composed would arm with 201 and then silently never run.
+the feed", and `pipeline-registry`'s "A pipeline read selects an authored or a compiled projection"), so it
+never runs. The gate moves that refusal to arming, where the author sees it. Without it, a pipeline whose
+schema never composed would be accepted when armed and then silently never run.
 
 Composition SHALL be driven by the `outputs` **keys**, with each key's structure looked up on the
 target column of the same name:
