@@ -66,7 +66,9 @@ role that reads the table with **no** policy sees every row, so give that role a
 - A hidden column is absent everywhere, revision snapshots included, and referencing it fails as an unknown field.
 - `sensitive` still applies on top: a sensitive column needs the policy **and** the clearance.
 - A rename updates every list. A drop that would empty a list is refused `409 column_in_column_policy`.
-- `permissions.columns_restricted` is `true` when a policy hides at least one column from the caller.
+- `permissions.columns_restricted` is `true` when a policy hides at least one column from the caller. A system
+  table's revision snapshot carries no columns to judge, so there it is `true` whenever a column policy confines the
+  caller (see [`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
 
 **Gaining a column-restricted role can hide columns.** A column shows when a role with no row policy allows it, or
 when every role the caller reads through allows it. So a caller with role `A` (rows of project `P1`, all columns) who

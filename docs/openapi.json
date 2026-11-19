@@ -3201,7 +3201,7 @@
       "PermissionsDto": {
         "properties": {
           "columns_restricted": {
-            "description": "Whether column policies hide at least one of this table's columns from the caller; false for a caller no column policy narrows. The policies are readable only through GET /v1/tables/{name}/access",
+            "description": "Whether column policies hide at least one of this table's columns from the caller; false for a caller no column policy narrows. On a system table's revision snapshot, which carries no columns, true whenever a column policy confines the caller. The policies are readable only through GET /v1/tables/{name}/access",
             "type": "boolean"
           },
           "get": {
@@ -5126,7 +5126,7 @@
             "type": "integer"
           },
           "columns": {
-            "description": "Exposed columns (single-get only)",
+            "description": "Exposed columns (single-get only; absent on a system table's revision snapshot, whose columns are not tracked)",
             "items": {
               "$ref": "#/components/schemas/ColumnDto"
             },
@@ -13223,7 +13223,7 @@
     },
     "/v1/tables/{name}/revision/{revision}": {
       "get": {
-        "description": "Returns the same shape as GET /{name}, reconstructed from the audit trail at the end of the given revision — the columns, ordering key and grain it had then, excluding columns dropped by then. 404 if the table did not exist at that revision or the revision is unknown. Revision ids come from the activity feed. A caller holding TABLE_GRANT (every caller in `none` mode) additionally receives the table's access entries as `roles`, as of that revision. A column is hidden when that revision's column policies or the current ones of the table's life containing it hide it from the caller: the live table's while that life runs, otherwise those it had when it was deleted, so a table created again under the same name never judges an earlier one's revisions. An enrichment's columns are judged by its source's: the source's own life while the enrichment's runs, otherwise the source as it stood just before the enrichment was deleted. Every column is hidden when no state of the table or of its source is recorded.",
+        "description": "Returns the same shape as GET /{name}, reconstructed from the audit trail at the end of the given revision — the columns, ordering key and grain it had then, excluding columns dropped by then. 404 if the table did not exist at that revision or the revision is unknown, and at every revision of a non-system table whose creation predates the audit trail. A system table answers at every revision from the first recorded state of its definition. It shows the definition last recorded at or before the revision (a migration's change shows from the table's next recorded change) and no `columns` member: the trail does not track its columns, so `permissions.columns_restricted` is true whenever a column policy confines the caller. Revision ids come from the activity feed. A caller holding TABLE_GRANT (every caller in `none` mode) additionally receives the table's access entries as `roles`, as of that revision. A column is hidden when that revision's column policies or the current ones of the table's life containing it hide it from the caller: the live table's while that life runs, otherwise those it had when it was deleted, so a table created again under the same name never judges an earlier one's revisions. An enrichment's columns are judged by its source's: the source's own life while the enrichment's runs, otherwise the source as it stood just before the enrichment was deleted. Every column is hidden when no state of the table or of its source is recorded.",
         "operationId": "getTableRevision",
         "parameters": [
           {
