@@ -3400,28 +3400,55 @@ that were mapped before the failing one are complete, and are written as usual.
 
 ### Requirement: Sensitive columns can be excluded from ingest
 
-The service SHALL accept an ingest setting `sync.sensitive-columns-enabled` (`SYNC_SENSITIVE_COLUMNS_ENABLED`), a
-boolean with default `true`.
+The service SHALL accept an ingest setting `sync.sensitive-columns` (`SYNC_SENSITIVE_COLUMNS`): a comma-separated
+list naming the columns the catalog flags `sensitive` that ingest writes. Its default is `*`.
+Whitespace around an entry SHALL be ignored, as SHALL a blank entry and a repeated one. The setting takes one of
+three forms:
 
-- **Under `true`,** ingest SHALL behave exactly as it would without the setting, and the catalog SHALL NOT be read
-  for it.
-- **Under `false`,** each ingest target SHALL leave out of every row it writes each column its mapping declares
-  that the catalog flags `sensitive` on that target's table. The catalog is matched on the column's physical name,
-  `column_mapping.source_name`. A left-out column SHALL take its ClickHouse default on the stored row: `NULL` for a
-  `Nullable` column, `{}` for a `JSON` column, and the type's zero value otherwise. The service SHALL NOT read,
-  transform, rewrite or count that column's source value for the row. Every other mapped column, the row itself and
-  the target's emit predicate SHALL be unaffected. A record SHALL still produce a row in every target it produced
-  one in before, so the all-or-none rule (see "A record is written for all of its targets or for none") and the
-  grain join between `dial_usage_log` and `dial_usage_log_payload` hold.
+- **`*`:** every sensitive column is written. Ingest SHALL behave exactly as it would without the
+  setting, and the catalog SHALL NOT be read for it.
+- **`none`, or an empty value:** no sensitive column is written.
+- **A list of column entries:** only the sensitive columns the entries name are written. A bare entry `column`
+  SHALL name that column on every ingest target table. An entry `table.column` SHALL name it on that table only.
+  Table and column names SHALL be matched exactly, case-sensitive, against the target's configured table and the
+  column's physical name, `column_mapping.source_name`.
+
+Under any setting other than `*`, each ingest target SHALL leave out of every row it writes each column that its
+mapping declares, or that ingest writes beyond the mapping, when the catalog flags that column `sensitive` on the
+target's table and no entry names it there. A left-out column SHALL take its ClickHouse default on the stored row:
+`NULL` for a `Nullable` column, `{}` for a `JSON` column, and the type's zero value otherwise. The service SHALL NOT
+read, transform, rewrite or count that column's source value for the row. A sensitive column that an entry names,
+every column the catalog does not flag `sensitive`, the row itself and the target's emit predicate SHALL be
+unaffected. A record SHALL still produce a row in every target it produced one in before, so the all-or-none rule
+(see "A record is written for all of its targets or for none") and the grain join between `dial_usage_log` and
+`dial_usage_log_payload` hold.
 
 The excluded set SHALL be resolved once per target at startup, from the catalog as it stands after the catalog
-migrations have run. A column flagged `sensitive` by a later migration is therefore excluded without a code or
-mapping change once the service restarts. With the seeded catalog this excludes `jwt_claims`, `request_tags`,
-`request_body`, `response_body`, `assembled_response` and `request_cache_control` from `dial_usage_log_payload`,
-and `comment` from `rate_analytics`. `dial_usage_log` has no sensitive column and is written as before.
+migrations have run. A column flagged `sensitive` by a later migration is therefore excluded, unless an entry names
+it, without a code or mapping change once the service restarts. With the seeded catalog, `none` excludes
+`jwt_claims`, `request_tags`, `request_body`, `response_body`, `assembled_response` and `request_cache_control` from
+`dial_usage_log_payload`, and `comment` from `rate_analytics`. `dial_usage_log` has no sensitive column and is
+written as before.
 
-Under `false`, startup SHALL fail, naming the target table and the column, when a column the catalog flags
-`sensitive` is one the ingest cannot do without for that target:
+Startup SHALL fail, naming the setting and the offending entry, when:
+
+- `*` or `none` appears together with any other entry;
+- an entry has more than one `.`, or an empty table or column part (`.comment`, `rate_analytics.`);
+- a bare entry names no column of any ingest target table;
+- a qualified entry names a table that is not an ingest target, or no column of that table.
+
+An entry that names no column is a typo. Starting anyway would silently leave out the column the operator meant to
+keep. An entry that names only columns the catalog does not flag `sensitive` SHALL instead be logged at `WARN`,
+naming the setting and the entry, and startup SHALL go on: ingest writes such a column anyway, so the entry has no
+effect. The flag can be cleared by a migration, by `PATCH /v1/tables/{name}/schema` or by a catalog import, none of
+which is the operator's, and none SHALL stop the next startup.
+
+The boolean setting this one replaces, `sync.sensitive-columns-enabled` (`SYNC_SENSITIVE_COLUMNS_ENABLED`), SHALL
+NOT be honoured. When it is set to any value, startup SHALL fail, naming it and `sync.sensitive-columns`. Ignoring
+it instead would make a deployment that set it to `false` write every sensitive column again after an upgrade.
+
+Under any setting other than `*`, startup SHALL fail, naming the target table and the column, when a column the
+setting leaves out is one the ingest cannot do without for that target:
 
 - the deduplication-key columns `trace_id`, `core_span_id` and `request_time` (see "Records without a
   deduplication key are dropped");
@@ -3429,73 +3456,163 @@ Under `false`, startup SHALL fail, naming the target table and the column, when 
   the catalog's table definition records them.
 
 Leaving one of these out would drop every row, collapse rows that do not belong together, or put rows in the epoch
-partition where retention drops them.
+partition where retention drops them. A sensitive column of this kind that an entry names is written, so the
+setting does not refuse it.
 
-Under `false`, startup SHALL also fail, naming the table, when a target's table has no catalog definition: its
-sensitivity cannot be known, and writing it as mapped would store exactly what the setting is meant to keep out.
-The operator defines the table in the catalog or points the target at a table the catalog defines.
+Under any setting other than `*`, startup SHALL also fail, naming the table, when a target's table has no catalog
+definition: its sensitivity cannot be known, and writing it as mapped could store exactly what the setting is
+meant to keep out. The operator defines the table in the catalog or points the target at a table the catalog
+defines.
 
-Under `false`, startup SHALL log, at `INFO`, each target table with the columns excluded from it.
+Under any setting other than `*`, startup SHALL log, at `INFO`, each target table with the sensitive columns
+excluded from it and the sensitive columns written to it.
 
 The setting SHALL apply only to rows written while it is in effect. It SHALL NOT change rows already stored, the
-catalog's `sensitive` flags, read-side masking, or the physical table schema. Switching it back to `true` SHALL
-make new rows carry the columns again. Rows written while it was `false` keep their defaults. A record
+catalog's `sensitive` flags, read-side masking, or the physical table schema. When a column is written again after a
+change of the setting, new rows SHALL carry it. Rows written while it was left out keep their defaults. A record
 re-ingested later is written under the setting in effect at that time, and the row it writes replaces the earlier
 one as any re-ingested row does (see "Primary-key deduplication"). Under `delta` this includes a parent: a
-parent re-ingested under `false` is rewritten with no body and no path, so a delta child stored from another blob
-and not re-ingested with it names a path no row carries and can no longer be rebuilt, as for a parent re-ingested
-under `whole` (see "The request body storage mode is configurable").
+parent re-ingested with `request_body` left out is rewritten with no body and no path, so a delta child stored from
+another blob and not re-ingested with it names a path no row carries and can no longer be rebuilt, as for a parent
+re-ingested under `whole` (see "The request body storage mode is configurable").
 
 #### Scenario: The default writes sensitive columns
 
-- **WHEN** the service starts without `SYNC_SENSITIVE_COLUMNS_ENABLED` and ingests a chat completion record
+- **WHEN** the service starts without `SYNC_SENSITIVE_COLUMNS` and ingests a chat completion record
   carrying claims, headers, a request body and a response body
 - **THEN** the `dial_usage_log_payload` row carries `jwt_claims`, `request_tags`, `request_body`, `response_body`
   and `assembled_response` as captured today
 
-#### Scenario: Disabled leaves the payload content columns at their defaults
+#### Scenario: The removed boolean switch fails startup
 
-- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests the same record
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or with
+  `SYNC_SENSITIVE_COLUMNS_ENABLED=true`, whatever `SYNC_SENSITIVE_COLUMNS` holds
+- **THEN** startup fails, naming `sync.sensitive-columns-enabled` and `sync.sensitive-columns`
+
+#### Scenario: none leaves the payload content columns at their defaults
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=none` and ingests the same record
 - **THEN** the `dial_usage_log_payload` row exists with the same `event_id`, `request_time`, `trace_id`,
   `core_span_id`, `project_id` and `user_hash` it would otherwise carry, `request_body`, `response_body`,
   `assembled_response` and `request_cache_control` are `NULL`, and `jwt_claims` and `request_tags` are `{}`
 
-#### Scenario: Disabled keeps the usage-log row whole
+#### Scenario: An empty value writes no sensitive column
 
-- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a record
-- **THEN** its `dial_usage_log` row carries every column it would carry under `true`, and a query joining the
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS` set to the empty string and ingests the same
+  record
+- **THEN** the rows are the ones `none` writes
+
+#### Scenario: A list writes only the named sensitive columns
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=request_tags,jwt_claims` and ingests the same
+  record
+- **THEN** the `dial_usage_log_payload` row carries `jwt_claims` and `request_tags` as captured today,
+  `request_body`, `response_body`, `assembled_response` and `request_cache_control` are `NULL`, and the startup log
+  lists `jwt_claims` and `request_tags` as written and the other four as excluded for that table
+
+#### Scenario: A qualified entry applies to its table only
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=rate_analytics.comment` and ingests a chat
+  completion record and a `/rate` record with a comment
+- **THEN** the `rate_analytics` row carries its `comment`, and the `dial_usage_log_payload` row has every
+  sensitive column at its default, as under `none`
+
+#### Scenario: none keeps the usage-log row whole
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=none` and ingests a record
+- **THEN** its `dial_usage_log` row carries every column it would carry under `*`, and a query joining the
   payload table on `event_id` still finds the payload row
 
-#### Scenario: Disabled leaves the rating comment at its default
+#### Scenario: none leaves the rating comment at its default
 
-- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and ingests a `/rate` record with a
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=none` and ingests a `/rate` record with a
   comment
 - **THEN** the `rate_analytics` row is written with its `rate`, `rate_raw` and `event_id`, and `comment` is `NULL`
 
 #### Scenario: The excluded set follows the catalog flag
 
 - **WHEN** a catalog migration flags a further mapped column of an ingest target `sensitive` and the service
-  restarts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`
+  restarts with `SYNC_SENSITIVE_COLUMNS=request_tags`
 - **THEN** that column is left out of the target's new rows, and the startup log lists it among the target's
   excluded columns
 
+#### Scenario: An entry that names no column fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=request_tag`, or with
+  `SYNC_SENSITIVE_COLUMNS=dial_usage_log.request_tags` and `dial_usage_log` has no `request_tags` column
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
+#### Scenario: Matching is case-sensitive
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=Request_Tags` and the catalog names the column
+  `request_tags`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
+#### Scenario: An entry that names only a column that is not sensitive warns
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=event_id`, a column the catalog does not flag
+  `sensitive`
+- **THEN** startup succeeds, logs a warning naming `sync.sensitive-columns` and the entry, and every sensitive
+  column is left out as under `none`
+
+#### Scenario: Clearing the flag of a named column does not stop startup
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=rate_analytics.comment`, the table's owner clears the
+  `sensitive` flag of `comment` through `PATCH /v1/tables/rate_analytics/schema`, and the service restarts
+- **THEN** startup succeeds, logs a warning naming the entry, and `rate_analytics` rows carry their `comment`
+
+#### Scenario: A bare entry applies on every target table
+
+- **WHEN** the catalog flags `comment` `sensitive` on both `rate_analytics` and `dial_usage_log_payload`, and the
+  service starts with `SYNC_SENSITIVE_COLUMNS=comment`
+- **THEN** both tables' rows carry their `comment`
+
+#### Scenario: Whitespace, blank and repeated entries are ignored
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS= request_tags ,,request_tags`
+- **THEN** it behaves as with `SYNC_SENSITIVE_COLUMNS=request_tags`
+
+#### Scenario: A qualified entry on a table that is not a target fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=sessions.comment` and no ingest target writes
+  `sessions`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
+#### Scenario: A keyword mixed with column entries fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=*,request_body` or
+  `SYNC_SENSITIVE_COLUMNS=none,request_tags`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the keyword
+
+#### Scenario: A malformed entry fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=.comment`, `SYNC_SENSITIVE_COLUMNS=rate_analytics.` or
+  `SYNC_SENSITIVE_COLUMNS=a.b.c`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
 #### Scenario: A sensitive key column fails startup
 
-- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and the catalog flags `trace_id`, or
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=none` and the catalog flags `trace_id`, or
   the target table's grain key, `sensitive` on an ingest target's table
 - **THEN** startup fails, naming the table and the column
 
+#### Scenario: A sensitive key column that an entry names is written
+
+- **WHEN** the catalog flags `trace_id` `sensitive` on an ingest target's table and the service starts with
+  `SYNC_SENSITIVE_COLUMNS=trace_id`
+- **THEN** startup succeeds and the target's rows carry `trace_id`
+
 #### Scenario: A target without a catalog definition fails startup
 
-- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and a configured target names a table
-  the catalog does not define
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=none`, or with a list of column entries, and a
+  configured target names a table the catalog does not define
 - **THEN** startup fails, naming the table
 
-#### Scenario: Rows stored before the switch are unchanged
+#### Scenario: Rows stored before a change of the setting are unchanged
 
-- **WHEN** rows were ingested under `true` and the service restarts under `false`
+- **WHEN** rows were ingested under `*` and the service restarts under `none` or under a list
 - **THEN** the rows already stored still carry their sensitive values, and only rows written after the restart
-  carry the defaults
+  carry the defaults in the columns now left out
 
 ### Requirement: The request body storage mode is configurable
 
@@ -3534,9 +3651,19 @@ setting has no effect.
 A target's mapping is taken here after sensitive-column exclusion (see "Sensitive columns can be excluded from
 ingest"). A target whose `request_body` is excluded SHALL therefore not qualify, and SHALL get no request-delta
 processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
-default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while the
-switch is `false`, startup SHALL log one warning that the mode has no effect, naming the switch, in place of the
-`delta` warning above, whose advice to check the mappings would mislead.
+default, `request_cache_control` included. The same holds for a target whose `project_id` or `user_hash` is
+excluded, for example after a migration flags it `sensitive`. Under `whole-with-path` or `delta` with no target
+qualifying while `sync.sensitive-columns` leaves `request_body`, `project_id` or `user_hash` out of at least one
+target, startup SHALL log one warning that the mode has no effect, naming the setting and the columns it leaves out,
+in place of the `delta` warning above, whose advice to check the mappings would mislead.
+
+Under `delta`, startup SHALL fail, naming the target table, `sync.sensitive-columns` and
+`request_cache_control`, when a target qualifies while the setting leaves `request_cache_control` out of it. Under
+`delta` a qualifying target moves a chat request's cache markers out of `request_body` into `request_cache_control`
+(see "Cache markers are kept per event"). Leaving that column out would store a body whose rebuild has lost its
+markers, and keeping the markers in the body would break rebuild equivalence. The operator either names
+`request_cache_control` alongside `request_body`, leaves both out, or runs under `whole` or `whole-with-path`, which
+keep `request_cache_control` at its default whatever the setting says.
 
 #### Scenario: The default stores request bodies whole
 
@@ -3588,11 +3715,39 @@ switch is `false`, startup SHALL log one warning that the mode has no effect, na
 
 #### Scenario: An excluded request body gets no request-delta processing
 
-- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and `SYNC_REQUEST_BODY_MODE=delta`, and
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=none` and `SYNC_REQUEST_BODY_MODE=delta`, and
   ingests a chat request
-- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns-enabled`, and the
-  payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns` and
+  `request_body`, and the payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
   `request_parent_hash`, and an empty `request_ancestor_hashes`
+
+#### Scenario: An excluded user hash names itself in the warning
+
+- **WHEN** the catalog flags `user_hash` `sensitive` on `dial_usage_log_payload`, and the service starts with
+  `SYNC_REQUEST_BODY_MODE=delta` and `SYNC_SENSITIVE_COLUMNS=request_body,request_cache_control`
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns` and `user_hash`,
+  and request bodies are stored whole
+
+#### Scenario: A delta body without its cache markers fails startup
+
+- **WHEN** the service starts with `SYNC_REQUEST_BODY_MODE=delta` and
+  `SYNC_SENSITIVE_COLUMNS=request_body`
+- **THEN** startup fails, naming `dial_usage_log_payload`, `sync.sensitive-columns` and
+  `request_cache_control`
+
+#### Scenario: A delta body with its cache markers is cut
+
+- **WHEN** the service runs with `SYNC_REQUEST_BODY_MODE=delta` and
+  `SYNC_SENSITIVE_COLUMNS=request_body,request_cache_control`, and ingests a follow-up chat request
+- **THEN** its payload row carries the cut `request_body`, its chain columns and its `request_cache_control`, and
+  `jwt_claims`, `request_tags`, `response_body` and `assembled_response` are at their defaults
+
+#### Scenario: whole-with-path keeps a body without its cache-marker column
+
+- **WHEN** the service runs with `SYNC_REQUEST_BODY_MODE=whole-with-path` and
+  `SYNC_SENSITIVE_COLUMNS=request_body`, and ingests a chat request
+- **THEN** startup succeeds, and the payload row carries the body as received, its `request_hash` and a `NULL`
+  `request_cache_control`
 
 ### Requirement: A chat request body is stored as its new history and a parent link
 
