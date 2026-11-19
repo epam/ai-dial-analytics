@@ -73,6 +73,10 @@ public final class SensitiveColumnExclusion {
             }
         }
         for (SensitiveColumnPolicy.Entry entry : policy.entries()) {
+            if (entry.table() != null && !distinct.contains(entry.table())) {
+                throw new IllegalStateException(SETTING + " entry '" + entry + "' names table '" + entry.table()
+                        + "', which is not an ingest target table; remove it, or correct its spelling");
+            }
             boolean matches = distinct.stream().anyMatch(table ->
                     sensitiveByTable.getOrDefault(table, Set.of()).stream().anyMatch(column -> entry.names(table, column)));
             if (!matches) {

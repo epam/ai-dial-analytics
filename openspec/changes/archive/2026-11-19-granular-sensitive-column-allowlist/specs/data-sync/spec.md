@@ -35,6 +35,7 @@ written as before.
 Startup SHALL fail, naming the setting and the offending entry, when:
 
 - `*` or `none` appears together with any other entry;
+- an entry has more than one `.`, or an empty table or column part (`.comment`, `rate_analytics.`);
 - a bare entry names no column the catalog flags `sensitive` on any ingest target table;
 - a qualified entry names a table that is not an ingest target, or a column the catalog does not flag
   `sensitive` on that table.
@@ -153,6 +154,12 @@ re-ingested under `whole` (see "The request body storage mode is configurable").
   `SYNC_SENSITIVE_COLUMNS=none,request_tags`
 - **THEN** startup fails, naming `sync.sensitive-columns` and the keyword
 
+#### Scenario: A malformed entry fails startup
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=.comment`, `SYNC_SENSITIVE_COLUMNS=rate_analytics.` or
+  `SYNC_SENSITIVE_COLUMNS=a.b.c`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
 #### Scenario: A sensitive key column fails startup
 
 - **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=none` and the catalog flags `trace_id`, or
@@ -171,7 +178,7 @@ re-ingested under `whole` (see "The request body storage mode is configurable").
   configured target names a table the catalog does not define
 - **THEN** startup fails, naming the table
 
-#### Scenario: Rows stored before the switch are unchanged
+#### Scenario: Rows stored before a change of the setting are unchanged
 
 - **WHEN** rows were ingested under `*` and the service restarts under `none` or under a list
 - **THEN** the rows already stored still carry their sensitive values, and only rows written after the restart
@@ -218,16 +225,16 @@ ingest"). A target whose `request_body` is excluded SHALL therefore not qualify,
 processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
 default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while
 `sync.sensitive-columns` leaves `request_body` out of at least one target, startup SHALL log one warning that
-the mode has no effect, naming the switch, in place of the `delta` warning above, whose advice to check the mappings
+the mode has no effect, naming the setting, in place of the `delta` warning above, whose advice to check the mappings
 would mislead.
 
 Under `delta`, startup SHALL fail, naming the target table, `sync.sensitive-columns` and
-`request_cache_control`, when a target qualifies while the switch leaves `request_cache_control` out of it. Under
+`request_cache_control`, when a target qualifies while the setting leaves `request_cache_control` out of it. Under
 `delta` a qualifying target moves a chat request's cache markers out of `request_body` into `request_cache_control`
 (see "Cache markers are kept per event"). Leaving that column out would store a body whose rebuild has lost its
 markers, and keeping the markers in the body would break rebuild equivalence. The operator either names
 `request_cache_control` alongside `request_body`, leaves both out, or runs under `whole` or `whole-with-path`, which
-keep `request_cache_control` at its default whatever the switch says.
+keep `request_cache_control` at its default whatever the setting says.
 
 #### Scenario: The default stores request bodies whole
 

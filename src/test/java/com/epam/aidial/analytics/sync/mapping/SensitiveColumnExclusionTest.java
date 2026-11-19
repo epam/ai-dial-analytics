@@ -188,6 +188,13 @@ class SensitiveColumnExclusionTest {
     }
 
     @Test
+    void qualifiedEntryOnNonTargetTableSaysSo() {
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, policy("sessions.comment"), columns, definitions))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("'sessions.comment'")
+                .hasMessageContaining("not an ingest target table");
+    }
+
+    @Test
     void namedSensitiveKeyColumnIsWritten() {
         column(USAGE_LOG, "trace_id", true);
 

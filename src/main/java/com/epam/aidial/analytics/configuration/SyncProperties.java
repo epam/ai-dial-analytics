@@ -12,6 +12,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.util.unit.DataSize;
 import org.springframework.validation.annotation.Validated;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -87,8 +89,8 @@ public record SyncProperties(
             throw new IllegalArgumentException("sync.inline-files-max-size must not be negative: " + inlineFilesMaxSize);
         }
         requestBodyMode = requestBodyMode == null ? RequestBodyMode.WHOLE : requestBodyMode;
-        sensitiveColumns = sensitiveColumns == null ? null : List.copyOf(sensitiveColumns);
         SensitiveColumnPolicy.parse(sensitiveColumns);
+        sensitiveColumns = sensitiveColumns == null ? null : Collections.unmodifiableList(new ArrayList<>(sensitiveColumns));
     }
 
     /** The parsed {@code sync.sensitive-columns}; unset is {@link SensitiveColumnPolicy#ALL}. */

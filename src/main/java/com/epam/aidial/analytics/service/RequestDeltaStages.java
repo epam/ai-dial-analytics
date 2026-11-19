@@ -34,7 +34,7 @@ import java.util.stream.Collectors;
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
  * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
  * {@code sync.sensitive-columns} has no body to rewrite and gets no stage, so its chain and cache-marker columns keep their
- * defaults; when that leaves no stage at all, the warning names the switch rather than the mappings. Under {@code delta} a
+ * defaults; when that leaves no stage at all, the warning names the setting rather than the mappings. Under {@code delta} a
  * stage moves a chat request's cache markers into {@code request_cache_control}, so a qualifying target that leaves that
  * column out fails startup: writing it would store an excluded column, and dropping the markers would break rebuilds.
  */
