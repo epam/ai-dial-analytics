@@ -95,7 +95,9 @@ import java.util.stream.Collectors;
  *
  * <ul>
  *   <li>{@code LLM} — the transform carries a non-blank model; bound input-binding columns exist and
- *       are entitled; input/output JSONata expressions parse (static parse only).
+ *       are entitled; input/output JSONata expressions parse (static parse only); and the response schema
+ *       composes against the target, so a composer refusal answers the arming write rather than leaving the
+ *       pipeline out of the feed.
  *   <li>{@code SQL} (Class-1) — no model is required and there is no JSONata; instead every output
  *       variable's {@code sql} expression passes {@link ExprSqlValidator} (bounded grammar, scalar not
  *       aggregate, single non-array value), its referenced columns run the same entitlement check, and
@@ -149,7 +151,8 @@ public class EnrichSpecValidator {
         TableDefinitionEntity target = requireActiveEnrichment(declaration.target());
         String grainKey = grainKeyOf(target);
         EnrichSpec.TransformSpec transform = requireValidTransform(declaration);
-        Map<String, ColumnMappingEntity> outputColumns = deriveOutputBindings(declaration, target, transform);
+        List<ColumnMappingEntity> targetColumns = columns.findByTableNameOrderByOrdinal(target.getName());
+        Map<String, ColumnMappingEntity> outputColumns = deriveOutputBindings(declaration, target, transform, targetColumns);
 
         String source = requireReadSource(declaration, target, grainKey);
         requireAlignableWriter(declaration, target, transform, source);
@@ -176,7 +179,7 @@ public class EnrichSpecValidator {
             checkBoundBindings(declaration, entity, source, referenced, clearance);
             parseJsonata(declaration, transform);
             validateTemplatePlaceholders(declaration, transform);
-            requireComposableSchema(transform, target);
+            requireComposableSchema(transform, target, targetColumns);
         }
         requireSoundEnrichmentReads(declaration, source, entity, referenced);
         // The grain key is read by every derivation and stored as the target's key, so a sensitive one is
@@ -627,6 +630,10 @@ public class EnrichSpecValidator {
                         + " transform; an llm output is prose, optionally with values or jsonata");
             }
             final boolean hasValues = output.getValues() != null && !output.getValues().isEmpty();
+            if (hasValues && output.getValues().stream().anyMatch(StringUtils::isBlank)) {
+                throw new PipelineValidationException(what + " declares a null or blank member in values; every"
+                        + " member is a value the field may take");
+            }
             if (hasValues && StringUtils.isNotBlank(output.getJsonata())) {
                 throw new PipelineValidationException(what + " declares both values and jsonata; an output"
                         + " carries at most one of them");
@@ -693,13 +700,14 @@ public class EnrichSpecValidator {
     }
 
     /**
-     * The response schema composes for the target as it stands. The read paths compose the same schema and, on a
-     * failure, serve the pipeline without one rather than fail a listing, so a refusal left to them would arm a
-     * pipeline whose model is called unconstrained. Asked here, the composer's refusal reaches the author as a 422
-     * naming the output and the column.
+     * The response schema composes for the target as it stands. The read paths compose the same schema, but a
+     * pipeline whose schema does not compose is only left out of the compiled feed and refused on a compiled read:
+     * it arms, and then never runs. Asked here, the composer's refusal reaches the author on the arming write, as a
+     * 422 naming the output and the column.
      */
-    private void requireComposableSchema(EnrichSpec.TransformSpec transform, TableDefinitionEntity target) {
-        schemaComposer.composeFor(transform, () -> columns.findByTableNameOrderByOrdinal(target.getName()), target.getName());
+    private void requireComposableSchema(EnrichSpec.TransformSpec transform, TableDefinitionEntity target,
+                                         List<ColumnMappingEntity> targetColumns) {
+        schemaComposer.composeFor(transform, () -> targetColumns, target.getName());
     }
 
     /**
@@ -1414,7 +1422,12 @@ public class EnrichSpecValidator {
      */
     private Map<String, ColumnMappingEntity> deriveOutputBindings(EnrichDeclaration declaration,
             TableDefinitionEntity target, EnrichSpec.TransformSpec transform) {
-        List<ColumnMappingEntity> targetColumns = columns.findByTableNameOrderByOrdinal(target.getName());
+        return deriveOutputBindings(declaration, target, transform, columns.findByTableNameOrderByOrdinal(target.getName()));
+    }
+
+    /** As above, over the target's columns already in hand. */
+    private Map<String, ColumnMappingEntity> deriveOutputBindings(EnrichDeclaration declaration,
+            TableDefinitionEntity target, EnrichSpec.TransformSpec transform, List<ColumnMappingEntity> targetColumns) {
         List<TransformVar> vars = transform.effectiveOutputVars();
         Map<String, ColumnMappingEntity> columnByVar = new LinkedHashMap<>();
         List<OutputBinding> derived = new ArrayList<>(vars.size());

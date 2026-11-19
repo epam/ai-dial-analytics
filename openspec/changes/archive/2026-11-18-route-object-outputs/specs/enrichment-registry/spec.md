@@ -10,12 +10,12 @@ transform, and binding the two is definitionally its job. The table SHALL stay i
 **A refusal of composition SHALL be raised by the static gate**, on every gated request of "Static
 governance gate on arming and execution", as HTTP 422 `pipeline_validation_failed` carrying the
 composer's message. A write that leaves the pipeline disabled stores the declaration without complaint,
-as it does for every other gate check. The read paths compose the same schema with the same rule, but
-cannot refuse: a target whose columns drifted under an armed declaration must not fail a listing for
-every other pipeline in it, so a read that cannot compose serves the entry with no `response_schema`
-and logs a warning for an armed pipeline. The gate is what keeps that state from being armed in the
-first place. Without it, a pipeline whose schema never composed would be armed and its model called
-unconstrained.
+as it does for every other gate check. The read paths compose the same schema with the same rule, but a
+refusal there does not fail the read: a target whose columns drifted under an armed declaration must not
+fail a listing for every other pipeline in it. Such a pipeline is instead left out of the compiled feed
+and refused on a compiled read (scenario "A pipeline whose outputs compose to no schema is omitted from
+the feed"), so it never runs. The gate moves that refusal to arming, where the author sees it. Without
+it, a pipeline whose schema never composed would arm with 201 and then silently never run.
 
 Composition SHALL be driven by the `outputs` **keys**, with each key's structure looked up on the
 target column of the same name:
@@ -30,10 +30,10 @@ target column of the same name:
 | `required` | **every** declared output; for `dial_app_route`, every output bound to a non-nullable column |
 | `additionalProperties` | always `false` |
 
-The type mapping SHALL be: `string` → `{"type": "string"}`; `enum` → `{"type": "string", "enum":
-[...]}`; `integer` and `long` → `{"type": "integer"}`; `double` and `decimal` → `{"type": "number"}`;
-`boolean` → `{"type": "boolean"}`; `timestamp` → `{"type": "string"}` with **no `format`** (strict
-schema mode rejects one); `array` → `{"type": "array", "items": <element_type mapped>}`.
+The type mapping SHALL be: `string` and `uuid` → `{"type": "string"}`; `enum` → `{"type": "string",
+"enum": [...]}`; `integer` and `long` → `{"type": "integer"}`; `decimal` → `{"type": "number"}`;
+`boolean` → `{"type": "boolean"}`; `date` and `timestamp` → `{"type": "string"}` with **no `format`**
+(strict schema mode rejects one); `array` → `{"type": "array", "items": <element_type mapped>}`.
 
 For a `dial_app_route` transform the mapping SHALL also cover the two document types: `object` →
 `{"type": "object"}`, open, with no `properties` and no `additionalProperties`, so any JSON object
@@ -47,16 +47,17 @@ Neither column type can be nullable (ClickHouse has no `Nullable(JSON)` or `Null
 route nullability rule below an output bound to either is always **required** and never accepts `null`. An
 empty document is written as `{}`. A value that evaluates to nothing is left out of the assembled object and
 fails validation, so the unit is dead-lettered at `validate` instead of being written as a row the column
-cannot store. A `source` that may filter every member away therefore has to yield `{}` itself, for example
-`$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone evaluates to nothing when no
-member passes.
+cannot store. A `source` that may filter every member away therefore has to yield `{}` itself, and
+should still yield nothing when the response lacks the member, for example
+`$exists(intent_counts) ? $merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone evaluates to
+nothing when no member passes; `$merge([{}, …])` without the `$exists` guard would also turn a response
+missing `intent_counts` into `{}` and record the unit as done.
 
 For a `chat_completion` transform, an output bound to an `object` or `map` column SHALL be rejected with
 HTTP 422 `pipeline_validation_failed`. The message SHALL name the output, the column, its type and the
 `chat_completion` preset, and SHALL say that a route transform or a scalar column can carry it. Strict
 mode requires every object in the schema to declare its properties and close `additionalProperties`, and
-neither column type declares an inner shape to compose them from. A column of any other type with no
-mapping above SHALL be rejected the same way under either preset.
+neither column type declares an inner shape to compose them from.
 
 The `description` default SHALL be applied **at composition time and SHALL NOT be written into the
 stored declaration**, so that the column remains the single authority for a fact the author did not
@@ -194,7 +195,8 @@ schema produced them.
 - **GIVEN** a `dial_app_route` transform whose output `intent_counts` binds an `object` column of the same
   name
 - **WHEN** the pipeline is registered and read with `view=compiled`
-- **THEN** registration succeeds, the composed property is `{"type": "object"}` with no `properties` member,
+- **THEN** registration succeeds, the composed property is `{"type": "object"}` with no `properties` or
+  `additionalProperties` member,
   and `intent_counts` is listed in `required`
 
 #### Scenario: A route output bound to a map column composes a string-valued object
@@ -207,10 +209,11 @@ schema produced them.
 #### Scenario: A route writes a sparse object as the application returned it
 
 - **GIVEN** an armed `dial_app_route` pipeline whose output `intent_counts` binds an `object` column, with
-  `source` `$merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`
+  `source` `$exists(intent_counts) ? $merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`
 - **WHEN** the route answers `{"intent_counts": {"fix": 2, "plan": 0, "create": 1}}` and the row is written
 - **THEN** the stored document holds the members `fix` and `create` only, and reading
-  `json_extract_int(intent_counts, 'plan')` yields `0`, the extracting type's default for an absent path
+  `json_extract_long(intent_counts, 'plan')` through the query surface yields `0`, the extracting type's
+  default for an absent path
 
 #### Scenario: An all-zero object is written as an empty document
 

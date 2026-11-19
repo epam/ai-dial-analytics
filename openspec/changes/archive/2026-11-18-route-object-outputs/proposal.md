@@ -14,18 +14,24 @@ must then be stored, zeros included, and a new key needs a new column.
   `{"type": "object"}`, and a column of type `map` to
   `{"type": "object", "additionalProperties": {"type": "string"}}`. Neither column type can be nullable, so
   under the existing route rule (nullability follows the column) such an output is always required. A
-  `source` that filters members, for example to drop zeros, must yield `{}` rather than nothing.
+  `source` that filters members, for example to drop zeros, must yield `{}` rather than nothing, and
+  should still yield nothing when the response lacks the member.
 - For a `chat_completion` transform, both types are still refused with HTTP 422
   `pipeline_validation_failed`. The message now says the refusal applies to the `chat_completion` preset,
   and suggests either `dial_app_route` or a scalar column.
 - The arming gate now composes the response schema, so every composer refusal is the HTTP 422 the spec
   already promised on a gated request. Before, registration only resolved outputs to columns; a schema that
-  could not compose armed with 201 and was served with no `response_schema`. An armed pipeline in that state
-  is refused on its next declaration patch. A draft is still stored.
+  could not compose armed with 201, was then left out of the compiled feed and refused on a compiled read,
+  so it never ran. An armed pipeline in that state is refused on its next declaration patch. A draft is
+  still stored.
+- An `llm` output's `values` with a `null` or blank member is refused with 422 at arming. Composing at
+  arming would otherwise turn it into a 500.
 - The spec's wording is corrected to name the catalog types as they are declared (`object`, `map`), not
   `json`.
-- Not breaking: a declaration that was refused before can now be accepted on a route. Every declaration
-  that was accepted before composes the same schema it did before.
+- **BREAKING**: arming is stricter. An `llm` declaration whose schema does not compose, which armed with
+  201 before, is now refused with 422 when enabled or patched while enabled. Such a pipeline never ran, so
+  nothing that runs stops running. Every other declaration accepted before composes the same schema it
+  did before, and a route may now bind `object` and `map` columns.
 
 ## Capabilities
 
@@ -41,10 +47,14 @@ must then be stored, zeros included, and a new key needs a new column.
 
 ## Impact
 
-- Code: `ResponseSchemaComposer` (type mapping and refusal message). `EnrichResolver` already passes the
-  preset flag. Tests: `ResponseSchemaComposerTest`, a pipeline registration/gate test, and a
-  write-path test for a nested object value on an enrichment's `object` column.
-- API: `POST`/`PATCH /v1/pipelines` accept more declarations. `GET /v1/pipelines?view=compiled` (the
+- Code: `ResponseSchemaComposer` (type mapping, refusal message, and `composes`/`composeFor`, the one rule
+  for when composition applies). `EnrichSpecValidator` composes the schema at arming and refuses a null or
+  blank `values` member. `EnrichResolver` and `PipelineService` (feed omission, compiled read) ask the same
+  rule. Tests: `ResponseSchemaComposerTest`, a pipeline registration/gate test, and a write-path test for
+  object and map values on an enrichment's columns.
+- API: `POST`/`PATCH /v1/pipelines` accept object and map outputs on a route, and refuse at arming an
+  `llm` declaration whose schema does not compose. A catalog import preview reports such a pipeline as
+  `armable: false`. `GET /v1/pipelines?view=compiled` (the
   runner's feed) can serve an object-typed property inside a route's `response_schema`.
 - Enrichment Runner: no code or contract change. Its route path (assemble by `source`, validate with JSON
   Schema 2020-12, map by name, post rows as JSON) carries an object value through unchanged. See design.md.

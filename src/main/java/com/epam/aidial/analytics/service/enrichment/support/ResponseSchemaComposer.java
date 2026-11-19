@@ -74,28 +74,36 @@ public class ResponseSchemaComposer {
     private static final String NULL = "null";
 
     /**
-     * The composed schema for {@code transform}, or null when it composes none: no transform, a {@code sql}
-     * transform (no response to constrain), a declaration storing its own {@code response_schema} (which wins while
-     * present), or one declaring no {@code outputs}. The one statement of when composition applies, shared by the
-     * arming gate, which lets a refusal out as a 422, and by the read paths, which decide for themselves what a
+     * The composed schema for {@code transform}, or null when {@link #composes} says it composes none. Shared by
+     * the arming gate, which lets a refusal out as a 422, and by the read paths, which decide for themselves what a
      * refusal means there. {@code targetColumns} is asked only when composition applies, so a declaration that
      * composes nothing costs its caller no catalog read.
-     *
-     * <p><b>This reads {@code outputs} only, and deliberately not through the output-shape accessor.</b> A folded
-     * declaration carrying {@code output_vars} and no stored {@code response_schema} calls the model unconstrained,
-     * and composing a schema for it would send a {@code response_format} where none was sent before.
      *
      * @throws PipelineValidationException as {@link #compose(List, List, String, boolean)}
      */
     public Map<String, Object> composeFor(
             EnrichSpec.TransformSpec transform, Supplier<List<ColumnMappingEntity>> targetColumns, String targetName) {
-        if (transform == null || transform.getType() != TransformType.LLM
-                || transform.getResponseSchema() != null
-                || transform.getOutputs() == null || transform.getOutputs().isEmpty()) {
+        if (!composes(transform)) {
             return null;
         }
         return compose(transform.getOutputs(), targetColumns.get(), targetName,
                 transform.getPreset() == TransformPreset.DIAL_APP_ROUTE);
+    }
+
+    /**
+     * Whether a schema is composed for {@code transform}: false for no transform, a {@code sql} transform (no
+     * response to constrain), a declaration storing its own {@code response_schema} (which wins while present), or
+     * one declaring no {@code outputs}. The one statement of when composition applies: the arming gate, the read
+     * paths and the feed's omission of a pipeline that composes none all ask it.
+     *
+     * <p><b>This reads {@code outputs} only, and deliberately not through the output-shape accessor.</b> A folded
+     * declaration carrying {@code output_vars} and no stored {@code response_schema} calls the model unconstrained,
+     * and composing a schema for it would send a {@code response_format} where none was sent before.
+     */
+    public static boolean composes(EnrichSpec.TransformSpec transform) {
+        return transform != null && transform.getType() == TransformType.LLM
+                && transform.getResponseSchema() == null
+                && transform.getOutputs() != null && !transform.getOutputs().isEmpty();
     }
 
     /**
