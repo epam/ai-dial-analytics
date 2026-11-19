@@ -119,6 +119,12 @@ def build_rows(anchor: datetime, hours: int, rows_per_hour: int, seed: int) -> l
             total_tokens = prompt_tokens + completion_tokens
             price = (total_tokens / 1000.0) * float(price_per_1k)
 
+            # Spending limits run in enforce mode. Two users in three are charged to a budget of their project; the
+            # rest have no budget and are refused, so in enforce mode they would have no row: they are seeded as
+            # if from an API key, with all five columns NULL. Derived from the user, not the RNG, so the other values
+            # stay as they were.
+            has_budget = user_index % 3 != 0
+
             # ~6% failures, so the success/response_status columns are not degenerate.
             failed = rng.random() < 0.06
             response_status = rng.choice([429, 500, 503]) if failed else 200
@@ -161,6 +167,11 @@ def build_rows(anchor: datetime, hours: int, rows_per_hour: int, seed: int) -> l
                     # Model and embedding calls are never served by a route, so both read NULL.
                     "route_name": None,
                     "route_type": None,
+                    "spending_limits_mode": "enforce" if has_budget else None,
+                    "budget_cost_object": project_id if has_budget else None,
+                    "budget_outcome": "paid" if has_budget else None,
+                    "budget_policy": "standard" if has_budget else None,
+                    "budget_assignment": f"{project_id}/user-{user_index}" if has_budget else None,
                 }
             )
 
