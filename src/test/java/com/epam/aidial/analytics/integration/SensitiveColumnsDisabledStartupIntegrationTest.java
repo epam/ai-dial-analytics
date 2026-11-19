@@ -13,14 +13,14 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The application started with {@code sync.sensitive-columns-enabled=false}: the {@code syncTargets} bean is built on the
+ * The application started with {@code sync.sensitive-columns=none}: the {@code syncTargets} bean is built on the
  * real startup path, reading the catalog the Postgres migrations seeded, and leaves the flagged columns out of each
  * target's mapping. The ingest effect of those mappings is covered by {@link SensitiveColumnIngestIntegrationTest}.
  *
  * <p>This property set is a context of its own; its JDBC pool is kept small, since the shared PostgreSQL container's
  * connection ceiling is what every cached context draws on (see {@link AbstractClickHouseIntegrationTest#SCAN_SAFETY_LAG_OFF}).
  */
-@TestPropertySource(properties = {"sync.sensitive-columns-enabled=false", "spring.datasource.hikari.maximum-pool-size=2"})
+@TestPropertySource(properties = {"sync.sensitive-columns=none", "spring.datasource.hikari.maximum-pool-size=2"})
 class SensitiveColumnsDisabledStartupIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     private static final List<String> PAYLOAD_SENSITIVE = List.of(

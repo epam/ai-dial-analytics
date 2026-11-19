@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.sync.delta.ClickHouseParentLookup;
 import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.delta.RequestDeltaEncoder;
 import com.epam.aidial.analytics.sync.mapping.ColumnMapping;
+import com.epam.aidial.analytics.sync.mapping.SensitiveColumnPolicy;
 import com.epam.aidial.analytics.sync.mapping.SyncTarget;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -32,8 +33,10 @@ import java.util.stream.Collectors;
  * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path (and a large body that is not JSON with its body hash), so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
  * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
- * {@code sync.sensitive-columns-enabled=false} has no body to rewrite and gets no stage, so its chain and cache-marker
- * columns keep their defaults; when that leaves no stage at all, the warning names the switch rather than the mappings.
+ * {@code sync.sensitive-columns} has no body to rewrite and gets no stage, so its chain and cache-marker columns keep their
+ * defaults; when that leaves no stage at all, the warning names the switch rather than the mappings. Under {@code delta} a
+ * stage moves a chat request's cache markers into {@code request_cache_control}, so a qualifying target that leaves that
+ * column out fails startup: writing it would store an excluded column, and dropping the markers would break rebuilds.
  */
 @Component
 @Slf4j
@@ -42,11 +45,13 @@ public class RequestDeltaStages {
     /** Written paths remembered per payload table; a few hundred bytes each. */
     static final int PATH_CACHE_ENTRIES = 200_000;
 
+    private static final String REQUEST_CACHE_CONTROL = "request_cache_control";
+
     private static final Set<String> REQUIRED_COLUMNS = Set.of("request_body", "project_id", "user_hash");
 
     /** The columns the stage writes beyond the mapping: what a payload table gains in ClickHouse V16. */
     private static final Set<String> REQUIRED_TABLE_COLUMNS = Set.of(
-            "request_hash", "request_parent_hash", "request_ancestor_hashes", "request_cache_control");
+            "request_hash", "request_parent_hash", "request_ancestor_hashes", REQUEST_CACHE_CONTROL);
 
     private final Map<String, FlushStage> stages;
 
@@ -58,14 +63,22 @@ public class RequestDeltaStages {
             for (SyncTarget target : targets) {
                 Set<String> columns = target.mapping().columns().stream().map(ColumnMapping::column).collect(Collectors.toSet());
                 if (columns.containsAll(REQUIRED_COLUMNS)) {
+                    if (mode == RequestBodyMode.DELTA && target.excludedColumns().contains(REQUEST_CACHE_CONTROL)) {
+                        throw new IllegalStateException("sync.request-body-mode=delta cannot store request bodies of ingest target table '"
+                                + target.table() + "' while " + SensitiveColumnPolicy.SETTING + " leaves out "
+                                + REQUEST_CACHE_CONTROL + ": delta moves a request's cache markers there. Name "
+                                + REQUEST_CACHE_CONTROL + " alongside request_body, leave both out, or use "
+                                + "whole or whole-with-path");
+                    }
                     RequestDeltaEncoder encoder = new RequestDeltaEncoder(
                             mode, new ClickHouseParentLookup(writer, target.table()), PATH_CACHE_ENTRIES, registry, target.table());
                     byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
                 }
             }
-            if (byTable.isEmpty() && !properties.sensitiveColumnsEnabled()) {
-                log.warn("sync.request-body-mode={} has no effect: with sync.sensitive-columns-enabled=false excluding the "
-                        + "sensitive columns, no ingest target's mapping maps all of {}", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), REQUIRED_COLUMNS);
+            boolean bodyExcluded = targets.stream().anyMatch(t -> t.excludedColumns().contains("request_body"));
+            if (byTable.isEmpty() && bodyExcluded) {
+                log.warn("sync.request-body-mode={} has no effect: with {} leaving request_body out, no ingest target's mapping "
+                        + "maps all of {}", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), SensitiveColumnPolicy.SETTING, REQUIRED_COLUMNS);
             } else if (byTable.isEmpty() && mode == RequestBodyMode.DELTA) {
                 log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
             }

@@ -16,6 +16,10 @@ Three things make this release more than a redeploy:
 There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build writes aligned tables with no
 `request_time`, so its rows land in the 1970 partition, which the inherited TTL drops at the next merge.
 
+**0.23.1** is a patch on 0.23.0. It replaces the sensitive-column switch `SYNC_SENSITIVE_COLUMNS_ENABLED` with
+`SYNC_SENSITIVE_COLUMNS`, which names the sensitive columns ingest writes. Startup fails while the old variable is
+set, so a deployment that set it changes one variable (§8).
+
 ## Why 0.23 and not 0.4
 
 0.23 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of ADAS and
@@ -421,3 +425,36 @@ re-fires every row-grain enrichment over them, a full-cost replay on an LLM pipe
   `SYNC_RETRY_MAX_BACKOFF` (`24h`), `SYNC_RETRY_MAX_ATTEMPTS` (`10`), `SYNC_RETRY_MAX_PER_SWEEP` (`20`) — the retry
   sweep over the failure ledger (§3b); failures are recorded and listed even with retries disabled. See
   [`configuration.md`](configuration.md).
+
+## 8. 0.23.1
+
+0.23.1 keeps runner contract version `4` and adds no migration. Its one configuration change is the sensitive-column
+setting below; a deployment that never set `SYNC_SENSITIVE_COLUMNS_ENABLED` takes it as an ordinary redeploy. An
+environment still on 0.3 follows §1 to §7 and deploys 0.23.1 in place of 0.23.0, setting `SYNC_SENSITIVE_COLUMNS`
+wherever §3d and §7 name `SYNC_SENSITIVE_COLUMNS_ENABLED`.
+
+### Sensitive columns are chosen per column
+
+`SYNC_SENSITIVE_COLUMNS` (see [`configuration.md`](configuration.md#data-sync-schedule)) is a comma-separated list of
+the columns the catalog flags `sensitive` that ingest writes; the others hold their ClickHouse defaults on new rows,
+as under the 0.23.0 `false` (see [`data-sync`](../openspec/specs/data-sync/spec.md), "Sensitive columns can be
+excluded from ingest").
+
+| 0.23.0 | 0.23.1 |
+|--------|--------|
+| unset or `SYNC_SENSITIVE_COLUMNS_ENABLED=true` | unset, or `SYNC_SENSITIVE_COLUMNS=*` |
+| `SYNC_SENSITIVE_COLUMNS_ENABLED=false` | `SYNC_SENSITIVE_COLUMNS=none` |
+| — | `SYNC_SENSITIVE_COLUMNS=request_tags,jwt_claims`: only those; `rate_analytics.comment` limits an entry to one table |
+
+- **Startup fails while `SYNC_SENSITIVE_COLUMNS_ENABLED` is set**, whatever its value, naming the replacement.
+  Ignoring it would turn a `false` into the default `*` and write payload content again.
+- **Startup fails** on an entry that names no column the catalog flags `sensitive` on an ingest target table, and on
+  `*` or `none` mixed with other entries. The 0.23.0 checks, an undefined target table and an excluded key column,
+  apply to every value other than `*`.
+- **Under `SYNC_REQUEST_BODY_MODE=delta`, `request_body` needs `request_cache_control`** in the same list, or startup
+  fails: delta moves a request's cache markers into that column.
+- Write `none`, not an empty value: an empty value also means none, but tooling that prunes empty variables
+  restores `*`.
+- **Rollback.** 0.23.0 ignores `SYNC_SENSITIVE_COLUMNS` and writes every sensitive column unless
+  `SYNC_SENSITIVE_COLUMNS_ENABLED=false` is set again, so set it before rolling back a deployment that kept columns
+  out.

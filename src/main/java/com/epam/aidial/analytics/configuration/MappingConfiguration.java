@@ -7,12 +7,14 @@ import com.epam.aidial.analytics.sync.mapping.MappingConfig;
 import com.epam.aidial.analytics.sync.mapping.MappingEngine;
 import com.epam.aidial.analytics.sync.mapping.MappingFileLoader;
 import com.epam.aidial.analytics.sync.mapping.SensitiveColumnExclusion;
+import com.epam.aidial.analytics.sync.mapping.SensitiveColumnPolicy;
 import com.epam.aidial.analytics.sync.mapping.SyncTarget;
 import com.epam.aidial.analytics.sync.mapping.TransformRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.core.io.ResourceLoader;
 
 import java.util.ArrayList;
@@ -30,11 +32,12 @@ import java.util.Set;
  * {@code sync.inline-files-drop-truncated} and {@code sync.inline-files-max-size}, so its {@code inline-files} body
  * columns are rewritten (and counted) only when the repair is on or a size limit is set.
  *
- * <p>Under {@code sync.sensitive-columns-enabled=false} each mapping first loses the columns the catalog flags
- * {@code sensitive} on its table ({@link SensitiveColumnExclusion}), keeping its emit predicate, so the engine never
- * extracts them and the stored row holds their ClickHouse defaults. The catalog's Flyway migrations have run by then: the
- * repositories depend on the JPA {@code EntityManagerFactory}, which Spring Boot builds after them. Under the default
- * {@code true} the catalog is not read for this at all.
+ * <p>Under {@code sync.sensitive-columns} other than {@code *} each mapping first loses the columns the catalog flags
+ * {@code sensitive} on its table that no entry names ({@link SensitiveColumnExclusion}), keeping its emit predicate, so the
+ * engine never extracts them and the stored row holds their ClickHouse defaults. The catalog's Flyway migrations have run
+ * by then: the repositories depend on the JPA {@code EntityManagerFactory}, which Spring Boot builds after them. Under the
+ * default {@code *} the catalog is not read for this at all. The removed boolean {@code sync.sensitive-columns-enabled}
+ * fails startup here when it is still set, before any target is built.
  */
 @Configuration
 public class MappingConfiguration {
@@ -42,6 +45,7 @@ public class MappingConfiguration {
     @Bean
     public List<SyncTarget> syncTargets(
             SyncProperties syncProperties,
+            Environment environment,
             ResourceLoader resourceLoader,
             TransformRegistry transformRegistry,
             DeriverRegistry deriverRegistry,
@@ -50,18 +54,20 @@ public class MappingConfiguration {
             ObjectProvider<TableDefinitionRepository> tableDefinitions) {
         MappingFileLoader loader = new MappingFileLoader(resourceLoader, transformRegistry, deriverRegistry);
 
-        Map<String, Set<String>> excluded = syncProperties.sensitiveColumnsEnabled()
+        SensitiveColumnPolicy.rejectRemovedSetting(environment);
+        SensitiveColumnPolicy policy = syncProperties.sensitiveColumnPolicy();
+        Map<String, Set<String>> excluded = policy.all()
                 ? Map.of()
                 : SensitiveColumnExclusion.resolve(syncProperties.targets().stream().map(SyncProperties.Target::table).toList(),
-                        columnMappings.getObject(), tableDefinitions.getObject());
+                        policy, columnMappings.getObject(), tableDefinitions.getObject());
 
         List<SyncTarget> targets = new ArrayList<>(syncProperties.targets().size());
         for (SyncProperties.Target target : syncProperties.targets()) {
-            MappingConfig mapping = SensitiveColumnExclusion.without(loader.load(target.mappingFile()),
-                    excluded.getOrDefault(target.table(), Set.of()));
+            Set<String> excludedColumns = excluded.getOrDefault(target.table(), Set.of());
+            MappingConfig mapping = SensitiveColumnExclusion.without(loader.load(target.mappingFile()), excludedColumns);
             MappingEngine engine = new MappingEngine(mapping, transformRegistry, deriverRegistry,
                     syncProperties.inlineFilesPolicy(), target.table(), meterRegistry);
-            targets.add(new SyncTarget(target.table(), mapping, engine));
+            targets.add(new SyncTarget(target.table(), mapping, engine, excludedColumns));
         }
         return List.copyOf(targets);
     }
