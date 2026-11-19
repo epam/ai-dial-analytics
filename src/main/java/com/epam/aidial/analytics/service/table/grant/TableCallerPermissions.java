@@ -81,7 +81,9 @@ public class TableCallerPermissions {
 
     /**
      * As {@link #resolve(TableDefinitionEntity)}, with {@code columnsRestricted} judged by {@code visibility} over
-     * {@code ownColumns}: the columns the response is built from, which for a revision snapshot are the revision's.
+     * {@code ownColumns}: the columns the response is built from, which for a revision snapshot are the revision's. A
+     * {@code null} list, a system table's snapshot whose columns are not tracked, reports restricted whenever
+     * {@code visibility} confines the caller at all: judged without columns, it fails closed.
      */
     public EffectivePermissions resolve(TableDefinitionEntity definition, ColumnVisibility visibility, List<ColumnMappingEntity> ownColumns) {
         return resolve(definition, () -> hides(visibility, ownColumns));
@@ -112,10 +114,11 @@ public class TableCallerPermissions {
 
     /**
      * Whether the column-visibility decision hides one of {@code ownColumns} from the caller — the one decision every
-     * read surface applies, never a separate union. False when nothing restricts the caller.
+     * read surface applies, never a separate union. False when nothing restricts the caller; true when anything does and
+     * {@code ownColumns} is {@code null}, not tracked.
      */
     private static boolean hides(ColumnVisibility visibility, List<ColumnMappingEntity> ownColumns) {
-        return !visibility.isAll() && ownColumns.stream().anyMatch(column -> !visibility.allows(column.getName()));
+        return !visibility.isAll() && (ownColumns == null || ownColumns.stream().anyMatch(column -> !visibility.allows(column.getName())));
     }
 
     /**

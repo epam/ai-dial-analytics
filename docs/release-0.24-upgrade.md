@@ -29,8 +29,9 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
 - **Five spending-limit columns on `dial_usage_log`** from ClickHouse `V18`, which an operator with migrations
   disabled applies before starting the new build (§16).
+- **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§17).
 - **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
-  route outputs may bind `object` and `map` columns (§17).
+  route outputs may bind `object` and `map` columns (§18).
 
 ---
 
@@ -413,7 +414,27 @@ stores it in five nullable columns of `dial_usage_log`, tagged `cost`: `spending
 - **Rollback.** A 0.23 build does not declare the columns, so it ignores them and they read `NULL` on the rows it
   ingests.
 
-## 17. Route outputs may bind `object` and `map` columns; arming composes the schema
+## 17. Revision snapshots of system tables
+
+`GET /v1/tables/{name}/revision/{revision}` answered `404 revision_not_found` at every revision of `dial_usage_log`,
+`rate_analytics` and `dial_usage_log_payload`: a migration creates them, so their creation is not in the audit trail.
+It now answers `200` at every revision from the first recorded state of the table's definition, so the access edits
+already recorded on these tables become readable, with no backfill (see
+[`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
+
+- **No `columns` member.** The trail does not track a system table's columns, so the snapshot leaves the member out
+  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those last
+  recorded at or before the revision: a migration's change to the definition, such as `V40` setting
+  `dial_usage_log_payload`'s partitioning, shows only from the table's next recorded change. `roles` is served under
+  the usual `TABLE_GRANT` bar. A history client such as the Admin UI must
+  not assume `columns` is present.
+- **`permissions.columns_restricted`** is `true` whenever a column policy confines the caller, one that lists every
+  column included.
+- A revision before the table's first recorded state still answers `404 revision_not_found`, as does every revision
+  of a non-system table created before the trail.
+- **Rollback.** An older build answers `404` for these tables again. No data changes.
+
+## 18. Route outputs may bind `object` and `map` columns; arming composes the schema
 
 A `dial_app_route` output may now bind an `object` column, stored as the JSON document the route's `source`
 yields, or a `map` column of strings. Neither column can be nullable, so such an output is always required. A
@@ -453,4 +474,5 @@ draft is still stored. Before, such a pipeline armed and was served with no `res
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
 | Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
 | Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
-| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Preview armed `llm` pipelines served without a `response_schema` and fix them before their next patch; before a rollback, move object/map route outputs to scalar columns (§17) |
+| System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
+| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Preview armed `llm` pipelines served without a `response_schema` and fix them before their next patch; before a rollback, move object/map route outputs to scalar columns (§18) |
