@@ -21,7 +21,8 @@ import java.util.Map;
  *
  * <p>{@code rowsRestricted} is not a privilege: it reports whether row policies confine the caller's reads
  * of the table to some of its rows, and {@code columnsRestricted} whether column policies hide one of its columns from
- * the caller. Neither discloses the policies themselves.
+ * the caller; judged without columns, as on a system table's revision snapshot, it is {@code true} whenever a column
+ * policy confines the caller (see {@link TableCallerPermissions}). Neither discloses the policies themselves.
  *
  * <p>Computed by {@link TableCallerPermissions}, which shares its role-matching with the enforcement path
  * so reporting and enforcement cannot disagree.

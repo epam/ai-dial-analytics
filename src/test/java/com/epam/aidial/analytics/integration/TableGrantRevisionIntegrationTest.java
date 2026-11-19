@@ -465,8 +465,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
                     .andExpect(jsonPath("$.system").value(true))
                     .andExpect(jsonPath("$.roles['" + SYS_LATER + "'].privileges[0]").value("read"))
                     .andExpect(jsonPath("$.roles['" + SYS_LATER + "'].rows.filter.args[0].name").value("project_id"))
-                    .andExpect(jsonPath("$.columns").doesNotExist())
-                    .andExpect(jsonPath("$.ordering_key").isNotEmpty());
+                    .andExpect(jsonPath("$.columns").doesNotExist());
             snapshot(USAGE, later, viewer())
                     .andExpect(jsonPath("$.roles").doesNotExist())
                     .andExpect(jsonPath("$.columns").doesNotExist());
@@ -492,7 +491,7 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     }
 
     @Test
-    void systemTableRevisionBeforeItsFirstRecordedStateIsNotFound() throws Exception {
+    void systemTableSnapshotIsTheRecordedStateAndNotFoundBeforeIt() throws Exception {
         final String table = "sysrev_seeded";
         // Seeded as a migration seeds a system table: a live row and no audit row, so its first recorded state is known.
         jdbc.update("INSERT INTO table_definition (name, type, status, write_mode, system, ordering_key) "
@@ -503,12 +502,21 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
             putEntry(table, SYS_EARLIER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
             final int first = tableUpdates(table).getFirst();
 
+            // No definition row exists at `before`, so this 404 holds with or without the system exemption; the 200s below need it.
             mockMvc.perform(get(BASE + "/" + table + "/revision/" + before).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
                     .andExpect(status().isNotFound())
                     .andExpect(jsonPath("$.error").value("revision_not_found"));
             snapshot(table, first, fullAdmin())
                     .andExpect(jsonPath("$.roles['" + SYS_EARLIER + "'].privileges[0]").value("read"))
-                    .andExpect(jsonPath("$.columns").doesNotExist());
+                    .andExpect(jsonPath("$.columns").doesNotExist())
+                    .andExpect(jsonPath("$.ordering_key", org.hamcrest.Matchers.contains("k")));
+
+            // A migration's change to the live row, outside the trail: the snapshot keeps the recorded state until the next change.
+            jdbc.update("UPDATE table_definition SET ordering_key = '{m}' WHERE name = ?", table);
+            snapshot(table, first, fullAdmin()).andExpect(jsonPath("$.ordering_key", org.hamcrest.Matchers.contains("k")));
+            putEntry(table, SYS_LATER, "\"privileges\":[\"read\"]").andExpect(status().isOk());
+            snapshot(table, tableUpdates(table).getFirst(), fullAdmin())
+                    .andExpect(jsonPath("$.ordering_key", org.hamcrest.Matchers.contains("m")));
         } finally {
             jdbc.update("DELETE FROM audit_activity WHERE resource_id = ?", table);
             jdbc.update("DELETE FROM table_definition_aud WHERE name = ?", table);

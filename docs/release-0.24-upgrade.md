@@ -386,8 +386,10 @@ already recorded on these tables become readable, with no backfill (see
 [`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
 
 - **No `columns` member.** The trail does not track a system table's columns, so the snapshot leaves the member out
-  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those recorded at
-  the revision, and `roles` is served under the usual `TABLE_GRANT` bar. A history client such as the Admin UI must
+  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those last
+  recorded at or before the revision: a migration's change to the definition, such as `V40` setting
+  `dial_usage_log_payload`'s partitioning, shows only from the table's next recorded change. `roles` is served under
+  the usual `TABLE_GRANT` bar. A history client such as the Admin UI must
   not assume `columns` is present.
 - **`permissions.columns_restricted`** is `true` whenever a column policy confines the caller, one that lists every
   column included.

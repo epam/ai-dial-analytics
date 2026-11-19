@@ -6,7 +6,8 @@ The system SHALL expose `GET /v1/tables/{name}/revision/{revision}` returning th
 at the end of the given revision, in the same response shape as the current-state read
 (`GET /v1/tables/{name}`) plus the access member below. The snapshot SHALL include the columns, ordering key, and grain that
 belonged to the table at that revision, and SHALL exclude a column that had been dropped by then. A system table's
-snapshot is the one exception, and carries no columns (below).
+snapshot is the one exception: it carries no columns, and its definition is the one last recorded at or before the
+revision (below).
 
 Every member of that response describes the table **as of the requested revision**, including the
 caller's effective permissions, which are resolved from the access entries the table had then. The columns it shows
@@ -63,11 +64,13 @@ entries above all, and never a change to one of its columns. Its snapshot SHALL 
 the first recorded state of its definition, with every member described above except `columns`, which SHALL be
 absent, not empty. An empty list would assert that the table had no columns, while a list built from the current
 schema would assert a past state the trail never recorded. Its `ordering_key`, partitioning, TTL and grain SHALL be
-those recorded at the revision. Its `roles` SHALL be served under the same bar as any table's. Its
+those last recorded at or before the revision. Its `roles` SHALL be served under the same bar as any table's. Its
 `permissions.columns_restricted` SHALL be `true` exactly when a column policy, the revision's or the current one,
 confines the caller, because no column list exists to judge it over. A revision before the first recorded state of
 its definition SHALL be answered with HTTP 404 and `revision_not_found`, like a revision before any table's creation.
-A change a migration makes to a system table's definition is written outside the trail and records no revision.
+A change a migration makes to a system table's definition is written outside the trail and records no revision. So no
+snapshot shows it until the table's next recorded change, whose recorded state carries it, and a comparison across that
+recorded change shows the migration's edit as part of it.
 
 #### Scenario: Table snapshot at a past revision
 
@@ -176,7 +179,8 @@ A change a migration makes to a system table's definition is written outside the
 
 - **WHEN** any caller allowed to read the table requests a system table's snapshot at a revision at or after the first
   recorded state of its definition
-- **THEN** the response carries no `columns` member, and carries `ordering_key` as recorded at that revision
+- **THEN** the response carries no `columns` member, and carries `ordering_key` as last recorded at or before that
+  revision
 
 #### Scenario: A system table's snapshot without TABLE_GRANT
 
@@ -196,6 +200,13 @@ A change a migration makes to a system table's definition is written outside the
 - **WHEN** a caller requests a system table's snapshot at a revision that exists but precedes every recorded state of
   its definition
 - **THEN** the system returns HTTP 404 with error code `revision_not_found`
+
+#### Scenario: A migration's change to a system table appears at its next recorded change
+
+- **GIVEN** a system table whose definition is recorded at revision `R` with `ordering_key` `["k"]`, after which a
+  migration sets its `ordering_key` to `["m"]` and an access change then records revision `R2`
+- **WHEN** a caller requests the snapshots at `R` and `R2`
+- **THEN** the one at `R` still carries `ordering_key` `["k"]`, and the one at `R2` carries `["m"]`
 
 #### Scenario: An enrichment snapshot reports its source's current read-side flags
 

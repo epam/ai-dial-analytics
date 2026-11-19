@@ -23,7 +23,8 @@ import java.util.List;
  * <p>The result carries a {@link TableView} — the very aggregate the live read builds — so the snapshot goes
  * through the same mapper and comes back in the same shape. A client therefore diffs two identical
  * shapes rather than a shape against an audit-specific projection, and a field added to the table API
- * appears in history for free.
+ * appears in history for free. The one exception is a {@code system} table, whose snapshot has no columns (see
+ * {@link #snapshot}).
  */
 @Service
 @RequiredArgsConstructor
@@ -40,7 +41,9 @@ public class AuditSnapshotService {
      *
      * <p>A {@code system} table, as the revision records it, is exempt from the creation guard: a migration creates it,
      * and the API never changes its columns, so the trail holds only its definition row. Its view carries {@code null}
-     * columns, meaning not tracked, rather than a list the trail cannot vouch for.
+     * columns, meaning not tracked, rather than a list the trail cannot vouch for. Its definition is the row last recorded
+     * at or before the revision: a migration changes that row outside the trail, so its change shows only from the
+     * table's next recorded change.
      */
     @Transactional(readOnly = true)
     public TableSnapshot snapshot(String name, int revision) {

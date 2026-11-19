@@ -23,7 +23,7 @@
   seeded table's trail held before it ran. Each test reads only revisions it recorded itself:
   - on `dial_usage_log`, two access `PUT`s: role `Y` with `read` at `R0`, then role `X` with `read` and a row policy
     at `R`. Both snapshots answer 200; `R` carries `roles.X`, and `R0` carries `roles.Y` and no entry for `X`;
-  - at `R` or `R0`: no `columns`, with `ordering_key` present;
+  - at `R` or `R0`: no `columns`;
   - at `R` or `R0`: a `TABLE_GET`-only caller gets neither `roles` nor `columns`;
   - at a revision the test recorded: `columns_restricted` is `true` for a confined caller and `false` for an
     unconfined one;
@@ -31,7 +31,9 @@
     so its first recorded state is known whatever ran first. Record a revision with an audited write to another
     entity (such as an access `PUT` on `dial_usage_log`), then `PUT` an entry with `read` only on the throwaway table,
     and assert `404 revision_not_found` at the first revision and 200 at the `PUT`'s. Remove the throwaway table's
-    live and audit rows through JDBC afterwards.
+    live and audit rows through JDBC afterwards;
+  - on the same throwaway table, seeded with `ordering_key` `{k}`: `["k"]` at the `PUT`'s revision, still `["k"]`
+    after a JDBC `UPDATE` of the live row to `{m}`, and `["m"]` at the next access `PUT`.
 
   Use role names no other test class uses. Clean up every entry the tests add.
 - [x] 3.2 Add a unit test for `TableCallerPermissions` covering a `null` column list under a confining and a

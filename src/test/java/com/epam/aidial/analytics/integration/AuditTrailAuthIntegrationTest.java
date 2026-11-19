@@ -105,7 +105,8 @@ class AuditTrailAuthIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(jsonPath("$.error").value("not_found"));
         // A caller holding TABLE_GET gets past authorization; whether that revision exists is a separate
         // question. Revision 0 is never issued, so the answer is 404 revision_not_found whatever other tests
-        // recorded for this table.
+        // recorded for this table. The 200 at a recorded revision, for the same READ_ONLY_ADMIN caller, is pinned by
+        // TableGrantRevisionIntegrationTest#systemTableAccessChangesAreReadableAtTheirRevisions.
         mockMvc.perform(authored(get(path), readOnlyAdmin()))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("revision_not_found"));
