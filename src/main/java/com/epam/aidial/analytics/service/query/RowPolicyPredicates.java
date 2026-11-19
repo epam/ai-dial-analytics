@@ -18,14 +18,12 @@ import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
-import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionDto;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionGroup;
 import lombok.RequiredArgsConstructor;
-import org.apache.commons.lang3.StringUtils;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
@@ -68,24 +66,15 @@ public class RowPolicyPredicates {
     public static final int MAX_RENDERED_BYTES = 16 * 1024;
 
     /** The caller's user hash, comparable with a {@code user_hash} column. */
-    public static final String CALLER_USER_HASH = "caller.user_hash";
+    public static final String CALLER_USER_HASH = CallerValues.USER_HASH;
 
     /** The project of the caller's project API key. */
-    public static final String CALLER_PROJECT = "caller.project";
+    public static final String CALLER_PROJECT = CallerValues.PROJECT;
 
-    /** A longer caller value is unknown, which bounds what a read can add to a predicate accepted at save time. */
-    public static final int MAX_CALLER_VALUE_BYTES = 512;
-
-    private static final Set<String> CALLER_VALUES = Set.of(CALLER_USER_HASH, CALLER_PROJECT);
+    private static final Set<String> CALLER_VALUES = CallerValues.NAMES;
 
     private static final String CALLER_VALUE_PLACEMENT = "may use a caller value (" + CALLER_USER_HASH + ", "
             + CALLER_PROJECT + ") only as a direct operand of 'eq' or 'ne' against a string field of the table";
-
-    /** The largest a caller value can render: every byte one that literal escaping doubles. */
-    private static final String WORST_CASE_VALUE = "'".repeat(MAX_CALLER_VALUE_BYTES);
-
-    /** {@code NULL} as a filter-typed operand: no row matches it, and no row matches its negation. */
-    private static final Condition UNKNOWN = DSL.condition("CAST(NULL, 'Nullable(UInt8)')");
 
     private final CatalogQueryService catalog;
     private final FilterTranslator filterTranslator;
@@ -98,7 +87,7 @@ public class RowPolicyPredicates {
      * @throws QueryValidationException as {@link #render(String, FilterNode, UnaryOperator)}
      */
     public String render(String table, FilterNode filter) {
-        return render(table, filter, ignored -> WORST_CASE_VALUE);
+        return render(table, filter, ignored -> CallerValues.WORST_CASE_VALUE);
     }
 
     /**
@@ -123,12 +112,6 @@ public class RowPolicyPredicates {
         return rendered;
     }
 
-    /** {@code value} when a policy may compare with it, or {@code null}: absent, blank and over-long are unknown. */
-    public static String knownCallerValue(String value) {
-        return StringUtils.isBlank(value) || value.getBytes(StandardCharsets.UTF_8).length > MAX_CALLER_VALUE_BYTES
-                ? null : value;
-    }
-
     /**
      * Translates the tree, handing every subtree without a caller value to the translator untouched, so a
      * policy that uses none renders exactly as it always did.
@@ -143,11 +126,8 @@ public class RowPolicyPredicates {
                 yield combine(logical.op(), args);
             }
             case ComparisonNode comparison when usesCallerValue(comparison) -> {
-                final List<Expr> bound = comparison.args().stream()
-                        .map(arg -> arg instanceof ParamExpr param ? callerLiteral(callerValues.apply(param.name())) : arg)
-                        .toList();
-                yield bound.contains(null)
-                        ? UNKNOWN : filterTranslator.toCondition(new ComparisonNode(comparison.op(), bound), bindings);
+                final ComparisonNode bound = CallerValues.bind(comparison, callerValues);
+                yield bound == null ? CallerValues.UNKNOWN : filterTranslator.toCondition(bound, bindings);
             }
             case null, default -> filterTranslator.toCondition(node, bindings);
         };
@@ -163,13 +143,8 @@ public class RowPolicyPredicates {
         return op == LogicalOp.AND ? DSL.and(args) : DSL.or(args);
     }
 
-    private static Expr callerLiteral(String value) {
-        final String known = knownCallerValue(value);
-        return known == null ? null : new ValueExpr(ValueType.STRING, known);
-    }
-
     private static boolean isCallerValue(Expr expr) {
-        return expr instanceof ParamExpr param && CALLER_VALUES.contains(param.name());
+        return CallerValues.isCallerValue(expr);
     }
 
     private static boolean usesCallerValue(FilterNode node) {

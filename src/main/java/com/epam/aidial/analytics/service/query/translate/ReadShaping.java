@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -476,8 +477,15 @@ final class ReadShaping {
         return binding == null ? null : binding.type();
     }
 
-    /** A non-null literal that is not {@code type}'s default: {@code ''} for text, {@code 0} for a number. */
+    /**
+     * A non-null literal that is not {@code type}'s default: {@code ''} for text, {@code 0} for a number. A caller value
+     * against a text field counts as one: a known value is never blank, and an unknown one makes the comparison
+     * {@code NULL}, which is false on a default row as well.
+     */
     private static boolean nonDefaultLiteral(QueryFieldType type, Expr expr) {
+        if (type == QueryFieldType.STRING && CallerValues.isCallerValue(expr)) {
+            return true;
+        }
         if (!(expr instanceof ValueExpr(ValueType valueType, String value)) || value == null) {
             return false;
         }

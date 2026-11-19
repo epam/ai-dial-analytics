@@ -639,6 +639,23 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
         }
     }
 
+    @Test
+    void inlineBodyKeepsCallerValueAsWrittenAndRefusesAnyOtherParameter() throws Exception {
+        final String mine = "SELECT count(*) AS n FROM dial_usage_log WHERE user_hash = caller.user_hash()";
+        mockMvc.perform(json(post(BASE)).content(body("Mine", "private", """
+                        {"id":"w1","row_limit":10,"layout":{"x":0,"y":0,"w":6,"h":4},
+                         "inline_query":{"name":"Mine","sql":"%s"}}""".formatted(mine))))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.widgets[0].inline_query.sql").value(mine));
+        mockMvc.perform(json(post(BASE)).content(body("Templated", "private", """
+                        {"id":"w1","row_limit":10,"layout":{"x":0,"y":0,"w":6,"h":4},
+                         "inline_query":{"name":"Templated","query":{"entity":"dial_usage_log","mode":"row",
+                           "select":[{"expr":{"type":"field","name":"project_id"}}],
+                           "filter":{"op":"eq","args":[{"type":"field","name":"user_hash"},{"type":"param","name":"caller.email"}]}}}}""")))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
+    }
+
     private static MockHttpServletRequestBuilder json(MockHttpServletRequestBuilder builder) {
         return builder.contentType(MediaType.APPLICATION_JSON);
     }

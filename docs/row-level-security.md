@@ -83,14 +83,27 @@ aligned target, `request_time`.
 
 ## Own rows: comparing a column with the caller
 
-A policy may compare a `string` column with `caller.user_hash` (needs the `logging-*` settings in
-[`configuration.md`](configuration.md)) or `caller.project` (the project of a project API key), using `=` or `!=`:
+A policy may compare a `string` column with `caller.user_hash()` (needs the `logging-*` settings in
+[`configuration.md`](configuration.md)) or `caller.project()` (the project of a project API key), using `=` or `!=`:
 
 ```json
-{"generation": 7, "privileges": ["read"], "rows": {"where": "user_hash = caller.user_hash"}}
+{"generation": 7, "privileges": ["read"], "rows": {"where": "user_hash = caller.user_hash()"}}
 ```
 
-A caller without the value matches no row.
+A caller without the value matches no row. The older spelling without the parentheses, `caller.user_hash`, is still
+accepted in a policy and stores the same filter.
+
+### Your own rows in a query
+
+A role that reads the table with no policy lifts the own-rows policy, so an administrator, whom an own-rows policy on
+`*` also matches, reads every row. To see only its own, the query asks for them with the same value:
+
+```sql
+SELECT * FROM dial_usage_log WHERE user_hash = caller.user_hash()
+```
+
+The value is filled in for whoever runs the query, so one saved query or dashboard widget shows each viewer its own
+rows. See [`sql-reference.md`](sql-reference.md), "Your own rows: caller values".
 
 ## Everyone: the `*` grantee
 

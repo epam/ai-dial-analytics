@@ -60,7 +60,8 @@ class SqlValidationServiceTest {
                         mock(com.epam.aidial.analytics.service.query.rebuild.ComputedFieldCompleter.class)),
                 new CompositeQueryBuilder(builder),
                 renderContext,
-                budget);
+                budget,
+                new com.epam.aidial.analytics.service.security.SecurityClaimsExtractor());
         return new SqlValidationService(
                 new SqlQueryFrontEnd(new CalciteQueryCatalog(catalog)),
                 queryService,

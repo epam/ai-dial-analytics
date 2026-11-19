@@ -22,7 +22,8 @@ public record RowsDto(
         @JsonDeserialize(using = FilterNodeDeserializer.class) FilterNode filter,
 
         @Schema(description = "Request only, instead of `filter`: the same policy as the SQL condition that would follow "
-                + "WHERE, for example `user_hash = caller.user_hash`. Translated to a `filter`, which is what is stored.")
+                + "WHERE, for example `user_hash = caller.user_hash()` (the spelling without parentheses is accepted too). "
+                + "Translated to a `filter`, which is what is stored.")
         @JsonInclude(JsonInclude.Include.NON_NULL) @JsonDeserialize(using = StrictStringDeserializer.class) String where) {
 
     /** The stored policy as a response member, or {@code null} for none. */

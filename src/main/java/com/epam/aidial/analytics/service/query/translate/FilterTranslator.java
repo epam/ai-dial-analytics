@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.DocumentComparisons;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
@@ -11,7 +12,9 @@ import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.model.FnExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
+import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
@@ -26,6 +29,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 /**
  * Translates the recursive filter tree into a jOOQ {@link Condition}. Logical nodes map to
@@ -78,11 +82,11 @@ public class FilterTranslator {
     }
 
     public Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
-        return toCondition(node, bindings, WindowPosition.FORBIDDEN);
+        return toCondition(node, bindings, Position.PREDICATE);
     }
 
 
-    private Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings, WindowPosition windows) {
+    private Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings, Position windows) {
         if (node == null) {
             return DSL.trueCondition();
         }
@@ -95,6 +99,14 @@ public class FilterTranslator {
             case ComparisonNode comparison -> toComparison(comparison, bindings, windows);
             case SubqueryNode subquery -> toSubquery(subquery, bindings);
         };
+    }
+
+    /**
+     * A {@code having} tree: a predicate like any other, and the one place a caller value may be compared with an
+     * aggregate (see {@link #requireCallerComparison}).
+     */
+    public Condition toHavingCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
+        return toCondition(node, bindings, Position.HAVING);
     }
 
     /**
@@ -118,11 +130,14 @@ public class FilterTranslator {
      * engine computes after the block's result exists, exactly like a bare window column.
      */
     public Condition toCaseCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
-        return toCondition(node, bindings, WindowPosition.ALLOWED);
+        return toCondition(node, bindings, Position.CASE_BRANCH);
     }
 
-    /** Whether the filter tree being translated may carry a window expression as a comparison operand. */
-    private enum WindowPosition { FORBIDDEN, ALLOWED }
+    /**
+     * Where the filter tree being translated stands: a predicate, which may carry no window expression; a
+     * {@code having} predicate, likewise; or a {@code case} branch inside a select-list expression, which may.
+     */
+    private enum Position { PREDICATE, HAVING, CASE_BRANCH }
 
     /**
      * {@code IN}/{@code NOT IN} over one operand or a tuple, and {@code EXISTS}/{@code NOT EXISTS}. The
@@ -160,7 +175,7 @@ public class FilterTranslator {
         };
     }
 
-    private Condition toLogical(LogicalNode node, Map<String, QueryFieldBinding> bindings, WindowPosition windows) {
+    private Condition toLogical(LogicalNode node, Map<String, QueryFieldBinding> bindings, Position windows) {
         final List<FilterNode> args = node.args() == null ? List.of() : node.args();
         return switch (node.op()) {
             case AND -> DSL.and(translateAll(args, bindings, windows));
@@ -175,7 +190,7 @@ public class FilterTranslator {
     }
 
     private List<Condition> translateAll(
-            List<FilterNode> nodes, Map<String, QueryFieldBinding> bindings, WindowPosition windows) {
+            List<FilterNode> nodes, Map<String, QueryFieldBinding> bindings, Position windows) {
         if (nodes.isEmpty()) {
             throw new QueryValidationException("'and'/'or' require at least one child node");
         }
@@ -188,10 +203,16 @@ public class FilterTranslator {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private Condition toComparison(
-            ComparisonNode node, Map<String, QueryFieldBinding> bindings, WindowPosition windows) {
+            ComparisonNode node, Map<String, QueryFieldBinding> bindings, Position windows) {
         final List<Expr> args = node.args() == null ? List.of() : node.args();
         if (args.size() != 2) {
             throw new QueryValidationException("comparison '" + node.op().code() + "' expects exactly two arguments");
+        }
+        final UnaryOperator<String> callerValues = CallerValues.current();
+        if (callerValues != null && CallerValues.usesCallerValue(node)) {
+            requireCallerComparison(node, bindings, windows);
+            final ComparisonNode bound = CallerValues.bind(node, callerValues);
+            return bound == null ? CallerValues.UNKNOWN : toComparison(bound, bindings, windows);
         }
         // An array-valued aggregate has no comparison in the DSL, and a `having` clause reaches an aggregate
         // output through its alias rather than by restating the call — so nothing expressible is lost.
@@ -201,7 +222,7 @@ public class FilterTranslator {
             // in WHERE and HAVING, and so does the DSL, rather than let ClickHouse phrase the refusal. A
             // `case` branch condition is exempt: that tree stands inside a select-list expression, not in a
             // predicate, so the window is still computed where SQL allows one.
-            if (windows == WindowPosition.FORBIDDEN) {
+            if (windows != Position.CASE_BRANCH) {
                 WindowExpressions.rejectNested(arg, "a filter or having comparison");
             }
         }
@@ -259,6 +280,30 @@ public class FilterTranslator {
         };
     }
 
+    /**
+     * The one shape a caller value is admitted in: a direct operand of {@code eq}/{@code ne} whose other operand is an
+     * expression of type {@code string} over at least one field — a field, a computed expression, or, in {@code having}
+     * only, one over an aggregate; never a literal — in a predicate rather than a {@code case} branch inside an expression, where an unknown value would
+     * take the {@code else}. The other operand is translated first, so an unknown field, or a caller value inside it,
+     * is reported whether or not the caller has a value; and an aggregate outside {@code having} is refused here,
+     * because an unknown value would otherwise replace the comparison before the engine could refuse it.
+     */
+    private void requireCallerComparison(ComparisonNode node, Map<String, QueryFieldBinding> bindings, Position position) {
+        final String name = node.args().stream().filter(CallerValues::isCallerValue)
+                .map(arg -> ((ParamExpr) arg).name()).findFirst().orElseThrow();
+        final Expr other = CallerValues.comparedOperand(node);
+        if (position == Position.CASE_BRANCH || other == null) {
+            throw new QueryValidationException(CallerValues.placementMessage(name));
+        }
+        exprTranslator.toField(other, bindings);
+        final boolean[] aggregate = {false};
+        WindowExpressions.visit(other, expr -> aggregate[0] |= expr instanceof FnExpr fn && WindowExpressions.isAggregate(fn.name()));
+        if (!WindowExpressions.readsField(other) || ExprFieldType.of(other, bindings) != QueryFieldType.STRING
+                || aggregate[0] && position != Position.HAVING) {
+            throw new QueryValidationException(CallerValues.placementMessage(name));
+        }
+    }
+
     private List<Object> inValues(Expr right, Map<String, QueryFieldBinding> bindings) {
         if (!(right instanceof ArrayExpr(List<Expr> arrayItems))) {
             throw new QueryValidationException("'in' requires an array as its right operand");
@@ -269,6 +314,9 @@ public class FilterTranslator {
         }
         final List<Object> values = new ArrayList<>(items.size());
         for (final Expr item : items) {
+            if (CallerValues.isCallerValue(item) && CallerValues.current() != null) {
+                throw new QueryValidationException(CallerValues.placementMessage(((ParamExpr) item).name()));
+            }
             if (!(item instanceof ValueExpr value)) {
                 throw new QueryValidationException("'in' array items must be literal values");
             }

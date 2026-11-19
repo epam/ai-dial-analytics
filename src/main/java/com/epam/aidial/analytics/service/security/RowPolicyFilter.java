@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.security;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.exception.RowPolicyConfinedException;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.RowPolicyPredicates;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -262,9 +263,9 @@ public class RowPolicyFilter {
      * is logged and put on the span — by name, never by content.
      */
     private String callerValue(String name) {
-        final String value = RowPolicyPredicates.knownCallerValue(switch (name) {
-            case RowPolicyPredicates.CALLER_USER_HASH -> claims.getUserHash();
-            case RowPolicyPredicates.CALLER_PROJECT -> claims.getProject();
+        final String value = CallerValues.known(switch (name) {
+            case CallerValues.USER_HASH -> claims.getUserHash();
+            case CallerValues.PROJECT -> claims.getProject();
             default -> null;
         });
         if (value == null) {

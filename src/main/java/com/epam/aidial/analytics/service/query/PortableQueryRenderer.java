@@ -59,8 +59,9 @@ public class PortableQueryRenderer {
 
     /** Validates {@code query} against {@code model} and renders it; a query the path refuses throws as it would there. */
     public String render(StructuredQuery query, QueryEntityModel model) {
-        // Validation pass only — the jOOQ model (internal ClickHouse SQL) is deliberately discarded.
-        queryBuilder.build(renderContext, model, query);
+        // Validation pass only — the jOOQ model (internal ClickHouse SQL) is deliberately discarded, so a caller value
+        // is checked where it stands but bound to a placeholder, and no identity is read.
+        CallerValues.validating(() -> queryBuilder.build(renderContext, model, query));
         return renderer.render(query, model);
     }
 

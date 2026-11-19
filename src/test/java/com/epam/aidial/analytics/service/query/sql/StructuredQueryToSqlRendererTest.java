@@ -166,6 +166,16 @@ class StructuredQueryToSqlRendererTest {
         return new ValueExpr(ValueType.STRING, value);
     }
 
+    @Test
+    void callerValueRendersAsItsCallAndAnyOtherParamIsRefused() {
+        assertThat(render(rowQuery(comparison(ComparisonOp.EQ, new FieldExpr("event_kind"),
+                new com.epam.aidial.analytics.service.query.model.ParamExpr("caller.user_hash")))))
+                .contains("\"event_kind\" = caller.user_hash()");
+        assertThatThrownBy(() -> render(rowQuery(comparison(ComparisonOp.EQ, new FieldExpr("event_kind"),
+                new com.epam.aidial.analytics.service.query.model.ParamExpr("caller.email")))))
+                .hasMessageContaining("param expressions are not supported");
+    }
+
     // ------------------------------------------------------------- arithmetic and accessors
 
     @Test

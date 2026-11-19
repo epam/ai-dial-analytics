@@ -496,6 +496,15 @@ class AggregateSqlValidatorTest {
     }
 
     @Test
+    void callerValueIsUnknownFunctionInDeclaration() {
+        // A pipeline runs with no caller, so no spelling of a caller value reaches its declaration.
+        for (final String call : List.of("caller.user_hash()", "CALLER_USER_HASH()", "\"caller_user_hash\"()")) {
+            assertRefused(HEAD + KEYS + "FROM dial_usage_log WHERE user_hash = " + call + " GROUP BY 1, 2",
+                    "No match found for function signature");
+        }
+    }
+
+    @Test
     void functionOutsideTheCatalogIsRefusedPointingAtTheSqlCatalog() {
         assertRefused(HEAD + "SELECT deployment, date_trunc('day', request_time), countIf(success), sum(total_tokens) "
                 + "FROM dial_usage_log GROUP BY 1, 2", "countIf", "/v1/queries/sql-functions");

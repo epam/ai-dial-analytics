@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.query.saved;
 
 import com.epam.aidial.analytics.exception.SavedQueryValidationException;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
 import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
@@ -170,9 +171,10 @@ public class SavedQueryBodyValidator {
 
     /**
      * A runtime parameter expression is refused here, with this capability's own message, rather than
-     * being left to the translator. The translator would also reject it — it has no server-side parameter
-     * registry — but as a {@code 400} carrying an internal message about the translator. Which errors this
-     * API produces is part of its contract; the translator's wording is an implementation detail.
+     * being left to the translator. The translator would also reject it — the only parameters it binds are the
+     * caller values, which this check admits — but as a {@code 400} carrying an internal message about the
+     * translator. Which errors this API produces is part of its contract; the translator's wording is an
+     * implementation detail.
      */
     private static void rejectParameters(StructuredQuery query) {
         if (query == null) {
@@ -205,7 +207,9 @@ public class SavedQueryBodyValidator {
     private static boolean exprHasParam(Expr expr) {
         return switch (expr) {
             case null -> false;
-            case ParamExpr ignored -> true;
+            // A caller value is no template parameter: no client binds it, and the query surface resolves it for
+            // whoever runs the body; where it stands is checked by the translation the save runs.
+            case ParamExpr param -> !CallerValues.isCallerValue(param);
             case FnExpr fn -> fn.args() != null && fn.args().stream().anyMatch(SavedQueryBodyValidator::exprHasParam);
             case ArrayExpr array -> array.items() != null
                     && array.items().stream().anyMatch(SavedQueryBodyValidator::exprHasParam);
