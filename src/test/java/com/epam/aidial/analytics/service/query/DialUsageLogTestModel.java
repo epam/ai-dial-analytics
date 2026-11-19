@@ -92,6 +92,11 @@ public final class DialUsageLogTestModel {
         add(bindings, schema, "response_body_bytes", QueryFieldType.LONG);
         add(bindings, schema, "route_name", QueryFieldType.STRING);
         add(bindings, schema, "route_type", QueryFieldType.STRING);
+        add(bindings, schema, "spending_limits_mode", QueryFieldType.STRING);
+        add(bindings, schema, "budget_cost_object", QueryFieldType.STRING);
+        add(bindings, schema, "budget_outcome", QueryFieldType.STRING);
+        add(bindings, schema, "budget_policy", QueryFieldType.STRING);
+        add(bindings, schema, "budget_assignment", QueryFieldType.STRING);
         // None of the five verbatim-content columns is a source column: the mapping split stopped
         // capturing them on dial_usage_log (V11 then dropped the physical columns) and V38
         // re-keyed their catalog rows onto the dial_usage_log_payload

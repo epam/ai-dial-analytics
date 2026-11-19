@@ -15,7 +15,7 @@
 ## 3. Spec and docs
 
 - [x] 3.1 Confirm the delta in `specs/enrichment-registry/spec.md` matches the shipped behaviour and error text
-- [x] 3.2 Check `docs/*.md` for any statement that route outputs cannot bind `object`/`map` columns, and update it to agree with the spec (no `docs/configuration.md` change: no property is added); the upgrade note is `docs/release-0.24-upgrade.md` §16
+- [x] 3.2 Check `docs/*.md` for any statement that route outputs cannot bind `object`/`map` columns, and update it to agree with the spec (no `docs/configuration.md` change: no property is added); the upgrade note is `docs/release-0.24-upgrade.md` §17
 
 ## 4. Verification
 
