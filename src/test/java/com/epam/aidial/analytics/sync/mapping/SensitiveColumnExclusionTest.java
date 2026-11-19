@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.epam.aidial.analytics.sync.mapping.SensitiveColumnPolicy.NONE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -23,8 +24,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * The columns {@code sync.sensitive-columns-enabled=false} leaves out per ingest target, read from the catalog's
- * {@code sensitive} flags, and the startup guard against excluding a column ingest depends on.
+ * The columns {@code sync.sensitive-columns} leaves out per ingest target, read from the catalog's {@code sensitive} flags:
+ * all of them under {@code none}, the unnamed ones under a list. Also the startup guards against an entry naming no
+ * column and against excluding a column ingest depends on, and the warning for an entry naming no sensitive column.
  */
 class SensitiveColumnExclusionTest {
 
@@ -80,7 +82,7 @@ class SensitiveColumnExclusionTest {
 
     @Test
     void seededCatalogExcludesThePayloadContentAndTheRatingComment() {
-        Map<String, Set<String>> excluded = SensitiveColumnExclusion.resolve(TARGETS, columns, definitions);
+        Map<String, Set<String>> excluded = SensitiveColumnExclusion.resolve(TARGETS, NONE, columns, definitions);
 
         assertThat(excluded.get(USAGE_LOG)).isEmpty();
         assertThat(excluded.get(PAYLOAD)).containsExactly(
@@ -94,14 +96,14 @@ class SensitiveColumnExclusionTest {
     void columnFlaggedLaterIsExcludedWithoutCodeChange() {
         column(USAGE_LOG, "user_hash", true);
 
-        assertThat(SensitiveColumnExclusion.resolve(TARGETS, columns, definitions).get(USAGE_LOG)).containsExactly("user_hash");
+        assertThat(SensitiveColumnExclusion.resolve(TARGETS, NONE, columns, definitions).get(USAGE_LOG)).containsExactly("user_hash");
     }
 
     @Test
     void sensitiveDeduplicationKeyColumnFailsStartup() {
         column(USAGE_LOG, "trace_id", true);
 
-        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, columns, definitions))
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, NONE, columns, definitions))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("trace_id").hasMessageContaining(USAGE_LOG);
     }
 
@@ -109,7 +111,7 @@ class SensitiveColumnExclusionTest {
     void sensitiveGrainKeyFailsStartup() {
         column(PAYLOAD, "event_id", true);
 
-        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD), columns, definitions))
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD), NONE, columns, definitions))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("event_id").hasMessageContaining(PAYLOAD);
     }
 
@@ -117,7 +119,7 @@ class SensitiveColumnExclusionTest {
     void sensitiveOrderingKeyColumnFailsStartup() {
         column(USAGE_LOG, "project_id", true);
 
-        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(USAGE_LOG), columns, definitions))
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(USAGE_LOG), NONE, columns, definitions))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("project_id").hasMessageContaining(USAGE_LOG);
     }
 
@@ -132,7 +134,7 @@ class SensitiveColumnExclusionTest {
         for (String column : List.of("day", "version", "expires")) {
             catalog.removeIf(c -> c.getTableName().equals("custom_sink"));
             column("custom_sink", column, true);
-            assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of("custom_sink"), columns, definitions))
+            assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of("custom_sink"), NONE, columns, definitions))
                     .isInstanceOf(IllegalStateException.class).hasMessageContaining(column).hasMessageContaining("custom_sink");
         }
     }
@@ -140,7 +142,91 @@ class SensitiveColumnExclusionTest {
     /** Writing an unknown table whole would store exactly what the switch is meant to keep out. */
     @Test
     void tableWithoutCatalogDefinitionFailsStartup() {
-        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD, "custom_sink"), columns, definitions))
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD, "custom_sink"), NONE, columns, definitions))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("custom_sink").hasMessageContaining("does not define");
+    }
+
+    @Test
+    void listWritesOnlyTheNamedSensitiveColumns() {
+        Map<String, Set<String>> excluded = SensitiveColumnExclusion.resolve(TARGETS, policy("request_tags", "jwt_claims"), columns, definitions);
+
+        assertThat(excluded.get(USAGE_LOG)).isEmpty();
+        assertThat(excluded.get(PAYLOAD)).containsExactly("request_body", "response_body", "assembled_response", "request_cache_control");
+        assertThat(excluded.get(RATE)).containsExactly("comment");
+        assertThat(messages(Level.INFO)).anySatisfy(m -> assertThat(m).contains(PAYLOAD)
+                .contains("excludes sensitive columns [request_body, response_body, assembled_response, request_cache_control]")
+                .contains("writes sensitive columns [jwt_claims, request_tags]"));
+    }
+
+    @Test
+    void qualifiedEntryAppliesToItsTableOnly() {
+        column(PAYLOAD, "comment", true);
+
+        Map<String, Set<String>> excluded = SensitiveColumnExclusion.resolve(TARGETS, policy("rate_analytics.comment"), columns, definitions);
+
+        assertThat(excluded.get(RATE)).isEmpty();
+        assertThat(excluded.get(PAYLOAD)).contains("comment", "request_body");
+    }
+
+    @Test
+    void bareEntryAppliesToEveryTargetTable() {
+        column(PAYLOAD, "comment", true);
+
+        Map<String, Set<String>> excluded = SensitiveColumnExclusion.resolve(TARGETS, policy("comment"), columns, definitions);
+
+        assertThat(excluded.get(RATE)).isEmpty();
+        assertThat(excluded.get(PAYLOAD)).doesNotContain("comment");
+    }
+
+    /** A typo, a wrong case, or a column of another table names nothing, and would silently drop the column meant. */
+    @Test
+    void entryNamingNoColumnFailsStartup() {
+        for (String entry : List.of("request_tag", "Request_Tags", "dial_usage_log.request_tags", "sessions.comment")) {
+            assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, policy(entry), columns, definitions))
+                    .as(entry).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("sync.sensitive-columns").hasMessageContaining("'" + entry + "'");
+        }
+    }
+
+    /**
+     * A column that exists but is not flagged sensitive is written anyway, so its entry only warns: the flag can be
+     * cleared through the table API, which must not stop the next startup.
+     */
+    @Test
+    void entryNamingOnlyNonSensitiveColumnsWarns() {
+        for (String entry : List.of("event_id", "rate_analytics.rate")) {
+            assertThat(SensitiveColumnExclusion.resolve(TARGETS, policy(entry), columns, definitions).get(PAYLOAD)).as(entry)
+                    .contains("request_body");
+            assertThat(messages(Level.WARN)).as(entry).anySatisfy(m -> assertThat(m)
+                    .contains("sync.sensitive-columns").contains("'" + entry + "'").contains("no effect"));
+        }
+    }
+
+    @Test
+    void namedColumnWhoseFlagWasClearedStillStarts() {
+        column(RATE, "comment", false);
+
+        assertThat(SensitiveColumnExclusion.resolve(TARGETS, policy("rate_analytics.comment"), columns, definitions).get(RATE)).isEmpty();
+        assertThat(messages(Level.WARN)).singleElement().satisfies(m -> assertThat(m).contains("'rate_analytics.comment'"));
+    }
+
+    @Test
+    void qualifiedEntryOnNonTargetTableSaysSo() {
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, policy("sessions.comment"), columns, definitions))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("'sessions.comment'")
+                .hasMessageContaining("not an ingest target table");
+    }
+
+    @Test
+    void namedSensitiveKeyColumnIsWritten() {
+        column(USAGE_LOG, "trace_id", true);
+
+        assertThat(SensitiveColumnExclusion.resolve(TARGETS, policy("trace_id"), columns, definitions).get(USAGE_LOG)).isEmpty();
+    }
+
+    @Test
+    void tableWithoutCatalogDefinitionFailsStartupUnderList() {
+        assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(List.of(PAYLOAD, "custom_sink"), policy("request_tags"), columns, definitions))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("custom_sink").hasMessageContaining("does not define");
     }
 
@@ -156,6 +242,10 @@ class SensitiveColumnExclusionTest {
         assertThat(reduced.columns()).extracting(ColumnMapping::column).containsExactly("event_id");
         assertThat(reduced.matcher()).isSameAs(matcher);
         assertThat(SensitiveColumnExclusion.without(mapping, Set.of())).isSameAs(mapping);
+    }
+
+    private static SensitiveColumnPolicy policy(String... entries) {
+        return SensitiveColumnPolicy.parse(List.of(entries));
     }
 
     private List<String> messages(Level level) {
