@@ -1219,9 +1219,10 @@ no snapshot endpoint for `Setting` is exposed.
 
 ### Requirement: The enrichment access clean-up records no revision
 
-In addition to the limitations stated under "Audited resources", the catalog migration that removes the `get`, `read`
-and `sensitive` grants and the row policies stored on enrichments (see `table-access-control`, "An enrichment's
-read-side access is its source's") records **no revision**, and this SHALL be stated as a known limitation. It rewrites the rows in raw SQL, outside
+It SHALL be stated as a known limitation, in addition to those under "Audited resources", that the catalog migration
+that removes the `get`, `read` and `sensitive` grants and the row policies stored on enrichments (see
+`table-access-control`, "An enrichment's read-side access is its source's") records **no revision**. It rewrites the
+rows in raw SQL, outside
 the persistence context, so an enrichment's latest revision snapshot keeps showing the removed grants and policies until
 the next change that rewrites its table definition (its description or access entries, not a column-only
 schema change) records a new one. The history of earlier revisions SHALL be left as it was,

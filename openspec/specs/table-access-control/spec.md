@@ -1901,11 +1901,12 @@ exactly when a column policy, the revision's or the current one, confines the ca
 
 ### Requirement: Pipeline and export paths refuse a hidden column
 
-Wherever a path refuses `403 sensitive_column_not_entitled` for a sensitive column the calling identity may not read
-or see — pipeline authoring (`enrich` and `aggregate` registration, enable, patch and preview, and an aggregate's
-refresh on request), the runner's data-plane endpoints under the calling identity, and catalog export — the same path
-SHALL refuse a column hidden from the calling identity with HTTP 403 and machine code `column_not_entitled`, naming the
-column, and SHALL NOT report it as an unknown column. A column that is both hidden and sensitive without the clearance
+Every path that refuses `403 sensitive_column_not_entitled` SHALL also refuse a column hidden from the calling
+identity, with HTTP 403 and machine code `column_not_entitled`, naming the column, and SHALL NOT report it as an
+unknown column. Those paths refuse `sensitive_column_not_entitled` for a sensitive column the calling identity may not
+read or see: pipeline authoring (`enrich` and `aggregate` registration, enable, patch and preview, and an aggregate's
+refresh on request), the runner's data-plane endpoints under the calling identity, and catalog export. A column that
+is both hidden and sensitive without the clearance
 SHALL be refused `column_not_entitled`. Every column a request references SHALL be judged for a column policy before
 any is judged for the clearance: on `enrich` registration, enable and patch the column-policy check SHALL run where
 each fragment of the declaration is resolved, and the clearance check of the resolved bound inputs and grain key SHALL

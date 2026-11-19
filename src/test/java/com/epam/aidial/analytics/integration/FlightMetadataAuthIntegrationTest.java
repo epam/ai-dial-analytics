@@ -60,13 +60,11 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
     /**
      * The entity whose wildcard schema can still show a sensitive column being filtered.
      *
-     * <p>Asserted on {@code rate_analytics}, not on {@code dial_usage_log}, and the reason is the split.
-     * {@code GetTables} reports an entity's STAR schema, and a star never fans out into a grain join —
-     * so every enrichment column is absent from it for admin and read-only callers alike. Since all
-     * five of {@code dial_usage_log}'s sensitive columns moved to {@code dial_usage_log_payload}, that
-     * table can no longer show a filtering difference here at all: both callers would see the same
-     * list, and the assertion would pass while testing nothing. {@code rate_analytics.comment} (V3) is
-     * the remaining sensitive SOURCE column, so it is what can still demonstrate the rule.
+     * <p>{@code GetTables} reports an entity's STAR schema, and a star never fans out into a grain join —
+     * so every enrichment column is absent from it for admin and read-only callers alike. On
+     * {@code dial_usage_log} the difference would rest on the two budget paths V59 seeds sensitive, while most
+     * of its sensitive columns live on {@code dial_usage_log_payload}. {@code rate_analytics.comment} (V3) is
+     * the only sensitive column of its table and has no enrichment beside it, so it shows the rule alone.
      *
      * <p>The enrichment columns' filtering is not left unguarded — it is
      * {@link #catalogSqlHidesSensitiveColumnsFromReadOnlyCaller} that covers them, because
@@ -81,7 +79,8 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
      * Every column reachable from {@code dial_usage_log} that is marked {@code sensitive} — seeded by
      * migrations V3 ({@code jwt_claims}, {@code request_body}, {@code response_body}), V12
      * ({@code request_tags}) and V29 ({@code assembled_response}), all five re-keyed onto the
-     * payload enrichment by V38, and the cache markers V50 seeds there. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
+     * payload enrichment by V38, the cache markers V50 seeds there, and the two budget paths V59 seeds on
+     * {@code dial_usage_log} itself. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
      * which enumerates the entity's full binding list rather than its wildcard expansion, so the
      * payload columns ARE visible to an admin there — which is what makes this the channel that can
      * still prove the filtering the wildcard schema no longer can.
@@ -95,7 +94,9 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
             "dial_usage_log_payload.request_cache_control",
             // The computed rebuild fields carry request_body's flag and are listed like any column of the entity.
             "dial_usage_log_payload.request_body_full",
-            "dial_usage_log_payload.request_body_rebuild");
+            "dial_usage_log_payload.request_body_rebuild",
+            "budget_policy",
+            "budget_assignment");
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;

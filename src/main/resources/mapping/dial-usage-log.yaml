@@ -19,7 +19,8 @@
 #
 # Column order matches the physical table: db/migration/clickhouse/V1__create_dial_usage_log.sql,
 # less the five columns this mapping stopped capturing (see below), followed by route_name and
-# route_type, which V15__dial_usage_log_route.sql appended. _ingested_at (DEFAULT
+# route_type, which V15__dial_usage_log_route.sql appended, and the five spending-limit columns, which
+# V18__dial_usage_log_budget.sql appended. _ingested_at (DEFAULT
 # now64(3)) is the only table column left unmapped, so it applies its ClickHouse default.
 # operation_duration_ms is the producer's own measurement, copied as reported and never recomputed here:
 # DIAL measures from accepting the request to having the full response body (for a background job, to
@@ -198,5 +199,30 @@ columns:
     nullable: true
   - column: route_type
     source: route_type
+    kind: string
+    nullable: true
+  # The spending-limits check of a token caller's model call, copied as reported from the producer's nested
+  # `spending_limits` object. The producer omits the object on every other row (an API key caller, a row that is
+  # not a model call's, a pass whose limits it does not check), so NULL in all five is the "budgets did not apply"
+  # signal. With mode off only the mode is reported; policy and assignment come with outcome paid only, and
+  # assignment is omitted for a policy that applies by itself. budget_cost_object is never derived from project_id.
+  - column: spending_limits_mode
+    source: spending_limits.mode
+    kind: string
+    nullable: true
+  - column: budget_cost_object
+    source: spending_limits.cost_object
+    kind: string
+    nullable: true
+  - column: budget_outcome
+    source: spending_limits.outcome
+    kind: string
+    nullable: true
+  - column: budget_policy
+    source: spending_limits.policy
+    kind: string
+    nullable: true
+  - column: budget_assignment
+    source: spending_limits.assignment
     kind: string
     nullable: true
