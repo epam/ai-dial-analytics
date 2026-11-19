@@ -33,13 +33,13 @@ cannot tell a request under spending limits off from one charged to a budget.
 
 - Add five physical columns to `dial_usage_log` with a new ClickHouse migration: `spending_limits_mode`,
   `budget_cost_object`, `budget_outcome`, `budget_policy` and `budget_assignment`, all
-  `LowCardinality(Nullable(String))`.
+  `Nullable(String)`, dictionary-encoded (`LowCardinality`) except `budget_assignment`.
   - NULL in all five means "budgets did not apply to this request".
   - Rows ingested before this change read NULL until they are re-ingested.
 - Register the five columns in the PostgreSQL catalog with a new catalog migration:
   - type `string`, nullable;
   - tag `cost`, next to `total_price` and `deployment_price`;
-  - not sensitive, not heavy;
+  - `budget_policy` and `budget_assignment` sensitive, the other three not; none heavy;
   - ordinals after the current maximum, matching the physical append order.
 - Map the five columns in `mapping/dial-usage-log.yaml` as direct, nullable string sources from
   `spending_limits.*`. The change needs no new transform or deriver, and no configuration surface.

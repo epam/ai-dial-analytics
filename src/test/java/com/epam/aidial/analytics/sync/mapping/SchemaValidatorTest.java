@@ -237,7 +237,7 @@ class SchemaValidatorTest {
         table.put("budget_cost_object", "LowCardinality(Nullable(String))");
         table.put("budget_outcome", "LowCardinality(Nullable(String))");
         table.put("budget_policy", "LowCardinality(Nullable(String))");
-        table.put("budget_assignment", "LowCardinality(Nullable(String))");
+        table.put("budget_assignment", "Nullable(String)");
         return table;
     }
 

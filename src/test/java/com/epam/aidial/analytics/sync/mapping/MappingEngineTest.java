@@ -376,14 +376,14 @@ class MappingEngineTest {
                 .containsEntry("budget_policy", null)
                 .containsEntry("budget_assignment", null);
 
-        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
-                "\"mode\":\"enforce\",\"cost_object\":\"statgpt\",\"outcome\":\"paid\",\"policy\":\"engineering-pro\","
-                        + "\"assignment\":\"statgpt/a1\"")), "f"))
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("project-a",
+                "\"mode\":\"enforce\",\"cost_object\":\"project-a\",\"outcome\":\"paid\",\"policy\":\"engineering-pro\","
+                        + "\"assignment\":\"project-a/a1\"")), "f"))
                 .containsEntry("spending_limits_mode", "enforce")
-                .containsEntry("budget_cost_object", "statgpt")
+                .containsEntry("budget_cost_object", "project-a")
                 .containsEntry("budget_outcome", "paid")
                 .containsEntry("budget_policy", "engineering-pro")
-                .containsEntry("budget_assignment", "statgpt/a1");
+                .containsEntry("budget_assignment", "project-a/a1");
 
         // A policy that applies by itself has no assignment, and a token without a project leaves project_id
         // empty while the producer charges its default cost object: the cost object is not taken from the project.
@@ -395,20 +395,21 @@ class MappingEngineTest {
                 .containsEntry("budget_assignment", null);
 
         // No budget could pay in shadow mode: the outcome without a policy.
-        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
-                "\"mode\":\"shadow\",\"cost_object\":\"statgpt\",\"outcome\":\"exhausted\"")), "f"))
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("project-a",
+                "\"mode\":\"shadow\",\"cost_object\":\"project-a\",\"outcome\":\"exhausted\"")), "f"))
                 .containsEntry("budget_outcome", "exhausted")
                 .containsEntry("budget_policy", null);
 
         // Spending limits off: the mode alone.
-        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt", "\"mode\":\"off\"")), "f"))
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("project-a", "\"mode\":\"off\"")), "f"))
                 .containsEntry("spending_limits_mode", "off")
                 .containsEntry("budget_cost_object", null)
                 .containsEntry("budget_outcome", null);
 
-        // A blank value is absent, and an outcome this service has never seen is stored as reported.
-        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("statgpt",
-                "\"mode\":\"shadow\",\"cost_object\":\"statgpt\",\"outcome\":\"deferred\",\"policy\":\"\"")), "f"))
+        // A blank value is absent, and a mode or an outcome this service has never seen is stored as reported.
+        assertThat(engine.toRow(jsonMapper.readTree(withSpendingLimits("project-a",
+                "\"mode\":\"audit\",\"cost_object\":\"project-a\",\"outcome\":\"deferred\",\"policy\":\"\"")), "f"))
+                .containsEntry("spending_limits_mode", "audit")
                 .containsEntry("budget_outcome", "deferred")
                 .containsEntry("budget_policy", null);
     }

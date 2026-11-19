@@ -3,9 +3,10 @@
 ## What shipped
 
 - `clickhouse/V18__dial_usage_log_budget.sql` appends `spending_limits_mode`, `budget_cost_object`,
-  `budget_outcome`, `budget_policy` and `budget_assignment`, each `LowCardinality(Nullable(String))`.
-- `postgres/V59__seed_budget_columns.sql` registers them: `string`, nullable, tag `cost`, not sensitive, not
-  heavy, ordinals 41 to 45.
+  `budget_outcome`, `budget_policy` and `budget_assignment`, each `LowCardinality(Nullable(String))` except
+  `budget_assignment`, which is `Nullable(String) CODEC(ZSTD(1))`.
+- `postgres/V59__seed_budget_columns.sql` registers them: `string`, nullable, tag `cost`, `budget_policy` and
+  `budget_assignment` sensitive, none heavy, ordinals 41 to 45.
 - `mapping/dial-usage-log.yaml` maps them from `spending_limits.mode`, `.cost_object`, `.outcome`, `.policy` and
   `.assignment`.
 - `docs/column-tags.md` (the `cost` row) and `local_env/seed/seed_dial_usage_log.py` (a budget on two users in

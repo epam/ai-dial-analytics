@@ -3,7 +3,8 @@
 - [x] 1.1 Add `src/main/resources/db/migration/clickhouse/V18__dial_usage_log_budget.sql`: one
   `ALTER TABLE dial_usage_log` adding `spending_limits_mode`, `budget_cost_object`, `budget_outcome`,
   `budget_policy` and `budget_assignment`, each
-  `LowCardinality(Nullable(String))` with `IF NOT EXISTS`, appended in that order. One-line header pointing at
+  `LowCardinality(Nullable(String))` (`budget_assignment` `Nullable(String) CODEC(ZSTD(1))`) with `IF NOT EXISTS`,
+  appended in that order. One-line header pointing at
   the `data-sync` spec.
 - [x] 1.2 Confirm that no in-flight branch claims ClickHouse `V18` or PostgreSQL `V59`.
 
@@ -11,7 +12,7 @@
 
 - [x] 2.1 Add `src/main/resources/db/migration/postgres/V59__seed_budget_columns.sql`, modelled on
   `V49__seed_route_columns.sql`: five `column_mapping` rows, `'string'`, `nullable TRUE`, tag `'cost'`,
-  `sensitive FALSE`, `heavy FALSE`, display names `Spending limits mode`, `Budget cost object`, `Budget outcome`,
+  `sensitive TRUE` on `budget_policy` and `budget_assignment` and `FALSE` on the rest, `heavy FALSE`, display names `Spending limits mode`, `Budget cost object`, `Budget outcome`,
   `Budget policy`, `Budget assignment`, ordinals `41` to `45`. The descriptions say when the value is NULL and that pre-existing rows read NULL;
   `budget_cost_object`'s says it can differ from `project_id`; `budget_assignment`'s says it is NULL for a
   policy that applies by itself; `budget_outcome`'s says `no_budget` and `exhausted` appear in shadow mode only.
@@ -30,7 +31,7 @@
   shadow check, mode `off`, no object (all NULL), a blank `policy` and an unknown outcome. Extend
   `writesOnlyDeclaredColumnsInOrder` with the five columns. (Test name:
   `carriesTheReportedSpendingLimitsAndNullWhenBudgetsDidNotApply`.)
-- [x] 4.3 `SchemaValidatorTest.liveSchema()`: add the five `LowCardinality(Nullable(String))` columns.
+- [x] 4.3 `SchemaValidatorTest.liveSchema()`: add the five columns with their physical types.
 - [x] 4.4 `DialUsageLogTestModel`: add the five catalog columns.
 - [x] 4.5 `QuerySchemaDiscoveryIntegrationTest` and `TableManagementIntegrationTest`: raise the
   `dial_usage_log` column, description and display-name counts by five; assert the five columns are under tag

@@ -39,9 +39,13 @@ route columns.
 
 ### Physical type: `LowCardinality(Nullable(String))`, not `Enum`
 
-Modes, outcomes, cost objects, policies and assignments come from a small set of values or of configuration, so
-dictionary encoding fits. `route_name`, `route_type` and `parent_deployment` already use this type, so
-`SchemaValidator` and the catalog `string` type need no new handling.
+Modes, outcomes, cost objects and policies come from a small set of values or of configuration, so dictionary
+encoding fits. `route_name`, `route_type` and `parent_deployment` already use this type, so `SchemaValidator` and the
+catalog `string` type need no new handling.
+
+**`budget_assignment` is `Nullable(String) CODEC(ZSTD(1))`.** Assignments can be per user, so the column can hold
+one value per user, and past some ten thousand distinct values per part `LowCardinality`'s dictionaries cost memory
+and CPU instead of saving them. `core_parent_span_id` uses the same type, which is still the `string` kind.
 
 **`Enum8` for `spending_limits_mode` and `budget_outcome`: rejected,** for the reason the route columns rejected
 it. The producer owns the domain: a new value would fail the ClickHouse insert and its whole batch, and widening an
@@ -68,11 +72,16 @@ and the catalog ordinals continue past the current maximum (40, from the route c
 ### Catalog metadata
 
 - **Tag `cost`.** That role tag groups the columns a consumer uses to answer "what did it cost?": `total_price` and
-  `deployment_price`. The spending-limit columns answer "who paid for it, and under which limits?". The tag is
+  `deployment_price`. `docs/column-tags.md` says that only the two prices are measures in it. The spending-limit columns answer "who paid for it, and under which limits?". The tag is
   already in `dial_usage_log`'s `tag_order`, so no ordering migration is needed. **Tag `principal` (with
   `project_id`): rejected.** A budget is not who made the request. An application call carries the initiating
   user's budget.
-- **Not sensitive.** The values are modes, operator configuration paths and project ids, not user content.
+- **`budget_policy` and `budget_assignment` sensitive.** They hold paths an administrator chooses, and nothing stops
+  one from naming a user (a per-user assignment at `project-a/jane.doe@example.com`), which would link `user_hash`
+  back to a person. As with `request_tags`, they are classified by what they can store. `dial_usage_log` is a
+  system table, so the flag changes only by a later migration. A reader without the clearance can still group spend
+  by mode, cost object and outcome.
+- **The other three not sensitive.** They hold modes, outcomes and a cost object, which is a project id;
   `project_id`, which can hold the same value, is not sensitive either.
 - **Not heavy.** The values are short.
 - **Display names:** `Spending limits mode`, `Budget cost object`, `Budget outcome`, `Budget policy`,

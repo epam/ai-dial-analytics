@@ -1,4 +1,4 @@
--- Catalog rows for the dial_usage_log spending-limit columns added by clickhouse/V18.
+-- Catalog rows for the dial_usage_log spending-limit columns added by clickhouse/V18; see openspec/specs/table-management/spec.md.
 INSERT INTO column_mapping (table_name, source_name, name, type, element_type, nullable, description,
                             display_name, tag, sensitive, heavy, ordinal)
 VALUES ('dial_usage_log', 'spending_limits_mode', 'spending_limits_mode', 'string', NULL, TRUE,
@@ -21,11 +21,12 @@ VALUES ('dial_usage_log', 'spending_limits_mode', 'spending_limits_mode', 'strin
             || 're-ingested.',
         'Budget outcome', 'cost', FALSE, FALSE, 43),
        ('dial_usage_log', 'budget_policy', 'budget_policy', 'string', NULL, TRUE,
-        'Path of the budget policy that paid for the request. NULL unless budget_outcome is paid, and on rows '
+        'Path of the budget policy that paid for the request. The spend charged to a budget is the sum of '
+            || 'deployment_price over the rows that name it. NULL unless budget_outcome is paid, and on rows '
             || 'ingested before the column existed until they are re-ingested.',
-        'Budget policy', 'cost', FALSE, FALSE, 44),
+        'Budget policy', 'cost', TRUE, FALSE, 44),
        ('dial_usage_log', 'budget_assignment', 'budget_assignment', 'string', NULL, TRUE,
         'Path of the policy assignment that granted the budget, <cost object>/<id>. NULL unless budget_outcome '
             || 'is paid, for a policy that applies by itself, and on rows ingested before the column existed until '
             || 'they are re-ingested.',
-        'Budget assignment', 'cost', FALSE, FALSE, 45);
+        'Budget assignment', 'cost', TRUE, FALSE, 45);

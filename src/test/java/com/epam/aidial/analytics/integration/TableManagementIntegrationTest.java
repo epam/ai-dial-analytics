@@ -1028,8 +1028,9 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
 
     @Test
     void seededSpendingLimitColumnsAreNullableCostAttributes() throws Exception {
-        // V59 registers the five columns V18 appended. Nullable matches LowCardinality(Nullable(String)) —
-        // NULL is "budgets did not apply to the request" — and the tag groups them with the prices.
+        // V59 registers the five columns V18 appended. Nullable matches their Nullable physical type — NULL is
+        // "budgets did not apply to the request" — and the tag groups them with the prices. Policy and assignment
+        // paths are chosen by an administrator and can name a user, so those two are sensitive.
         String budget = "@.name=='spending_limits_mode' || @.name=='budget_cost_object' || @.name=='budget_outcome'"
                 + " || @.name=='budget_policy' || @.name=='budget_assignment'";
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
@@ -1037,7 +1038,10 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[?(" + budget + ")].type", contains("string", "string", "string", "string", "string")))
                 .andExpect(jsonPath("$.columns[?(" + budget + ")].nullable", contains(true, true, true, true, true)))
                 .andExpect(jsonPath("$.columns[?(" + budget + ")].tag", contains("cost", "cost", "cost", "cost", "cost")))
-                .andExpect(jsonPath("$.columns[?(" + budget + ")].sensitive", contains(false, false, false, false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='spending_limits_mode' || @.name=='budget_cost_object'"
+                        + " || @.name=='budget_outcome')].sensitive", contains(false, false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_policy' || @.name=='budget_assignment')].sensitive",
+                        contains(true, true)))
                 .andExpect(jsonPath("$.columns[?(" + budget + ")].heavy", contains(false, false, false, false, false)))
                 .andExpect(jsonPath("$.columns[?(@.name=='spending_limits_mode')].display_name", contains("Spending limits mode")))
                 .andExpect(jsonPath("$.columns[?(@.name=='budget_outcome')].display_name", contains("Budget outcome")))

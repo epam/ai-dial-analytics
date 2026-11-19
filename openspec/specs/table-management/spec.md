@@ -1896,8 +1896,8 @@ value is not an operator's to choose — the physical column decides it.
 
 - **WHEN** the catalog is read after the migrations that add `spending_limits_mode`, `budget_cost_object`,
   `budget_outcome`, `budget_policy` and `budget_assignment` run
-- **THEN** `dial_usage_log` reports the five columns with `nullable: true`, matching their
-  `LowCardinality(Nullable(String))` physical type
+- **THEN** `dial_usage_log` reports the five columns with `nullable: true`, matching their `Nullable(String)`
+  physical type (`LowCardinality` on all but `budget_assignment`)
 
 #### Scenario: A governance rule keyed on nullability sees the true value
 
@@ -2310,17 +2310,25 @@ default (see the `authentication` capability's "Sensitive column authorization" 
 rule). The seeded sensitive set SHALL be `dial_usage_log_payload.jwt_claims`,
 `dial_usage_log_payload.request_tags`, `dial_usage_log_payload.request_body`,
 `dial_usage_log_payload.response_body`, `dial_usage_log_payload.assembled_response`,
-`dial_usage_log_payload.request_cache_control`, and `rate_analytics.comment`. Every other seeded column SHALL
-default to `sensitive = false`.
+`dial_usage_log_payload.request_cache_control`, `dial_usage_log.budget_policy`, `dial_usage_log.budget_assignment`,
+and `rate_analytics.comment`. Every other seeded column SHALL default to `sensitive = false`.
+
+`budget_policy` and `budget_assignment` SHALL be seeded sensitive because they store paths an administrator
+chooses in DIAL Core's budget configuration. Nothing stops such a path from naming a user, for example a per-user
+assignment at `project-a/jane.doe@example.com`, and a path that does would link `user_hash` back to a person. As
+with `request_tags`, they are classified by what they can store, not by their intended role. `spending_limits_mode`,
+`budget_cost_object` and `budget_outcome` SHALL stay visible: they hold a closed set of modes and outcomes, and a
+cost object, which is a project id like `project_id`.
 
 `request_cache_control` SHALL be seeded sensitive on the same grounds as `request_body`: under
 `sync.request-body-mode=delta` it holds part of that body's content, the cache markers taken out of its history,
 so storing a request in parts SHALL NOT relax its sensitivity.
 
 All six SHALL carry the flag on `dial_usage_log_payload` because that is where they are stored;
-re-homing them SHALL NOT relax it. `rate_analytics.comment` SHALL therefore be the only sensitive
-SOURCE column left in the seeded catalog — which matters for any surface reporting an entity's
-wildcard schema, since an enrichment column is absent from one for every caller regardless of role. Enforcement is unchanged by the move: the flag is applied
+re-homing them SHALL NOT relax it. `rate_analytics.comment`, `dial_usage_log.budget_policy` and
+`dial_usage_log.budget_assignment` SHALL therefore be the only sensitive SOURCE columns in the seeded catalog — which
+matters for any surface reporting an entity's wildcard schema, since an enrichment column is absent from one for
+every caller regardless of role. Enforcement is unchanged by the move: the flag is applied
 when the column enters the query model, and an enrichment column enters it under its qualified name,
 so an unentitled caller sees neither spelling and a reference to either fails as an unknown field.
 
@@ -2352,6 +2360,14 @@ are changed only by a further migration.
 - **THEN** `dial_usage_log` reports `jwt_claims` and `request_tags` with `sensitive: true` and
   `user_hash` with `sensitive: false`, `dial_usage_log_payload` reports all six of its exposed columns with
   `sensitive: true`, and `rate_analytics` reports `comment` with `sensitive: true`
+
+#### Scenario: Budget paths are seeded sensitive
+
+- **WHEN** the catalog is read after the migration that registers the spending-limit columns runs
+- **THEN** `dial_usage_log` reports `budget_policy` and `budget_assignment` with `sensitive: true`, and
+  `spending_limits_mode`, `budget_cost_object` and `budget_outcome` with `sensitive: false`
+- **AND WHEN** a caller without `TABLE_SENSITIVE` on `dial_usage_log` reads its schema
+- **THEN** `budget_policy` and `budget_assignment` are absent, and the other three are listed
 
 #### Scenario: Management responses expose the seeded flag unfiltered
 

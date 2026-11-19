@@ -33,9 +33,9 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
         mockMvc.perform(get("/v1/queries/entities/schema/dial_usage_log"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entity").value("dial_usage_log"))
-                // All 34 columns dial_usage_log still owns (order is asserted separately — the seeded
-                // tag_order groups/sorts them, so these checks stay order-independent by name). 34, not
-                // the 39 it declared before the payload split: the five verbatim-content columns are
+                // All 41 columns dial_usage_log still owns (order is asserted separately — the seeded
+                // tag_order groups/sorts them, so these checks stay order-independent by name). 34 after
+                // the payload split, not the 39 it declared before: the five verbatim-content columns are
                 // dial_usage_log_payload's now, and are counted below under their qualified names.
                 //
                 // Counted on the UNQUALIFIED names only. A flat entity schema also publishes each ACTIVE

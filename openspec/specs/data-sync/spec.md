@@ -1850,7 +1850,8 @@ definition, which the older server cannot load. No serialization-format default 
 By default the service SHALL provision the target ClickHouse tables (`dial_usage_log` and
 `dial_usage_log_payload`) and the ingest ledger table (`_dial_internal_ingested_blob`) on startup by running Flyway migrations under `classpath:db/migration` over
 the ClickHouse JDBC driver, using the writer credential (which must therefore additionally hold
-`CREATE TABLE` grants, and `ALTER DROP COLUMN` on `dial_usage_log`). Provisioning SHALL be gated by
+`CREATE TABLE` grants, and `ALTER ADD COLUMN` and `ALTER DROP COLUMN` on `dial_usage_log`, among the `ALTER`
+sub-privileges `docs/clickhouse-server.md` lists). Provisioning SHALL be gated by
 `clickhouse.migrations.enabled` (default true) and SHALL run before any sync run or startup schema
 validation; a migration failure SHALL abort startup.
 
@@ -4550,10 +4551,11 @@ The service SHALL persist the spending-limits check a producer reports for a req
 - **THEN** the ingested row's `spending_limits_mode` is `enforce`, its `budget_cost_object` is `project-a`, its
   `budget_outcome` is `paid`, its `budget_policy` is `engineering-pro` and its `budget_assignment` is `project-a/a1`
 
-#### Scenario: An unrecognized outcome
+#### Scenario: An unrecognized mode or outcome
 
-- **WHEN** a record reports an `outcome` other than `paid`, `no_budget` or `exhausted`
-- **THEN** the ingested row stores that value as reported, and the record is not rejected
+- **WHEN** a record reports a `mode` other than `off`, `shadow` or `enforce`, or an `outcome` other than `paid`,
+  `no_budget` or `exhausted`
+- **THEN** the ingested row stores each value as reported, and the record is not rejected
 
 ### Requirement: Absent spending-limit fields read NULL
 

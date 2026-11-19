@@ -31,7 +31,7 @@ class MappingFileLoaderTest {
 
         // Every user column of dial_usage_log; only _ingested_at (a table-side default) is unmapped.
         // 33 after the mapping split moved the five verbatim-content columns to dial_usage_log_payload,
-        // plus the two route columns appended by V15.
+        // plus the two route columns appended by V15 and the five spending-limit columns appended by V18.
         assertThat(config.columns()).hasSize(40);
         ColumnMapping first = config.columns().getFirst();
         assertThat(first.column()).isEqualTo("event_id");

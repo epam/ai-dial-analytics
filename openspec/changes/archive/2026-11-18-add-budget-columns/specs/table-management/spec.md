@@ -68,8 +68,8 @@ value is not an operator's to choose — the physical column decides it.
 
 - **WHEN** the catalog is read after the migrations that add `spending_limits_mode`, `budget_cost_object`,
   `budget_outcome`, `budget_policy` and `budget_assignment` run
-- **THEN** `dial_usage_log` reports the five columns with `nullable: true`, matching their
-  `LowCardinality(Nullable(String))` physical type
+- **THEN** `dial_usage_log` reports the five columns with `nullable: true`, matching their `Nullable(String)`
+  physical type (`LowCardinality` on all but `budget_assignment`)
 
 #### Scenario: A governance rule keyed on nullability sees the true value
 
