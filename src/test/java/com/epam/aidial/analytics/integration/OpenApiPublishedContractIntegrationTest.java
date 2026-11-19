@@ -1,20 +1,21 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.web.openapi.OpenApiMarkings;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.json.JsonMapper;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BiConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * What the <b>published</b> OpenAPI document says about the registry's optional enum filters, as opposed to
- * what the handler does with them.
+ * What the <b>published</b> OpenAPI document says, as opposed to what the handlers do: the registry's optional
+ * enum filters, and the operation ids, tags and {@code x-preview} / {@code x-internal} extensions a generated
+ * client depends on ({@code openspec/specs/openapi-document/spec.md}).
  *
  * <p>These are the assertions whose absence let a contract defect ship. Nothing in this repo asserted
  * {@code /v3/api-docs} at all, so a parameter whose default was correct in code, correct in its own prose
@@ -31,13 +32,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegrationTest {
 
-    private static final String API_DOCS = "/v3/api-docs";
     private static final String LIST_PATH = "/v1/pipelines";
     private static final String READ_PATH = "/v1/pipelines/{name}";
     private static final String BACKFILL_PATH = "/v1/data-sync/backfill";
     private static final String ACCESS_PATH = "/v1/tables/{name}/access";
-    private static final String PREVIEW = "x-preview";
-    private static final String INTERNAL = "x-internal";
+    private static final String PREVIEW = OpenApiMarkings.PREVIEW;
+    private static final String INTERNAL = OpenApiMarkings.INTERNAL;
     private static final List<String[]> QUERY_OPERATIONS = List.of(
             new String[] {"post", "/v1/queries/execute"},
             new String[] {"post", "/v1/queries/execute-sql"},
@@ -178,8 +178,34 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
             }
         });
         assertThat(declared).as("the Queries tag is declared once").hasSize(1);
-        assertThat(declared.get(0).path("description").asString()).contains("Experimental");
+        assertThat(declared.getFirst().path("description").asString()).contains("Experimental");
         assertThat(document.toString()).doesNotContain("Structured Queries (experimental)");
+    }
+
+    /**
+     * Every operation publishes exactly one tag, and every tag in use is declared once at the top level with a
+     * description. Checked on the document as well as on the annotations, because a tag can also arrive through
+     * {@code @Operation(tags = …)} with no {@code @Tag} declaring it.
+     */
+    @Test
+    void everyOperationCarriesOneDeclaredDescribedTag() throws Exception {
+        final JsonNode document = document();
+        final Map<String, Integer> declared = new HashMap<>();
+        document.path("tags").forEach(tag -> {
+            assertThat(tag.path("description").asString("")).as("description of tag %s", tag.path("name")).isNotBlank();
+            declared.merge(tag.path("name").asString(), 1, Integer::sum);
+        });
+        assertThat(declared.values()).as("each tag is declared once").allMatch(count -> count == 1);
+        final List<String> violations = new ArrayList<>();
+        forEachOperation(document, (name, op) -> {
+            final List<String> tags = strings(op.path("tags"));
+            if (tags.size() != 1) {
+                violations.add(name + " publishes tags " + tags);
+            } else if (!declared.containsKey(tags.getFirst())) {
+                violations.add(name + " publishes the undeclared tag " + tags.getFirst());
+            }
+        });
+        assertThat(violations).as("operations without exactly one declared tag").isEmpty();
     }
 
     /** {@code x-preview} is the boolean {@code true} on the query surfaces and absent on stable client operations. */
@@ -234,18 +260,15 @@ class OpenApiPublishedContractIntegrationTest extends AbstractPostgresIntegratio
         final JsonNode paths = document.path("paths");
         for (final String path : paths.propertyNames()) {
             for (final String method : paths.get(path).propertyNames()) {
-                action.accept(method + " " + path, paths.get(path).get(method));
+                if (OpenApiDocuments.HTTP_METHODS.contains(method)) {
+                    action.accept(method + " " + path, paths.get(path).get(method));
+                }
             }
         }
     }
 
     private JsonNode document() throws Exception {
-        final String body = mockMvc.perform(get(API_DOCS))
-                .andExpect(status().isOk())
-                .andReturn()
-                .getResponse()
-                .getContentAsString();
-        return JsonMapper.builder().build().readTree(body);
+        return OpenApiDocuments.served(mockMvc);
     }
 
     /** The named query parameter of a {@code GET}, failing with the ones that are published if it is absent. */

@@ -1,5 +1,7 @@
 package com.epam.aidial.analytics.integration;
 
+import org.springframework.test.web.servlet.MockMvc;
+import tools.jackson.core.JacksonException;
 import tools.jackson.core.util.DefaultIndenter;
 import tools.jackson.core.util.DefaultPrettyPrinter;
 import tools.jackson.core.util.Separators;
@@ -9,9 +11,15 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The committed OpenAPI document's normal form, and the comparison the drift check reports.
@@ -26,6 +34,14 @@ final class OpenApiDocuments {
 
     /** The command that rewrites the committed file, named in every drift failure. */
     static final String REGENERATE_COMMAND = "./gradlew updateOpenApi";
+
+    /** The committed file, relative to the working directory: the project directory under Gradle and the IDE. */
+    static final Path COMMITTED_FILE = Path.of("docs", "openapi.json");
+
+    /** The members of an OpenAPI path item that are operations. */
+    static final Set<String> HTTP_METHODS = Set.of("get", "put", "post", "delete", "patch", "head", "options", "trace");
+
+    private static final String API_DOCS = "/v3/api-docs";
 
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
@@ -43,6 +59,25 @@ final class OpenApiDocuments {
 
     static JsonNode parse(String json) {
         return MAPPER.readTree(json);
+    }
+
+    /** The document {@code /v3/api-docs} serves, read as UTF-8 whatever charset the response declares. */
+    static JsonNode served(MockMvc mockMvc) throws Exception {
+        return parse(mockMvc.perform(get(API_DOCS))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString(StandardCharsets.UTF_8));
+    }
+
+    /** The committed file's content as JSON, failing with the regenerate command when it does not parse. */
+    static JsonNode parseCommitted(String json) {
+        try {
+            return parse(json);
+        } catch (JacksonException notJson) {
+            throw new AssertionError(COMMITTED_FILE + " is not valid JSON (" + notJson.getOriginalMessage() + "). Run "
+                    + REGENERATE_COMMAND + " and commit the result.", notJson);
+        }
     }
 
     /** The normal form of a served document: sorted keys, array order kept, no top-level {@code servers}. */

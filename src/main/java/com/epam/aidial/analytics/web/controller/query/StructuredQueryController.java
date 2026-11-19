@@ -39,7 +39,6 @@ public class StructuredQueryController {
     @PostMapping("/execute")
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Operation(operationId = "executeQuery",
-            
             summary = "Execute a structured query",
             description = "Translates the structured query to ClickHouse SQL and runs it against the entity named"
                     + " in `entity`. Returns the projected rows and, for row-mode offset paging with"

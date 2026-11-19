@@ -46,7 +46,6 @@ public class SqlValidationController {
     @PostMapping("/validate-sql")
     @RequiresPrivilege(value = Privilege.TABLE_GET, deferred = true)
     @Operation(operationId = "validateSql",
-            
             summary = "Check whether an ad-hoc SQL SELECT would be accepted, without executing it",
             description = "Runs every check `/v1/queries/execute-sql` runs except the ClickHouse round trip:"
                     + " the statement screen, parse, star expansion, entity and field validation, the closed"

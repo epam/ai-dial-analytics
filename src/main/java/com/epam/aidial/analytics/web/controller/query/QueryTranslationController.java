@@ -44,7 +44,6 @@ public class QueryTranslationController {
     @PostMapping("/translate-sql")
     @RequiresPrivilege(value = Privilege.TABLE_GET, deferred = true)
     @Operation(operationId = "translateSql",
-            
             summary = "Translate an ad-hoc SQL SELECT to the structured query DSL",
             description = "Translates a single read-only SQL SELECT statement to the structured query DSL without"
                     + " executing it — the exact translation `/v1/queries/execute-sql` would run, with the same"
@@ -84,7 +83,6 @@ public class QueryTranslationController {
     @PostMapping("/translate")
     @RequiresPrivilege(value = Privilege.TABLE_GET, deferred = true)
     @Operation(operationId = "translateQuery",
-            
             summary = "Translate a structured query to SQL",
             description = "Validates the structured query with the same rules as `/v1/queries/execute` (entity and"
                     + " field validation, closed function catalog, offset paging with maximum limit 1000) and,"

@@ -47,7 +47,6 @@ public class QuerySchemaController {
     @GetMapping("/entities")
     @RequiresPrivilege(value = Privilege.TABLE_LIST, deferred = true)
     @Operation(operationId = "listEntities",
-            
             summary = "List queryable entities",
             description = "Lists the entities available as the `entity` value of a structured query "
                     + "(the catalog's materialized source tables).")
@@ -62,7 +61,6 @@ public class QuerySchemaController {
     @GetMapping("/functions")
     @AuthenticatedOnly
     @Operation(operationId = "listQueryFunctions",
-            
             summary = "List supported query functions",
             description = "Lists the closed catalog of functions accepted in structured query `fn` expressions, "
                     + "with signatures, return types, distinct support, and argument constraints. These are the DSL's "
@@ -79,7 +77,6 @@ public class QuerySchemaController {
     @GetMapping("/sql-functions")
     @AuthenticatedOnly
     @Operation(operationId = "listSqlFunctions",
-            
             summary = "List supported SQL functions",
             description = "Lists every function-like spelling the ad-hoc SQL surface accepts (execute-sql, validate-sql, "
                     + "translate-sql, Flight SQL) — functions, operators such as `+` and `||`, and constructs such as "
@@ -97,7 +94,6 @@ public class QuerySchemaController {
     @GetMapping("/entities/schema/{name}")
     @RequiresPrivilege(value = Privilege.TABLE_GET, deferred = true)
     @Operation(operationId = "getEntitySchema",
-            
             summary = "Get an entity's flat schema",
             description = "Returns the flat schema of queryable fields (name, type, source): the source's "
                     + "columns plus every enrichment's exposed columns.")

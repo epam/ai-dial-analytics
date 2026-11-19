@@ -38,7 +38,6 @@ public class SqlQueryController {
     @PostMapping("/execute-sql")
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Operation(operationId = "executeSql",
-            
             summary = "Execute an ad-hoc SQL SELECT",
             description = "Translates a single read-only SQL SELECT statement to the structured query DSL and runs"
                     + " it through the same pipeline as `/v1/queries/execute`, with the same governance: entity and"

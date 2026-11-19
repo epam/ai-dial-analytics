@@ -402,9 +402,9 @@ tasks.named('test') {
     // run against another version is never reported UP-TO-DATE from one against the default.
     inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
     // OpenApiDocumentSnapshotIntegrationTest compares the served document with this file, so an edit to it alone must
-    // re-run the check.
+    // re-run the check. The test reads it relative to the working directory (the project directory), so no absolute path
+    // enters the task's inputs and the build cache stays relocatable.
     inputs.files(OPENAPI_DOCUMENT).withPropertyName('openapiDocument').withPathSensitivity(PathSensitivity.RELATIVE)
-    systemProperty 'openapi.document', OPENAPI_DOCUMENT.absolutePath
     // The multi-replica classes start a Keeper and three ClickHouse servers; they run in multiReplicaTest instead.
     filter {
         excludeTestsMatching MULTI_REPLICA_TESTS
@@ -420,9 +420,11 @@ tasks.register('updateOpenApi', Test) {
     classpath = sourceSets.test.runtimeClasspath
     useJUnitPlatform()
     jvmArgs arrowJvmArgs
-    systemProperty 'openapi.document', OPENAPI_DOCUMENT.absolutePath
     systemProperty 'openapi.update', 'true'
+    // Its job is the side effect on docs/openapi.json, which is no declared output: never up to date, and never loaded
+    // from the build cache (org.gradle.caching), which would skip the test and leave the file unwritten.
     outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
     filter {
         includeTestsMatching OPENAPI_SNAPSHOT_TEST
     }

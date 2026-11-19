@@ -18,10 +18,11 @@
 
 ## 2. Preview and internal markings
 
-- [x] 2.1 Add the `x-preview: true` operation extension (`parseValue = true`, so it publishes as a boolean) to
-      every handler on the six `Queries`-tagged controllers
-- [x] 2.2 Add the `x-internal: true` operation extension to the `OtelIngestController` handlers and to every
-      `PipelineDataController` `POST` not marked `@RunnerContractExempt`
+- [x] 2.1 Add the `@ApiPreview` and `@ApiInternal` markers and `OpenApiMarkings`, a springdoc
+      `GlobalOperationCustomizer` that publishes them as the boolean extensions `x-preview` and `x-internal`.
+      Mark the six `Queries`-tagged controllers `@ApiPreview`
+- [x] 2.2 Mark `OtelIngestController` and every `PipelineDataController` `POST` not marked
+      `@RunnerContractExempt` with `@ApiInternal`
 - [x] 2.3 Add a guard that derives both expected sets independently: preview from the controllers declaring
       the `Queries` tag constant, internal from the OTLP ingest handlers plus the non-exempt runner `POST`s. It
       fails, naming the handler, on any handler marked or unmarked against its set, and on a handler carrying

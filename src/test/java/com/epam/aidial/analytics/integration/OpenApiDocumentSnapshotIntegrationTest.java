@@ -20,8 +20,6 @@ import java.util.Set;
 import java.util.TreeSet;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The committed {@code docs/openapi.json} is the document this code serves, normalised.
@@ -33,9 +31,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegrationTest {
 
-    private static final String API_DOCS = "/v3/api-docs";
     private static final String APPLICATION_PACKAGE = "com.epam.aidial.analytics.";
-    private static final Set<String> HTTP_METHODS = Set.of("get", "put", "post", "delete", "patch", "head", "options", "trace");
 
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
@@ -43,8 +39,8 @@ class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegration
 
     @Test
     void committedDocumentMatchesTheServedDocument() throws Exception {
-        final Path file = Path.of(System.getProperty("openapi.document", "docs/openapi.json"));
-        final JsonNode served = OpenApiDocuments.normalise(OpenApiDocuments.parse(servedDocument()));
+        final Path file = OpenApiDocuments.COMMITTED_FILE;
+        final JsonNode served = OpenApiDocuments.normalise(OpenApiDocuments.served(mockMvc));
         final String rendered = OpenApiDocuments.render(served);
 
         if (Boolean.getBoolean("openapi.update")) {
@@ -60,7 +56,7 @@ class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegration
         if (committed.equals(rendered)) {
             return;
         }
-        final Optional<String> difference = OpenApiDocuments.firstDifference(OpenApiDocuments.parse(committed), served);
+        final Optional<String> difference = OpenApiDocuments.firstDifference(OpenApiDocuments.parseCommitted(committed), served);
         throw new AssertionError(file + " no longer matches the document the code serves"
                 + difference.map(pointer -> " (first difference at " + pointer + ")").orElse(" (formatting only)")
                 + ". Run " + OpenApiDocuments.REGENERATE_COMMAND + " and commit the result.");
@@ -88,10 +84,10 @@ class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegration
         }
 
         final Set<String> operations = new TreeSet<>();
-        final JsonNode paths = OpenApiDocuments.parse(servedDocument()).path("paths");
+        final JsonNode paths = OpenApiDocuments.served(mockMvc).path("paths");
         for (final String path : paths.propertyNames()) {
             for (final String method : paths.get(path).propertyNames()) {
-                if (HTTP_METHODS.contains(method)) {
+                if (OpenApiDocuments.HTTP_METHODS.contains(method)) {
                     operations.add(method + " " + path);
                 }
             }
@@ -110,13 +106,5 @@ class OpenApiDocumentSnapshotIntegrationTest extends AbstractPostgresIntegration
         }
         final Operation operation = handler.getMethodAnnotation(Operation.class);
         return operation != null && operation.hidden();
-    }
-
-    private String servedDocument() throws Exception {
-        return mockMvc.perform(get(API_DOCS))
-                .andExpect(status().isOk())
-                .andReturn()
-                .getResponse()
-                .getContentAsString(StandardCharsets.UTF_8);
     }
 }

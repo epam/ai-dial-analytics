@@ -55,7 +55,6 @@ public class QueryCsvController {
     @PostMapping(EXECUTE_CSV_PATH)
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Operation(operationId = "executeQueryCsv",
-            
             summary = "Execute a structured query, returning CSV",
             description = "Runs the structured query exactly as `/v1/queries/execute` does — same request body,"
                     + " validation, default limit 100 and maximum limit 1000 (a higher limit is rejected, never"
@@ -81,7 +80,6 @@ public class QueryCsvController {
     @PostMapping(EXECUTE_SQL_CSV_PATH)
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Operation(operationId = "executeSqlCsv",
-            
             summary = "Execute an ad-hoc SQL SELECT, returning CSV",
             description = "Runs the statement exactly as `/v1/queries/execute-sql` does — same SQL subset,"
                     + " governance, limits, `INFORMATION_SCHEMA` handling and errors — and returns the result as"
