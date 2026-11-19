@@ -60,10 +60,13 @@ unique to its table, so bare names cover the shipped targets. A custom target th
 stored as written, so entries are matched exactly. That gives one case rule, the physical one, for both parts.
 Table names are matched against `sync.targets[*].table`.
 
-**An entry that matches nothing fails startup.** An allowlist fails closed, so a typo (`request_tag`) would quietly
-drop a column the operator meant to keep. Startup failure surfaces it. The cost is that a later migration
-unflagging a named column makes the next startup fail until the entry is removed. That is rare, and the error is
-explicit. *Rejected:* a warning, which on a privacy setting is the kind of message nobody reads.
+**An entry that names no column fails startup; one that names only non-sensitive columns warns.** An allowlist
+fails closed, so a typo (`request_tag`) would quietly drop a column the operator meant to keep. Startup failure
+surfaces it. *Rejected for the typo case:* a warning, which on a privacy setting is the kind of message nobody reads.
+An entry naming an existing column that the catalog does not flag `sensitive` is different: ingest writes that column
+anyway, so the entry has no effect and nothing is lost. The flag can be cleared by a migration, by
+`PATCH /v1/tables/{name}/schema` or by a catalog import, none of which is the operator's; failing there would let a
+table owner stop the next startup while protecting nothing, so it is a `WARN`.
 
 **Key-column and undefined-table checks apply to every non-`*` setting, against the excluded set only.** These
 checks protect against leaving out a column ingest cannot do without. A sensitive key column that the list names is
@@ -91,12 +94,12 @@ skips the catalog entirely for `ALL`.
 - [A deployment that set `SYNC_SENSITIVE_COLUMNS_ENABLED` fails to start after the upgrade] → The error names
   `SYNC_SENSITIVE_COLUMNS` and the value mapping, and the 0.23 upgrade notes' 0.23.1 section (§8) lists it with the value mapping.
 - [An empty value is pruned by tooling and the default `*` takes over] → `none` is the documented spelling, and the
-  configuration row carries a ⚠️ note.
+  configuration row says so.
 - [Rolling back to a build without this change] → An older build does not know `SYNC_SENSITIVE_COLUMNS` and ignores
   it, so it writes every sensitive column. Its own `SYNC_SENSITIVE_COLUMNS_ENABLED` has to be set again for the
   rollback. The upgrade notes state this.
-- [A later migration unflags a column that the list names] → Startup fails until the entry is removed. This is
-  accepted for typo protection.
+- [A migration, the table API or a catalog import unflags a column that the list names] → Startup logs a warning
+  naming the entry and goes on; the column is written, as the entry asked.
 - [Unqualified names spread to custom targets] → A bare entry also writes a same-named sensitive column on a custom
   target. The startup `INFO` line lists written and excluded columns per table, and `table.column` narrows the
   entry.

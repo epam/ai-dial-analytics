@@ -1,9 +1,8 @@
 package com.epam.aidial.analytics.sync.mapping;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.core.env.MapPropertySource;
-import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
+import org.springframework.mock.env.MockEnvironment;
 
 import java.util.Arrays;
 import java.util.List;
@@ -77,7 +76,7 @@ class SensitiveColumnPolicyTest {
     @Test
     void removedBooleanSettingFailsWhateverItsValue() {
         for (String value : List.of("false", "true", "")) {
-            StandardEnvironment environment = new StandardEnvironment();
+            MockEnvironment environment = new MockEnvironment();
             environment.getPropertySources().addFirst(new SystemEnvironmentPropertySource("env",
                     Map.of("SYNC_SENSITIVE_COLUMNS_ENABLED", value)));
             assertThatThrownBy(() -> SensitiveColumnPolicy.rejectRemovedSetting(environment)).as(value)
@@ -86,10 +85,10 @@ class SensitiveColumnPolicyTest {
         }
     }
 
+    /** A mock environment, not the JVM's: a shell that still exports the removed variable must not fail this test. */
     @Test
     void removedSettingUnsetPasses() {
-        StandardEnvironment environment = new StandardEnvironment();
-        environment.getPropertySources().addFirst(new MapPropertySource("props", Map.of("sync.sensitive-columns", "none")));
+        MockEnvironment environment = new MockEnvironment().withProperty("sync.sensitive-columns", "none");
 
         assertThatCode(() -> SensitiveColumnPolicy.rejectRemovedSetting(environment)).doesNotThrowAnyException();
     }

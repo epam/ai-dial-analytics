@@ -15,8 +15,8 @@ import java.util.Set;
  * only; both parts are matched exactly, case-sensitively, against the target's table and {@code column_mapping.source_name}.
  *
  * <p>Parsing checks only the shape of the value: blank and repeated entries are dropped, and a keyword mixed with other
- * entries or an entry with an empty part is refused. Whether an entry names a sensitive column at all needs the catalog
- * and is checked by {@link SensitiveColumnExclusion#resolve}.
+ * entries or an entry with an empty part is refused. Whether an entry names a column at all, and whether that column is
+ * sensitive, needs the catalog and is checked by {@link SensitiveColumnExclusion#resolve}.
  *
  * @param all     whether every sensitive column is written ({@code *}); the catalog is then not read
  * @param entries the column entries, in configured order; empty with {@code all} false means no sensitive column is written

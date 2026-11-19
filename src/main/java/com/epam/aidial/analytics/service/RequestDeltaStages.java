@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -32,9 +33,10 @@ import java.util.stream.Collectors;
  * startup, so its path cache outlives a run and the poller, the scheduled sync and a backfill all see each other's
  * writes. Under {@code whole-with-path} the stage only stamps chat requests with their path (and a large body that is not JSON with its body hash), so a row
  * stored whole can still be a parent (see {@link RequestDeltaEncoder}). Under {@code delta} with no target qualifying,
- * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body} is excluded by
- * {@code sync.sensitive-columns} has no body to rewrite and gets no stage, so its chain and cache-marker columns keep their
- * defaults; when that leaves no stage at all, the warning names the setting rather than the mappings. Under {@code delta} a
+ * startup logs a warning: the setting would otherwise do nothing, silently. A target whose {@code request_body},
+ * {@code project_id} or {@code user_hash} is excluded by {@code sync.sensitive-columns} no longer maps all three and gets no
+ * stage, so its chain and cache-marker columns keep their defaults; when that leaves no stage at all, the warning names
+ * the setting and the columns it left out rather than the mappings. Under {@code delta} a
  * stage moves a chat request's cache markers into {@code request_cache_control}, so a qualifying target that leaves that
  * column out fails startup: writing it would store an excluded column, and dropping the markers would break rebuilds.
  */
@@ -75,10 +77,11 @@ public class RequestDeltaStages {
                     byTable.put(target.table(), new CheckedStage(encoder, writer, target.table()));
                 }
             }
-            boolean bodyExcluded = targets.stream().anyMatch(t -> t.excludedColumns().contains("request_body"));
-            if (byTable.isEmpty() && bodyExcluded) {
-                log.warn("sync.request-body-mode={} has no effect: with {} leaving request_body out, no ingest target's mapping "
-                        + "maps all of {}", mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), SensitiveColumnPolicy.SETTING, REQUIRED_COLUMNS);
+            Set<String> excludedRequired = targets.stream().flatMap(t -> t.excludedColumns().stream())
+                    .filter(REQUIRED_COLUMNS::contains).collect(Collectors.toCollection(TreeSet::new));
+            if (byTable.isEmpty() && !excludedRequired.isEmpty()) {
+                log.warn("sync.request-body-mode={} has no effect: with {} leaving {} out, no ingest target's mapping maps all of {}",
+                        mode.name().toLowerCase(Locale.ROOT).replace('_', '-'), SensitiveColumnPolicy.SETTING, excludedRequired, REQUIRED_COLUMNS);
             } else if (byTable.isEmpty() && mode == RequestBodyMode.DELTA) {
                 log.warn("sync.request-body-mode=delta has no effect: no ingest target's mapping maps all of {}", REQUIRED_COLUMNS);
             }

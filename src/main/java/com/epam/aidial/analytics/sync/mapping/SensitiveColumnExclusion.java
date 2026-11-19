@@ -26,8 +26,10 @@ import java.util.stream.Stream;
  * code or mapping change.
  *
  * <p>Read once at startup, in two batched lookups however many targets there are. Startup fails when an entry names no
- * column the catalog flags {@code sensitive} on an ingest target table (on its own table, for a qualified entry): the
- * policy is an allowlist, so a typo would otherwise silently drop a column the operator meant to keep. Startup also fails
+ * column at all of an ingest target table (of its own table, for a qualified entry): the policy is an allowlist, so a
+ * typo would otherwise silently drop a column the operator meant to keep. An entry that names only columns the catalog
+ * does not flag {@code sensitive} is logged as a warning instead: ingest writes such a column anyway, and the flag can be
+ * cleared through the table API, which must not stop the next startup. Startup also fails
  * when a column left out is one the ingest cannot do without: the deduplication key ({@code trace_id}, {@code core_span_id},
  * {@code request_time}), or the table's grain key, identity, ordering-key, partition, version or TTL column. Leaving one of
  * those out would drop every row, collapse rows that do not belong together, or land rows in the epoch partition where
@@ -50,7 +52,7 @@ public final class SensitiveColumnExclusion {
      * The sensitive physical columns of each of {@code tables} that {@code policy} leaves out, in catalog order; a table
      * leaving none out maps to an empty set.
      *
-     * @throws IllegalStateException when a table has no catalog definition, an entry names no sensitive column of a target,
+     * @throws IllegalStateException when a table has no catalog definition, an entry names no column of a target,
      *                               or a column left out is one the ingest depends on
      */
     public static Map<String, Set<String>> resolve(Collection<String> tables, SensitiveColumnPolicy policy,
@@ -58,8 +60,10 @@ public final class SensitiveColumnExclusion {
         Set<String> distinct = new LinkedHashSet<>(tables);
         Map<String, TableDefinitionEntity> defined = definitions.findAllById(distinct).stream()
                 .collect(Collectors.toMap(TableDefinitionEntity::getName, Function.identity()));
+        Map<String, Set<String>> columnsByTable = new LinkedHashMap<>();
         Map<String, Set<String>> sensitiveByTable = new LinkedHashMap<>();
         for (ColumnMappingEntity column : columns.findByTableNameInOrderByTableNameAscOrdinalAsc(distinct)) {
+            columnsByTable.computeIfAbsent(column.getTableName(), t -> new LinkedHashSet<>()).add(column.getSourceName());
             if (column.isSensitive()) {
                 sensitiveByTable.computeIfAbsent(column.getTableName(), t -> new LinkedHashSet<>()).add(column.getSourceName());
             }
@@ -77,12 +81,14 @@ public final class SensitiveColumnExclusion {
                 throw new IllegalStateException(SETTING + " entry '" + entry + "' names table '" + entry.table()
                         + "', which is not an ingest target table; remove it, or correct its spelling");
             }
-            boolean matches = distinct.stream().anyMatch(table ->
-                    sensitiveByTable.getOrDefault(table, Set.of()).stream().anyMatch(column -> entry.names(table, column)));
-            if (!matches) {
-                throw new IllegalStateException(SETTING + " entry '" + entry + "' names no column the catalog flags sensitive on "
-                        + (entry.table() == null ? "any ingest target table" : "ingest target table '" + entry.table() + "'")
+            String where = entry.table() == null ? "any ingest target table" : "ingest target table '" + entry.table() + "'";
+            if (!namesAny(entry, distinct, columnsByTable)) {
+                throw new IllegalStateException(SETTING + " entry '" + entry + "' names no column of " + where
                         + "; remove it, or correct its spelling");
+            }
+            if (!namesAny(entry, distinct, sensitiveByTable)) {
+                log.warn("{} entry '{}' names no column the catalog flags sensitive on {}; ingest writes that column anyway, "
+                        + "so the entry has no effect", SETTING, entry, where);
             }
         }
 
@@ -117,6 +123,11 @@ public final class SensitiveColumnExclusion {
         }
         List<ColumnMapping> kept = mapping.columns().stream().filter(c -> !excluded.contains(c.column())).toList();
         return new MappingConfig(kept, mapping.matcher());
+    }
+
+    private static boolean namesAny(SensitiveColumnPolicy.Entry entry, Set<String> tables, Map<String, Set<String>> columnsByTable) {
+        return tables.stream().anyMatch(table ->
+                columnsByTable.getOrDefault(table, Set.of()).stream().anyMatch(column -> entry.names(table, column)));
     }
 
     private static Set<String> requiredColumns(TableDefinitionEntity definition) {

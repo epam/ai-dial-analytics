@@ -3481,12 +3481,14 @@ Startup SHALL fail, naming the setting and the offending entry, when:
 
 - `*` or `none` appears together with any other entry;
 - an entry has more than one `.`, or an empty table or column part (`.comment`, `rate_analytics.`);
-- a bare entry names no column the catalog flags `sensitive` on any ingest target table;
-- a qualified entry names a table that is not an ingest target, or a column the catalog does not flag
-  `sensitive` on that table.
+- a bare entry names no column of any ingest target table;
+- a qualified entry names a table that is not an ingest target, or no column of that table.
 
-An entry that matches nothing is a typo or a column that is not sensitive. Starting anyway would silently leave
-out a column the operator meant to keep.
+An entry that names no column is a typo. Starting anyway would silently leave out the column the operator meant to
+keep. An entry that names only columns the catalog does not flag `sensitive` SHALL instead be logged at `WARN`,
+naming the setting and the entry, and startup SHALL go on: ingest writes such a column anyway, so the entry has no
+effect. The flag can be cleared by a migration, by `PATCH /v1/tables/{name}/schema` or by a catalog import, none of
+which is the operator's, and none SHALL stop the next startup.
 
 The boolean setting this one replaces, `sync.sensitive-columns-enabled` (`SYNC_SENSITIVE_COLUMNS_ENABLED`), SHALL
 NOT be honoured. When it is set to any value, startup SHALL fail, naming it and `sync.sensitive-columns`. Ignoring
@@ -3581,11 +3583,41 @@ re-ingested under `whole` (see "The request body storage mode is configurable").
 - **THEN** that column is left out of the target's new rows, and the startup log lists it among the target's
   excluded columns
 
-#### Scenario: An entry that matches no sensitive column fails startup
+#### Scenario: An entry that names no column fails startup
 
 - **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=request_tag`, or with
-  `SYNC_SENSITIVE_COLUMNS=model`, a column the catalog does not flag `sensitive`
+  `SYNC_SENSITIVE_COLUMNS=dial_usage_log.request_tags` and `dial_usage_log` has no `request_tags` column
 - **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
+#### Scenario: Matching is case-sensitive
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=Request_Tags` and the catalog names the column
+  `request_tags`
+- **THEN** startup fails, naming `sync.sensitive-columns` and the entry
+
+#### Scenario: An entry that names only a column that is not sensitive warns
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=event_id`, a column the catalog does not flag
+  `sensitive`
+- **THEN** startup succeeds, logs a warning naming `sync.sensitive-columns` and the entry, and every sensitive
+  column is left out as under `none`
+
+#### Scenario: Clearing the flag of a named column does not stop startup
+
+- **WHEN** the service runs with `SYNC_SENSITIVE_COLUMNS=rate_analytics.comment`, the table's owner clears the
+  `sensitive` flag of `comment` through `PATCH /v1/tables/rate_analytics/schema`, and the service restarts
+- **THEN** startup succeeds, logs a warning naming the entry, and `rate_analytics` rows carry their `comment`
+
+#### Scenario: A bare entry applies on every target table
+
+- **WHEN** the catalog flags `comment` `sensitive` on both `rate_analytics` and `dial_usage_log_payload`, and the
+  service starts with `SYNC_SENSITIVE_COLUMNS=comment`
+- **THEN** both tables' rows carry their `comment`
+
+#### Scenario: Whitespace, blank and repeated entries are ignored
+
+- **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS= request_tags ,,request_tags`
+- **THEN** it behaves as with `SYNC_SENSITIVE_COLUMNS=request_tags`
 
 #### Scenario: A qualified entry on a table that is not a target fails startup
 
@@ -3668,10 +3700,11 @@ setting has no effect.
 A target's mapping is taken here after sensitive-column exclusion (see "Sensitive columns can be excluded from
 ingest"). A target whose `request_body` is excluded SHALL therefore not qualify, and SHALL get no request-delta
 processing: no body is parsed, and its rows keep every request-delta column except the identity columns at its
-default, `request_cache_control` included. Under `whole-with-path` or `delta` with no target qualifying while
-`sync.sensitive-columns` leaves `request_body` out of at least one target, startup SHALL log one warning that
-the mode has no effect, naming the setting, in place of the `delta` warning above, whose advice to check the mappings
-would mislead.
+default, `request_cache_control` included. The same holds for a target whose `project_id` or `user_hash` is
+excluded, for example after a migration flags it `sensitive`. Under `whole-with-path` or `delta` with no target
+qualifying while `sync.sensitive-columns` leaves `request_body`, `project_id` or `user_hash` out of at least one
+target, startup SHALL log one warning that the mode has no effect, naming the setting and the columns it leaves out,
+in place of the `delta` warning above, whose advice to check the mappings would mislead.
 
 Under `delta`, startup SHALL fail, naming the target table, `sync.sensitive-columns` and
 `request_cache_control`, when a target qualifies while the setting leaves `request_cache_control` out of it. Under
@@ -3733,9 +3766,16 @@ keep `request_cache_control` at its default whatever the setting says.
 
 - **WHEN** the service starts with `SYNC_SENSITIVE_COLUMNS=none` and `SYNC_REQUEST_BODY_MODE=delta`, and
   ingests a chat request
-- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns`, and the
-  payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns` and
+  `request_body`, and the payload row carries a `NULL` `request_body` and `request_cache_control`, an all-zero `request_hash` and
   `request_parent_hash`, and an empty `request_ancestor_hashes`
+
+#### Scenario: An excluded user hash names itself in the warning
+
+- **WHEN** the catalog flags `user_hash` `sensitive` on `dial_usage_log_payload`, and the service starts with
+  `SYNC_REQUEST_BODY_MODE=delta` and `SYNC_SENSITIVE_COLUMNS=request_body,request_cache_control`
+- **THEN** startup logs one warning that the mode has no effect, naming `sync.sensitive-columns` and `user_hash`,
+  and request bodies are stored whole
 
 #### Scenario: A delta body without its cache markers fails startup
 

@@ -22,8 +22,8 @@ The setting should name which sensitive columns ingest writes, and a list no lon
   that set it would start writing raw content again after the upgrade.
 - New startup failures, each naming the setting and the entry:
   - `*` or `none` combined with other entries;
-  - an entry that matches no column the catalog flags `sensitive` on an ingest target table (a typo, or a
-    non-sensitive column);
+  - an entry that names no column of an ingest target table (a typo); one that names only a non-sensitive
+    column logs a warning instead;
   - under `SYNC_REQUEST_BODY_MODE=delta`, a target that writes `request_body` but not `request_cache_control`.
     The delta stage moves cache markers out of the body into that column, so leaving it out would break rebuilds.
 - The existing startup checks, the undefined target table and the excluded deduplication, grain, identity,

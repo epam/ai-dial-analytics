@@ -448,8 +448,8 @@ excluded from ingest").
 
 - **Startup fails while `SYNC_SENSITIVE_COLUMNS_ENABLED` is set**, whatever its value, naming the replacement.
   Ignoring it would turn a `false` into the default `*` and write payload content again.
-- **Startup fails** on an entry that names no column the catalog flags `sensitive` on an ingest target table, and on
-  `*` or `none` mixed with other entries. The 0.23.0 checks, an undefined target table and an excluded key column,
+- **Startup fails** on an entry that names no column of an ingest target table, and on `*` or `none` mixed with
+  other entries. An entry that names only a column the catalog does not flag `sensitive` logs a warning instead. The 0.23.0 checks, an undefined target table and an excluded key column,
   apply to every value other than `*`.
 - **Under `SYNC_REQUEST_BODY_MODE=delta`, `request_body` needs `request_cache_control`** in the same list, or startup
   fails: delta moves a request's cache markers into that column.

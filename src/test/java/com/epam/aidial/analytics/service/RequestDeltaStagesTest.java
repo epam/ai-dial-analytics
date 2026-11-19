@@ -94,7 +94,21 @@ class RequestDeltaStagesTest {
                     new SimpleMeterRegistry()).byTable()).isEmpty();
             assertThat(logs.messagesAt(Level.WARN)).singleElement()
                     .satisfies(message -> assertThat(message).contains("sync.request-body-mode=delta").contains("sync.sensitive-columns ")
-                            .contains("leaving request_body out"));
+                            .contains("leaving [request_body] out"));
+        }
+    }
+
+    /** A target also stops qualifying when the setting leaves out user_hash; the warning names that column, not the mappings. */
+    @Test
+    void excludedUserHashGetsNoStageAndWarnsNamingIt() {
+        Set<String> excluded = Set.of("user_hash");
+        MappingConfig withoutUser = SensitiveColumnExclusion.without(payload, excluded);
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", withoutUser, new MappingEngine(withoutUser, transforms, derivers), excluded);
+        try (LogCapture logs = LogCapture.of(RequestDeltaStages.class)) {
+            assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.DELTA), List.of(target), writerWith(TABLE_COLUMNS),
+                    new SimpleMeterRegistry()).byTable()).isEmpty();
+            assertThat(logs.messagesAt(Level.WARN)).singleElement()
+                    .satisfies(message -> assertThat(message).contains("sync.sensitive-columns ").contains("leaving [user_hash] out"));
         }
     }
 

@@ -26,7 +26,7 @@ import static org.mockito.Mockito.when;
 /**
  * The columns {@code sync.sensitive-columns} leaves out per ingest target, read from the catalog's {@code sensitive} flags:
  * all of them under {@code none}, the unnamed ones under a list. Also the startup guards against an entry naming no
- * sensitive column and against excluding a column ingest depends on.
+ * column and against excluding a column ingest depends on, and the warning for an entry naming no sensitive column.
  */
 class SensitiveColumnExclusionTest {
 
@@ -178,13 +178,36 @@ class SensitiveColumnExclusionTest {
         assertThat(excluded.get(PAYLOAD)).doesNotContain("comment");
     }
 
+    /** A typo, a wrong case, or a column of another table names nothing, and would silently drop the column meant. */
     @Test
-    void entryNamingNoSensitiveColumnFailsStartup() {
-        for (String entry : List.of("request_tag", "event_id", "Request_Tags", "dial_usage_log.request_tags", "sessions.comment")) {
+    void entryNamingNoColumnFailsStartup() {
+        for (String entry : List.of("request_tag", "Request_Tags", "dial_usage_log.request_tags", "sessions.comment")) {
             assertThatThrownBy(() -> SensitiveColumnExclusion.resolve(TARGETS, policy(entry), columns, definitions))
                     .as(entry).isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("sync.sensitive-columns").hasMessageContaining("'" + entry + "'");
         }
+    }
+
+    /**
+     * A column that exists but is not flagged sensitive is written anyway, so its entry only warns: the flag can be
+     * cleared through the table API, which must not stop the next startup.
+     */
+    @Test
+    void entryNamingOnlyNonSensitiveColumnsWarns() {
+        for (String entry : List.of("event_id", "rate_analytics.rate")) {
+            assertThat(SensitiveColumnExclusion.resolve(TARGETS, policy(entry), columns, definitions).get(PAYLOAD)).as(entry)
+                    .contains("request_body");
+            assertThat(messages(Level.WARN)).as(entry).anySatisfy(m -> assertThat(m)
+                    .contains("sync.sensitive-columns").contains("'" + entry + "'").contains("no effect"));
+        }
+    }
+
+    @Test
+    void namedColumnWhoseFlagWasClearedStillStarts() {
+        column(RATE, "comment", false);
+
+        assertThat(SensitiveColumnExclusion.resolve(TARGETS, policy("rate_analytics.comment"), columns, definitions).get(RATE)).isEmpty();
+        assertThat(messages(Level.WARN)).singleElement().satisfies(m -> assertThat(m).contains("'rate_analytics.comment'"));
     }
 
     @Test

@@ -10,14 +10,15 @@
 - [x] 1.3 `application.yml`: replace the `sensitive-columns-enabled` line with
       `sensitive-columns: ${SYNC_SENSITIVE_COLUMNS:*}`.
 - [x] 1.4 `SyncPropertiesTest`: default `*`; `none` and empty give `NONE`; a list keeps its entries; mixed keywords
-      and blank parts fail; `SYNC_SENSITIVE_COLUMNS_ENABLED=false` and `=true` both fail startup with the
-      replacement named.
+      fail startup. `SensitiveColumnPolicyTest`: entries with an empty part fail, and the removed variable fails
+      whatever its value (`false`, `true`, empty) with the replacement named; `SensitiveColumnIngestIntegrationTest`
+      checks that failure through `MappingConfiguration.syncTargets`.
 
 ## 2. Exclusion resolution
 
 - [x] 2.1 `SensitiveColumnExclusion.resolve` takes the policy. It excludes sensitive columns that no entry names on
-      that table, and fails on an entry that matches no sensitive column of any target (bare) or of its table
-      (qualified, including a non-target table). It keeps the undefined-table check and runs the key-column check
+      that table, and fails on an entry that names no column of any target (bare) or of its table (qualified,
+      including a non-target table); an entry naming only a non-sensitive column logs a warning. It keeps the undefined-table check and runs the key-column check
       on the excluded set only.
 - [x] 2.2 Log one `INFO` line per target table listing excluded and written sensitive columns. Reword the
       exception and log messages to name `sync.sensitive-columns`.
@@ -25,7 +26,7 @@
       request-delta stage (on `SyncTarget` or a dedicated bean). Update the class Javadoc and the `SyncTarget`
       Javadoc.
 - [x] 2.4 `SensitiveColumnExclusionTest`: allowlist subset, qualified entry, unknown bare and qualified entries,
-      non-sensitive column entry, a named sensitive key column passes, an excluded sensitive key column fails,
+      non-sensitive column entry warns, a named column whose flag was cleared starts, a named sensitive key column passes, an excluded sensitive key column fails,
       undefined table fails under a list.
 
 ## 3. Request-delta interaction
@@ -35,7 +36,8 @@
 - [x] 3.2 Show the "mode has no effect" warning when no target qualifies and `request_body` is excluded from at
       least one target, instead of keying it on the old boolean.
 - [x] 3.3 `RequestDeltaStagesTest`: the delta failure; no failure under `whole-with-path` with `request_body` only;
-      a delta target with both columns qualifies; the reworded warning.
+      the reworded warning, naming each excluded column a stage needs (`request_body`, `user_hash`). A delta target
+      writing both columns is covered end to end by the `delta` + `request_body,request_cache_control` case of 4.1.
 
 ## 4. Integration tests
 
@@ -49,9 +51,8 @@
 ## 5. Documentation
 
 - [x] 5.1 `docs/configuration.md`: replace the `SYNC_SENSITIVE_COLUMNS_ENABLED` row with a one-line
-      `SYNC_SENSITIVE_COLUMNS` / `sync.sensitive-columns` row (default `*`). Add a ⚠️ note under the table that an
-      empty value means none, but tooling that prunes empty variables restores `*`, so `none` is the spelling to
-      use.
+      `SYNC_SENSITIVE_COLUMNS` / `sync.sensitive-columns` row (default `*`) that says to write `none`, not an empty
+      value, which tooling that prunes empty variables turns back into `*`.
 - [x] 5.2 `docs/release-0.23-upgrade.md` (the change ships as 0.23.1): leave the 0.23.0 notes unchanged and add a
       closing `## 8. 0.23.1` section (value mapping, startup failure on the old variable, the new checks, the `delta` +
       `request_cache_control` rule, rollback), with a pointer paragraph under the introduction. In
