@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.configuration;
 
 import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
+import com.epam.aidial.analytics.sync.mapping.SensitiveColumnPolicy;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -11,6 +12,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.util.unit.DataSize;
 import org.springframework.validation.annotation.Validated;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -44,9 +47,11 @@ import java.util.List;
  *                              (unset or blank) means no limit, and a negative value fails binding, and so startup
  * @param requestBodyMode       how a payload row's request body is stored: whole, or cut to its new history + parent link for a chat
  *                              request; {@code null} (unset) means {@link RequestBodyMode#WHOLE}. An unknown value fails binding, and so startup
- * @param sensitiveColumnsEnabled whether ingest writes the columns the catalog flags {@code sensitive} on each target table; under
- *                              {@code false} they are left out of the target's mapping at startup and take their ClickHouse defaults.
- *                              {@code null} (unset) means {@code true}
+ * @param sensitiveColumns      which of the columns the catalog flags {@code sensitive} on each target table ingest writes:
+ *                              {@code *}, {@code none}, or a list of {@code column} / {@code table.column} entries (see
+ *                              {@link SensitiveColumnPolicy}); the others are left out of the target's mapping at startup and take
+ *                              their ClickHouse defaults. {@code null} (unset) means {@code *}; an empty value binds as an empty
+ *                              list and means {@code none}. A malformed value fails binding, and so startup
  */
 @Validated
 @ConfigurationProperties(prefix = "sync")
@@ -64,7 +69,7 @@ public record SyncProperties(
         Boolean inlineFilesDropTruncated,
         DataSize inlineFilesMaxSize,
         RequestBodyMode requestBodyMode,
-        Boolean sensitiveColumnsEnabled) {
+        List<String> sensitiveColumns) {
 
     /** The {@code sync.max-line-bytes} default that {@code application.yml} ships (64 MiB). */
     public static final int DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
@@ -84,7 +89,13 @@ public record SyncProperties(
             throw new IllegalArgumentException("sync.inline-files-max-size must not be negative: " + inlineFilesMaxSize);
         }
         requestBodyMode = requestBodyMode == null ? RequestBodyMode.WHOLE : requestBodyMode;
-        sensitiveColumnsEnabled = sensitiveColumnsEnabled == null || sensitiveColumnsEnabled;
+        SensitiveColumnPolicy.parse(sensitiveColumns);
+        sensitiveColumns = sensitiveColumns == null ? null : Collections.unmodifiableList(new ArrayList<>(sensitiveColumns));
+    }
+
+    /** The parsed {@code sync.sensitive-columns}; unset is {@link SensitiveColumnPolicy#ALL}. */
+    public SensitiveColumnPolicy sensitiveColumnPolicy() {
+        return SensitiveColumnPolicy.parse(sensitiveColumns);
     }
 
     /** The inline-files settings as one policy; an unset size is {@link InlineFilesPolicy#NO_LIMIT}. */

@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Which targets get the request-delta stage: a payload mapping on a table that has the request-delta columns, the table
@@ -85,14 +86,54 @@ class RequestDeltaStagesTest {
     /** A payload target whose request body was excluded as sensitive has nothing to cut; the one warning names the switch. */
     @Test
     void excludedRequestBodyGetsNoStageAndWarns() {
-        MappingConfig withoutBody = SensitiveColumnExclusion.without(payload, Set.of("request_body"));
-        SyncTarget target = new SyncTarget("dial_usage_log_payload", withoutBody, new MappingEngine(withoutBody, transforms, derivers));
+        Set<String> excluded = Set.of("request_body", "request_cache_control");
+        MappingConfig withoutBody = SensitiveColumnExclusion.without(payload, excluded);
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", withoutBody, new MappingEngine(withoutBody, transforms, derivers), excluded);
         try (LogCapture logs = LogCapture.of(RequestDeltaStages.class)) {
-            assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.DELTA, false), List.of(target), writerWith(TABLE_COLUMNS),
+            assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.DELTA), List.of(target), writerWith(TABLE_COLUMNS),
                     new SimpleMeterRegistry()).byTable()).isEmpty();
             assertThat(logs.messagesAt(Level.WARN)).singleElement()
-                    .satisfies(message -> assertThat(message).contains("sync.request-body-mode=delta").contains("sync.sensitive-columns-enabled=false"));
+                    .satisfies(message -> assertThat(message).contains("sync.request-body-mode=delta").contains("sync.sensitive-columns ")
+                            .contains("leaving [request_body] out"));
         }
+    }
+
+    /** A target also stops qualifying when the setting leaves out user_hash; the warning names that column, not the mappings. */
+    @Test
+    void excludedUserHashGetsNoStageAndWarnsNamingIt() {
+        Set<String> excluded = Set.of("user_hash");
+        MappingConfig withoutUser = SensitiveColumnExclusion.without(payload, excluded);
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", withoutUser, new MappingEngine(withoutUser, transforms, derivers), excluded);
+        try (LogCapture logs = LogCapture.of(RequestDeltaStages.class)) {
+            assertThat(new RequestDeltaStages(properties(true, RequestBodyMode.DELTA), List.of(target), writerWith(TABLE_COLUMNS),
+                    new SimpleMeterRegistry()).byTable()).isEmpty();
+            assertThat(logs.messagesAt(Level.WARN)).singleElement()
+                    .satisfies(message -> assertThat(message).contains("sync.sensitive-columns ").contains("leaving [user_hash] out"));
+        }
+    }
+
+    /** Delta moves cache markers into request_cache_control, so a body written without that column fails startup. */
+    @Test
+    void deltaBodyWithoutItsCacheMarkerColumnFailsStartup() {
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers),
+                Set.of("request_cache_control"));
+
+        assertThatThrownBy(() -> new RequestDeltaStages(properties(true, RequestBodyMode.DELTA), List.of(target), writerWith(TABLE_COLUMNS),
+                new SimpleMeterRegistry()))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("dial_usage_log_payload")
+                .hasMessageContaining("sync.sensitive-columns").hasMessageContaining("request_cache_control");
+    }
+
+    /** whole-with-path never writes request_cache_control, so excluding it alone is fine there. */
+    @Test
+    void wholeWithPathKeepsBodyWithoutItsCacheMarkerColumn() {
+        SyncTarget target = new SyncTarget("dial_usage_log_payload", payload, new MappingEngine(payload, transforms, derivers),
+                Set.of("request_cache_control"));
+        RequestDeltaStages stages = new RequestDeltaStages(properties(true, RequestBodyMode.WHOLE_WITH_PATH), List.of(target),
+                writerWith(TABLE_COLUMNS), new SimpleMeterRegistry());
+
+        Map<String, Object> row = flush(stages);
+        assertThat(row).containsKey("request_hash").doesNotContainKey("request_cache_control");
     }
 
     private static Map<String, Object> flush(RequestDeltaStages stages) {
@@ -129,12 +170,8 @@ class RequestDeltaStagesTest {
     }
 
     private static SyncProperties properties(boolean validateSchema, RequestBodyMode mode) {
-        return properties(validateSchema, mode, true);
-    }
-
-    private static SyncProperties properties(boolean validateSchema, RequestBodyMode mode, boolean sensitiveColumnsEnabled) {
         return new SyncProperties("-", 0, 1000, 268_435_456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, "logs", "yyyy/MM/dd",
                 "'date='yyyy-MM-dd", validateSchema, List.of(new SyncProperties.Target("dial_usage_log", "classpath:mapping/dial-usage-log.yaml")),
-                null, null, mode, sensitiveColumnsEnabled);
+                null, null, mode, null);
     }
 }
