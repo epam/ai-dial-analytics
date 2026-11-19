@@ -203,7 +203,7 @@ class DraftPipelineIntegrationTest extends AbstractClickHouseIntegrationTest {
                 + "\"trigger\":{\"kind\":\"schedule\",\"cron\":\"0 0 * * * *\"}}")
                 .andExpect(status().isOk());
         mockMvc.perform(post(PIPELINES + "/dr-rollup/preview")).andExpect(status().isOk());
-        patchPipeline("dr-rollup", "{\"enabled\":true}").andDo(r -> System.out.println("DRDIAG " + r.getResponse().getStatus() + " " + r.getResponse().getContentAsString())).andExpect(status().isOk());
+        patchPipeline("dr-rollup", "{\"enabled\":true}").andExpect(status().isOk());
     }
 
     @Test
