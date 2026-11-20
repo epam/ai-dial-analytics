@@ -306,6 +306,8 @@ public class UsageLogWriter {
     }
 
     private Client buildClient() {
+        // Not ClickHouseClients.failFastWriterBuilder: ingest keeps ClickHouse's own Keeper retries, so a Keeper restart
+        // of a minute or two pauses it instead of deferring every in-flight blob to the retry sweep.
         return ClickHouseClients.builder(properties, writerProperties.user(), writerProperties.password())
                 .serverSetting(ClickHouseWriterClient.ASYNC_INSERT, "0")
                 .build();

@@ -740,6 +740,21 @@ that talks to ClickHouse. They mean the cluster's coordination is impaired, not 
 The classification SHALL be made in the same shared place as the resource-exhaustion classification, and data-sync
 SHALL treat these codes as a transient failure of the blob, which the retry sweep retries.
 
+ClickHouse's default Keeper retries hold an insert into a replicated table whose replica has lost its Keeper session
+for about two minutes. Each write path SHALL choose between those retries and failing promptly by how it recovers:
+
+- The catalog row writer (`POST /v1/tables/{name}/rows`, OTel ingest) SHALL fail promptly. Its caller waits on an
+  HTTP response, and a two-minute wait outlasts a typical proxy read timeout, after which the insert may still be
+  stored while the caller retries it.
+- A pipeline's `INSERT … SELECT`, on the primary or on the run's home replica, SHALL fail promptly. The run fails
+  with its cursor unchanged and the next scheduled run retries it.
+- Data-sync ingest and its ledgers SHALL keep ClickHouse's default retries. A failed blob waits for the retry sweep
+  (`sync.retry.initial-backoff`), so failing promptly would turn a Keeper restart of a minute or two into that much
+  longer ingest delay and a failure-ledger entry per blob in flight.
+
+Failing promptly SHALL bound `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` so that, with the
+replica's Keeper session already lost, the insert is answered within about ten seconds.
+
 An insert answered `UNKNOWN_STATUS_OF_INSERT` may already have been stored, so retrying it can store the rows
 twice. On an `upsert_by_key` table or an enrichment the copies collapse. On an `append` table and an OTel sink
 table a retried write is at-least-once. Callers of `POST …/rows` and the OTel endpoints SHALL be told this in
@@ -756,6 +771,7 @@ the operator documentation.
 - **GIVEN** the Keeper ensemble unavailable
 - **WHEN** `POST /v1/tables/{name}/rows` is called
 - **THEN** the response is HTTP 503 `clickhouse_unavailable`, not a 4xx
+- **AND** it is answered within 30 seconds, not after ClickHouse's default two-minute Keeper retry
 
 #### Scenario: A pipeline run while Keeper is down is refused as unavailable
 

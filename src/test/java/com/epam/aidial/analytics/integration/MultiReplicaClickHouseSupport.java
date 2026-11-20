@@ -189,6 +189,27 @@ final class MultiReplicaClickHouseSupport {
         }
     }
 
+    /** Waits until every replica has noticed a {@link #stopKeeper stopped} Keeper: its tables turned read-only. */
+    void awaitKeeperLost() {
+        final long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
+        for (final String name : REPLICAS) {
+            while (true) {
+                try (Client client = client(name)) {
+                    if (client.queryAll("SELECT count() AS n FROM system.replicas WHERE NOT (is_readonly OR is_session_expired)")
+                            .getFirst().getLong("n") == 0) {
+                        break;
+                    }
+                } catch (Exception notYet) {
+                    // Still answering from before the loss.
+                }
+                if (System.nanoTime() > deadline) {
+                    throw new IllegalStateException("replica " + name + " did not notice that Keeper is down");
+                }
+                sleep(250);
+            }
+        }
+    }
+
     /** Waits until no replica has a read-only table, as after Keeper or a replica came back. */
     void awaitWritable() {
         final long deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos();

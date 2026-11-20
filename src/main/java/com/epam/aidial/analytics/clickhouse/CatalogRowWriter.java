@@ -98,7 +98,7 @@ public class CatalogRowWriter {
     }
 
     private Client buildClient() {
-        return ClickHouseClients.builder(properties, writerProperties.user(), writerProperties.password())
+        return ClickHouseClients.failFastWriterBuilder(properties, writerProperties.user(), writerProperties.password())
                 .serverSetting(ClickHouseWriterClient.ASYNC_INSERT, "0")
                 // A write-back batch into an aligned enrichment may span more day partitions than the default 100.
                 .serverSetting(ClickHouseInsertSelectExecutor.MAX_PARTITIONS_PER_INSERT_BLOCK, "0")
