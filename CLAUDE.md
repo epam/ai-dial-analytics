@@ -40,7 +40,7 @@ tables included.
 ./gradlew bootRun                           # run locally on http://localhost:5000
 ./gradlew checkstyleMain checkstyleTest     # code style (Google Java Style, 180-char lines)
 ./gradlew test                              # run the test suite
-./gradlew multiReplicaTest                  # opt-in: replication tests on a three-replica cluster
+./gradlew multiReplicaTest                  # replication tests on a three-replica cluster (CI: matching PRs, post-merge)
 ```
 
 Smoke test a running instance:

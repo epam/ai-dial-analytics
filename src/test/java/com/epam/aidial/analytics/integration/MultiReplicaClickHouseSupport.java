@@ -36,7 +36,7 @@ final class MultiReplicaClickHouseSupport {
     static final String DATABASE = "adas";
     static final List<String> REPLICAS = List.of("chi-0", "chi-1", "chi-2");
     static final String PRIMARY = "chi-0";
-    private static final String IMAGE = "clickhouse/clickhouse-server:" + ClickHouseContainerSupport.VERSION;
+    private static final String IMAGE = "clickhouse/clickhouse-server:" + ClickHouseTestVersion.VERSION;
 
     private static MultiReplicaClickHouseSupport instance;
 
@@ -55,7 +55,7 @@ final class MultiReplicaClickHouseSupport {
     }
 
     private MultiReplicaClickHouseSupport() {
-        keeper = new GenericContainer<>(DockerImageName.parse("clickhouse/clickhouse-keeper:" + ClickHouseContainerSupport.VERSION))
+        keeper = new GenericContainer<>(DockerImageName.parse("clickhouse/clickhouse-keeper:" + ClickHouseTestVersion.VERSION))
                 .withNetwork(network)
                 .withNetworkAliases("keeper")
                 .withCreateContainerCmdModifier(cmd -> cmd.withHostName("keeper"))
@@ -64,6 +64,10 @@ final class MultiReplicaClickHouseSupport {
                 .waitingFor(Wait.forSuccessfulCommand("echo ruok | nc -w1 127.0.0.1 9181 | grep -q imok "
                         + "&& echo mntr | nc -w1 127.0.0.1 9181 | grep -q zk_server_state")
                         .withStartupTimeout(Duration.ofMinutes(1)));
+        if (ClickHouseTestVersion.KEEPER_FSYNC_THROTTLE) {
+            keeper.withCopyFileToContainer(MountableFile.forClasspathResource(ClickHouseTestVersion.NO_FSYNC_THROTTLE),
+                    "/etc/clickhouse-keeper/keeper_config.d/keeper-no-fsync-throttle.xml");
+        }
         for (final String name : REPLICAS) {
             final int port = freePort();
             ports.put(name, port);

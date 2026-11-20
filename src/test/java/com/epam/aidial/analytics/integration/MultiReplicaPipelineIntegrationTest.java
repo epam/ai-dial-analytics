@@ -446,7 +446,7 @@ class MultiReplicaPipelineIntegrationTest {
 
             CLUSTER.start("chi-2");
             CLUSTER.awaitWritable();
-            if (ClickHouseContainerSupport.VERSION.startsWith("25.")) {
+            if (ClickHouseTestVersion.VERSION.startsWith("25.")) {
                 // 25.3 replays the payload table's original CREATE against its newer metadata and stalls; the
                 // documented recovery re-joins the replica (docs/clickhouse-replication.md).
                 MultiReplicaClickHouseSupport.sleep(15_000);

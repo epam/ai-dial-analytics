@@ -34,11 +34,8 @@ final class ClickHouseContainerSupport {
     /** ClickHouse HTTP port — exposed by the container and used by both the client-v2 and JDBC paths. */
     static final int HTTP_PORT = 8123;
 
-    /**
-     * The server version the suite runs against: {@code CLICKHOUSE_TEST_VERSION}, or 26.8, the newest verified. Set it
-     * to check the supported range (25.3 LTS and up) without editing the suite.
-     */
-    static final String VERSION = System.getenv().getOrDefault("CLICKHOUSE_TEST_VERSION", "26.8");
+    /** The server version the suite runs against ({@link ClickHouseTestVersion}). */
+    static final String VERSION = ClickHouseTestVersion.VERSION;
 
     /** The {@code Replicated} session database, created by {@code clickhouse/init-replicated-database.sql}. */
     static final String DATABASE = "adas";
@@ -69,6 +66,10 @@ final class ClickHouseContainerSupport {
                             "/docker-entrypoint-initdb.d/init-replicated-database.sql");
 
     static {
+        if (ClickHouseTestVersion.KEEPER_FSYNC_THROTTLE) {
+            CLICKHOUSE.withCopyFileToContainer(MountableFile.forClasspathResource(ClickHouseTestVersion.NO_FSYNC_THROTTLE),
+                    "/etc/clickhouse-server/config.d/keeper-no-fsync-throttle.xml");
+        }
         CLICKHOUSE.start();
     }
 

@@ -7,9 +7,8 @@
         <server_id>1</server_id>
         <log_storage_path>/var/lib/clickhouse-keeper/log</log_storage_path>
         <snapshot_storage_path>/var/lib/clickhouse-keeper/snapshots</snapshot_storage_path>
-        <!-- Throwaway Keeper: skip the fsync throttle every Keeper write would otherwise wait out. -->
+        <!-- Throwaway Keeper. The fsync throttle is lifted in ../keeper-no-fsync-throttle.xml, on the versions that have it. -->
         <coordination_settings>
-            <min_time_between_fsyncs_ms>0</min_time_between_fsyncs_ms>
             <force_sync>false</force_sync>
         </coordination_settings>
         <raft_configuration>
