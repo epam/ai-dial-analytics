@@ -743,7 +743,8 @@ SHALL treat these codes as a transient failure of the blob, which the retry swee
 ClickHouse's default Keeper retries hold an insert into a replicated table whose replica has lost its Keeper session
 for about two minutes. Each write path SHALL choose between those retries and failing promptly by how it recovers:
 
-- The catalog row writer (`POST /v1/tables/{name}/rows`, OTel ingest) SHALL fail promptly. Its caller waits on an
+- The catalog row writer (`POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`,
+  OTel ingest) SHALL fail promptly. Its caller waits on an
   HTTP response, and a two-minute wait outlasts a typical proxy read timeout, after which the insert may still be
   stored while the caller retries it.
 - A pipeline's `INSERT … SELECT`, on the primary or on the run's home replica, SHALL fail promptly. The run fails
@@ -753,7 +754,8 @@ for about two minutes. Each write path SHALL choose between those retries and fa
   longer ingest delay and a failure-ledger entry per blob in flight.
 
 Failing promptly SHALL bound `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` so that, with the
-replica's Keeper session already lost, the insert is answered within about ten seconds.
+replica's Keeper session already lost, the insert is answered within about ten seconds. The bound also covers a
+Keeper failure during the insert's commit, so a prompt failure there may be `UNKNOWN_STATUS_OF_INSERT`, as below.
 
 An insert answered `UNKNOWN_STATUS_OF_INSERT` may already have been stored, so retrying it can store the rows
 twice. On an `upsert_by_key` table or an enrichment the copies collapse. On an `append` table and an OTel sink

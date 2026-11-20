@@ -200,7 +200,7 @@ final class MultiReplicaClickHouseSupport {
                         break;
                     }
                 } catch (Exception notYet) {
-                    // Still answering from before the loss.
+                    // The replica did not answer this poll; ask again until the deadline.
                 }
                 if (System.nanoTime() > deadline) {
                     throw new IllegalStateException("replica " + name + " did not notice that Keeper is down");

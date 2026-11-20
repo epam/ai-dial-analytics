@@ -201,12 +201,7 @@ With deduplication off, a replayed or retried insert stores its rows again:
 ## Keeper and replication failures
 
 With Keeper unavailable, reads keep working. Inserts, `INSERT … SELECT`, DDL and replica syncs fail.
-ADAS reports these codes as `503 clickhouse_unavailable` on every path, and data-sync retries the blob.
-Row writes (`POST …/rows`, OTel ingest) and pipeline runs cap ClickHouse's Keeper retries
-(`insert_keeper_max_retries = 8`, `insert_keeper_retry_max_backoff_ms = 2000`), so they fail after about
-ten seconds instead of the two minutes ClickHouse's defaults allow. Data-sync ingest keeps the defaults
-and pauses through a short Keeper outage. A settings profile constraint on the writer user must allow
-both settings:
+ADAS reports these codes as `503 clickhouse_unavailable` on every path, and data-sync retries the blob:
 
 | Code | Name                       | Seen when                                          |
 |------|----------------------------|----------------------------------------------------|
@@ -218,6 +213,13 @@ both settings:
 A replica whose Keeper metadata was lost stays `TABLE_IS_READ_ONLY` until an operator runs
 `SYSTEM RESTORE REPLICA`. ADAS still answers `503` for it, and the log line names the replica and
 the code.
+
+Row writes (`POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`, OTel
+ingest) and pipeline runs cap ClickHouse's Keeper retries (`insert_keeper_max_retries = 8`,
+`insert_keeper_retry_max_backoff_ms = 2000`). Once a replica has noticed it lost its Keeper session, they fail
+after about ten seconds instead of the two minutes ClickHouse's defaults allow. Data-sync ingest keeps the
+defaults and pauses through a short Keeper outage. A settings profile constraint on the writer user must allow
+both settings.
 
 ## Settled ingest days are force-merged
 

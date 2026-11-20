@@ -61,8 +61,9 @@ public final class ClickHouseClients {
 
     /**
      * {@link #builder(ClickHouseProperties, String, String)} for a writer that must fail promptly when Keeper is gone:
-     * the catalog row writer behind {@code POST …/rows} and OTel ingest, whose caller is waiting on an HTTP response,
-     * and the pipeline {@code INSERT … SELECT} clients, whose run is retried on its next tick with its cursor unmoved.
+     * the catalog row writer behind {@code POST /v1/tables/{name}/rows}, the pipeline write-back and OTel ingest, whose
+     * caller is waiting on an HTTP response, and the pipeline {@code INSERT … SELECT} clients, whose run is retried on its
+     * next tick with its cursor unmoved. The writer client also carries DDL; both settings apply to inserts only.
      *
      * <p>An insert into a replicated table whose replica has lost its Keeper session retries
      * {@value #INSERT_KEEPER_MAX_RETRIES} times with a backoff doubling from 100 ms to

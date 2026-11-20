@@ -492,14 +492,17 @@ reads back without it, and no row is migrated.
 ## 20. Writes with Keeper down
 
 ClickHouse's default Keeper retries held an insert into a replicated table whose replica had lost Keeper for about
-two minutes. `POST …/rows`, OTel ingest and pipeline runs now cap those retries and answer
-`503 clickhouse_unavailable` in about ten seconds. Data-sync ingest keeps ClickHouse's defaults and pauses through
+two minutes. `POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`, OTel ingest
+and pipeline runs now cap those retries and answer `503 clickhouse_unavailable` in about ten seconds once the replica
+has noticed the lost session. Data-sync ingest keeps ClickHouse's defaults and pauses through
 a short Keeper outage (see [`clickhouse-replication`](../openspec/specs/clickhouse-replication/spec.md)).
 
 - **Settings.** The writer user now sends `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms`.
-  A settings profile constraint that makes either read-only, or bounds it below the value sent (`8`, `2000`),
-  refuses those writes. Allow both before deploying.
-- **Callers** of `POST …/rows` and the OTel endpoints get the `503` they already handle, sooner.
+  A settings profile constraint that makes either read-only, or whose `min`/`max` excludes the value sent (`8`,
+  `2000`), refuses those writes. Allow both before deploying.
+- **Callers** of `POST …/rows`, the OTel endpoints and the enrichment runner's write-back get the `503` they
+  already handle, sooner. Fewer retries also mean a Keeper blip during an insert's commit more often ends in
+  `UNKNOWN_STATUS_OF_INSERT`, whose retry on an `append` table can store the rows twice (at-least-once, as before).
 - **Rollback.** An earlier build sends neither setting and waits out ClickHouse's defaults again.
 
 ## Summary
