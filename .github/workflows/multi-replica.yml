@@ -1,20 +1,24 @@
 name: Multi-replica tests
 
 # The replication tests on a three-replica ClickHouse cluster (./gradlew multiReplicaTest), which the main PR build
-# leaves out. The filter is deliberately wide: any change to production code or resources runs them; a PR touching
-# only docs, specs or other tests does not. The job runs beside the main PR build, so it adds no wall-clock time.
+# leaves out. The filter is deliberately wide: any change to production code or resources, or to a test helper (a
+# test source not named *Test.java, such as the container supports, IntegrationTables or RunnerCalls), runs them; a
+# PR touching only docs, specs or other test classes does not. Later patterns override earlier ones, so the
+# multi-replica test classes are added back after the *Test.java exclusion. The job runs beside the main PR build,
+# so it adds no wall-clock time.
 
 on:
   pull_request:
     branches: [development, release-*]
     paths:
       - "src/main/**"
-      - "src/test/java/com/epam/aidial/analytics/integration/MultiReplica*.java"
-      - "src/test/java/com/epam/aidial/analytics/integration/ClickHouseContainerSupport.java"
-      - "src/test/java/com/epam/aidial/analytics/integration/PostgresContainerSupport.java"
+      - "src/test/java/**"
+      - "!src/test/java/**/*Test.java"
+      - "src/test/java/**/MultiReplica*IntegrationTest.java"
       - "src/test/resources/**"
       - "build.gradle"
       - "settings.gradle"
+      - "gradle.properties"
       - "gradle/**"
       - ".github/workflows/multi-replica.yml"
   workflow_dispatch:
@@ -23,8 +27,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# packages: read lets GITHUB_TOKEN resolve the GitHub Packages dependency (build.gradle, epam/jclouds) when the
+# Gradle cache misses, as on a dependency bump.
 permissions:
   contents: read
+  packages: read
 
 jobs:
   multi_replica_test:

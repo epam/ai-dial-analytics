@@ -432,7 +432,7 @@ tasks.register('updateOpenApi', Test) {
 
 // The replication tests on a three-replica cluster: replica discovery, pipeline home replicas, DDL and pipelines with a
 // replica or Keeper down, and the continuous-ingest disruption test. Kept out of test because it takes minutes; CI runs
-// it on every PR that touches production code (.github/workflows/multi-replica.yml).
+// it on every PR that touches production code or a test helper (.github/workflows/multi-replica.yml).
 tasks.register('multiReplicaTest', Test) {
     description = 'Runs the replication tests against a three-replica ClickHouse cluster.'
     group = 'verification'
