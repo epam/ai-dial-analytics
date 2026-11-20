@@ -31,8 +31,8 @@ class MappingFileLoaderTest {
 
         // Every user column of dial_usage_log; only _ingested_at (a table-side default) is unmapped.
         // 33 after the mapping split moved the five verbatim-content columns to dial_usage_log_payload,
-        // plus the two route columns appended by V15.
-        assertThat(config.columns()).hasSize(35);
+        // plus the two route columns appended by V15 and the five spending-limit columns appended by V18.
+        assertThat(config.columns()).hasSize(40);
         ColumnMapping first = config.columns().getFirst();
         assertThat(first.column()).isEqualTo("event_id");
         assertThat(first.isDerived()).isTrue();
@@ -44,8 +44,8 @@ class MappingFileLoaderTest {
                         "jwt_claims", "request_tags");
         // ...but the columns that SIZE a payload stay: 4 bytes each, and they must outlive it.
         assertThat(config.columns().stream().map(ColumnMapping::column)).contains("response_body_bytes");
-        // The route columns were appended by ADD COLUMN, so they close the physical order.
-        assertThat(config.columns().getLast().column()).isEqualTo("route_type");
+        // The spending-limit columns were appended by ADD COLUMN after the route columns, so they close the physical order.
+        assertThat(config.columns().getLast().column()).isEqualTo("budget_assignment");
     }
 
     @Test

@@ -74,7 +74,8 @@ public class CatalogTransferController {
 
     @PostMapping("/export")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Export a catalog bundle (writes nothing)",
+    @Operation(operationId = "exportCatalog",
+            summary = "Export a catalog bundle (writes nothing)",
             description = "Returns a bundle file of the listed tables and pipelines with their dependency closure, "
                     + "computed in both directions; an empty or absent list exports every exportable object. System "
                     + "tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left "
@@ -95,7 +96,8 @@ public class CatalogTransferController {
 
     @PostMapping("/export/preview")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Preview a catalog export (writes nothing)",
+    @Operation(operationId = "previewCatalogExport",
+            summary = "Preview a catalog export (writes nothing)",
             description = "Takes the export body and returns the objects the bundle would carry, each with the reason "
                     + "it is included, plus the system tables it would require and the objects left out. With "
                     + "`include_access: true`, `access` lists each table's roles and what stays behind (`left_behind`).")
@@ -105,7 +107,8 @@ public class CatalogTransferController {
 
     @PostMapping(value = "/import/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @RequiresPrivilege(Privilege.TABLE_CREATE)
-    @Operation(summary = "Preview a catalog import (writes nothing)",
+    @Operation(operationId = "previewCatalogImport",
+            summary = "Preview a catalog import (writes nothing)",
             description = "Runs the import's validation pass — the real create services inside a rolled-back "
                     + "transaction, then the arm-time pipeline checks — and returns what an import would do with each "
                     + "object, and with `include_access=true` with each access entry under `access`. Answers 200 "
@@ -123,7 +126,8 @@ public class CatalogTransferController {
 
     @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @RequiresPrivilege(Privilege.TABLE_CREATE)
-    @Operation(summary = "Import a catalog bundle (writes)",
+    @Operation(operationId = "importCatalog",
+            summary = "Import a catalog bundle (writes)",
             description = "Runs the same validation pass as the preview and, only if it finds no problem, creates each "
                     + "object in dependency order as its own step: tables, then pipelines, always disabled, and, with "
                     + "`include_access=true`, the bundle's access entries last, in one transaction; without it no access "

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.configuration;
 
 import com.epam.aidial.analytics.sync.delta.RequestBodyMode;
 import com.epam.aidial.analytics.sync.inline.InlineFilesPolicy;
+import com.epam.aidial.analytics.sync.mapping.SensitiveColumnPolicy;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -175,17 +176,46 @@ class SyncPropertiesTest {
     }
 
     @Test
-    void sensitiveColumnsAreEnabledByDefault() {
+    void sensitiveColumnsDefaultToAll() {
         contextRunner.run(context ->
-                assertThat(context.getBean(SyncProperties.class).sensitiveColumnsEnabled()).isTrue());
-        assertThat(properties(10000, 134_217_728L).sensitiveColumnsEnabled()).isTrue();
+                assertThat(context.getBean(SyncProperties.class).sensitiveColumnPolicy()).isSameAs(SensitiveColumnPolicy.ALL));
+        assertThat(properties(10000, 134_217_728L).sensitiveColumnPolicy()).isSameAs(SensitiveColumnPolicy.ALL);
     }
 
     @Test
-    void sensitiveColumnsCanBeDisabledFromTheEnvironment() {
-        contextRunner.withSystemProperties("SYNC_SENSITIVE_COLUMNS_ENABLED=false")
-                .run(context ->
-                        assertThat(context.getBean(SyncProperties.class).sensitiveColumnsEnabled()).isFalse());
+    void sensitiveColumnsNoneFromTheEnvironment() {
+        contextRunner.withSystemProperties("SYNC_SENSITIVE_COLUMNS=none")
+                .run(context -> assertThat(context.getBean(SyncProperties.class).sensitiveColumnPolicy()).isSameAs(SensitiveColumnPolicy.NONE));
+    }
+
+    /**
+     * An empty value means none, not the default: a deployment that sets it empty must not get every column back. Set
+     * directly, as {@link #emptyFileNameHeadVariableWinsOverTheDefault} explains.
+     */
+    @Test
+    void sensitiveColumnsEmptyFromTheEnvironmentIsNone() {
+        System.setProperty("SYNC_SENSITIVE_COLUMNS", "");
+        try {
+            contextRunner.run(context ->
+                    assertThat(context.getBean(SyncProperties.class).sensitiveColumnPolicy()).isSameAs(SensitiveColumnPolicy.NONE));
+        } finally {
+            System.clearProperty("SYNC_SENSITIVE_COLUMNS");
+        }
+    }
+
+    @Test
+    void sensitiveColumnsListFromTheEnvironment() {
+        contextRunner.withSystemProperties("SYNC_SENSITIVE_COLUMNS=request_tags, jwt_claims,rate_analytics.comment")
+                .run(context -> assertThat(context.getBean(SyncProperties.class).sensitiveColumnPolicy().entries())
+                        .extracting(SensitiveColumnPolicy.Entry::toString)
+                        .containsExactly("request_tags", "jwt_claims", "rate_analytics.comment"));
+    }
+
+    @Test
+    void sensitiveColumnsKeywordMixedWithEntriesFailsStartup() {
+        contextRunner.withSystemProperties("SYNC_SENSITIVE_COLUMNS=*,request_body")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasStackTraceContaining("sync.sensitive-columns").hasStackTraceContaining("'*'"));
     }
 
     @EnableConfigurationProperties(SyncProperties.class)

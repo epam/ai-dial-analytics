@@ -25,6 +25,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
+import org.springframework.mock.env.MockEnvironment;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.OutputStream;
@@ -40,16 +41,18 @@ import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@code sync.sensitive-columns-enabled} end to end: the shipped mappings, the seeded catalog's {@code sensitive} flags and
- * the real ClickHouse tables. A chat completion and a {@code /rate} record are ingested from a gzip blob; under the default
- * the sensitive columns carry what was captured, under {@code false} the rows are still written, keys and the grain join
- * intact, with every sensitive column at its ClickHouse default, request-delta columns included under {@code delta}.
+ * {@code sync.sensitive-columns} end to end: the shipped mappings, the seeded catalog's {@code sensitive} flags and the real
+ * ClickHouse tables. A chat completion and a {@code /rate} record are ingested from a gzip blob; under the default {@code *}
+ * the sensitive columns carry what was captured, under {@code none} the rows are still written, keys and the grain join
+ * intact, with every sensitive column at its ClickHouse default, request-delta columns included under {@code delta}, and
+ * under a list only the named sensitive columns are written.
  *
- * <p>The switch-off targets are built here by {@link MappingConfiguration} against the context's own catalog
- * repositories, so the default and the switch-off ingest share one context. The bean the real startup builds under
- * {@code false} is checked by {@link SensitiveColumnsDisabledStartupIntegrationTest}.
+ * <p>The targets for each setting are built here by {@link MappingConfiguration} against the context's own catalog
+ * repositories, so every setting's ingest shares one context. The bean the real startup builds under {@code none} is
+ * checked by {@link SensitiveColumnsDisabledStartupIntegrationTest}.
  */
 class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegrationTest {
 
@@ -97,22 +100,67 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
     }
 
     @Test
-    void disabledLeavesEverySensitiveColumnAtItsDefault() throws Exception {
-        String project = ingest(disabledTargets(), RequestBodyMode.WHOLE);
+    void noneLeavesEverySensitiveColumnAtItsDefault() throws Exception {
+        String project = ingest(targets(RequestBodyMode.WHOLE, "none"), RequestBodyMode.WHOLE);
 
         assertSensitiveColumnsAtDefaults(project);
         assertKeysAndJoinIntact(project);
     }
 
     @Test
-    void disabledUnderDeltaGetsNoRequestDeltaProcessing() throws Exception {
-        String project = ingest(disabledTargets(), RequestBodyMode.DELTA);
+    void noneUnderDeltaGetsNoRequestDeltaProcessing() throws Exception {
+        String project = ingest(targets(RequestBodyMode.DELTA, "none"), RequestBodyMode.DELTA);
 
         assertSensitiveColumnsAtDefaults(project);
         assertKeysAndJoinIntact(project);
         assertThat(payload(project, "toString(request_hash)")).isEqualTo("00000000-0000-0000-0000-000000000000");
         assertThat(payload(project, "toString(request_parent_hash)")).isEqualTo("00000000-0000-0000-0000-000000000000");
         assertThat(payload(project, "length(request_ancestor_hashes)")).isEqualTo("0");
+    }
+
+    @Test
+    void listWritesOnlyTheNamedSensitiveColumns() throws Exception {
+        String project = ingest(targets(RequestBodyMode.WHOLE, "request_tags", "jwt_claims"), RequestBodyMode.WHOLE);
+
+        assertThat(payload(project, "toString(jwt_claims)")).contains("\"sub\":\"someone\"");
+        assertThat(payload(project, "toString(request_tags)")).contains("\"x-conversation-id\":\"c-1\"");
+        assertThat(payload(project, "ifNull(request_body, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(payload(project, "ifNull(response_body, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(payload(project, "ifNull(assembled_response, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(payload(project, "ifNull(request_cache_control, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(rate(project, "ifNull(comment, '" + NULL + "')")).isEqualTo(NULL);
+        assertKeysAndJoinIntact(project);
+    }
+
+    @Test
+    void qualifiedEntryWritesTheRatingCommentOnly() throws Exception {
+        String project = ingest(targets(RequestBodyMode.WHOLE, "rate_analytics.comment"), RequestBodyMode.WHOLE);
+
+        assertThat(rate(project, "ifNull(comment, '" + NULL + "')")).isEqualTo("too vague");
+        assertThat(payload(project, "ifNull(request_body, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(payload(project, "toString(jwt_claims)")).isEqualTo("{}");
+        assertThat(payload(project, "toString(request_tags)")).isEqualTo("{}");
+    }
+
+    @Test
+    void deltaBodyWithItsCacheMarkerColumnIsStored() throws Exception {
+        String project = ingest(targets(RequestBodyMode.DELTA, "request_body", "request_cache_control"), RequestBodyMode.DELTA);
+
+        assertThat(payload(project, "ifNull(request_body, '" + NULL + "')")).contains("\"content\":\"hello\"");
+        assertThat(payload(project, "toString(request_hash)")).isNotEqualTo("00000000-0000-0000-0000-000000000000");
+        assertThat(payload(project, "ifNull(response_body, '" + NULL + "')")).isEqualTo(NULL);
+        assertThat(payload(project, "toString(jwt_claims)")).isEqualTo("{}");
+        assertKeysAndJoinIntact(project);
+    }
+
+    @Test
+    void removedBooleanSettingFailsTargetConstruction() {
+        MockEnvironment environment = new MockEnvironment().withProperty("sync.sensitive-columns-enabled", "false");
+
+        assertThatThrownBy(() -> new MappingConfiguration().syncTargets(properties(RequestBodyMode.WHOLE), environment, context,
+                transforms, derivers, new SimpleMeterRegistry(), columnMappings, tableDefinitions))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("sync.sensitive-columns-enabled")
+                .hasMessageContaining("sync.sensitive-columns (");
     }
 
     private void assertSensitiveColumnsAtDefaults(String project) {
@@ -136,9 +184,10 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
                 + "00000000-0000-0000-0000-000000000000')))")).isEqualTo("0|false|1");
     }
 
-    private List<SyncTarget> disabledTargets() {
-        return new MappingConfiguration().syncTargets(properties(RequestBodyMode.WHOLE, false), context, transforms, derivers,
-                new SimpleMeterRegistry(), columnMappings, tableDefinitions);
+    /** The targets {@link MappingConfiguration} builds under {@code sync.sensitive-columns} = {@code entries}. */
+    private List<SyncTarget> targets(RequestBodyMode mode, String... entries) {
+        return new MappingConfiguration().syncTargets(properties(mode, List.of(entries)), context.getEnvironment(), context, transforms,
+                derivers, new SimpleMeterRegistry(), columnMappings, tableDefinitions);
     }
 
     /** Writes the two records under a fresh project id, polls them in through {@code targets}, and returns the project id. */
@@ -149,7 +198,7 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
 
         BlobClient blobClient = new BlobClient(new BlobProperties("filesystem", null, null, BUCKET, null,
                 Map.of("jclouds.filesystem.basedir", baseDir.toString())), TestBlobSpans.noop());
-        SyncProperties syncProps = properties(mode, true);
+        SyncProperties syncProps = properties(mode);
         BlobIngestor ingestor = new BlobIngestor(blobClient, new LogParser(JsonMapper.builder().build(), SyncProperties.DEFAULT_MAX_LINE_BYTES),
                 targets, flushOrder, new RequestDeltaStages(syncProps, targets, usageLogWriter, new SimpleMeterRegistry()));
         PollProperties pollProps = new PollProperties(true, "-", Duration.ofMinutes(1), Duration.ofMinutes(10), Duration.ZERO,
@@ -159,9 +208,13 @@ class SensitiveColumnIngestIntegrationTest extends AbstractClickHouseIntegration
         return project;
     }
 
-    private SyncProperties properties(RequestBodyMode mode, boolean sensitiveColumnsEnabled) {
+    private SyncProperties properties(RequestBodyMode mode) {
+        return properties(mode, null);
+    }
+
+    private SyncProperties properties(RequestBodyMode mode, List<String> sensitiveColumns) {
         return new SyncProperties("-", 0, 1000, 268435456L, SyncProperties.DEFAULT_MAX_LINE_BYTES, PATH_PREFIX, "yyyy/MM/dd",
-                "'date='yyyy-MM-dd", false, contextSyncProperties.targets(), null, null, mode, sensitiveColumnsEnabled);
+                "'date='yyyy-MM-dd", false, contextSyncProperties.targets(), null, null, mode, sensitiveColumns);
     }
 
     /** The chat completion's payload row; the payload target is match-all, so the {@code /rate} record has one too. */

@@ -13,7 +13,9 @@ The surface lives under `/v1/tables`: create source and enrichment tables, read 
 update descriptions, evolve column schema via PATCH, write rows, and delete definitions. Enrichment
 columns resolve into a source's flat schema through a single-key grain join with enforced 0..1
 cardinality.
+
 ## Requirements
+
 ### Requirement: Table definition catalog
 
 The system SHALL maintain a Postgres-backed catalog of table definitions, each carrying a `name`
@@ -1835,7 +1837,8 @@ materialized as a bare `T` SHALL be seeded `nullable = false`.
 The `dial_usage_log` seed SHALL therefore record as nullable exactly the columns its DDL declares
 `Nullable(...)`: `core_parent_span_id`, `parent_deployment`, `response_upstream_uri`, `prompt_tokens`,
 `completion_tokens`, `total_tokens`, `cached_prompt_tokens`, `cache_creation_tokens`, `total_price`,
-`deployment_price`, `route_name`, and `route_type`.
+`deployment_price`, `route_name`, `route_type`, `spending_limits_mode`, `budget_cost_object`,
+`budget_outcome`, `budget_policy`, and `budget_assignment`.
 
 The `dial_usage_log_payload` seed SHALL record all three of its columns as nullable — they are
 `Nullable(String)`, so that "the producer sent nothing" stays distinguishable from "the producer sent
@@ -1888,6 +1891,13 @@ value is not an operator's to choose — the physical column decides it.
 - **WHEN** the catalog is read after the migrations that add `route_name` and `route_type` run
 - **THEN** `dial_usage_log` reports both columns with `nullable: true`, matching their
   `LowCardinality(Nullable(String))` physical type
+
+#### Scenario: Spending-limit columns are seeded nullable
+
+- **WHEN** the catalog is read after the migrations that add `spending_limits_mode`, `budget_cost_object`,
+  `budget_outcome`, `budget_policy` and `budget_assignment` run
+- **THEN** `dial_usage_log` reports the five columns with `nullable: true`, matching their `Nullable(String)`
+  physical type (`LowCardinality` on all but `budget_assignment`)
 
 #### Scenario: A governance rule keyed on nullability sees the true value
 
@@ -2300,17 +2310,25 @@ default (see the `authentication` capability's "Sensitive column authorization" 
 rule). The seeded sensitive set SHALL be `dial_usage_log_payload.jwt_claims`,
 `dial_usage_log_payload.request_tags`, `dial_usage_log_payload.request_body`,
 `dial_usage_log_payload.response_body`, `dial_usage_log_payload.assembled_response`,
-`dial_usage_log_payload.request_cache_control`, and `rate_analytics.comment`. Every other seeded column SHALL
-default to `sensitive = false`.
+`dial_usage_log_payload.request_cache_control`, `dial_usage_log.budget_policy`, `dial_usage_log.budget_assignment`,
+and `rate_analytics.comment`. Every other seeded column SHALL default to `sensitive = false`.
+
+`budget_policy` and `budget_assignment` SHALL be seeded sensitive because they store paths an administrator
+chooses in DIAL Core's budget configuration. Nothing stops such a path from naming a user, for example a per-user
+assignment at `project-a/jane.doe@example.com`, and a path that does would link `user_hash` back to a person. As
+with `request_tags`, they are classified by what they can store, not by their intended role. `spending_limits_mode`,
+`budget_cost_object` and `budget_outcome` SHALL stay visible: they hold a closed set of modes and outcomes, and a
+cost object, which is a project id like `project_id`.
 
 `request_cache_control` SHALL be seeded sensitive on the same grounds as `request_body`: under
 `sync.request-body-mode=delta` it holds part of that body's content, the cache markers taken out of its history,
 so storing a request in parts SHALL NOT relax its sensitivity.
 
 All six SHALL carry the flag on `dial_usage_log_payload` because that is where they are stored;
-re-homing them SHALL NOT relax it. `rate_analytics.comment` SHALL therefore be the only sensitive
-SOURCE column left in the seeded catalog — which matters for any surface reporting an entity's
-wildcard schema, since an enrichment column is absent from one for every caller regardless of role. Enforcement is unchanged by the move: the flag is applied
+re-homing them SHALL NOT relax it. `rate_analytics.comment`, `dial_usage_log.budget_policy` and
+`dial_usage_log.budget_assignment` SHALL therefore be the only sensitive SOURCE columns in the seeded catalog — which
+matters for any surface reporting an entity's wildcard schema, since an enrichment column is absent from one for
+every caller regardless of role. Enforcement is unchanged by the move: the flag is applied
 when the column enters the query model, and an enrichment column enters it under its qualified name,
 so an unentitled caller sees neither spelling and a reference to either fails as an unknown field.
 
@@ -2342,6 +2360,14 @@ are changed only by a further migration.
 - **THEN** `dial_usage_log` reports `jwt_claims` and `request_tags` with `sensitive: true` and
   `user_hash` with `sensitive: false`, `dial_usage_log_payload` reports all six of its exposed columns with
   `sensitive: true`, and `rate_analytics` reports `comment` with `sensitive: true`
+
+#### Scenario: Budget paths are seeded sensitive
+
+- **WHEN** the catalog is read after the migration that registers the spending-limit columns runs
+- **THEN** `dial_usage_log` reports `budget_policy` and `budget_assignment` with `sensitive: true`, and
+  `spending_limits_mode`, `budget_cost_object` and `budget_outcome` with `sensitive: false`
+- **AND WHEN** a caller without `TABLE_SENSITIVE` on `dial_usage_log` reads its schema
+- **THEN** `budget_policy` and `budget_assignment` are absent, and the other three are listed
 
 #### Scenario: Management responses expose the seeded flag unfiltered
 
@@ -3745,8 +3771,8 @@ the catalog unaligned would otherwise write rows with no alignment value after t
 
 ### Requirement: Column policies follow a rename and refuse an emptying drop
 
-A column policy (see [table-access-control](../table-access-control/spec.md), "Per-role column policies") names
-columns, so a schema change SHALL keep every stored policy pointing at the columns it meant and SHALL never widen one.
+A schema change SHALL keep every stored column policy pointing at the columns it meant and SHALL never widen one. A
+column policy (see [table-access-control](../table-access-control/spec.md), "Per-role column policies") names columns.
 
 **Rename.** A `PATCH /v1/tables/{name}/schema` that renames a column SHALL rewrite every entry on the table whose
 `columns` lists it to the new name, in the same transaction and the same audit revision as the rename. Renaming a
@@ -3881,11 +3907,11 @@ added later under it.
 
 ### Requirement: Writes to one table definition wait a bounded time for each other
 
-Every request that writes a table's definition — an access `PUT` or `DELETE` (see
-[table-access-control](../table-access-control/spec.md), "Role-keyed access API"), a metadata update
-(`PUT /v1/tables/{name}`), a schema definition (`POST /v1/tables/{name}/schema`), a schema `PATCH` and a table
-`DELETE` — SHALL take turns with the other writes of the same definition, and of its source's where it rewrites the
-source's column policies, so none of them writes back state another committed meanwhile. A write that finds another
+Every request that writes a table's definition SHALL take turns with the other writes of the same definition, and of
+its source's where it rewrites the source's column policies, so none of them writes back state another committed
+meanwhile. These requests are an access `PUT` or `DELETE` (see [table-access-control](../table-access-control/spec.md),
+"Role-keyed access API"), a metadata update (`PUT /v1/tables/{name}`), a schema definition
+(`POST /v1/tables/{name}/schema`), a schema `PATCH` and a table `DELETE`. A write that finds another
 holding the definition SHALL wait for it at most the configured lock timeout (`tables.lock-timeout`, ten seconds by
 default). When the wait expires the request SHALL be refused with HTTP 409 and machine code `table_busy`, whose
 message says another change to the table is in progress; it SHALL change nothing, so it MAY be retried as sent, and
@@ -4003,4 +4029,3 @@ A table registered over hand-written DDL SHALL use a replicated engine, or the s
 
 - **WHEN** a materialized `upsert_by_key` source is read back
 - **THEN** it reports `write: "upsert_by_key"`, matching its `ReplicatedReplacingMergeTree(_updated_at)` engine
-

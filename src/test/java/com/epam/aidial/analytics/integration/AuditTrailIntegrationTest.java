@@ -365,9 +365,9 @@ class AuditTrailIntegrationTest extends AbstractPostgresIntegrationTest {
 
     @Test
     void tablePredatingTheTrailHasNoReconstructableState() {
-        // A table written straight to the database, as one that existed before this feature deployed
+        // A non-system table written straight to the database, as one that existed before this feature deployed
         // would have been: no audit rows at all. Then it is touched, which audits the definition row but
-        // NOT its columns, since nothing changed them.
+        // NOT its columns, since nothing changed them. Only a system table is exempt from the creation guard.
         jdbc.update("INSERT INTO table_definition (name, type, status, write_mode, system, access, ordering_key) "
                 + "VALUES (?, 'SOURCE', 'ACTIVE', 'APPEND', false, '{\"write\":[],\"modify\":[]}'::jsonb, '{legacy_id}')",
                 table);

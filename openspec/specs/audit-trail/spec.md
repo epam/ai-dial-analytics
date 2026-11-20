@@ -674,7 +674,9 @@ identifier is rejected with `invalid_filter_value`, and `ne` matches activities 
 The system SHALL expose `GET /v1/tables/{name}/revision/{revision}` returning the table as it stood
 at the end of the given revision, in the same response shape as the current-state read
 (`GET /v1/tables/{name}`) plus the access member below. The snapshot SHALL include the columns, ordering key, and grain that
-belonged to the table at that revision, and SHALL exclude a column that had been dropped by then.
+belonged to the table at that revision, and SHALL exclude a column that had been dropped by then. A system table's
+snapshot is the one exception: it carries no columns, and its definition is the one last recorded at or before the
+revision (below).
 
 Every member of that response describes the table **as of the requested revision**, including the
 caller's effective permissions, which are resolved from the access entries the table had then. The columns it shows
@@ -696,7 +698,8 @@ used to decide whether an action is currently permitted — the live read answer
 both ways because a column restricted today would otherwise reappear, metadata and all, in every revision recorded
 before the restriction, those recorded before column policies existed included; a column renamed since the revision
 is hidden when the current allowlist lists only its new name. The snapshot's `permissions.columns_restricted` is judged
-over the revision's own columns. A column's `sensitive` flag is still resolved as of the revision.
+over the revision's own columns; a system table's, which has none, is judged as below. A column's `sensitive` flag is
+still resolved as of the revision.
 
 The snapshot SHALL additionally carry the table's access entries as of the revision as `roles`, in the shape of the
 `roles` member of `GET /v1/tables/{name}/access` — each role's `privileges`, `rows` and `columns` — to a caller holding
@@ -722,6 +725,21 @@ table that already existed when tracking began SHALL be answered with HTTP 404 a
 the same reason: its columns acquire history only as they are individually changed, so any state
 reconstructed for it would omit every column nobody has touched since. Answering "no tracked state"
 is correct where answering with a partial one would assert that the missing columns were absent.
+
+A **system** table, one whose definition the revision records as `system`, is exempt from that rule.
+It is created by a migration, and its definition update, schema definition, schema patch and
+deletion are refused (see `table-management`). So its trail can hold only changes to its definition row, its access
+entries above all, and never a change to one of its columns. Its snapshot SHALL be returned at every revision at or after
+the first recorded state of its definition, with every member described above except `columns`, which SHALL be
+absent, not empty. An empty list would assert that the table had no columns, while a list built from the current
+schema would assert a past state the trail never recorded. Its `ordering_key`, partitioning, TTL and grain SHALL be
+those last recorded at or before the revision. Its `roles` SHALL be served under the same bar as any table's. Its
+`permissions.columns_restricted` SHALL be `true` exactly when a column policy, the revision's or the current one,
+confines the caller, because no column list exists to judge it over. A revision before the first recorded state of
+its definition SHALL be answered with HTTP 404 and `revision_not_found`, like a revision before any table's creation.
+A change a migration makes to a system table's definition is written outside the trail and records no revision. So no
+snapshot shows it until the table's next recorded change, whose recorded state carries it, and a comparison across that
+recorded change shows the migration's edit as part of it.
 
 #### Scenario: Table snapshot at a past revision
 
@@ -811,10 +829,53 @@ is correct where answering with a partial one would assert that the missing colu
 
 #### Scenario: Snapshot of a table older than the trail
 
-- **WHEN** a caller requests a snapshot of a table that existed before change tracking began, at a
+- **WHEN** a caller requests a snapshot of a non-system table that existed before change tracking began, at a
   revision in which only its definition row was changed
 - **THEN** the system returns HTTP 404 with error code `revision_not_found`, rather than a state whose
   column list is empty because those columns have no recorded history
+
+#### Scenario: A system table's access change is readable at its revision
+
+- **GIVEN** the system table `dial_usage_log`, on which a caller holding `TABLE_GRANT` `PUT`s an entry for role `Y`
+  with `read`, recording revision `R0`, and then an entry for role `X` with `read` and a row policy, recording
+  revision `R`
+- **WHEN** that caller requests `GET /v1/tables/dial_usage_log/revision/R0` and
+  `GET /v1/tables/dial_usage_log/revision/R`
+- **THEN** both return HTTP 200 with `system` `true`, the snapshot at `R` carries `roles.X` with `["read"]` and that
+  policy, and the one at `R0` carries `roles.Y` and no entry for `X`
+
+#### Scenario: A system table's snapshot carries no columns
+
+- **WHEN** any caller allowed to read the table requests a system table's snapshot at a revision at or after the first
+  recorded state of its definition
+- **THEN** the response carries no `columns` member, and carries `ordering_key` as last recorded at or before that
+  revision
+
+#### Scenario: A system table's snapshot without TABLE_GRANT
+
+- **WHEN** a caller holding `TABLE_GET` but not `TABLE_GRANT` requests a system table's snapshot at an access change
+- **THEN** it returns HTTP 200 with neither `roles` nor `columns`
+
+#### Scenario: Columns restricted on a system table's snapshot
+
+- **GIVEN** a system table revision at which the caller's only role had `read` and `columns` `["event_id"]`
+- **WHEN** the caller requests the snapshot at that revision
+- **THEN** `permissions.columns_restricted` is `true`
+- **AND WHEN** a caller confined by no column policy requests the same snapshot
+- **THEN** `permissions.columns_restricted` is `false`
+
+#### Scenario: Before a system table's first recorded state
+
+- **WHEN** a caller requests a system table's snapshot at a revision that exists but precedes every recorded state of
+  its definition
+- **THEN** the system returns HTTP 404 with error code `revision_not_found`
+
+#### Scenario: A migration's change to a system table appears at its next recorded change
+
+- **GIVEN** a system table whose definition is recorded at revision `R` with `ordering_key` `["k"]`, after which a
+  migration sets its `ordering_key` to `["m"]` and an access change then records revision `R2`
+- **WHEN** a caller requests the snapshots at `R` and `R2`
+- **THEN** the one at `R` still carries `ordering_key` `["k"]`, and the one at `R2` carries `["m"]`
 
 #### Scenario: An enrichment snapshot reports its source's current read-side flags
 
@@ -1158,9 +1219,10 @@ no snapshot endpoint for `Setting` is exposed.
 
 ### Requirement: The enrichment access clean-up records no revision
 
-In addition to the limitations stated under "Audited resources", the catalog migration that removes the `get`, `read`
-and `sensitive` grants and the row policies stored on enrichments (see `table-access-control`, "An enrichment's
-read-side access is its source's") records **no revision**, and this SHALL be stated as a known limitation. It rewrites the rows in raw SQL, outside
+It SHALL be stated as a known limitation, in addition to those under "Audited resources", that the catalog migration
+that removes the `get`, `read` and `sensitive` grants and the row policies stored on enrichments (see
+`table-access-control`, "An enrichment's read-side access is its source's") records **no revision**. It rewrites the
+rows in raw SQL, outside
 the persistence context, so an enrichment's latest revision snapshot keeps showing the removed grants and policies until
 the next change that rewrites its table definition (its description or access entries, not a column-only
 schema change) records a new one. The history of earlier revisions SHALL be left as it was,

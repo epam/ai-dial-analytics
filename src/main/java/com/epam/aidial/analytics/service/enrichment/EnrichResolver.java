@@ -1,8 +1,6 @@
 package com.epam.aidial.analytics.service.enrichment;
 
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
-import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
-import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.support.ResponseSchemaComposer;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineSpecCodec;
@@ -129,26 +127,14 @@ public class EnrichResolver {
     }
 
     /**
-     * As above, over columns already in hand; null means fetch them for this one target.
-     *
-     * <p><b>This reads {@code outputs} only, and deliberately not through the output-shape accessor.</b>
-     * Every other consumer resolves {@code outputs}-else-{@code output_vars}; this one must not. A folded
-     * declaration carrying {@code output_vars} and no stored {@code response_schema} calls the model
-     * <em>unconstrained</em> today, and the feed serves it that way on purpose. Composing a schema for it
-     * would send a {@code response_format} where none was sent before — a silent change to a live prompt,
-     * made by a read path, on a declaration nobody edited.
+     * As above, over columns already in hand; null means fetch them for this one target. When composition applies
+     * is {@link ResponseSchemaComposer#composeFor}'s rule, the same one the arming gate applies.
      */
     private Map<String, Object> composeSchema(PipelineEntity pipeline,
             EnrichSpec.TransformSpec transform, List<ColumnMappingEntity> targetColumns) {
-        if (transform == null || transform.getType() != TransformType.LLM
-                || transform.getResponseSchema() != null
-                || transform.getOutputs() == null || transform.getOutputs().isEmpty()) {
-            return null;
-        }
-        return schemaComposer.compose(transform.getOutputs(),
-                targetColumns != null ? targetColumns
-                        : columns.findByTableNameOrderByOrdinal(pipeline.getTarget()),
-                pipeline.getTarget(), transform.getPreset() == TransformPreset.DIAL_APP_ROUTE);
+        return schemaComposer.composeFor(transform,
+                () -> targetColumns != null ? targetColumns : columns.findByTableNameOrderByOrdinal(pipeline.getTarget()),
+                pipeline.getTarget());
     }
 
     /**

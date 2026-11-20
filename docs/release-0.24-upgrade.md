@@ -1,7 +1,7 @@
 # ADAS 0.24 — upgrade notes
 
-What an environment has to do to move from **0.23** to **0.24**. An environment on an earlier build first
-follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md).
+What an environment has to do to move from **0.23.1** to **0.24**. An environment on an earlier build, 0.23.0
+included, first follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md), through its 0.23.1 section (§8).
 
 This release runs ADAS on replicated ClickHouse storage, on every deployment, a single server included
 ([`clickhouse-replication.md`](clickhouse-replication.md)). That makes it more than a redeploy:
@@ -28,6 +28,11 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
 - **Catalog bundles are `format_version` `4`**, which a 0.23 ADAS refuses to import, and carry table access on
   request (§15).
+- **Five spending-limit columns on `dial_usage_log`** from ClickHouse `V18`, which an operator with migrations
+  disabled applies before starting the new build (§16).
+- **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§17).
+- **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
+  route outputs may bind `object` and `map` columns (§18).
 
 ---
 
@@ -341,7 +346,8 @@ text before.
 Such an empty row holds nothing of its own, so two rules matter once any exist:
 
 - **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
-  by a 0.23 instance, under `whole`, with `SYNC_SENSITIVE_COLUMNS_ENABLED=false`, or after a change of
+  by a 0.23 instance, under `whole`, with `request_body` left out of ingest (`SYNC_SENSITIVE_COLUMNS`, see
+  [`release-0.23-upgrade.md`](release-0.23-upgrade.md) §8), or after a change of
   `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
   after it; they read `partial` with an empty body until the day is re-ingested.
 - **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
@@ -383,6 +389,86 @@ carries.
 - **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
   `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
 
+## 16. Spending-limit columns on `dial_usage_log`
+
+DIAL Core reports the spending-limits check of a token caller's model call as a `spending_limits` object. ADAS
+stores it in five nullable columns of `dial_usage_log`, tagged `cost`: `spending_limits_mode`, `budget_cost_object`,
+`budget_outcome`, `budget_policy` and `budget_assignment` (see
+[`data-sync`](../openspec/specs/data-sync/spec.md), "Reported spending limits are persisted").
+
+- **Migrations.** ClickHouse `V18` adds the columns with `ALTER ADD COLUMN`, a metadata-only change that needs no
+  new grant. Postgres `V59` adds their catalog rows. With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply `V18` by hand
+  **before** starting the new build: startup validation refuses a mapping whose columns the table lacks. With
+  `SYNC_VALIDATE_SCHEMA=false` as well, nothing stops that start: rows are then written without the five values,
+  their blobs are recorded as ingested, and a query that reads the columns, a wildcard included, fails until
+  `V18` is applied. With
+  `POSTGRES_MIGRATIONS_ENABLED=false`, apply `V59` by hand too: without it ingest fills the columns, but no query
+  surface knows them (`unknown field`), and nothing warns at startup.
+- **Budget paths are sensitive.** `budget_policy` and `budget_assignment` hold paths an administrator chooses, which
+  can name a user, so a caller needs `TABLE_SENSITIVE` on `dial_usage_log` to see them (see
+  [`table-management`](../openspec/specs/table-management/spec.md), "Seeded column sensitivity on the built-in source
+  tables"). `spending_limits_mode`, `budget_cost_object` and `budget_outcome` are visible to every reader.
+- **A custom mapping file needs the five entries.** With `SYNC_MAPPING_FILE` set to your own copy, copy the five
+  `spending_limits.*` entries from `mapping/dial-usage-log.yaml`. Without them the columns stay `NULL`, which reads
+  the same as "budgets did not apply".
+- **Deploy order does not matter.** Until DIAL Core reports the object, the five columns read `NULL`, the same as
+  for a call budgets do not apply to.
+- **`NULL` means "did not apply" only from the day both sides are upgraded.** Earlier rows read `NULL` whether or
+  not budgets applied, and a query cannot tell the two apart. Note the first full UTC day on which both ADAS and a
+  DIAL Core that reports the object ran, and read `NULL` as "did not apply" only from then on.
+- **Rows ingested earlier read `NULL`** until their blobs are re-ingested. Under `delta`, re-ingest whole UTC days
+  on one release and configuration (§13).
+- **A refused call has no row.** `budget_outcome` `no_budget` and `exhausted` appear in shadow mode only.
+- **Rollback.** A 0.23 build does not declare the columns, so it ignores them and they read `NULL` on the rows it
+  ingests.
+
+## 17. Revision snapshots of system tables
+
+`GET /v1/tables/{name}/revision/{revision}` answered `404 revision_not_found` at every revision of `dial_usage_log`,
+`rate_analytics` and `dial_usage_log_payload`: a migration creates them, so their creation is not in the audit trail.
+It now answers `200` at every revision from the first recorded state of the table's definition, so the access edits
+already recorded on these tables become readable, with no backfill (see
+[`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
+
+- **No `columns` member.** The trail does not track a system table's columns, so the snapshot leaves the member out
+  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those last
+  recorded at or before the revision: a migration's change to the definition, such as `V40` setting
+  `dial_usage_log_payload`'s partitioning, shows only from the table's next recorded change. `roles` is served under
+  the usual `TABLE_GRANT` bar. A history client such as the Admin UI must
+  not assume `columns` is present.
+- **`permissions.columns_restricted`** is `true` whenever a column policy confines the caller, one that lists every
+  column included.
+- A revision before the table's first recorded state still answers `404 revision_not_found`, as does every revision
+  of a non-system table created before the trail.
+- **Rollback.** An older build answers `404` for these tables again. No data changes.
+
+## 18. Route outputs may bind `object` and `map` columns; arming composes the schema
+
+A `dial_app_route` output may now bind an `object` column, stored as the JSON document the route's `source`
+yields, or a `map` column of strings. Neither column can be nullable, so such an output is always required. A
+`source` that filters members, for example dropping zero counts, must still yield `{}`, and should yield nothing
+when the response lacks the member:
+`$exists(intent_counts) ? $merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone yields
+nothing when every member is zero, and the unit is then dead-lettered. Without the `$exists` guard, a response
+missing `intent_counts` would be stored as `{}` instead. A `chat_completion` output bound to either type is
+refused (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
+
+Arming now composes each `llm` pipeline's response schema, so a declaration whose schema cannot be composed is
+refused with `422 pipeline_validation_failed` when it is enabled or its declaration is patched while enabled. A
+draft is still stored. Before, such a pipeline was accepted when armed, was then left out of the runner's feed and refused
+on a compiled read, so it never ran. Nothing that runs today starts failing: the refusal moves to arming, where the
+author sees it.
+
+- **Before upgrading, find armed pipelines that never ran for this reason.** Compare the names in
+  `GET /v1/pipelines?kind=enrich&enabled=true` with those in `GET /v1/pipelines?kind=enrich&enabled=true&view=compiled`.
+  The missing names include these pipelines, and incomplete declarations too. Confirm each with
+  `GET /v1/pipelines/{name}?view=compiled`, which answers `422` saying its outputs compose to no response schema,
+  or with `POST /v1/pipelines/{name}/preview`, which names the output and the column. ADAS also logs
+  an ERROR containing `compose to no response schema` for each one. Fix the output or the column before the
+  pipeline's next patch; a catalog import preview reports such a pipeline as `armable: false`, unless the target already has it enabled.
+- **Rollback.** A build older than 0.24 cannot read a `dial_app_route` pipeline at all (§9), so follow §9:
+  re-declare each route pipeline as `chat_completion` on scalar columns, or delete it, before rolling back.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -401,3 +487,6 @@ carries.
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
 | Catalog bundles are `format_version` `4`; access travels on request | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`; import responses carry an `access` list | Upgrade an import target before promoting to it from 0.24; accept `access` and `REPLACE` in import responses (§15) |
+| Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
+| System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
+| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |

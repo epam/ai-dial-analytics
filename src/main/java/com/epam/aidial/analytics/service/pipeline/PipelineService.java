@@ -12,6 +12,7 @@ import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.enrichment.model.TransformVar;
 import com.epam.aidial.analytics.service.enrichment.model.TriggerKind;
+import com.epam.aidial.analytics.service.enrichment.support.ResponseSchemaComposer;
 import com.epam.aidial.analytics.service.enrichment.support.RunnerContactMetrics;
 import com.epam.aidial.analytics.service.enrichment.validation.EnrichDeclarationCompleteness;
 import com.epam.aidial.analytics.service.enrichment.validation.EnrichSpecValidator;
@@ -549,17 +550,13 @@ public class PipelineService implements PipelineTargetCascade {
     }
 
     /**
-     * Whether this entry's transform is one a composed schema is <b>expected</b> of: {@code llm}, carrying
-     * the {@code outputs} shape. The type check is load-bearing rather than defensive — a {@code sql}
-     * transform declares {@code outputs} too and composes no schema by design, because it asks no model
-     * anything, so omitting the type would drop every Class-1 pipeline from the feed.
+     * Whether this entry's transform is one a composed schema is <b>expected</b> of — {@link
+     * ResponseSchemaComposer#composes}, the same rule the arming gate and the resolver apply, so the three cannot
+     * disagree. A {@code sql} transform declares {@code outputs} too but composes no schema by design, and a
+     * declaration storing its own {@code response_schema} needs none composed.
      */
     private static boolean expectsComposedSchema(ResolvedEnrichPipeline entry) {
-        final EnrichSpec.TransformSpec transform = entry.transform();
-        return transform != null
-                && transform.getType() == TransformType.LLM
-                && transform.getOutputs() != null
-                && !transform.getOutputs().isEmpty();
+        return ResponseSchemaComposer.composes(entry.transform());
     }
 
     /** One ENRICH pipeline, fully resolved. */

@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.service.security.RowPolicyFilterStubs;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableAccess;
@@ -79,6 +80,16 @@ class TableCallerPermissionsTest {
         t.setColumnPolicies("{\"X\": [\"a\"]}");
         authenticateWith(EnumSet.of(Privilege.TABLE_LIST), "other");
         assertThat(oidc.resolve(t).columnsRestricted()).as("no governing role").isFalse();
+    }
+
+    @Test
+    @DisplayName("without a column list, columns_restricted is true exactly when a column policy confines the caller")
+    void untrackedColumnsFailClosed() {
+        final TableDefinitionEntity t = table(Map.of(Privilege.TABLE_READ, List.of("X")));
+        t.setSystem(true);
+        authenticateWith(EnumSet.noneOf(Privilege.class), "X");
+        assertThat(oidc.resolve(t, new ColumnVisibility(Set.of("a")), null).columnsRestricted()).isTrue();
+        assertThat(oidc.resolve(t, ColumnVisibility.ALL, null).columnsRestricted()).as("no column policy").isFalse();
     }
 
     private static ColumnMappingEntity column(String name) {

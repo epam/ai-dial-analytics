@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.web.controller.query;
 import com.epam.aidial.analytics.service.query.repository.QueryResultPage;
 import com.epam.aidial.analytics.web.dto.query.SqlQueryRequestDto;
 import com.epam.aidial.analytics.web.dto.query.StructuredQueryResultDto;
+import com.epam.aidial.analytics.web.openapi.ApiPreview;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
@@ -28,16 +29,15 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/v1/queries")
 @RequiredArgsConstructor
-@Tag(
-        name = "Structured Queries (experimental)",
-        description = "Execute structured queries against analytics data. Experimental — may change.")
+@Tag(name = QueryApiTag.NAME, description = QueryApiTag.DESCRIPTION)
+@ApiPreview
 public class SqlQueryController {
 
     private final SqlStatementRunner sqlStatementRunner;
 
     @PostMapping("/execute-sql")
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
-    @Operation(
+    @Operation(operationId = "executeSql",
             summary = "Execute an ad-hoc SQL SELECT",
             description = "Translates a single read-only SQL SELECT statement to the structured query DSL and runs"
                     + " it through the same pipeline as `/v1/queries/execute`, with the same governance: entity and"

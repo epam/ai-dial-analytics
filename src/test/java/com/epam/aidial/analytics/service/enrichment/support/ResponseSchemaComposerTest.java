@@ -2,12 +2,17 @@ package com.epam.aidial.analytics.service.enrichment.support;
 
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
+import com.epam.aidial.analytics.service.enrichment.model.TransformPreset;
+import com.epam.aidial.analytics.service.enrichment.model.TransformType;
+import com.epam.aidial.analytics.service.pipeline.model.EnrichSpec;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -47,6 +52,13 @@ class ResponseSchemaComposerTest {
     private static ColumnMappingEntity arrayColumn(String name, QueryFieldType element) {
         final ColumnMappingEntity column = column(name, QueryFieldType.ARRAY);
         column.setElementType(element);
+        return column;
+    }
+
+    /** An object or map column, which the catalog always resolves non-nullable. */
+    private static ColumnMappingEntity documentColumn(String name, QueryFieldType type) {
+        final ColumnMappingEntity column = column(name, type);
+        column.setNullable(false);
         return column;
     }
 
@@ -112,6 +124,25 @@ class ResponseSchemaComposerTest {
                 .hasMessageContaining("sentiment")
                 .hasMessageContaining("enum_values")
                 .hasMessageContaining("one authority");
+    }
+
+    @Test
+    void nullMemberInValuesIsRefusedNotThrownAsNullPointer() {
+        assertThatThrownBy(() -> composer.compose(
+                List.of(withValues("tone", "…", Arrays.asList("positive", null))),
+                List.of(column("tone", QueryFieldType.STRING)),
+                "widget_insights"))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("output 'tone' declares a null member in values");
+    }
+
+    @Test
+    void blankMemberInValuesStillComposesAsBefore() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(withValues("tone", "…", List.of("positive", ""))),
+                List.of(column("tone", QueryFieldType.STRING)),
+                "widget_insights");
+        assertThat(propertyOf(schema, "tone")).containsEntry("enum", List.of("positive", ""));
     }
 
     @Test
@@ -215,15 +246,17 @@ class ResponseSchemaComposerTest {
     }
 
     @Test
-    void columnTypeWithNoStrictModeRepresentationIsRefusedNamingIt() {
-        for (final QueryFieldType unrepresentable : List.of(QueryFieldType.MAP, QueryFieldType.OBJECT)) {
+    void documentColumnIsRefusedForModelNamingItAndThePreset() {
+        for (final QueryFieldType document : List.of(QueryFieldType.MAP, QueryFieldType.OBJECT)) {
             assertThatThrownBy(() -> composer.compose(
                     List.of(prose("payload", "…")),
-                    List.of(column("payload", unrepresentable)),
+                    List.of(documentColumn("payload", document)),
                     "widget_insights"))
                     .isInstanceOf(PipelineValidationException.class)
                     .hasMessageContaining("payload")
-                    .hasMessageContaining(unrepresentable.code());
+                    .hasMessageContaining("whose type " + document.code())
+                    .hasMessageContaining("chat_completion")
+                    .hasMessageContaining("dial_app_route");
         }
     }
 
@@ -295,6 +328,74 @@ class ResponseSchemaComposerTest {
         assertThat(propertyOf(schema, "cost")).containsEntry("type", List.of("number", "null"));
         assertThat((List<Object>) propertyOf(schema, "sentiment").get("enum"))
                 .containsExactly("negative", "positive", null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeObjectColumnComposesOpenRequiredObject() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("intent_counts", "Turns per intent; zero counts omitted.")),
+                List.of(documentColumn("intent_counts", QueryFieldType.OBJECT)),
+                "widget_insights", true);
+
+        assertThat((List<String>) schema.get("required")).containsExactly("intent_counts");
+        assertThat(propertyOf(schema, "intent_counts"))
+                .containsEntry("type", "object")
+                .containsEntry("description", "Turns per intent; zero counts omitted.")
+                .doesNotContainKeys("properties", "additionalProperties");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void routeMapColumnComposesRequiredObjectOfStrings() {
+        final Map<String, Object> schema = composer.compose(
+                List.of(prose("labels", "…")),
+                List.of(documentColumn("labels", QueryFieldType.MAP)),
+                "widget_insights", true);
+
+        assertThat((List<String>) schema.get("required")).containsExactly("labels");
+        assertThat(propertyOf(schema, "labels"))
+                .containsEntry("type", "object")
+                .containsEntry("additionalProperties", Map.of("type", "string"));
+    }
+
+    private static EnrichSpec.TransformSpec transform(TransformType type, TransformPreset preset, TransformOutput... outputs) {
+        final EnrichSpec.TransformSpec transform = new EnrichSpec.TransformSpec();
+        transform.setType(type);
+        transform.setPreset(preset);
+        transform.setOutputs(outputs.length == 0 ? null : List.of(outputs));
+        return transform;
+    }
+
+    /** A declaration that composes nothing never asks for the target's columns, so the read costs no catalog query. */
+    @Test
+    void composeForComposesNothingWithoutReadingTheTarget() {
+        final Supplier<List<ColumnMappingEntity>> untouched = () -> {
+            throw new AssertionError("target columns read for a declaration that composes nothing");
+        };
+        final EnrichSpec.TransformSpec stored = transform(TransformType.LLM, null, prose("payload", "…"));
+        stored.setResponseSchema(Map.of("type", "object"));
+
+        assertThat(composer.composeFor(null, untouched, "widget_insights")).isNull();
+        assertThat(composer.composeFor(transform(TransformType.SQL, null, prose("payload", "…")), untouched,
+                "widget_insights")).isNull();
+        assertThat(composer.composeFor(stored, untouched, "widget_insights")).isNull();
+        assertThat(composer.composeFor(transform(TransformType.LLM, null), untouched, "widget_insights")).isNull();
+    }
+
+    /** The preset picks the mapping: a route composes a document column, a model is refused it. */
+    @Test
+    void composeForAppliesTheRouteMappingByPreset() {
+        final Supplier<List<ColumnMappingEntity>> columns =
+                () -> List.of(documentColumn("intent_counts", QueryFieldType.OBJECT));
+
+        assertThat(propertyOf(composer.composeFor(transform(TransformType.LLM, TransformPreset.DIAL_APP_ROUTE,
+                prose("intent_counts", "…")), columns, "widget_insights"), "intent_counts"))
+                .containsEntry("type", "object");
+        assertThatThrownBy(() -> composer.composeFor(transform(TransformType.LLM, TransformPreset.CHAT_COMPLETION,
+                prose("intent_counts", "…")), columns, "widget_insights"))
+                .isInstanceOf(PipelineValidationException.class)
+                .hasMessageContaining("chat_completion");
     }
 
     @Test

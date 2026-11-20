@@ -48,7 +48,8 @@ public class DashboardController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.SAVED_QUERY_READ)
-    @Operation(summary = "List dashboards",
+    @Operation(operationId = "listDashboards",
+            summary = "List dashboards",
             description = "Every dashboard the caller may see — its own private ones and every public one — most "
                     + "recently updated first, as list items without widgets, plus what the caller may create.")
     public DashboardListDto list() {
@@ -58,7 +59,8 @@ public class DashboardController {
     @PostMapping
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Create a dashboard",
+    @Operation(operationId = "createDashboard",
+            summary = "Create a dashboard",
             description = "Each inline query is validated by the same translation the query surface performs, "
                     + "against the caller's view of the catalog. id, owner_id, owner_email, generation, the "
                     + "timestamps and permissions are server-assigned and rejected if supplied. A public dashboard "
@@ -69,7 +71,8 @@ public class DashboardController {
 
     @GetMapping("/{id}")
     @RequiresPrivilege(Privilege.SAVED_QUERY_READ)
-    @Operation(summary = "Read a dashboard",
+    @Operation(operationId = "getDashboard",
+            summary = "Read a dashboard",
             description = "The full dashboard, widgets and inline bodies included, as stored. A dashboard the "
                     + "caller may not see is reported as not found.")
     public DashboardDto get(@PathVariable String id) {
@@ -78,7 +81,8 @@ public class DashboardController {
 
     @PutMapping("/{id}")
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
-    @Operation(summary = "Replace a dashboard",
+    @Operation(operationId = "replaceDashboard",
+            summary = "Replace a dashboard",
             description = "Whole-document replace. The body must carry the generation the client last read; a "
                     + "stale one answers 409 dashboard_conflict and changes nothing. Changing visibility requires "
                     + "SAVED_QUERY_PUBLISH. id, owner and created_at are preserved.")
@@ -89,7 +93,8 @@ public class DashboardController {
     @DeleteMapping("/{id}")
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Delete a dashboard")
+    @Operation(operationId = "deleteDashboard",
+            summary = "Delete a dashboard")
     public void delete(@PathVariable String id) {
         service.delete(id);
     }

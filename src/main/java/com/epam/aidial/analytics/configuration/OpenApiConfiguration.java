@@ -4,11 +4,16 @@ import com.epam.aidial.analytics.web.security.apikey.CoreApiKeyIntrospector;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.info.License;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.oas.models.tags.Tag;
+import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
+
+import java.util.Comparator;
 
 /**
  * OpenAPI document for the Swagger UI. Declares the two ways a caller may authenticate in
@@ -18,6 +23,10 @@ import org.springframework.http.HttpHeaders;
  * offers each independently, matching the runtime where either header authenticates a request and
  * the Bearer header takes precedence when both are present. The schemes are documentation only; they
  * do not enforce anything, so declaring them unconditionally is safe even in {@code none} mode.
+ *
+ * <p>The top-level {@code tags} are sorted by name. springdoc collects them through a {@code HashSet}, so its own
+ * order is hash order, which also moves a tag when its description changes. Sorting gives Swagger UI a stable
+ * heading order and the committed {@code docs/openapi.json} a stable diff ({@code openspec/specs/openapi-document/spec.md}).
  */
 @Configuration
 public class OpenApiConfiguration {
@@ -31,7 +40,8 @@ public class OpenApiConfiguration {
                 .info(new Info()
                         .title("AI DIAL Analytics API")
                         .description("Gateway between analytics consumers and the underlying data stores.")
-                        .version("v1"))
+                        .version("v1")
+                        .license(new License().name("Apache 2.0").identifier("Apache-2.0")))
                 .components(new Components()
                         .addSecuritySchemes(API_KEY_SCHEME, new SecurityScheme()
                                 .type(SecurityScheme.Type.APIKEY)
@@ -43,11 +53,18 @@ public class OpenApiConfiguration {
                                 .type(SecurityScheme.Type.HTTP)
                                 .scheme("bearer")
                                 .bearerFormat("JWT")
-                                .in(SecurityScheme.In.HEADER)
-                                .name(HttpHeaders.AUTHORIZATION)
-                                .description("OIDC bearer token (JWT or opaque) sent in the Authorization header.")))
+                                .description("OIDC bearer token (JWT or opaque) sent in the " + HttpHeaders.AUTHORIZATION + " header.")))
                 // Two separate requirements express OR: a request may authenticate with either scheme.
                 .addSecurityItem(new SecurityRequirement().addList(API_KEY_SCHEME))
                 .addSecurityItem(new SecurityRequirement().addList(BEARER_SCHEME));
+    }
+
+    @Bean
+    public OpenApiCustomizer sortTagsByName() {
+        return openApi -> {
+            if (openApi.getTags() != null) {
+                openApi.getTags().sort(Comparator.comparing(Tag::getName));
+            }
+        };
     }
 }
