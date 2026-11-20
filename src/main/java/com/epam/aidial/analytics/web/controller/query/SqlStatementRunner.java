@@ -7,6 +7,7 @@ import com.epam.aidial.analytics.service.query.sql.SqlCompositeTranslation;
 import com.epam.aidial.analytics.service.query.sql.SqlMetadataResult;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
+import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -23,7 +24,7 @@ class SqlStatementRunner {
     private final StructuredQueryService queryService;
 
     QueryResultPage run(String sql) {
-        return switch (sqlQueryFrontEnd.plan(sql)) {
+        return switch (sqlQueryFrontEnd.plan(sql, Privilege.TABLE_READ, true)) {
             // A catalog statement arrives already evaluated — its rows come from ADAS's own catalog, so
             // there is nothing to run and no page limit to apply; its size is bounded by the catalog.
             case SqlMetadataResult metadata -> new QueryResultPage(

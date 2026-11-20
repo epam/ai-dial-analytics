@@ -160,7 +160,16 @@ public class SqlQueryFrontEnd {
      * endpoints pass {@link Privilege#TABLE_GET}.
      */
     public SqlTranslation translate(String sql, Privilege bar) {
-        return switch (plan(sql, bar)) {
+        return translate(sql, bar, false);
+    }
+
+    /**
+     * As {@link #translate(String, Privilege)}, reading the caller-value calls {@code caller.user_hash()} and
+     * {@code caller.project()} when {@code callerValues} is set — which only a user's statement and a row-policy
+     * condition pass; a pipeline declaration never does, so a caller value there stays an unknown function.
+     */
+    public SqlTranslation translate(String sql, Privilege bar, boolean callerValues) {
+        return switch (plan(sql, bar, callerValues)) {
             case SqlTranslation translation -> translation;
             // Executes, but has no DSL document: a join, a derived table or a subquery is more than one block.
             case SqlCompositeTranslation ignored -> throw new SqlTranslationException(
@@ -195,10 +204,25 @@ public class SqlQueryFrontEnd {
      * statement that will execute, {@link Privilege#TABLE_GET} for one that is only translated or validated.
      */
     public SqlStatementPlan plan(String rawSql, Privilege bar) {
+        return plan(rawSql, bar, false);
+    }
+
+    /**
+     * As {@link #plan(String, Privilege)}, reading the caller-value calls {@code caller.user_hash()} and
+     * {@code caller.project()} when {@code callerValues} is set (see {@link SqlCallerValues}). Only a user's statement
+     * and a row-policy condition opt in; whatever opts in, a statement that calls an internal caller-value operator
+     * itself is refused.
+     */
+    public SqlStatementPlan plan(String rawSql, Privilege bar, boolean callerValues) {
         // FINAL is rewritten into a table hint before anything parses the text: Babel has no FINAL modifier
         // and reads `FROM t FINAL` as an alias (see SqlFinalModifier).
-        final String sql = SqlFinalModifier.rewrite(stripTrailingSeparator(rawSql));
-        screen(sql);
+        final String finalRewritten = SqlFinalModifier.rewrite(stripTrailingSeparator(rawSql));
+        final SqlNode screened = screen(finalRewritten);
+        // After the FINAL rewrite, which changes the length, so the caller-value rewrite moves no position the
+        // parser reports in the text it parses — which is also how a rewrite-produced call is told from a forged one.
+        final SqlCallerValues.Rewrite callers = callerValues
+                ? SqlCallerValues.rewrite(finalRewritten, screened) : SqlCallerValues.Rewrite.none(finalRewritten);
+        final String sql = callers.sql();
         final CalciteQueryCatalog.Snapshot snapshot = catalog.snapshot(bar);
         final FrameworkConfig config = Frameworks.newConfigBuilder()
                 .context(Contexts.of(CONNECTION_CONFIG))
@@ -224,6 +248,7 @@ public class SqlQueryFrontEnd {
                 .build();
         try (Planner planner = Frameworks.getPlanner(config)) {
             SqlNode parsed = planner.parse(sql);
+            callers.rejectForgedCalls(parsed);
             // A FINAL on a CTE name or a catalog table names no entity; inlining would lose it silently.
             SqlFinalReferences.check(parsed);
             // Set operations are made to mean what they mean to ClickHouse before anything else looks at
@@ -262,15 +287,21 @@ public class SqlQueryFrontEnd {
             // The catalog relations live in ADAS, not ClickHouse, so a statement over them is evaluated
             // here instead of being translated into a query against an entity that does not exist.
             if (InformationSchemaExecutor.isMetadataStatement(root)) {
+                if (callers.applied()) {
+                    // Evaluated in-process, where a caller value has nothing to stand for.
+                    throw new SqlTranslationException("caller value '" + callers.firstCallerValue()
+                            + "' is not supported by the query translator in a statement against INFORMATION_SCHEMA");
+                }
                 return InformationSchemaExecutor.execute(root);
             }
             return RelToStructuredQueryTranslator.translate(root, snapshot);
         } catch (SqlParseException e) {
             throw parseError(sql, e);
         } catch (ValidationException e) {
-            throw new SqlTranslationException("SQL validation error: " + reportSelfReferenceAsUnknownColumn(rootMessage(e)), e);
+            throw new SqlTranslationException(callers.restoreNames(
+                    "SQL validation error: " + reportSelfReferenceAsUnknownColumn(rootMessage(e))), e);
         } catch (RelConversionException e) {
-            throw new SqlTranslationException("SQL cannot be planned: " + rootMessage(e), e);
+            throw new SqlTranslationException(callers.restoreNames("SQL cannot be planned: " + rootMessage(e)), e);
         }
     }
 
@@ -545,8 +576,8 @@ public class SqlQueryFrontEnd {
         return trimmed.endsWith(";") ? trimmed.substring(0, trimmed.length() - 1).stripTrailing() : sql;
     }
 
-    /** Statement screen: exactly one statement, of a read-only SELECT kind. */
-    private static void screen(String sql) {
+    /** Statement screen: exactly one statement, of a read-only SELECT kind, which is returned as parsed. */
+    private static SqlNode screen(String sql) {
         if (sql == null || sql.isBlank()) {
             throw new SqlTranslationException("SQL statement must not be empty");
         }
@@ -559,7 +590,8 @@ public class SqlQueryFrontEnd {
         if (statements.size() != 1) {
             throw new SqlTranslationException("exactly one SQL statement is required; got " + statements.size());
         }
-        SqlNode statement = statements.getFirst();
+        final SqlNode parsed = statements.getFirst();
+        SqlNode statement = parsed;
         // A top-level ORDER BY wraps the whole query it sorts, WITH included — `WITH … SELECT … ORDER BY x`
         // parses as SqlOrderBy(SqlWith(…)) — so the wrapper is peeled before the WITH is examined, or a
         // sorted WITH RECURSIVE would slip past the rejection below.
@@ -585,6 +617,7 @@ public class SqlQueryFrontEnd {
             throw new SqlTranslationException(
                     "only SELECT statements are supported; got " + kind.lowerName.toUpperCase(java.util.Locale.ROOT));
         }
+        return parsed;
     }
 
     /**

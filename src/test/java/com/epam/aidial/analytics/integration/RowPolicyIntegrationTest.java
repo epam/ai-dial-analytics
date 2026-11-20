@@ -21,6 +21,7 @@ import tools.jackson.databind.json.JsonMapper;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
@@ -63,6 +64,8 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private ColumnMappingRepository columns;
     @Autowired
     private RowPolicyService rowPolicies;
+    @Autowired
+    private com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle flight;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -578,8 +581,9 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 // The placement rule of a caller value holds in SQL too.
                 "{\"where\":\"coalesce(caller.user_hash, '') = project\"}",
                 "{\"where\":\"n = caller.user_hash\"}",
-                "{\"where\":\"project IN (caller.user_hash, 'P1')\"}",
-                "{\"where\":\"project = caller.email\"}");
+                "{\"where\":\"n = caller.user_hash()\"}",
+                "{\"where\":\"project = caller.email\"}",
+                "{\"where\":\"project = caller.email()\"}");
         for (final String body : refused) {
             putPolicy("team-x", body)
                     .andExpect(status().isUnprocessableContent())
@@ -617,17 +621,6 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
         asAdmin(put(BASE + "/no_such_table/access?role=team-x").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"generation\":0,\"rows\":{\"where\":\"a = 1\"}}"))
                 .andExpect(status().isNotFound());
-    }
-
-    @Test
-    void queryParameterNamedLikeCallerValueIsNotBoundToTheCaller() throws Exception {
-        // The reserved names mean the caller only inside a row policy. A query has no parameters at all, and
-        // one named like a caller value is refused like any other rather than filled in from the identity.
-        execute(callerToken("P1", "viewer"), "{\"entity\":\"" + PROBE + "\",\"mode\":\"row\",\"select\":[{\"expr\":"
-                + "{\"type\":\"field\",\"name\":\"n\"}}],\"filter\":" + callerIs("eq", "caller.user_hash") + ","
-                + "\"page\":{\"type\":\"offset\",\"limit\":100}}")
-                .andExpect(status().is4xxClientError())
-                .andExpect(jsonPath("$.message").value(containsString("param expressions are not supported")));
     }
 
     // --- governance --------------------------------------------------------------------------------------
@@ -686,6 +679,202 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                                 // guard test exercises the row-policy refusal rather than that one.
                                 + "\"ordering_key\":[\"n\"]}"))
                 .andExpect(status().isOk());
+    }
+
+    // --- caller values in a query ---------------------------------------------------------------------------
+
+    @Test
+    void queryCallerValueNarrowsAnUnconfinedReaderToItsOwnRows() throws Exception {
+        // `viewer` reads with no policy, so it lifts team-x's own-rows policy; the query asks for its own rows itself.
+        putPolicy("team-x", "{\"filter\":" + callerIs("eq", "caller.user_hash") + "}").andExpect(status().isOk());
+        final String admin = callerToken("P1", "team-x", "viewer");
+        sql(admin, COUNT).andExpect(jsonPath("$.rows[0].c").value(4));
+        sql(admin, COUNT + " WHERE project = caller.user_hash()").andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(admin, COUNT + " WHERE project = CALLER.USER_HASH ( )").andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(admin, COUNT + " WHERE CAST(caller.user_hash() AS VARCHAR) = project").andExpect(jsonPath("$.rows[0].c").value(2));
+        execute(admin, dslCount(callerIs("eq", "caller.user_hash"))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].c").value(2));
+        // One body, every caller its own rows.
+        sql(callerToken("P2", "viewer"), COUNT + " WHERE project = caller.user_hash()").andExpect(jsonPath("$.rows[0].c").value(1));
+        // The count statement of include_total and the DSL CSV twin bind the same value.
+        final String rows = "{\"entity\":\"" + PROBE + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"n\"}}],"
+                + "\"filter\":" + callerIs("eq", "caller.user_hash") + ",\"sort\":[{\"field\":\"n\",\"dir\":\"asc\"}],"
+                + "\"page\":{\"type\":\"offset\",\"limit\":100,\"include_total\":true}}";
+        execute(admin, rows).andExpect(status().isOk()).andExpect(jsonPath("$.totalCount").value(2));
+        mockMvc.perform(post("/v1/queries/execute-csv").header(HttpHeaders.AUTHORIZATION, bearer(admin))
+                        .contentType(MediaType.APPLICATION_JSON).content(rows))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.matchesPattern("(?s)n\\r?\\n1\\r?\\n2\\r?\\n?")));
+        // A computed text operand is a comparison like a column.
+        sql(admin, COUNT + " WHERE upper(project) = caller.user_hash()").andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        // The CSV twin resolves the same way.
+        mockMvc.perform(post("/v1/queries/execute-sql-csv").header(HttpHeaders.AUTHORIZATION, bearer(admin))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sql\":\"SELECT n FROM " + PROBE + " WHERE project = caller.user_hash() ORDER BY n\"}"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.matchesPattern("(?s)n\\r?\\n1\\r?\\n2\\r?\\n?")));
+    }
+
+    @Test
+    void queryCallerValueWithoutValueMatchesNothing() throws Exception {
+        asAdmin(post(BASE + "/" + PROBE + "/rows").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rows\":[{\"project\":\"\",\"n\":5}]}"))
+                .andExpect(status().isOk());
+        for (final String token : List.of(callerToken(null, "viewer"), callerToken("  ", "viewer"))) {
+            sql(token, COUNT + " WHERE project = caller.user_hash()").andExpect(status().isOk())
+                    .andExpect(jsonPath("$.rows[0].c").value(0));
+            sql(token, COUNT + " WHERE project <> caller.user_hash()").andExpect(jsonPath("$.rows[0].c").value(0));
+            sql(token, COUNT + " WHERE NOT (project = caller.user_hash())").andExpect(jsonPath("$.rows[0].c").value(0));
+            // A disjunction still matches through its other branch.
+            sql(token, COUNT + " WHERE project = caller.user_hash() OR project = 'P3'").andExpect(jsonPath("$.rows[0].c").value(1));
+            execute(token, dslCount(callerIs("eq", "caller.user_hash"))).andExpect(jsonPath("$.rows[0].c").value(0));
+        }
+    }
+
+    @Test
+    void queryCallerValueNeverWidensConfinedRead() throws Exception {
+        putPolicy("team-x", projectIn("P1")).andExpect(status().isOk());
+        sql(callerToken("P2", "team-x"), COUNT + " WHERE project <> caller.user_hash()").andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken("P2", "team-x"), COUNT + " WHERE project = caller.user_hash()").andExpect(jsonPath("$.rows[0].c").value(0));
+    }
+
+    @Test
+    void queryCallerValueKeepsItsPlaceNextToOtherTerms() throws Exception {
+        final String grouped = "SELECT project, count(*) AS c FROM " + PROBE + " GROUP BY project HAVING ";
+        sql(callerToken("P1", "viewer"), grouped + "project = caller.user_hash() AND project = 'P1'")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.rows", hasSize(1)));
+        sql(callerToken(null, "viewer"), grouped + "project <> caller.user_hash() AND project = 'P1'")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.rows", hasSize(0)));
+        sql(callerToken("P1", "viewer"), COUNT + " WHERE project IN (caller.user_hash(), 'P3')").andExpect(jsonPath("$.rows[0].c").value(3));
+        // A join's ON, a subquery and a scalar subquery resolve the same value.
+        sql(callerToken("P1", "viewer"), "SELECT count(*) AS c FROM " + PROBE + " a JOIN " + PROBE
+                + " b ON a.n = b.n AND a.project = caller.user_hash()").andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken("P1", "viewer"), COUNT + " WHERE n IN (SELECT n FROM " + PROBE + " WHERE project = caller.user_hash())")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        sql(callerToken("P1", "viewer"), "SELECT (SELECT count(*) FROM " + PROBE + " WHERE project = caller.user_hash()) AS c FROM "
+                + PROBE + " LIMIT 1").andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(2));
+        // An unknown value in an inner join's ON matches nothing; in a left join's ON it keeps every left row,
+        // matching nothing on the right.
+        sql(callerToken(null, "viewer"), "SELECT count(*) AS c FROM " + PROBE + " a JOIN " + PROBE
+                + " b ON a.n = b.n AND a.project = caller.user_hash()").andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(0));
+        sql(callerToken(null, "viewer"), "SELECT count(*) AS c FROM " + PROBE + " a LEFT JOIN " + PROBE
+                + " b ON a.n = b.n AND b.project = caller.user_hash()").andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].c").value(4));
+    }
+
+    @Test
+    void misplacedQueryCallerValueIsRefused() throws Exception {
+        for (final String statement : List.of(
+                "SELECT caller.user_hash() AS h FROM " + PROBE,
+                COUNT + " WHERE upper(caller.user_hash()) = project",
+                COUNT + " WHERE n = caller.user_hash()",
+                COUNT + " WHERE project > caller.user_hash()",
+                COUNT + " WHERE caller.user_hash() IS NULL",
+                COUNT + " WHERE project LIKE caller.user_hash()",
+                COUNT + " WHERE NOT (CASE WHEN project = caller.user_hash() THEN TRUE ELSE FALSE END)")) {
+            sql(callerToken("P1", "viewer"), statement)
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value("bad_request"))
+                    .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("caller value 'caller.user_hash'")));
+            mockMvc.perform(post("/v1/queries/validate-sql").header(HttpHeaders.AUTHORIZATION, bearer(callerToken("P1", "viewer")))
+                            .contentType(MediaType.APPLICATION_JSON).content("{\"sql\":\"" + statement + "\"}"))
+                    .andExpect(jsonPath("$.valid").value(false))
+                    .andExpect(jsonPath("$.issues[0].code").value("unsupported_construct"));
+        }
+        execute(callerToken("P1", "viewer"), dslCount("{\"op\":\"gt\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("caller value 'caller.user_hash'")));
+        execute(callerToken("P1", "viewer"), dslCount(callerIs("eq", "caller.email")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("param expressions are not supported")));
+    }
+
+    @Test
+    void translationCarriesTheCallerValueUnresolved() throws Exception {
+        mockMvc.perform(post("/v1/queries/translate-sql").header(HttpHeaders.AUTHORIZATION, bearer(callerToken("P1", "viewer")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sql\":\"SELECT n FROM " + PROBE + " WHERE project = caller.user_hash()\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.query.filter.args[1].type").value("param"))
+                .andExpect(jsonPath("$.query.filter.args[1].name").value("caller.user_hash"));
+        for (final String token : List.of(callerToken("P1", "viewer"), callerToken(null, "viewer"))) {
+            mockMvc.perform(post("/v1/queries/translate").header(HttpHeaders.AUTHORIZATION, bearer(token))
+                            .contentType(MediaType.APPLICATION_JSON).content(dslCount(callerIs("eq", "caller.user_hash"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.sql").value(org.hamcrest.Matchers.containsString("\"project\" = caller.user_hash()")))
+                    .andExpect(jsonPath("$.sql").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("P1"))));
+        }
+    }
+
+    @Test
+    void savedQueryStoresTheCallerValueAsWritten() throws Exception {
+        final String sqlBody = "SELECT n FROM " + PROBE + " WHERE project = caller.user_hash()";
+        asAdmin(post("/v1/saved-queries").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Mine\",\"sql\":\"" + sqlBody + "\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.sql").value(sqlBody));
+        asAdmin(post("/v1/saved-queries").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Mine too\",\"query\":" + dslCount(callerIs("eq", "caller.user_hash")) + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.query.filter.args[1].name").value("caller.user_hash"));
+        asAdmin(post("/v1/saved-queries").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Misplaced\",\"sql\":\"SELECT n FROM " + PROBE + " WHERE n = caller.user_hash()\"}"))
+                .andExpect(status().isBadRequest());
+        asAdmin(post("/v1/saved-queries").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Other param\",\"query\":" + dslCount(callerIs("eq", "caller.email")) + "}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
+    }
+
+    @Test
+    void policyConditionReadsTheCallSpellingAndAnInListOfEither() throws Exception {
+        putPolicy("team-x", "{\"where\":\"project = caller.user_hash()\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows.filter.op").value("eq"))
+                .andExpect(jsonPath("$.rows.filter.args[1].name").value("caller.user_hash"));
+        for (final String spelling : List.of("caller.user_hash", "caller.user_hash()")) {
+            putPolicy("team-x", "{\"where\":\"project IN ('P3', " + spelling + ")\"}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.rows.filter.op").value("or"))
+                    .andExpect(jsonPath("$.rows.filter.args[1].args[1].name").value("caller.user_hash"));
+            sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
+        }
+        // NOT IN is the negation of that disjunction, stored the same under either spelling.
+        final List<JsonNode> stored = new java.util.ArrayList<>();
+        for (final String spelling : List.of("caller.user_hash", "caller.user_hash()")) {
+            putPolicy("team-x", "{\"where\":\"project NOT IN ('P3', " + spelling + ")\"}").andExpect(status().isOk());
+            stored.add(access(PROBE).at("/roles/team-x/rows/filter"));
+            sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(1));
+        }
+        assertThat(stored.getLast()).isEqualTo(stored.getFirst());
+    }
+
+    @Test
+    void flightTicketResolvesTheCallerValueForTheCallerRedeemingIt() throws Exception {
+        try (org.apache.arrow.memory.BufferAllocator allocator = new org.apache.arrow.memory.RootAllocator();
+             org.apache.arrow.flight.sql.FlightSqlClient client = new org.apache.arrow.flight.sql.FlightSqlClient(
+                     org.apache.arrow.flight.FlightClient.builder(allocator, org.apache.arrow.flight.Location.forGrpcInsecure(
+                             "localhost", flight.boundPort())).build())) {
+            final org.apache.arrow.flight.FlightInfo info = client.execute(
+                    COUNT + " WHERE project = caller.user_hash()", flightBearer(callerToken("P1", "viewer")));
+            try (org.apache.arrow.flight.FlightStream stream = client.getStream(
+                    info.getEndpoints().getFirst().getTicket(), flightBearer(callerToken("P2", "viewer")))) {
+                assertThat(stream.next()).isTrue();
+                assertThat(((org.apache.arrow.vector.BigIntVector) stream.getRoot().getVector(0)).get(0)).isEqualTo(1L);
+            }
+        }
+    }
+
+    private static org.apache.arrow.flight.CallOption flightBearer(String token) {
+        final org.apache.arrow.flight.FlightCallHeaders headers = new org.apache.arrow.flight.FlightCallHeaders();
+        headers.insert("authorization", bearer(token));
+        return new org.apache.arrow.flight.HeaderCallOption(headers);
+    }
+
+    private static String dslCount(String filter) {
+        return "{\"entity\":\"" + PROBE + "\",\"mode\":\"aggregate\",\"select\":[{\"expr\":{\"type\":\"fn\","
+                + "\"name\":\"count\",\"args\":[]},\"as\":\"c\"}],\"filter\":" + filter + "}";
     }
 
     private ResultActions putPolicy(String role, String rows) throws Exception {

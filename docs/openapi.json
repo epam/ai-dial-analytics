@@ -4299,7 +4299,7 @@
             ]
           },
           "where": {
-            "description": "Request only, instead of `filter`: the same policy as the SQL condition that would follow WHERE, for example `user_hash = caller.user_hash`. Translated to a `filter`, which is what is stored.",
+            "description": "Request only, instead of `filter`: the same policy as the SQL condition that would follow WHERE, for example `user_hash = caller.user_hash()` (the spelling without parentheses is accepted too). Translated to a `filter`, which is what is stored.",
             "type": "string"
           }
         },

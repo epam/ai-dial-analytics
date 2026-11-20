@@ -13,6 +13,7 @@ import com.epam.aidial.analytics.service.query.sql.ResultColumnKind;
 import com.epam.aidial.analytics.service.query.sql.SqlMetadataResult;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
+import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.BDDMockito;
@@ -183,7 +184,7 @@ class QueryCsvControllerTest {
 
     @Test
     void sqlStatementReturnsCsvWithHeaderFromThePage() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(SQL)).willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
+        BDDMockito.given(sqlQueryFrontEnd.plan(SQL, Privilege.TABLE_READ, true)).willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
         BDDMockito.given(queryService.execute(TRANSLATED)).willReturn(new QueryResultPage(List.of("request_id", "model"),
                 List.of(row("request_id", "r1", "model", "gpt, \"4\"")), null));
 
@@ -197,7 +198,7 @@ class QueryCsvControllerTest {
 
     @Test
     void unnamedSqlExpressionKeepsItsDerivedHeaderName() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
         BDDMockito.given(queryService.execute(TRANSLATED))
                 .willReturn(new QueryResultPage(List.of("count"), List.of(row("count", 12L)), null));
@@ -213,7 +214,8 @@ class QueryCsvControllerTest {
     void catalogStatementReturnsEveryRowWithoutExecuting() throws Exception {
         final List<Map<String, Object>> rows = new ArrayList<>();
         IntStream.range(0, 150).forEach(i -> rows.add(row("COLUMN_NAME", "c" + i, "ORDINAL_POSITION", i + 1)));
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString())).willReturn(new SqlMetadataResult(
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(),
+                ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true))).willReturn(new SqlMetadataResult(
                 List.of(new ResultColumn("COLUMN_NAME", ResultColumnKind.STRING),
                         new ResultColumn("ORDINAL_POSITION", ResultColumnKind.INT32)),
                 rows));
@@ -232,7 +234,8 @@ class QueryCsvControllerTest {
 
     @Test
     void emptyCatalogResultIsHeaderOnly() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString())).willReturn(new SqlMetadataResult(
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(),
+                ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true))).willReturn(new SqlMetadataResult(
                 List.of(new ResultColumn("TABLE_NAME", ResultColumnKind.STRING)), List.of()));
 
         mockMvc.perform(post("/v1/queries/execute-sql-csv").contentType(MediaType.APPLICATION_JSON).content(SQL_BODY))
@@ -242,7 +245,7 @@ class QueryCsvControllerTest {
 
     @Test
     void sqlTranslationFailureUnderAcceptCsvIsErrorViewJson() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willThrow(new SqlTranslationException("unknown column 'no_such_column'"));
 
         final MvcResult result = mockMvc.perform(post("/v1/queries/execute-sql-csv")

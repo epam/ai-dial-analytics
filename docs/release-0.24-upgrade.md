@@ -14,7 +14,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Four new writer grants** (§1).
 - **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
 - **`*` in a read-side grant list means every authenticated caller**: check for a stored `*` before upgrading (§7).
-- **Row policies may match the caller's own rows** through `caller.user_hash`, which needs new `logging-*` settings (§8).
+- **Row policies and queries may match the caller's own rows** through `caller.user_hash`, which needs new
+  `logging-*` settings (§8).
 - **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `6`, and a runner on
   any other version is refused, so enrichment pauses until both sides match (§9, §14).
 - **An enrichment's read access follows its source table.** A migration removes its own read-side grants and row
@@ -161,7 +162,9 @@ A row policy may compare a `string` column with a value of the caller reading th
 `caller.project`, and an entry's `rows` (`PUT /v1/tables/{name}/access?role={role}`, see
 [Role-keyed table access](#11-role-keyed-table-access)) accepts the policy as a SQL condition in `where` instead of
 `filter` (see [`row-level-security.md`](row-level-security.md#own-rows-comparing-a-column-with-the-caller)).
-Nothing changes for stored policies.
+Nothing changes for stored policies. A query may filter on the same values, so a caller whose roles read every row
+can still ask for its own: `caller.user_hash()` / `caller.project()` in SQL, the `param` of that name in the
+structured-query DSL (see [`sql-reference.md`](sql-reference.md#your-own-rows-caller-values)).
 
 - **`caller.user_hash` needs new settings.** It is derived the way DIAL Core derives its `user.id` log field, from
   `providers.<name>.logging-key`, `.logging-salt` and `.obfuscate-user-email` for an identity provider
@@ -170,9 +173,10 @@ Nothing changes for stored policies.
   (see [`configuration.md`](configuration.md#api-key-authentication)). Set them to the values DIAL Core uses for
   the same provider; leave the API-key settings unset when Core's providers use different salts. The salt is a
   credential: keep it in the deployment's secret store. Without the settings a caller has no user hash, and a
-  policy matching on `caller.user_hash` gives that caller no rows.
+  policy matching on `caller.user_hash`, or a query filtering on `caller.user_hash()`, gives that caller no rows.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
-  confines fails. Replace or delete such policies before rolling back.
+  confines fails. Replace or delete such policies before rolling back. It also refuses, with `400`, a query that
+  holds a caller value, so a saved query or dashboard widget that stores one fails to run until it is rewritten.
 
 ## 9. Enrichment pipelines calling a DIAL application route
 
@@ -492,7 +496,7 @@ reads back without it, and no row is migrated.
 | `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§7) |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
 | Transform preset `dial_app_route` and the `app-routes` setting; runner contract `6` | A runner on any contract other than `6` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§9) |
-| Row policies may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies are used; before a rollback, remove caller-value policies (§8) |
+| Row policies and queries may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies or queries use it; before a rollback, remove caller-value policies and rewrite saved queries and widgets that store a caller value (§8) |
 | An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the two §10 queries, hide or grant per role, save the lists for a rollback (§10) |
 | Sensitive-grant subset rule removed | Derived tables no longer need clearance on their input | Review who holds each derived table's clearance (§10) |
 | Role-keyed access API, column policies (breaking) | Old access and row-policy calls are gone; snapshots carry `roles`; hidden columns are absent and refused `403 column_not_entitled` | Move clients using the table in §11; name the cursor columns in a restricted runner's list; delete column policies before a rollback (§11) |

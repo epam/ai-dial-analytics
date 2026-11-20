@@ -115,6 +115,19 @@ class SqlQueryExecutionIntegrationTest extends AbstractClickHouseIntegrationTest
                 .andExpect(jsonPath("$.rows", hasSize(0)));
     }
 
+    /** In {@code none} mode no credential is read, so a caller value is unknown and matches no row, not even an empty one. */
+    @Test
+    void callerValueIsUnknownInNoneMode() throws Exception {
+        fixture().row("chat", "p1", 100).row("chat", "", 200).insert();
+
+        executeSql("SELECT project_id FROM dial_usage_log WHERE project_id = caller.project()")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(0)));
+        executeSql("SELECT project_id FROM dial_usage_log WHERE NOT (project_id = caller.project())")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows", hasSize(0)));
+    }
+
     /** A backslash in a value is matched literally — {@code a\nb} is four characters, not a newline. */
     @Test
     void backslashInStringLiteralMatchesLiterally() throws Exception {

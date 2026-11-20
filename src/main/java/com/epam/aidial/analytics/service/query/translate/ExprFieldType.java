@@ -19,8 +19,10 @@ import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QueryFunctionDto;
+import org.jooq.impl.DSL;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -46,7 +48,7 @@ import java.util.Set;
  * is the {@code null} literal, which has no type by construction and which callers report on their own
  * terms. {@link #of} returns {@code null} for exactly that case.
  */
-final class ExprFieldType {
+public final class ExprFieldType {
 
     /**
      * For each catalog function declaring {@code same_as_argument}, the argument index its result type
@@ -95,6 +97,17 @@ final class ExprFieldType {
             case ScalarSubqueryExpr scalar -> scalar.subquery() == null || scalar.subquery().columns().isEmpty()
                     ? null : scalar.subquery().columns().getFirst().type();
         };
+    }
+
+    /**
+     * As {@link #of(Expr, Map)} over a block's declared column types alone — all the SQL front end knows of its columns
+     * before anything is bound — so the two surfaces type an operand by one rule. Element types are not known here, so
+     * {@code array_join} over a column answers {@code null}.
+     */
+    public static QueryFieldType ofDeclared(Expr expr, Map<String, QueryFieldType> types) {
+        final Map<String, QueryFieldBinding> bindings = new HashMap<>();
+        types.forEach((name, type) -> bindings.put(name, new QueryFieldBinding(name, DSL.field(DSL.name(name)), type, null)));
+        return of(expr, bindings);
     }
 
     /** Whether {@code type} is one of the mutually-widening numeric types. */

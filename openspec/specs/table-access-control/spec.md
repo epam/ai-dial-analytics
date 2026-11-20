@@ -559,7 +559,9 @@ closes it by storing policies on the aggregate targets a confined role may read.
 ### Requirement: Row policies are inert in none mode
 
 In `none` security mode the system SHALL NOT enforce row policies: no read SHALL carry the filter, and every caller
-SHALL see every row. The access API SHALL still require nothing beyond what `none` mode requires of every endpoint,
+SHALL see every row a query selects, no policy removing any. A query's own filter still applies, a caller value in it
+included, and in `none` mode a caller value is unknown (see [authentication](../authentication/spec.md), "Caller
+values derived from the credential"). The access API SHALL still require nothing beyond what `none` mode requires of every endpoint,
 and a policy written in `none` mode SHALL still be validated — its role, its filter against the table's stored
 columns, and the schema guard that protects the columns it references — because a stored policy takes effect the
 moment the deployment switches to `oidc`, when refusing it would be too late.
@@ -567,7 +569,7 @@ moment the deployment switches to `oidc`, when refusing it would be too late.
 #### Scenario: none mode returns every row
 
 - **WHEN** the service runs in `none` mode and a table carries policies
-- **THEN** every query returns every row
+- **THEN** every query returns every row its own filter selects, as if the table carried no policy
 
 #### Scenario: An invalid policy is refused in none mode
 
@@ -589,8 +591,10 @@ comparison MAY sit under any logical operator, `not` included. A stored filter S
 resolved value. The 16 KiB limit SHALL be checked with each caller value taken at its maximum length of
 512 bytes, so a policy that was accepted cannot exceed the limit on a read.
 
-The reserved names SHALL have this meaning only inside a row policy. A `param` in a query SHALL be refused
-as before, whatever its name, and SHALL NOT receive the caller's value.
+A query MAY use the same two caller values under its own rules (see
+[structured-query](../structured-query/spec.md), "Caller values in a query filter"). A caller value in a query only
+narrows what that query returns: it SHALL NOT change which policies confine the caller, nor lift or add a
+confinement.
 
 How each value is derived from the caller's credential is specified in
 [authentication](../authentication/spec.md), "Caller values derived from the credential".
@@ -690,9 +694,15 @@ SHALL NOT be returned: the response and every later read of the entry carry the 
 The condition SHALL be resolved against every column the table stores, sensitive columns and columns a column policy
 hides included, whatever the writing caller may itself see or read.
 
-A caller value SHALL be written in the condition as `caller.user_hash` or `caller.project`, exactly, and SHALL become
-the `param` of that name, subject to the placement rule of "Caller values in row policies". A string literal in the
-condition SHALL remain a literal whatever it spells, including the text of a caller value's name.
+A caller value SHALL be written in the condition as `caller.user_hash()` or `caller.project()`, the spelling a query
+uses and matched as a query matches it (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values
+in SQL"), or as `caller.user_hash` or `caller.project` without the parentheses, exactly; either spelling SHALL become
+the `param` of that name, subject to the placement rule of "Caller values in row policies". An `IN` list holding a
+caller value, in either spelling, SHALL be stored as the disjunction of the equalities it abbreviates, and a `NOT IN`
+list as the `not` of that disjunction; in the `filter`
+form a caller value as an `in` item stays refused. A string literal
+in the condition SHALL remain a literal whatever it spells, including the text of a caller value's name in either
+spelling.
 
 A condition that does not parse, does not validate against the table, or uses a construct the SQL surface cannot
 express as a single filter SHALL be refused `422 validation_error` with the reason. A condition that holds a subquery
@@ -714,10 +724,30 @@ whether a table or column outside the policy's own table exists. An enrichment a
 - **THEN** the stored filter compares `user_hash` with the `param` `caller.user_hash`, and each caller reads its own
   rows
 
+#### Scenario: The call spelling in a condition
+
+- **WHEN** a policy is written as `"rows": {"where": "user_hash = caller.user_hash()"}`
+- **THEN** the stored filter is the one `"user_hash = caller.user_hash"` stores, comparing `user_hash` with the
+  `param` `caller.user_hash`
+
 #### Scenario: A literal spelling a caller value stays a literal
 
 - **WHEN** a policy is written as `"rows": {"where": "user_hash = 'caller.user_hash'"}`
 - **THEN** the stored filter compares `user_hash` with the string `caller.user_hash`, and no caller's value is
+  substituted
+
+#### Scenario: An IN list with a caller value is stored as a disjunction
+
+- **WHEN** a policy is written as `"rows": {"where": "user_hash IN ('a', caller.user_hash)"}` or as
+  `"rows": {"where": "user_hash IN ('a', caller.user_hash())"}`
+- **THEN** both store the same filter, an `or` of the `eq` comparisons with `'a'` and with the `param`
+  `caller.user_hash`
+- **AND** the same two spellings with `NOT IN` both store the `not` of that `or`
+
+#### Scenario: A literal spelling the call stays a literal
+
+- **WHEN** a policy is written as `"rows": {"where": "user_hash = 'caller.user_hash()'"}`
+- **THEN** the stored filter compares `user_hash` with the string `caller.user_hash()`, and no caller's value is
   substituted
 
 #### Scenario: Both forms at once are refused

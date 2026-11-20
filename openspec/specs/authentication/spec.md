@@ -763,7 +763,7 @@ expanded privilege set **and** the caller's raw provider role names under the re
 An entry point SHALL NOT omit the raw provider roles, because per-table grants match on them.
 
 Every entry point SHALL likewise carry the caller values (see "Caller values derived from the
-credential"), because a row policy compares rows with them.
+credential"), because row policies and queries compare rows with them.
 
 Where two entry points share an introspection cache entry for the same credential, the cached
 identity SHALL be independent of which surface populated it: the same API key SHALL yield the same
@@ -855,8 +855,10 @@ publish one.
 ### Requirement: Caller values derived from the credential
 
 The system SHALL derive two caller values from an authenticated credential, for use in row policies
-(see [table-access-control](../table-access-control/spec.md), "Caller values in row policies"). Either
-MAY be absent; an absent value is unknown to a policy.
+(see [table-access-control](../table-access-control/spec.md), "Caller values in row policies") and in queries
+(see [structured-query](../structured-query/spec.md), "Caller values in a query filter"). Either MAY be absent; an
+absent value is unknown to a policy and to a query alike. In `none` security mode no credential is read, so every
+request has neither value.
 
 **`caller.project`** SHALL be the project name of a project API key, and absent for every other
 credential.
@@ -916,6 +918,12 @@ logged or returned by any endpoint.
 
 - **WHEN** a project API key of project `P1` authenticates
 - **THEN** the caller's project is `P1` and it has no user hash
+
+#### Scenario: none mode yields no caller values
+
+- **WHEN** the service runs in `none` security mode and a request carrying a Bearer JWT whose configured claim is set
+  runs a query filtering `user_hash = caller.user_hash`
+- **THEN** the request has no user hash and no project, and the query returns no rows
 
 #### Scenario: A key without a salt fails startup
 

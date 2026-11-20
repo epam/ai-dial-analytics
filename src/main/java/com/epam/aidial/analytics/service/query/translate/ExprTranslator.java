@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.JooqTypes;
 import com.epam.aidial.analytics.service.query.JsonExtractFunctions;
@@ -62,7 +63,8 @@ import java.util.Set;
  *       the schema the client discovered);
  *   <li>{@link ValueExpr} → a typed bind value via {@link ValueExprToObjectMapper};
  *   <li>{@link FnExpr} → a small allowlist of scalar/aggregate SQL functions;
- *   <li>{@link ParamExpr} → rejected (no server-side param registry);
+ *   <li>{@link ParamExpr} → rejected: a caller value is bound by the filter translator where it may stand, and
+ *       every other parameter has nothing to bind it;
  *   <li>{@link ArrayExpr} → rejected here (only meaningful as the right operand of {@code in},
  *       handled by {@link FilterTranslator}).
  * </ul>
@@ -252,8 +254,12 @@ public class ExprTranslator {
             case LambdaExpr ignored -> throw new QueryValidationException(
                     "a lambda is only valid as the first argument of a higher-order array function ("
                             + HigherOrderFunctions.names() + ")");
+            // A caller value is bound where a filter compares it (FilterTranslator); reaching here means any other
+            // position, which is misplaced wherever caller values are admitted and refused like any param elsewhere.
             case ParamExpr param -> throw new QueryValidationException(
-                    "param expressions are not supported by the query translator: '" + param.name() + "'");
+                    CallerValues.isCallerValue(param) && CallerValues.current() != null
+                            ? CallerValues.placementMessage(param.name())
+                            : "param expressions are not supported by the query translator: '" + param.name() + "'");
             case ArrayExpr ignored -> throw new QueryValidationException(
                     "array expressions are only valid as the right operand of 'in'");
         };

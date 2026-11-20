@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -438,6 +439,10 @@ final class ReadShaping {
         }
         final Expr left = args.get(0);
         final Expr right = args.get(1);
+        // eq is symmetric: a value written first is pushed as well (it is still no lookup, which reads field-first).
+        if (op == ComparisonOp.EQ && right instanceof FieldExpr && !(left instanceof FieldExpr)) {
+            return pushableConjunctField(model, new ComparisonNode(op, List.of(right, left)));
+        }
         if (left instanceof FieldExpr(String name)) {
             final QueryFieldType type = fieldType(model, name);
             if (type == null) {
@@ -476,8 +481,15 @@ final class ReadShaping {
         return binding == null ? null : binding.type();
     }
 
-    /** A non-null literal that is not {@code type}'s default: {@code ''} for text, {@code 0} for a number. */
+    /**
+     * A non-null literal that is not {@code type}'s default: {@code ''} for text, {@code 0} for a number. A caller value
+     * against a text field counts as one: a known value is never blank, and an unknown one makes the comparison
+     * {@code NULL}, which is false on a default row as well.
+     */
     private static boolean nonDefaultLiteral(QueryFieldType type, Expr expr) {
+        if (type == QueryFieldType.STRING && CallerValues.isCallerValue(expr)) {
+            return true;
+        }
         if (!(expr instanceof ValueExpr(ValueType valueType, String value)) || value == null) {
             return false;
         }

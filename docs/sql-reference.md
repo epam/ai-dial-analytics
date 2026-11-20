@@ -427,6 +427,31 @@ Usable in `WHERE`, `HAVING`, `ON` and `CASE WHEN`, combined with `AND`, `OR`, `N
 a literal pattern. Prefix and suffix patterns (`'gpt%'`) are rejected. A non-boolean bare expression
 (`WHERE lower(x)`) is rejected; quantified comparisons (`= SOME`, `> ALL`) are rejected.
 
+### Your own rows: caller values
+
+`caller.user_hash()` is the user hash of the caller running the statement, as DIAL Core writes it to `user_hash`, and
+`caller.project()` the project of a project API key. The service fills them in for whoever runs the statement, so one
+saved query or dashboard shows each viewer its own rows, and a caller whose role reads every row can still ask for
+only its own:
+
+```sql
+SELECT deployment, count(*) AS requests FROM dial_usage_log WHERE user_hash = caller.user_hash() GROUP BY deployment
+```
+
+- Only `x = caller.user_hash()` or `<>`, where `x` is a text expression over a column (`user_hash`,
+  `lower(user_hash)`, a grouped column or an output alias in `HAVING`), in `WHERE`, `HAVING` or `ON` (subqueries and
+  derived tables included), under `AND`, `OR` and `NOT`. `IN (..., caller.user_hash())` reads as the `OR` it
+  abbreviates. Anywhere else (a projection, a function argument, `CASE`, `LIKE`, `IS NULL`, a literal, a non-text
+  column such as an `enum` or `uuid`) is a `400`, reported by `validate-sql` as `unsupported_construct`.
+- The name matches in any letter case, with no space inside it: `caller . user_hash()` is an unknown function.
+- A caller without the value (no `logging-*` settings, a project key asking for a user hash, `none` mode) matches no row, under
+  `NOT` too; a disjunction still matches through its other branch. A `NOT EXISTS` or `NOT IN` subquery around such a
+  comparison follows SQL's rules for `NULL`, so it can return every row.
+- The value only narrows the result: row policies still apply.
+- `translate-sql` returns it as `{"type": "param", "name": "caller.user_hash"}`, unresolved, and `translate` renders
+  that back as `caller.user_hash()`.
+- `caller.user_hash` without the parentheses is an ordinary column reference, as in ClickHouse.
+
 ## Grouping and aggregation
 
 - `GROUP BY` keys are columns, select aliases, or computed expressions that also appear in the select

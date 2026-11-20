@@ -11,6 +11,7 @@ import com.epam.aidial.analytics.web.dto.query.QueryFunctionDto;
 import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
 import com.epam.aidial.analytics.web.dto.query.SqlFunctionDto;
 import com.epam.aidial.analytics.web.dto.query.SqlFunctionForm;
+import com.epam.aidial.analytics.web.security.Privilege;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.jooq.impl.DSL;
@@ -57,9 +58,12 @@ class SqlFunctionCatalogParityTest {
 
     /**
      * Registered in the custom operator table only so the validator can resolve a rewritten call by name;
-     * the surface refuses both when a caller spells them ({@code SqlTextRebinder}, {@code SqlLambdaRewriter}).
+     * the surface refuses each when a caller spells it ({@code SqlTextRebinder}, {@code SqlLambdaRewriter},
+     * {@code SqlCallerValues}). The caller values themselves are advertised as {@code caller.user_hash} and
+     * {@code caller.project}.
      */
-    private static final Set<String> INTERNAL_MARKERS = Set.of("to_string_cast", "__lambdaparam");
+    private static final Set<String> INTERNAL_MARKERS =
+            Set.of("to_string_cast", "__lambdaparam", "caller_user_hash", "caller_project");
 
     private final SqlFunctionCatalog catalog = new SqlFunctionCatalog();
     private final SqlQueryFrontEnd frontEnd = newFrontEnd();
@@ -100,7 +104,8 @@ class SqlFunctionCatalogParityTest {
         final List<String> failures = new ArrayList<>();
         for (final SqlFunctionDto entry : catalog.listFunctions()) {
             try {
-                final String plan = frontEnd.translate(entry.example()).query().toString();
+                // As a caller's statement is read: caller values are part of the surface the catalog describes.
+                final String plan = frontEnd.translate(entry.example(), Privilege.TABLE_READ, true).query().toString();
                 // Where the entry names a DSL function and is written as a call, the translation must actually
                 // reach it: an example that happens to translate through a different function proves nothing.
                 if (entry.dslFunction() != null && entry.form() == SqlFunctionForm.FUNCTION

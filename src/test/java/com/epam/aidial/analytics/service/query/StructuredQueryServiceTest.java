@@ -66,7 +66,8 @@ class StructuredQueryServiceTest {
     }
 
     private StructuredQueryService service() {
-        return new StructuredQueryService(catalog, executor, compositeBuilder, ctx, BUDGET);
+        return new StructuredQueryService(catalog, executor, compositeBuilder, ctx, BUDGET,
+                new com.epam.aidial.analytics.service.security.SecurityClaimsExtractor());
     }
 
     @Test

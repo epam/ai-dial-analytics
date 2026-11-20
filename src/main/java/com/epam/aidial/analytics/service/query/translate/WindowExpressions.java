@@ -142,6 +142,13 @@ public final class WindowExpressions {
                         || descriptor.group() == QueryFunctionGroup.ORDERED_SET_AGGREGATE);
     }
 
+    /** Whether {@code expr}, or any expression below it, is a field reference. */
+    public static boolean readsField(Expr expr) {
+        final boolean[] found = {false};
+        visit(expr, node -> found[0] |= node instanceof FieldExpr);
+        return found[0];
+    }
+
     /** Pre-order visit of every expression below {@code expr}, including {@code expr} itself. */
     static void visit(Expr expr, Consumer<Expr> visitor) {
         if (expr == null) {

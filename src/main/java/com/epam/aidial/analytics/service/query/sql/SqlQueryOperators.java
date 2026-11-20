@@ -492,6 +492,19 @@ final class SqlQueryOperators {
             ArrayValuedFunctions.GROUP_ARRAY_ARRAY, SqlKind.OTHER_FUNCTION,
             ReturnTypes.ARG0, OperandTypes.ARRAY);
 
+    /**
+     * The caller values {@code caller.user_hash()} and {@code caller.project()} (see {@link SqlCallerValues}), under
+     * internal names of the same length as the qualified spelling the caller writes, which the front end rewrites to
+     * them before parsing. Non-deterministic and dynamic, so the planner never folds one with a literal or with
+     * itself; and nullable, so {@code IS [NOT] NULL} over one is not decided before it is resolved — an unknown value
+     * is {@code NULL}. ({@code VARCHAR_NULLABLE} would derive {@code NOT NULL} for a call without arguments.) Like
+     * {@link #TO_STRING_CAST}, the names are internal markers: a statement that calls one itself is refused.
+     */
+    static final SqlFunction CALLER_USER_HASH = callerValue(SqlCallerValues.USER_HASH_OPERATOR);
+
+    /** See {@link #CALLER_USER_HASH}. */
+    static final SqlFunction CALLER_PROJECT = callerValue(SqlCallerValues.PROJECT_OPERATOR);
+
     // ILIKE (case-insensitive LIKE, the DSL's ico/inc) is a PostgreSQL-library operator, not part of
     // the std table — both variants must be registered explicitly for validation to accept them.
     // LENGTH is likewise a library operator (the std table only has CHAR_LENGTH/CHARACTER_LENGTH);
@@ -509,7 +522,7 @@ final class SqlQueryOperators {
                     ARRAY_HAS, ARRAY_HAS_ANY, ARRAY_HAS_ALL, ARRAY_LENGTH, ARRAY_JOIN, SPLIT_STRING,
                     CONCAT, TO_STRING, TO_STRING_CAST, ARRAY_TO_STRING, ARRAY_SLICE,
                     MATCH, LAMBDA_PARAM, ARRAY_EXISTS, ARRAY_ALL, ARRAY_COUNT, ARRAY_FILTER, ARRAY_MAP,
-                    GROUP_UNIQ_ARRAY_ARRAY, GROUP_ARRAY_ARRAY),
+                    GROUP_UNIQ_ARRAY_ARRAY, GROUP_ARRAY_ARRAY, CALLER_USER_HASH, CALLER_PROJECT),
             SqlStdOperatorTable.instance());
 
     /**
@@ -526,6 +539,13 @@ final class SqlQueryOperators {
         return element == null
                 ? binding.getTypeFactory().createSqlType(SqlTypeName.ANY)
                 : binding.getTypeFactory().createTypeWithNullability(element, false);
+    }
+
+    /** A caller-value operator under its internal name (see {@link #CALLER_USER_HASH}). */
+    private static SqlFunction callerValue(String name) {
+        return SqlBasicFunction.create(name, ReturnTypes.VARCHAR_FORCE_NULLABLE, OperandTypes.NILADIC)
+                .withDeterministic(false)
+                .withDynamic(true);
     }
 
     /** One of the two higher-order predicates: a boolean body, an array, and a boolean result. */
