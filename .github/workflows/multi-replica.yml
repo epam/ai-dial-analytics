@@ -1,0 +1,54 @@
+name: Multi-replica tests
+
+# The replication tests on a three-replica ClickHouse cluster (./gradlew multiReplicaTest), which the main PR build
+# leaves out. The filter is deliberately wide: any change to production code or resources runs them; a PR touching
+# only docs, specs or other tests does not. The job runs beside the main PR build, so it adds no wall-clock time.
+
+on:
+  pull_request:
+    branches: [development, release-*]
+    paths:
+      - "src/main/**"
+      - "src/test/java/com/epam/aidial/analytics/integration/MultiReplica*.java"
+      - "src/test/java/com/epam/aidial/analytics/integration/ClickHouseContainerSupport.java"
+      - "src/test/java/com/epam/aidial/analytics/integration/PostgresContainerSupport.java"
+      - "src/test/resources/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle/**"
+      - ".github/workflows/multi-replica.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  multi_replica_test:
+    name: multiReplicaTest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: epam/ai-dial-ci/actions/java_prepare@4.13.2
+        with:
+          java-version: 25
+      - name: Run multiReplicaTest
+        run: ./gradlew multiReplicaTest
+        env:
+          GPR_USERNAME: ${{ github.actor }}
+          GPR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: multi-replica-reports
+          path: |
+            build/reports/tests/multiReplicaTest/
+            build/test-results/multiReplicaTest/
+          retention-days: 14
