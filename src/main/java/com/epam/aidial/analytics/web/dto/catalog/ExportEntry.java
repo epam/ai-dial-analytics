@@ -13,7 +13,9 @@ public record ExportEntry(
         @Schema(description = "The object's description, when it has one")
         String description,
 
-        @Schema(description = "`selected`, or the dependency that pulled the object in",
+        @Schema(description = "`selected`; the dependency that pulled the object in, such as `column policy of <table>` "
+                + "for an enrichment an access entry names; or, for a required system table, `access` when only "
+                + "exporting everything with access covers it",
                 example = "source_table of usage_sentiment")
         String reason) {
 }

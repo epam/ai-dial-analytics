@@ -19,6 +19,11 @@ public record ImportPreview(
         @Schema(description = "Values likely to mean something different on this environment")
         @JsonProperty("env_specific") List<EnvSpecificValue> envSpecific,
 
-        @Schema(description = "Problems with the bundle as a whole: format, version, closure, limits")
-        @JsonProperty("validation_errors") List<String> validationErrors) {
+        @Schema(description = "Problems with the bundle as a whole: format, version, closure, limits, and, with "
+                + "include_access, its access member")
+        @JsonProperty("validation_errors") List<String> validationErrors,
+
+        @Schema(description = "With include_access only, one per table and role key of the bundle's access, sorted by "
+                + "table and role; empty otherwise")
+        List<AccessImportEntry> access) {
 }

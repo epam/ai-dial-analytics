@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.service.query.StructuredQueryService;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.repository.QueryResultPage;
 import com.epam.aidial.analytics.web.dto.query.StructuredQueryResultDto;
+import com.epam.aidial.analytics.web.openapi.ApiPreview;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
@@ -29,16 +30,15 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/v1/queries")
 @RequiredArgsConstructor
-@Tag(
-        name = "Structured Queries (experimental)",
-        description = "Execute structured queries against analytics data. Experimental — may change.")
+@Tag(name = QueryApiTag.NAME, description = QueryApiTag.DESCRIPTION)
+@ApiPreview
 public class StructuredQueryController {
 
     private final StructuredQueryService queryService;
 
     @PostMapping("/execute")
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
-    @Operation(
+    @Operation(operationId = "executeQuery",
             summary = "Execute a structured query",
             description = "Translates the structured query to ClickHouse SQL and runs it against the entity named"
                     + " in `entity`. Returns the projected rows and, for row-mode offset paging with"

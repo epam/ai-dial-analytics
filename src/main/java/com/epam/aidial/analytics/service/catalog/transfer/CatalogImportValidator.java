@@ -2,7 +2,11 @@ package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
+import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
+import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
@@ -17,6 +21,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -26,12 +31,13 @@ import java.util.stream.Stream;
  * <p>It runs the real services — table create, define-schema, pipeline create — in import order inside
  * one PostgreSQL transaction that is always rolled back, with ClickHouse DDL replaced by a no-op. Every check
  * those services make is therefore the check the import will meet, and nothing is written: no catalog row, no
- * ClickHouse table, no audit revision. Once every pipeline is created it arms each one the same way
- * {@code PATCH enabled=true} does, inside the same transaction, to report {@code armable}; arming only after all
- * are created means an enrich pipeline reading another one's target is checked against that pipeline, whichever
- * comes first. Existing objects the import keeps are not re-created, so later objects are validated against
- * them rather than against the bundle's version — under {@code FAIL_IF_EXISTS} too, so the preview of a
- * conflicting bundle still validates its new objects.
+ * ClickHouse table, no audit revision. Once every pipeline is created it checks every access entry of an import
+ * with {@code include_access} and, when none is refused, applies every one that changes its table, so the arm checks and the ineffective-grant
+ * reports see the access the import would write. It then arms each pipeline the same way {@code PATCH enabled=true}
+ * does, inside the same transaction, to report {@code armable}; arming only after all are created means an enrich
+ * pipeline reading another one's target is checked against that pipeline, whichever comes first. Existing objects
+ * the import keeps are not re-created, so later objects are validated against them rather than against the bundle's
+ * version — under {@code FAIL_IF_EXISTS} too, so the preview of a conflicting bundle still validates its new objects.
  *
  * <p>The pass runs in a transaction of its own ({@code REQUIRES_NEW}), so it can never doom a caller's. The
  * services join it (none uses {@code REQUIRES_NEW}), and a refusal one of them throws marks it rollback-only
@@ -55,10 +61,13 @@ class CatalogImportValidator {
     private final TableMapper tableMapper;
     private final PipelineMapper pipelineMapper;
     private final JdbcTemplate jdbc;
+    private final TableAccessService tableAccess;
+    private final TableDefinitionRepository definitions;
 
     CatalogImportValidator(PlatformTransactionManager transactionManager, TableCatalogService catalog,
             TableSchemaCreationService schemas, PipelineService pipelineService,
-            TableMapper tableMapper, PipelineMapper pipelineMapper, JdbcTemplate jdbc) {
+            TableMapper tableMapper, PipelineMapper pipelineMapper, JdbcTemplate jdbc, TableAccessService tableAccess,
+            TableDefinitionRepository definitions) {
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.catalog = catalog;
@@ -67,6 +76,8 @@ class CatalogImportValidator {
         this.tableMapper = tableMapper;
         this.pipelineMapper = pipelineMapper;
         this.jdbc = jdbc;
+        this.tableAccess = tableAccess;
+        this.definitions = definitions;
     }
 
     /** Runs the pass over {@code plan}, adding each refusal to the object it concerns. Writes nothing. */
@@ -90,6 +101,7 @@ class CatalogImportValidator {
         private final ImportPlan plan;
         private final Set<String> refused = new HashSet<>();
         private String stoppedAt;
+        private boolean accessFailed;
 
         private Pass(ImportPlan plan) {
             this.plan = plan;
@@ -124,8 +136,14 @@ class CatalogImportValidator {
                 }
                 attempt(pipeline, () -> pipelineService.create(pipelineMapper.toRegistration(pipeline.pipeline())));
             }
+            checkAccess();
             for (final PlannedObject pipeline : plan.pipelines()) {
                 if (pipeline.failed()) {
+                    continue;
+                }
+                if (accessFailed) {
+                    pipeline.armProblem("not checked: applying the bundle's access in the validation pass failed, and "
+                            + "the access may be partly applied; preview again");
                     continue;
                 }
                 if (stoppedAt != null) {
@@ -135,6 +153,70 @@ class CatalogImportValidator {
                 }
                 arm(pipeline);
             }
+        }
+
+        /**
+         * Checks every access entry with the rules of a {@code PUT}, against the target as the pass leaves it, and, when
+         * none is refused, applies every {@code CREATE} and {@code REPLACE}, so arming and the reports see them. A refusal is reported as
+         * {@code <code>: <message>}.
+         */
+        private void checkAccess() {
+            if (plan.access().isEmpty()) {
+                return;
+            }
+            for (final PlannedAccess entry : plan.access()) {
+                if (entry.failed()) {
+                    continue;
+                }
+                if (stoppedAt != null) {
+                    entry.fail("not checked: the validation pass stopped at '" + stoppedAt + "', whose failure ended its "
+                            + "transaction; fix that object and preview again");
+                    continue;
+                }
+                if (tableRefused(entry.table())) {
+                    entry.fail("table '" + entry.table() + "' cannot be imported, so its access cannot either");
+                    continue;
+                }
+                final TableDefinitionEntity definition = definitions.findById(entry.table()).orElse(null);
+                if (definition == null) {
+                    entry.fail("table '" + entry.table() + "' does not exist on this environment");
+                    continue;
+                }
+                try {
+                    entry.checked(tableAccess.importEntryFor(definition, entry.key(), entry.bundled().toRequest()));
+                } catch (RuntimeException ex) {
+                    final String code = TableAccessService.refusalCode(ex);
+                    entry.fail(code == null ? CatalogImportService.describe(ex) : code + ": " + CatalogImportService.describe(ex));
+                    if (code == null && transactionAborted()) {
+                        stoppedAt = entry.table();
+                    }
+                }
+            }
+            if (plan.access().stream().anyMatch(PlannedAccess::failed)) {
+                return;
+            }
+            // Only a changing entry is applied, so a table whose entries all equal the target's is never locked. The pass
+            // has loaded these rows before importEntries locks them, so the preview may judge a copy a moment older than
+            // the lock; nothing it writes survives, and the import itself locks first in a fresh transaction.
+            final Map<String, Map<String, EntryRequest>> changes = plan.accessBodies(PlannedAccess::changes);
+            try {
+                if (!changes.isEmpty()) {
+                    tableAccess.importEntries(changes);
+                }
+                plan.access().forEach(entry -> entry.ineffectiveGrants(tableAccess.ineffectiveGrants(entry.table(), entry.role())));
+            } catch (RuntimeException ex) {
+                accessFailed = true;
+                plan.access().forEach(entry -> {
+                    entry.clearIneffectiveGrants();
+                    entry.fail("applying the access failed: " + CatalogImportService.describe(ex));
+                });
+            }
+        }
+
+        /** Whether the bundle's table or required system table {@code name} is refused, a conflict excepted. */
+        private boolean tableRefused(String name) {
+            return Stream.concat(plan.systemTables().stream(), plan.tables().stream())
+                    .anyMatch(table -> table.name().equals(name) && table.failed() && !table.isConflict());
         }
 
         private void refuse(PlannedObject planned, String dependency) {
@@ -200,5 +282,4 @@ class CatalogImportValidator {
             }
         }
     }
-
 }

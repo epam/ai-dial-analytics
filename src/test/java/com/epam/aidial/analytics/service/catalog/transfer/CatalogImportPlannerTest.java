@@ -2,8 +2,10 @@ package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.web.dto.catalog.BundleAccessEntry;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
 import com.epam.aidial.analytics.web.dto.catalog.CatalogBundle;
@@ -167,10 +169,10 @@ class CatalogImportPlannerTest {
                 256);
         final CatalogBundle bundle = bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target")));
 
-        final PlannedObject refused = planner.plan(bundle, false, ResolutionPolicy.SKIP_IF_EXISTS, target)
+        final PlannedObject refused = planner.plan(bundle, false, ResolutionPolicy.SKIP_IF_EXISTS, target, false)
                 .pipelines().getFirst();
         final PlannedObject accepted = planner.plan(bundle, true, ResolutionPolicy.SKIP_IF_EXISTS,
-                target).pipelines().getFirst();
+                target, false).pipelines().getFirst();
 
         assertThat(refused.action()).isEqualTo(ImportAction.FAIL);
         assertThat(refused.toEntry().reusedName()).isTrue();
@@ -250,7 +252,7 @@ class CatalogImportPlannerTest {
     void hiddenPrevIsReportedAsAbsentButStillCompared() {
         final BundleTable stored = source("usage_base");
         final ImportTarget.Table hidden = new ImportTarget.Table("usage_base", TableType.SOURCE, false, TableStatus.ACTIVE,
-                stored, null);
+                stored, null, Map.of());
 
         final PlannedObject planned = plan(bundle(List.of(withColumnDescription(stored, "changed")), List.of()),
                 ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of("usage_base", hidden))).tables().getFirst();
@@ -355,10 +357,74 @@ class CatalogImportPlannerTest {
                 && "rollup".equals(value.name()));
     }
 
+    // --- access --------------------------------------------------------------------------------------
+
+    @Test
+    void accessIsPlannedOnlyWithTheFlagAndMissingMemberIsBundleProblem() {
+        final CatalogBundle without = requiring(SYSTEM);
+        assertThat(planner.plan(without, false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of(SYSTEM, system())), false).access()).isEmpty();
+        final ImportPlan flagged = planner.plan(without, false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of(SYSTEM, system())), true);
+        assertThat(flagged.validationErrors()).anyMatch(error -> error.contains("no access member"));
+        assertThat(flagged.hasProblems()).isTrue();
+    }
+
+    @Test
+    void accessEntriesAreSortedAndCarryTheTargetsEntry() {
+        final ImportTarget.Table stored = new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null,
+                Map.of("viewers", new AccessEntry(List.of(), null, List.of("a"))));
+        final ImportPlan plan = planner.plan(withAccess(Map.of(SYSTEM, Map.of("viewers", entry("read"), " admins", entry("get")))),
+                false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of(SYSTEM, stored)), true);
+
+        assertThat(plan.validationErrors()).isEmpty();
+        assertThat(plan.access()).extracting(PlannedAccess::role).containsExactly("admins", "viewers");
+        assertThat(plan.accessEntries().get(0).prev()).isNull();
+        assertThat(plan.accessEntries().get(1).prev().columns()).containsExactly("a");
+        assertThat(plan.hasProblems()).isFalse();
+    }
+
+    @Test
+    void bundleLevelAccessProblemsFailEveryEntryUnderThem() {
+        final Map<String, Map<String, BundleAccessEntry>> access = Map.of(
+                SYSTEM, Map.of("viewers", entry("read"), " viewers", entry("get"), " ", entry("read")),
+                "nowhere", Map.of("viewers", entry("read")));
+        final ImportPlan plan = planner.plan(withAccess(access), false, ResolutionPolicy.SKIP_IF_EXISTS,
+                target(Map.of(SYSTEM, system())), true);
+
+        assertThat(plan.validationErrors()).hasSize(3)
+                .anyMatch(error -> error.contains("'nowhere'"))
+                .anyMatch(error -> error.contains("blank role key"))
+                .anyMatch(error -> error.contains("trim to role 'viewers'"));
+        assertThat(plan.access()).allMatch(PlannedAccess::failed);
+    }
+
+    @Test
+    void accessOnRefusedTableFailsButNotOnConflictingOne() {
+        final CatalogBundle missingSystem = withAccess(Map.of(SYSTEM, Map.of("viewers", entry("read"))));
+        assertThat(planner.plan(missingSystem, false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of()), true).access())
+                .allMatch(PlannedAccess::failed);
+
+        final BundleTable base = source("usage_base");
+        final CatalogBundle conflicting = new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(),
+                List.of(), List.of(base), List.of(), Map.of("usage_base", Map.of("viewers", entry("read"))));
+        final ImportPlan plan = planner.plan(conflicting, false, ResolutionPolicy.FAIL_IF_EXISTS,
+                target(Map.of("usage_base", existing(base))), true);
+        assertThat(plan.tables().getFirst().isConflict()).isTrue();
+        assertThat(plan.access()).noneMatch(PlannedAccess::failed);
+    }
+
+    private static CatalogBundle withAccess(Map<String, Map<String, BundleAccessEntry>> access) {
+        return new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(), List.of(SYSTEM), List.of(),
+                List.of(), access);
+    }
+
+    private static BundleAccessEntry entry(String... privileges) {
+        return new BundleAccessEntry(List.of(privileges), null, null);
+    }
+
     // --- fixtures ------------------------------------------------------------------------------------
 
     private ImportPlan plan(CatalogBundle bundle, ResolutionPolicy policy, ImportTarget target) {
-        return planner.plan(bundle, false, policy, target);
+        return planner.plan(bundle, false, policy, target, false);
     }
 
     private static CatalogBundle bundle(List<BundleTable> tables, List<BundlePipeline> pipelines) {
@@ -406,11 +472,11 @@ class CatalogImportPlannerTest {
     }
 
     private static ImportTarget.Table existing(BundleTable table, TableStatus status) {
-        return new ImportTarget.Table(table.table().name(), table.table().type(), false, status, table, table);
+        return new ImportTarget.Table(table.table().name(), table.table().type(), false, status, table, table, Map.of());
     }
 
     private static ImportTarget.Table system() {
-        return new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null);
+        return new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null, Map.of());
     }
 
     private static CatalogBundle requiring(String systemTable) {

@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
@@ -40,6 +41,8 @@ record ImportTarget(
      * @param prev         what an entry reports of it: the caller's view of {@code bundle} (sensitive columns only
      *                     with the clearance), or null for a system table or when the caller may not
      *                     {@code TABLE_GET} it
+     * @param access       its stored access entries by role, system tables included; read only for an import with
+     *                     {@code include_access}, and empty otherwise
      */
     record Table(
             String name,
@@ -47,6 +50,7 @@ record ImportTarget(
             boolean system,
             TableStatus status,
             BundleTable bundle,
-            BundleTable prev) {
+            BundleTable prev,
+            Map<String, AccessEntry> access) {
     }
 }

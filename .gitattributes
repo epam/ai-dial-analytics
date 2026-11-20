@@ -2,3 +2,4 @@
 *.bat text eol=crlf
 *.jar binary
 docker-entrypoint.sh text eol=lf
+docs/openapi.json text eol=lf

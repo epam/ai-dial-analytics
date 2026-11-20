@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
+import com.epam.aidial.analytics.exception.CatalogTransferForbiddenException;
 import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.PipelineNotFoundException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
@@ -15,14 +16,18 @@ import com.epam.aidial.analytics.service.pipeline.PipelineDeclaration;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.PortableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.web.dto.catalog.BundleAccessEntry;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
 import com.epam.aidial.analytics.web.dto.catalog.CatalogBundle;
 import com.epam.aidial.analytics.web.dto.catalog.ExportComponent;
@@ -32,6 +37,8 @@ import com.epam.aidial.analytics.web.dto.catalog.ExportRequest;
 import com.epam.aidial.analytics.web.dto.catalog.SkippedObject;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
 import com.epam.aidial.analytics.web.mapper.table.TableMapper;
+import com.epam.aidial.analytics.web.security.Privilege;
+import com.epam.aidial.analytics.web.security.SecurityModeResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -42,12 +49,15 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -64,7 +74,16 @@ import java.util.stream.Collectors;
  * a pipeline pulls in its input, its target and every enrichment it reads. Enrichment reads appear only as
  * {@code "<enrichment>.<column>"} tokens inside filters, measures and inputs, so they are resolved through the
  * validators' own {@code referencedEnrichmentsOrThrow} rather than from the structured fields. A system table is
- * never expanded: it is written by name as a required system table, and selecting one explicitly is a 422.
+ * written by name as a required system table and otherwise never expanded; selecting one explicitly is a 422 unless the
+ * export includes access, which it then carries.
+ *
+ * <h2>Access</h2>
+ *
+ * <p>With {@code include_access}, which needs {@code TABLE_GRANT}, each covered table's entries travel, reduced by
+ * {@link TableAccessService#portable} to what a {@code PUT} accepts now. An enrichment a kept entry's column policy names
+ * joins the closure as a filter token's does, from a system table's entries too, but no table comes to need it: a
+ * skipped one leaves only the entry naming it behind. Exporting everything also covers every system table the caller
+ * may get; one nothing else reaches is required only when it keeps an entry.
  *
  * <h2>What an export cannot carry</h2>
  *
@@ -89,6 +108,9 @@ public class CatalogExportService {
     private final PipelineMapper pipelineMapper;
     private final SensitiveColumnAccess sensitiveAccess;
     private final PlatformTransactionManager transactionManager;
+    private final TableAccessService tableAccess;
+    private final SecurityModeResolver securityMode;
+    private final SecurityClaimsExtractor claims;
 
     /** The bundle for {@code request}. Writes nothing. */
     @Transactional(readOnly = true)
@@ -105,7 +127,21 @@ public class CatalogExportService {
                         .toList(),
                 resolution.pipelines().keySet().stream()
                         .map(name -> pipelineMapper.toBundle(resolution.pipeline(name)))
-                        .toList());
+                        .toList(),
+                resolution.access() == null ? null : bundleAccess(resolution.access()));
+    }
+
+    /** The covered tables' entries, table to role to entry; a candidate with no entry left is not covered. */
+    private static Map<String, Map<String, BundleAccessEntry>> bundleAccess(Map<String, PortableAccess> access) {
+        final Map<String, Map<String, BundleAccessEntry>> bundle = new TreeMap<>();
+        access.forEach((table, portable) -> {
+            if (!portable.entries().isEmpty()) {
+                final Map<String, BundleAccessEntry> roles = new TreeMap<>();
+                portable.entries().forEach((role, entry) -> roles.put(role, BundleAccessEntry.of(entry)));
+                bundle.put(table, roles);
+            }
+        });
+        return bundle;
     }
 
     /** What {@link #export} would write for {@code request}, with the reason each object is included. */
@@ -120,12 +156,28 @@ public class CatalogExportService {
         final List<ExportEntry> systemTables = new ArrayList<>();
         resolution.systemTables().forEach((name, reason) -> systemTables.add(new ExportEntry(ExportComponent.Type.TABLE,
                 name, resolution.definition(name).getDescription(), reason)));
-        return new ExportPreview(objects, systemTables, resolution.skipped());
+        List<ExportPreview.AccessItem> access = null;
+        if (resolution.access() != null) {
+            access = new ArrayList<>();
+            for (final Map.Entry<String, PortableAccess> table : resolution.access().entrySet()) {
+                final PortableAccess portable = table.getValue();
+                if (portable.entries().isEmpty() && portable.leftBehind().isEmpty()) {
+                    continue;
+                }
+                access.add(new ExportPreview.AccessItem(table.getKey(), List.copyOf(portable.entries().keySet()),
+                        portable.leftBehind().stream()
+                                .map(part -> new ExportPreview.LeftBehindItem(part.role(), BundleAccessEntry.of(part.entry()),
+                                        part.error()))
+                                .toList()));
+            }
+        }
+        return new ExportPreview(objects, systemTables, resolution.skipped(), access);
     }
 
     /**
-     * A table in bundle shape, whatever the caller may see: every stored column, and no grants, which never
-     * travel. For import's {@code prev}, which describes the target's own object to the importing caller.
+     * A table in bundle shape, whatever the caller may see: every stored column, and none of its access, which travels
+     * only in a bundle's {@code access} member. For import's {@code prev}, which describes the target's own object to the
+     * importing caller.
      */
     @Transactional(readOnly = true)
     public BundleTable bundleTable(TableDefinitionEntity definition) {
@@ -176,26 +228,39 @@ public class CatalogExportService {
      * (sources, then enrichments), pipelines by name, and the system tables reached, by name.
      */
     private Resolution resolve(ExportRequest request) {
+        final boolean includeAccess = request != null && request.accessIncluded();
+        if (includeAccess && securityMode.isEnforced() && !claims.hasPrivilege(Privilege.TABLE_GRANT)) {
+            throw new CatalogTransferForbiddenException("exporting access discloses which provider roles hold access to "
+                    + "each table, which requires the TABLE_GRANT privilege");
+        }
         final boolean everything = request == null || request.components() == null || request.components().isEmpty();
-        final Walk walk = new Walk(otlpTableNames(), pipelines.findAll());
+        final Walk walk = new Walk(otlpTableNames(), pipelines.findAll(), includeAccess);
         if (everything) {
-            definitions.findAll().stream()
-                    .filter(definition -> !definition.isSystem())
+            final List<TableDefinitionEntity> all = definitions.findAll().stream()
                     .sorted(Comparator.comparing(TableDefinitionEntity::getName))
+                    .toList();
+            all.stream()
+                    .filter(definition -> !definition.isSystem())
                     .forEach(definition -> walk.table(definition.getName(), SELECTED));
             walk.allPipelines.keySet().stream()
                     .sorted()
                     .forEach(name -> walk.pipeline(name, SELECTED));
+            if (includeAccess) {
+                all.stream()
+                        .filter(TableDefinitionEntity::isSystem)
+                        .filter(definition -> sensitiveAccess.mayGet(definition.getName()))
+                        .forEach(walk::systemCandidate);
+            }
         } else {
             for (final ExportComponent component : request.components()) {
                 if (component.type() == ExportComponent.Type.TABLE) {
                     final TableDefinitionEntity definition = definitions.findById(component.name())
                             .filter(found -> sensitiveAccess.mayGet(found.getName()))
                             .orElseThrow(() -> new TableNotFoundException("table '" + component.name() + "' not found"));
-                    if (definition.isSystem()) {
+                    if (definition.isSystem() && !includeAccess) {
                         throw new CatalogExportInvalidException("table '" + definition.getName() + "' is a system "
                                 + "table; system tables are referenced by the bundle, never exported; select the tables "
-                                + "or pipelines that use it");
+                                + "or pipelines that use it, or set include_access to export its access");
                     }
                     walk.table(definition.getName(), SELECTED);
                 } else {
@@ -204,7 +269,8 @@ public class CatalogExportService {
             }
         }
         walk.run();
-        return everything ? walk.withoutUnexportable() : walk.requireExportable();
+        final Resolution resolution = everything ? walk.withoutUnexportable() : walk.requireExportable();
+        return includeAccess ? walk.withAccess(resolution) : resolution;
     }
 
     /** The closure walk over one request. */
@@ -223,10 +289,16 @@ public class CatalogExportService {
         /** Pipelines whose enrichment reads could not be resolved, with the resolver's refusal. */
         private final Map<String, String> unresolvable = new LinkedHashMap<>();
         private final List<Runnable> pending = new ArrayList<>();
+        private final boolean includeAccess;
+        /** Exporting everything with access: every system table the caller may get, reached or not. */
+        private final Set<String> systemCandidates = new TreeSet<>();
+        /** Each table whose access edges the walk has followed, with its portable access, so each is reduced once. */
+        private final Map<String, PortableAccess> followed = new HashMap<>();
         private Map<String, List<ColumnMappingEntity>> mappings = Map.of();
 
-        private Walk(Set<String> otlp, List<PipelineEntity> all) {
+        private Walk(Set<String> otlp, List<PipelineEntity> all, boolean includeAccess) {
             this.otlp = otlp;
+            this.includeAccess = includeAccess;
             this.allPipelines = all.stream().collect(Collectors.toMap(PipelineEntity::getName, Function.identity()));
             this.pipelinesByTarget = all.stream()
                     .filter(pipeline -> pipeline.getTarget() != null)
@@ -240,6 +312,9 @@ public class CatalogExportService {
             final TableDefinitionEntity definition = load(name, reason);
             if (definition.isSystem()) {
                 systemTables.put(name, reason);
+                if (includeAccess) {
+                    pending.add(() -> followAccess(definition));
+                }
                 return;
             }
             tables.put(name, reason);
@@ -258,6 +333,28 @@ public class CatalogExportService {
             pending.add(() -> expand(pipeline));
         }
 
+        /** A system table whose access an export of everything covers, whether or not anything reaches it. */
+        private void systemCandidate(TableDefinitionEntity definition) {
+            loadedTables.putIfAbsent(definition.getName(), definition);
+            systemCandidates.add(definition.getName());
+            pending.add(() -> followAccess(definition));
+        }
+
+        /**
+         * Pulls in every enrichment a kept entry's column policy names, as a filter token's enrichment is, without
+         * making {@code definition} need it: a skipped one leaves only the entry naming it behind.
+         */
+        private void followAccess(TableDefinitionEntity definition) {
+            if (followed.containsKey(definition.getName())) {
+                return;
+            }
+            final PortableAccess kept = tableAccess.portable(definition);
+            followed.put(definition.getName(), kept);
+            for (final String enrichment : TableAccessService.enrichmentsNamed(kept.entries())) {
+                table(enrichment, "column policy of " + definition.getName());
+            }
+        }
+
         private void run() {
             while (!pending.isEmpty()) {
                 pending.removeFirst().run();
@@ -274,6 +371,9 @@ public class CatalogExportService {
             final PipelineEntity writer = pipelinesByTarget.get(definition.getName());
             if (writer != null) {
                 pipeline(writer.getName(), "targets " + definition.getName());
+            }
+            if (includeAccess) {
+                followAccess(definition);
             }
         }
 
@@ -443,6 +543,33 @@ public class CatalogExportService {
             }
         }
 
+        /**
+         * {@code resolution} with each candidate's portable access: every bundle table, every required system table and,
+         * exporting everything, every system table the caller may get, required for the reason {@code access} only when
+         * it keeps an entry.
+         */
+        private Resolution withAccess(Resolution resolution) {
+            final Set<String> skippedTables = new HashSet<>();
+            resolution.skipped().stream()
+                    .filter(skipped -> skipped.type() == ExportComponent.Type.TABLE)
+                    .forEach(skipped -> skippedTables.add(skipped.name()));
+            final Set<String> candidates = new TreeSet<>(resolution.tables().keySet());
+            candidates.addAll(resolution.systemTables().keySet());
+            candidates.addAll(systemCandidates);
+            final Map<String, PortableAccess> access = new TreeMap<>();
+            final Map<String, String> required = new TreeMap<>(resolution.systemTables());
+            for (final String name : candidates) {
+                final PortableAccess portable = followed.computeIfAbsent(name, table -> tableAccess.portable(loadedTables.get(table)))
+                        .withoutSkipped(skippedTables::contains);
+                access.put(name, portable);
+                if (systemCandidates.contains(name) && !portable.entries().isEmpty()) {
+                    required.putIfAbsent(name, "access");
+                }
+            }
+            return new Resolution(resolution.tables(), new LinkedHashMap<>(required), resolution.pipelines(),
+                    resolution.skipped(), loadedTables, allPipelines, mappings, access);
+        }
+
         private Map<String, String> allTables() {
             final Map<String, String> all = new LinkedHashMap<>(tables);
             all.putAll(systemTables);
@@ -457,7 +584,7 @@ public class CatalogExportService {
                             .thenComparing(Map.Entry::getKey))
                     .forEach(entry -> ordered.put(entry.getKey(), entry.getValue()));
             return new Resolution(ordered, sortedByName(systemTables), sortedByName(pipelineReasons), skipped,
-                    loadedTables, allPipelines, mappings);
+                    loadedTables, allPipelines, mappings, null);
         }
 
         private static Map<String, String> sortedByName(Map<String, String> reasons) {
@@ -486,7 +613,10 @@ public class CatalogExportService {
         }
     }
 
-    /** A resolved request: names in bundle order, each with its reason. */
+    /**
+     * A resolved request: names in bundle order, each with its reason, and, with {@code include_access}, each
+     * candidate's portable access by table name ({@code null} without it).
+     */
     private record Resolution(
             Map<String, String> tables,
             Map<String, String> systemTables,
@@ -494,7 +624,8 @@ public class CatalogExportService {
             List<SkippedObject> skipped,
             Map<String, TableDefinitionEntity> loadedTables,
             Map<String, PipelineEntity> loadedPipelines,
-            Map<String, List<ColumnMappingEntity>> mappings) {
+            Map<String, List<ColumnMappingEntity>> mappings,
+            Map<String, PortableAccess> access) {
 
         TableDefinitionEntity definition(String name) {
             return loadedTables.get(name);

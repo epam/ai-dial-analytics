@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.web.controller.query;
 import com.epam.aidial.analytics.service.query.sql.SqlValidationService;
 import com.epam.aidial.analytics.web.dto.query.SqlQueryRequestDto;
 import com.epam.aidial.analytics.web.dto.query.SqlValidationResponseDto;
+import com.epam.aidial.analytics.web.openapi.ApiPreview;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
@@ -36,16 +37,15 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/v1/queries")
 @RequiredArgsConstructor
-@Tag(
-        name = "Structured Queries (experimental)",
-        description = "Execute structured queries against analytics data. Experimental — may change.")
+@Tag(name = QueryApiTag.NAME, description = QueryApiTag.DESCRIPTION)
+@ApiPreview
 public class SqlValidationController {
 
     private final SqlValidationService validationService;
 
     @PostMapping("/validate-sql")
     @RequiresPrivilege(value = Privilege.TABLE_GET, deferred = true)
-    @Operation(
+    @Operation(operationId = "validateSql",
             summary = "Check whether an ad-hoc SQL SELECT would be accepted, without executing it",
             description = "Runs every check `/v1/queries/execute-sql` runs except the ClickHouse round trip:"
                     + " the statement screen, parse, star expansion, entity and field validation, the closed"

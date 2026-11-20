@@ -6,6 +6,8 @@ import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
@@ -34,9 +36,10 @@ import java.util.Set;
  * that the bundle names or depends on, in bundle shape, and the bundle pipeline names that were in use before.
  *
  * <p>The import endpoints need only {@code TABLE_CREATE}, so what an entry reports as {@code prev} follows the
- * export's visibility rules, never the full objects the planner compares: grants only with {@code TABLE_GRANT},
- * sensitive columns only with the clearance on that table, no column a column policy hides, nothing for a table the caller may not
- * {@code TABLE_GET}, and no pipeline declaration without {@code REGISTRY_READ}.
+ * export's visibility rules, never the full objects the planner compares: sensitive columns only with the clearance on
+ * that table, no column a column policy hides, nothing for a table the caller may not {@code TABLE_GET}, and no pipeline
+ * declaration without {@code REGISTRY_READ}. A table's access entries are read only for an import with
+ * {@code include_access}, whose {@code TABLE_GRANT} check runs before this read.
  */
 @Component
 @RequiredArgsConstructor
@@ -54,17 +57,21 @@ class ImportTargetReader {
     private final SecurityModeResolver securityMode;
     private final SecurityClaimsExtractor claims;
     private final SensitiveColumnAccess sensitiveAccess;
+    private final TableAccessService tableAccess;
 
     @Transactional(readOnly = true)
-    public ImportTarget read(CatalogBundle bundle) {
+    public ImportTarget read(CatalogBundle bundle, boolean includeAccess) {
         final Map<String, ImportTarget.Table> tables = new LinkedHashMap<>();
         for (final TableDefinitionEntity definition : definitions.findAllById(tableNames(bundle))) {
             final String name = definition.getName();
             final boolean visible = sensitiveAccess.mayGet(name);
             final boolean sensitiveVisible = sensitiveAccess.maySeeSensitive(name);
+            final Map<String, AccessEntry> access = includeAccess
+                    ? tableAccess.entries(definition.getAccess(), definition.getRowPolicies(), definition.getColumnPolicies())
+                    : Map.of();
             if (definition.isSystem()) {
                 tables.put(name, new ImportTarget.Table(name, definition.getType(), true, definition.getStatus(), null,
-                        null));
+                        null, access));
             } else {
                 final BundleTable full = exportService.bundleTable(definition);
                 final ColumnVisibility columnVisibility = sensitiveAccess.visibleColumns(definition);
@@ -72,7 +79,7 @@ class ImportTargetReader {
                         ? new BundleTable(full.table(), withoutHidden(full.schema(), sensitiveVisible, columnVisibility))
                         : null;
                 tables.put(name, new ImportTarget.Table(name, definition.getType(), false, definition.getStatus(), full,
-                        prev));
+                        prev, access));
             }
         }
         final Set<String> pipelineNames = new LinkedHashSet<>();

@@ -37,7 +37,9 @@ import tools.jackson.databind.node.StringNode;
 
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -474,6 +476,151 @@ class TableAccessServiceTest {
 
         verify(definitions, never()).save(any());
         assertThat(table.getAccess().getRead()).isEmpty();
+    }
+
+    // --- catalog transfer seams ---------------------------------------------------------------------
+
+    @Test
+    void entryForReturnsWhatPutWouldStoreAndThrowsItsRefusal() {
+        assertThat(service.entryFor(table, " X ", importBody(List.of("read", "get"), null, List.of("b", "a"))))
+                .isEqualTo(new AccessEntry(List.of(Privilege.TABLE_GET, Privilege.TABLE_READ), null, List.of("a", "b")));
+        assertThatThrownBy(() -> service.entryFor(table, "*", importBody(List.of("write"), null, null)))
+                .isInstanceOf(TableValidationException.class);
+        final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
+        assertThatThrownBy(() -> service.entryFor(enrichment, "X", importBody(List.of("read"), null, null)))
+                .isInstanceOf(EnrichmentFollowsSourceException.class);
+        // An empty entry is what a PUT that removes the role stores; only the import refuses it.
+        assertThat(service.entryFor(table, "X", importBody(List.of(), null, null)).isEmpty()).isTrue();
+        assertThatThrownBy(() -> service.importEntryFor(table, "X", importBody(List.of(), null, null)))
+                .isInstanceOf(TableValidationException.class)
+                .hasMessageContaining("DELETE /v1/tables/{name}/access?role=");
+    }
+
+    @Test
+    void putKeepsItsCheckOrderAfterTheSeamIsSplitOut() {
+        // A stale generation is reported before the body's refusal, as before.
+        service.put("t", "X", request(4, List.of("read"), null, null));
+        assertThatThrownBy(() -> service.put("t", "X", request(3, List.of("read"), null, List.of())))
+                .isInstanceOf(AccessConflictException.class);
+    }
+
+    @Test
+    void importEntriesWritesChangedEntriesSkipsEqualOnesAndMovesTheGenerationOncePerChangedRole() {
+        service.put("t", "Y", request(4, List.of("read"), null, null));
+        service.put("t", "Z", request(5, List.of("get"), null, null));
+        assertThat(table.getAccessGeneration()).isEqualTo(6);
+
+        when(definitions.findTypes(any())).thenReturn(List.of(type(table)));
+        final var statuses = service.importEntries(Map.of("t", Map.of(
+                " X ", importBody(List.of("read"), null, null),
+                "Y", importBody(List.of("read", "get"), null, null),
+                "Z", importBody(List.of("get"), null, null))));
+
+        assertThat(statuses.get("t")).containsEntry("X", TableAccessService.ImportStatus.CREATED)
+                .containsEntry("Y", TableAccessService.ImportStatus.REPLACED)
+                .containsEntry("Z", TableAccessService.ImportStatus.SKIPPED);
+        assertThat(table.getAccessGeneration()).isEqualTo(8);
+        assertThat(service.list("t").roles()).containsOnlyKeys("X", "Y", "Z");
+        // A re-run changes nothing.
+        service.importEntries(Map.of("t", Map.of("X", importBody(List.of("read"), null, null))));
+        assertThat(table.getAccessGeneration()).isEqualTo(8);
+        verify(definitions, times(2)).flush();
+        // The lock is each row's first load: a row loaded before it would be returned stale by the lock.
+        verify(definitions, never()).findAllById(any());
+    }
+
+    @Test
+    void importEntriesRefusesAnEmptyEntryAndLocksEnrichmentsFirst() {
+        final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
+        stored(enrichment);
+        when(definitions.findTypes(any())).thenReturn(List.of(type(table))).thenReturn(List.of(type(table), type(enrichment)));
+        assertThatThrownBy(() -> service.importEntries(Map.of("t", Map.of("X", importBody(List.of(), null, null)))))
+                .isInstanceOf(TableValidationException.class);
+
+        service.importEntries(new TreeMap<>(Map.of(
+                "t", Map.of("X", importBody(List.of("read"), null, null)),
+                "e", Map.of("X", importBody(List.of("write"), null, null)))));
+        final var order = org.mockito.Mockito.inOrder(definitions);
+        order.verify(definitions).findForUpdate("e");
+        order.verify(definitions).findForUpdate("t");
+    }
+
+    @Test
+    void importEntriesLocksEveryTableBeforeCheckingAnyEntry() {
+        final TableDefinitionEntity other = table("u", TableType.SOURCE);
+        stored(other);
+        when(definitions.findTypes(any())).thenReturn(List.of(type(table), type(other)));
+        when(conditions.toFilter(anyString(), anyString())).thenReturn(filter());
+
+        service.importEntries(Map.of("t", Map.of("X", importBody(List.of("read"), new RowsRequest(null, "a = 'P-1'"), null)),
+                "u", Map.of("X", importBody(List.of("read"), null, null))));
+
+        final var order = org.mockito.Mockito.inOrder(definitions, conditions);
+        order.verify(definitions).findForUpdate("t");
+        order.verify(definitions).findForUpdate("u");
+        order.verify(conditions).toFilter("t", "a = 'P-1'");
+    }
+
+    @Test
+    void portableViewReducesStoredEntriesInStepOrder() {
+        table.getAccess().setRead(List.of("*", "READ_ONLY_ANALYTIC", "X"));
+        table.getAccess().setWrite(List.of("*"));
+        table.setColumnPolicies(columnPolicyCodec.write(Map.of("X", List.of("a", "e.note"), "Y", List.of("b"))));
+        final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
+        when(definitions.findBySourceTable("t")).thenReturn(List.of(enrichment));
+        when(columns.findByTableNameOrderByOrdinal("e")).thenReturn(List.of(column("e", "note")));
+        clearInvocations(columns);
+
+        final TableAccessService.PortableAccess kept = service.portable(table);
+        verify(columns, times(1)).findByTableNameOrderByOrdinal("t");
+        assertThat(kept.entries()).containsOnlyKeys("*", "X", "Y");
+        assertThat(kept.entries().get("*").privileges()).containsExactly(Privilege.TABLE_READ);
+        assertThat(kept.leftBehind()).extracting(TableAccessService.LeftBehind::role, TableAccessService.LeftBehind::error)
+                .containsExactly(tuple("*", "validation_error"), tuple("READ_ONLY_ANALYTIC", "validation_error"));
+        assertThat(kept.leftBehind().get(0).entry().privileges()).containsExactly(Privilege.TABLE_WRITE);
+        assertThat(TableAccessService.enrichmentsNamed(kept.entries())).containsExactly("e");
+
+        final TableAccessService.PortableAccess skipped = service.portable(table).withoutSkipped("e"::equals);
+        assertThat(skipped.entries()).containsOnlyKeys("*", "Y");
+        assertThat(skipped.leftBehind()).extracting(TableAccessService.LeftBehind::role, TableAccessService.LeftBehind::error)
+                .containsExactly(tuple("*", "validation_error"), tuple("READ_ONLY_ANALYTIC", "validation_error"),
+                        tuple("X", "dependency_skipped"));
+    }
+
+    @Test
+    void portableViewOfEnrichmentAndSystemTable() {
+        final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
+        enrichment.getAccess().setRead(List.of("X"));
+        enrichment.getAccess().setWrite(List.of("X"));
+        final TableAccessService.PortableAccess enriched = service.portable(enrichment);
+        assertThat(enriched.entries().get("X")).isEqualTo(new AccessEntry(List.of(Privilege.TABLE_WRITE), null, null));
+        assertThat(enriched.leftBehind()).extracting(TableAccessService.LeftBehind::error).containsExactly("enrichment_follows_source");
+
+        final TableDefinitionEntity system = table("s", TableType.SOURCE);
+        system.setSystem(true);
+        system.getAccess().setRead(List.of("X"));
+        system.getAccess().setWrite(List.of("X"));
+        final TableAccessService.PortableAccess systemAccess = service.portable(system);
+        assertThat(systemAccess.entries().get("X")).isEqualTo(new AccessEntry(List.of(Privilege.TABLE_READ), null, null));
+        assertThat(systemAccess.leftBehind()).extracting(TableAccessService.LeftBehind::error).containsExactly("table_is_system");
+    }
+
+    private static TableDefinitionRepository.NameAndType type(TableDefinitionEntity definition) {
+        return new TableDefinitionRepository.NameAndType() {
+            @Override
+            public String getName() {
+                return definition.getName();
+            }
+
+            @Override
+            public TableType getType() {
+                return definition.getType();
+            }
+        };
+    }
+
+    private static EntryRequest importBody(List<String> privileges, RowsRequest rows, List<String> columns) {
+        return new EntryRequest(null, privileges, rows, columns);
     }
 
     private static List<IneffectiveReason> reasons(EntryReplacement replacement) {

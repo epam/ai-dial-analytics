@@ -75,7 +75,8 @@ public class SavedQueryController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.SAVED_QUERY_READ)
-    @Operation(summary = "List saved queries",
+    @Operation(operationId = "listSavedQueries",
+            summary = "List saved queries",
             description = "Each entry is the same full object the single read returns, body included. "
                     + "Defaults to the caller's personal saved queries, most recently updated first.")
     public SavedQueryListDto list(
@@ -87,7 +88,8 @@ public class SavedQueryController {
     @PostMapping
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Create a saved query",
+    @Operation(operationId = "createSavedQuery",
+            summary = "Create a saved query",
             description = "The body is validated by the same translation the matching translate-only "
                     + "endpoint performs, so a saved query is always executable as stored. id, owner_id, "
                     + "source, generation and the timestamps are server-assigned and rejected if supplied.")
@@ -97,7 +99,8 @@ public class SavedQueryController {
 
     @GetMapping("/{id}")
     @RequiresPrivilege(Privilege.SAVED_QUERY_READ)
-    @Operation(summary = "Read a saved query",
+    @Operation(operationId = "getSavedQuery",
+            summary = "Read a saved query",
             description = "Returns the full object including its body, exactly as persisted. A saved query "
                     + "the caller may not see is reported as not found.")
     public SavedQueryDto get(@PathVariable String id) {
@@ -106,7 +109,8 @@ public class SavedQueryController {
 
     @PutMapping("/{id}")
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
-    @Operation(summary = "Replace a saved query",
+    @Operation(operationId = "replaceSavedQuery",
+            summary = "Replace a saved query",
             description = "Full replace. id, owner_id and created_at are preserved; generation is bumped. "
                     + "Changing scope requires the write permission for both the stored and the new scope.")
     public SavedQueryDto replace(@PathVariable String id, @Valid @RequestBody SavedQueryRequestDto request) {
@@ -116,14 +120,16 @@ public class SavedQueryController {
     @DeleteMapping("/{id}")
     @RequiresPrivilege(value = Privilege.SAVED_QUERY_WRITE, deferred = true)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Delete a saved query")
+    @Operation(operationId = "deleteSavedQuery",
+            summary = "Delete a saved query")
     public void delete(@PathVariable String id) {
         service.delete(id);
     }
 
     @GetMapping("/{id}/revision/{revision}")
     @RequiresPrivilege(Privilege.SAVED_QUERY_READ)
-    @Operation(summary = "Get a saved query as it stood at a revision",
+    @Operation(operationId = "getSavedQueryRevision",
+            summary = "Get a saved query as it stood at a revision",
             description = "Returns the saved query's own stored fields reconstructed from the audit trail "
                     + "at the end of the given revision. 404 if the saved query did not exist at that "
                     + "revision, the revision is unknown, or the caller may not currently see it (visibility "
