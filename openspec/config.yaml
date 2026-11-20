@@ -359,9 +359,10 @@ operations:
         `replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0`.
       - The default suite runs on one ClickHouse server (embedded Keeper, `Replicated` database).
         `./gradlew multiReplicaTest` (three replicas; `CLICKHOUSE_TEST_VERSION` selects the server version) is not
-        part of `clean build`; `.github/workflows/multi-replica.yml` runs it on every PR that touches production
-        code or a test helper. Run it locally first for a change to replication, routing, the storage phase or the
-        ClickHouse migrations, and across the supported version range for a ClickHouse upgrade.
+        part of `clean build`. `.github/workflows/multi-replica.yml` runs it on PRs into `development` and
+        `release-*` whose changes match its path filter, on 26.8, and after a merge into `development` on 25.3 and
+        26.8. Run it locally first for a change to replication, routing, the storage phase or the ClickHouse
+        migrations, with `CLICKHOUSE_TEST_VERSION` across the supported range (25.3 LTS and up).
   archive:
     guidance:
       - Confirm the merged spec matches the shipped behavior before archiving; the spec, not the

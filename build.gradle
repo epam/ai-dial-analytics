@@ -431,8 +431,11 @@ tasks.register('updateOpenApi', Test) {
 }
 
 // The replication tests on a three-replica cluster: replica discovery, pipeline home replicas, DDL and pipelines with a
-// replica or Keeper down, and the continuous-ingest disruption test. Kept out of test because it takes minutes; CI runs
-// it on every PR that touches production code or a test helper (.github/workflows/multi-replica.yml).
+// replica or Keeper down, and the continuous-ingest disruption test. Kept out of test because it takes minutes. CI runs
+// it on PRs into development and release-*, and after a merge into development, when the change matches the path filter
+// of .github/workflows/multi-replica.yml; run it locally first for a change to replication, routing or migrations, and
+// with CLICKHOUSE_TEST_VERSION across the supported range. Never cached or up to date: the cluster's images, on a
+// floating tag, are not task inputs, so a restored result must not stand in for a run.
 tasks.register('multiReplicaTest', Test) {
     description = 'Runs the replication tests against a three-replica ClickHouse cluster.'
     group = 'verification'
@@ -441,6 +444,8 @@ tasks.register('multiReplicaTest', Test) {
     useJUnitPlatform()
     jvmArgs arrowJvmArgs
     inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
     filter {
         includeTestsMatching MULTI_REPLICA_TESTS
     }

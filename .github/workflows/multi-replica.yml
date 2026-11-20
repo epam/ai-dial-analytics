@@ -1,15 +1,32 @@
 name: Multi-replica tests
 
 # The replication tests on a three-replica ClickHouse cluster (./gradlew multiReplicaTest), which the main PR build
-# leaves out. The filter is deliberately wide: any change to production code or resources, or to a test helper (a
-# test source not named *Test.java, such as the container supports, IntegrationTables or RunnerCalls), runs them; a
-# PR touching only docs, specs or other test classes does not. Later patterns override earlier ones, so the
-# multi-replica test classes are added back after the *Test.java exclusion. The job runs beside the main PR build,
-# so it adds no wall-clock time.
+# leaves out. They run on a PR into development or release-*, and after a merge into development, when the change
+# matches the path filter. The filter is deliberately wide: any change to production code or resources, or to a test
+# helper (a test source not named *Test.java, such as the container supports, IntegrationTables or RunnerCalls), runs
+# them; a change touching only docs, specs or other test classes does not. Later patterns override earlier ones, so
+# the multi-replica test classes are added back after the *Test.java exclusion. GitHub matches the filter against the
+# first 300 changed files only, so a larger change may skip the run: dispatch it by hand then. A PR runs the
+# default server version beside the main PR build, so it adds no wall-clock time; the post-merge and manual runs also
+# run the supported floor, 25.3.
 
 on:
   pull_request:
     branches: [development, release-*]
+    paths:
+      - "src/main/**"
+      - "src/test/java/**"
+      - "!src/test/java/**/*Test.java"
+      - "src/test/java/**/MultiReplica*IntegrationTest.java"
+      - "src/test/resources/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle.properties"
+      - "gradle/**"
+      - ".github/workflows/multi-replica.yml"
+  push:
+    branches: [development]
+    # The same filter as pull_request.
     paths:
       - "src/main/**"
       - "src/test/java/**"
@@ -35,9 +52,13 @@ permissions:
 
 jobs:
   multi_replica_test:
-    name: multiReplicaTest
+    name: multiReplicaTest (ClickHouse ${{ matrix.clickhouse }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        clickhouse: ${{ fromJSON(github.event_name == 'pull_request' && '["26.8"]' || '["25.3", "26.8"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,13 +69,15 @@ jobs:
       - name: Run multiReplicaTest
         run: ./gradlew multiReplicaTest
         env:
+          CLICKHOUSE_TEST_VERSION: ${{ matrix.clickhouse }}
           GPR_USERNAME: ${{ github.actor }}
           GPR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      # cancelled() as well: a cluster that never recovers ends the job on its timeout, which is reported as cancelled.
       - name: Upload test reports
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: multi-replica-reports
+          name: multi-replica-reports-${{ matrix.clickhouse }}
           path: |
             build/reports/tests/multiReplicaTest/
             build/test-results/multiReplicaTest/

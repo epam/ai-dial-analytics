@@ -16,9 +16,8 @@
         <coordination_settings>
             <operation_timeout_ms>10000</operation_timeout_ms>
             <session_timeout_ms>30000</session_timeout_ms>
-            <!-- A throwaway Keeper: every Keeper write otherwise waits out the fsync throttle, and a replicated
-                 DDL makes a dozen or more of them in sequence. Durability does not matter to the suite. -->
-            <min_time_between_fsyncs_ms>0</min_time_between_fsyncs_ms>
+            <!-- A throwaway Keeper: durability does not matter to the suite. The fsync throttle is lifted in
+                 keeper-no-fsync-throttle.xml, on the versions that have it. -->
             <force_sync>false</force_sync>
         </coordination_settings>
         <raft_configuration>
