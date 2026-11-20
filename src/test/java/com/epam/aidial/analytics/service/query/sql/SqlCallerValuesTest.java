@@ -67,7 +67,7 @@ class SqlCallerValuesTest {
     }
 
     @Test
-    void aNotInListIsTheNegatedDisjunction() {
+    void notInListIsTheNegatedDisjunction() {
         assertThat(filter("user_hash NOT IN (caller.user_hash(), 'x')")).isEqualTo(new LogicalNode(LogicalOp.NOT, List.of(
                 filter("user_hash IN (caller.user_hash(), 'x')"))));
     }
