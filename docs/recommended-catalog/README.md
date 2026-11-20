@@ -46,7 +46,9 @@ Points specific to this bundle:
 - **`dial_usage_log_payload` must be ACTIVE.** Both enrichments read `request_tags` from it.
 - **`env_specific` lists the cron triggers.** Adjust them after the import if the defaults do not suit the
   installation.
-- **Grant access.** The imported tables have no grants. Grant each role with `PUT /v1/tables/{name}/access?role={role}`
+- **Grant access.** The imported tables have no grants: this bundle carries no access (a bundle exported with
+  `include_access: true` brings its own; see [`catalog-promotion.md`](../catalog-promotion.md)). Grant each role with
+  `PUT /v1/tables/{name}/access?role={role}`
   (see [`row-level-security.md`](../row-level-security.md)). `usage_client_identity` and `sessions` carry
   personal-data columns marked `sensitive` (user email and display name). `usage_client_identity` is an enrichment:
   grant `dial_usage_log`, and its sensitive columns follow the usage log's clearance. `sessions` is a rollup target

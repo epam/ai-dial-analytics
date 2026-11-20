@@ -20,7 +20,8 @@ application routes an enrich pipeline may call. Saved queries (`/v1/saved-querie
 intent the client runs through those endpoints; the `data-sync` path ingests DIAL
 usage logs from blob storage into ClickHouse, recording every blob or day that fails to ingest for automatic
 retry or operator requeue under `/v1/data-sync/failures` (capability `data-sync-failures`). `POST /v1/catalog/export` / `import` (each with a `/preview`
-twin; capability `catalog-export-import`) promote user tables and pipelines (never grants) between environments.
+twin; capability `catalog-export-import`) promote user tables and pipelines between environments, and, on request (`include_access`), table access, system
+tables included.
 
 ## Source of Truth
 

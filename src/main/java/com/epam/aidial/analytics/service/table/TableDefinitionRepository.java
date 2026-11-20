@@ -2,8 +2,10 @@ package com.epam.aidial.analytics.service.table;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 
 /** Spring Data JPA repository for {@link TableDefinitionEntity}, keyed by table {@code name}. */
@@ -12,6 +14,20 @@ public interface TableDefinitionRepository extends JpaRepository<TableDefinition
 
     /** Enrichments that reference {@code sourceTable} — used to flatten schemas and block source deletes. */
     List<TableDefinitionEntity> findBySourceTable(String sourceTable);
+
+    /**
+     * The name and type of each of {@code names} that exists, as a scalar projection: it never enters the persistence
+     * context, so a writer may ask it before {@link #findForUpdate} makes the first load of each row.
+     */
+    @Query("SELECT d.name AS name, d.type AS type FROM TableDefinitionEntity d WHERE d.name IN :names")
+    List<NameAndType> findTypes(@Param("names") Collection<String> names);
+
+    /** A table's name and type; see {@link #findTypes}. */
+    interface NameAndType {
+        String getName();
+
+        TableType getType();
+    }
 
     /** Definitions of a given type and status (e.g. materialized sources for query discovery). */
     List<TableDefinitionEntity> findByTypeAndStatus(TableType type, TableStatus status);

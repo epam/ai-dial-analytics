@@ -5,11 +5,13 @@ import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
 import com.epam.aidial.analytics.service.table.ColumnInput;
 import com.epam.aidial.analytics.service.table.DefineSchemaInput;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
 import com.epam.aidial.analytics.service.table.TableColumnRules;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.web.dto.catalog.BundleAccessEntry;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
 import com.epam.aidial.analytics.web.dto.catalog.CatalogBundle;
@@ -25,6 +27,7 @@ import com.epam.aidial.analytics.web.dto.pipeline.PipelineRequests.TriggerReques
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest.ColumnRequest;
 import com.epam.aidial.analytics.web.dto.table.DefineSchemaRequest;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -37,6 +40,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -76,7 +80,8 @@ public class CatalogImportPlanner {
         this.jsonMapper = jsonMapper;
     }
 
-    ImportPlan plan(CatalogBundle bundle, boolean acknowledgeReusedNames, ResolutionPolicy policy, ImportTarget target) {
+    ImportPlan plan(CatalogBundle bundle, boolean acknowledgeReusedNames, ResolutionPolicy policy, ImportTarget target,
+            boolean includeAccess) {
         final List<EnvSpecificValue> envSpecific = new ArrayList<>();
         final List<String> validationErrors = new ArrayList<>();
 
@@ -103,7 +108,72 @@ public class CatalogImportPlanner {
         requireDistinctKinds(systemTables, tables, validationErrors);
         requireClosure(systemTables, tables, pipelines, target);
         requireLimits(tables, target, validationErrors);
-        return new ImportPlan(systemTables, tables, pipelines, envSpecific, validationErrors);
+        final List<PlannedAccess> access = includeAccess ? planAccess(bundle, systemTables, tables, target, validationErrors)
+                : List.of();
+        return new ImportPlan(systemTables, tables, pipelines, access, envSpecific, validationErrors);
+    }
+
+    // --- access --------------------------------------------------------------------------------------
+
+    /**
+     * One entry per table and role key of the bundle's {@code access}, sorted by table, trimmed role and key as written,
+     * each with the target's stored entry for the role. A bundle-level problem (no {@code access} member, a table the
+     * bundle does not carry, a blank role key, two keys trimming to one role) is a validation error and fails every entry
+     * under it; an entry on a refused table fails too, a {@code FAIL_IF_EXISTS} conflict excepted. The body itself is
+     * checked by the validation pass.
+     */
+    private static List<PlannedAccess> planAccess(CatalogBundle bundle, List<PlannedObject> systemTables,
+            List<PlannedObject> tables, ImportTarget target, List<String> validationErrors) {
+        if (bundle.access() == null) {
+            validationErrors.add("the bundle carries no access member, so include_access=true has nothing to import; export "
+                    + "it with include_access: true, or import it without include_access");
+            return List.of();
+        }
+        final Map<String, PlannedObject> carried = new HashMap<>();
+        systemTables.forEach(planned -> carried.put(planned.name(), planned));
+        tables.forEach(planned -> carried.put(planned.name(), planned));
+        final List<PlannedAccess> planned = new ArrayList<>();
+        for (final Map.Entry<String, Map<String, BundleAccessEntry>> table : new TreeMap<>(bundle.access()).entrySet()) {
+            final String name = table.getKey();
+            final ImportTarget.Table existing = target.tables().get(name);
+            final Map<String, AccessEntry> stored = existing == null ? Map.of() : existing.access();
+            final List<PlannedAccess> roles = new ArrayList<>();
+            table.getValue().forEach((key, entry) -> roles.add(new PlannedAccess(name, key, entry,
+                    stored.get(StringUtils.trimToEmpty(key)))));
+            final PlannedObject owner = carried.get(name);
+            if (owner == null) {
+                final String problem = "access names table '" + name + "', which the bundle carries neither under tables nor "
+                        + "under required_system_tables";
+                validationErrors.add(problem);
+                roles.forEach(role -> role.fail(problem));
+            }
+            for (final PlannedAccess role : roles) {
+                if (role.role().isEmpty()) {
+                    final String problem = "the access of table '" + name + "' has the blank role key '" + role.key() + "'";
+                    validationErrors.add(problem);
+                    role.fail(problem);
+                }
+            }
+            final Map<String, List<PlannedAccess>> byRole = new TreeMap<>();
+            roles.stream().filter(role -> !role.role().isEmpty())
+                    .forEach(role -> byRole.computeIfAbsent(role.role(), key -> new ArrayList<>()).add(role));
+            byRole.forEach((role, keys) -> {
+                if (keys.size() > 1) {
+                    final String problem = "the access of table '" + name + "' has " + keys.size() + " role keys that trim "
+                            + "to role '" + role + "'";
+                    validationErrors.add(problem);
+                    keys.forEach(key -> key.fail(problem));
+                }
+            });
+            if (owner != null && owner.failed() && !owner.isConflict()) {
+                roles.stream().filter(role -> !role.failed()).forEach(role -> role.fail("table '" + name
+                        + "' cannot be imported, so its access cannot either"));
+            }
+            planned.addAll(roles);
+        }
+        planned.sort(Comparator.comparing(PlannedAccess::table).thenComparing(PlannedAccess::role)
+                .thenComparing(PlannedAccess::key));
+        return planned;
     }
 
     // --- required system tables ----------------------------------------------------------------------
@@ -111,7 +181,8 @@ public class CatalogImportPlanner {
     /**
      * A required system table must exist here, be system-flagged and be ACTIVE. Its columns are not checked here:
      * the validation pass arms each pipeline against the real table, which names any column a pipeline reads
-     * that is missing. Its grants are never compared or written: they are this environment's operator's.
+     * that is missing. Its definition is never written, and its access only by an import with {@code include_access},
+     * which plans the bundle's entries for it as for any other table.
      */
     private static PlannedObject planSystemTable(PlannedObject planned, ImportTarget target) {
         final String name = planned.name();
@@ -435,9 +506,8 @@ public class CatalogImportPlanner {
     // --- comparison ----------------------------------------------------------------------------------
 
     /**
-     * Whether the target's object differs from the bundle's, by their serialized forms. Grant lists compare as
-     * sets, and an absent bundle grant document is compared as absent on both sides. A pipeline compares its
-     * declaration only, so {@code exported_enabled} never counts.
+     * Whether the target's object differs from the bundle's, by their serialized forms, which carry no access. A
+     * pipeline compares its declaration only, so {@code exported_enabled} never counts.
      */
     private void compare(PlannedObject planned, Object existing) {
         if (existing == null) {

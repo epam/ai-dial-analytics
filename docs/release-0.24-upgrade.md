@@ -26,7 +26,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Under `SYNC_REQUEST_BODY_MODE=delta`, a repeated large request body that is not JSON is stored once**, so later
   rows repeating it have an empty `request_body` (§13).
 - **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§14).
-- **Catalog bundles are `format_version` `3`**, which a 0.23 ADAS refuses to import (§15).
+- **Catalog bundles are `format_version` `4`**, which a 0.23 ADAS refuses to import, and carry table access on
+  request (§15).
 - **Five spending-limit columns on `dial_usage_log`** from ClickHouse `V18`, which an operator with migrations
   disabled applies before starting the new build (§16).
 - **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§17).
@@ -372,16 +373,22 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
 - **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
   runner's default trimming applies again. Roll ADAS and the runner back together.
 
-## 15. Catalog bundle format version 3
+## 15. Catalog bundle format version 4, and access on request
 
-`POST /v1/catalog/export` now writes `format_version: 3`, because a bundle may carry an `enrich` transform's `route`
-(§9) and `advanced.input_token_budget` (§14) (see
-[`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `3`, whatever its
-pipelines use.
+`POST /v1/catalog/export` now writes `format_version: 4`, because a bundle may carry an `enrich` transform's `route`
+(§9), `advanced.input_token_budget` (§14) and, exported with `include_access: true`, the covered tables' access (see
+[`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `4`, whatever it
+carries.
 
 - **Import into 0.24 first.** A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`.
-  Upgrade the target before promoting from an upgraded environment.
-- **Older bundles still import.** A version `1` or `2` bundle imports into 0.24 unchanged.
+  Upgrade the target before importing a bundle exported by 0.24.
+- **Older bundles still import.** A version `1`, `2` or `3` bundle imports into 0.24 unchanged.
+- **Access travels only on request.** `include_access: true` in the export body and `include_access=true` on the
+  import, each requiring `TABLE_GRANT`, carry every covered table's role entries, system tables included, and upsert
+  them per role on the target, never removing one. Without them nothing about access changes. The runbook is
+  [`catalog-promotion.md`](catalog-promotion.md).
+- **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
+  `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
 
 ## 16. Spending-limit columns on `dial_usage_log`
 
@@ -493,7 +500,7 @@ reads back without it, and no row is migrated.
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§12) |
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
-| Catalog bundles are `format_version` `3` | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported` | Upgrade an import target before promoting to it from 0.24 (§15) |
+| Catalog bundles are `format_version` `4`; access travels on request | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`; import responses carry an `access` list | Upgrade an import target before promoting to it from 0.24; accept `access` and `REPLACE` in import responses (§15) |
 | Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
 | System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |

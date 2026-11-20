@@ -10,8 +10,9 @@ public record ImportResult(
         @Schema(description = "Correlates this import with its catalog_import log event")
         @JsonProperty("import_id") String importId,
 
-        @Schema(description = "`completed`; `rolled_back` when an object failed and what this import had created was "
-                + "deleted again; `rollback_failed` when some of it could not be, and each entry's status says which",
+        @Schema(description = "`completed`; `rolled_back` when an object or the access step failed and what this import "
+                + "had created was deleted again; `rollback_failed` when some of it could not be, and each entry's status "
+                + "says which",
                 example = "completed")
         String outcome,
 
@@ -25,5 +26,9 @@ public record ImportResult(
         List<ImportEntry> pipelines,
 
         @Schema(description = "Values likely to mean something different on this environment")
-        @JsonProperty("env_specific") List<EnvSpecificValue> envSpecific) {
+        @JsonProperty("env_specific") List<EnvSpecificValue> envSpecific,
+
+        @Schema(description = "With include_access only, one per table and role key of the bundle's access; empty "
+                + "otherwise")
+        List<AccessImportEntry> access) {
 }
