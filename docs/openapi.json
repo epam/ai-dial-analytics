@@ -2342,7 +2342,7 @@
         "properties": {
           "chart": {
             "$ref": "#/components/schemas/SavedQueryChart",
-            "description": "Chart configuration in the saved-query model; stored as sent, except that a string y_field becomes a one-element array"
+            "description": "Chart configuration in the saved-query model; stored as sent, except that a string y_field becomes a one-element array. legend.position is free text; the client knows above, right, below and left"
           },
           "name": {
             "description": "Display name; required and non-blank",
@@ -4164,6 +4164,9 @@
       },
       "SavedQueryChart": {
         "properties": {
+          "legend": {
+            "$ref": "#/components/schemas/SavedQueryChartLegend"
+          },
           "type": {
             "type": "string"
           },
@@ -4175,6 +4178,17 @@
               "type": "string"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "SavedQueryChartLegend": {
+        "properties": {
+          "position": {
+            "type": "string"
+          },
+          "visible": {
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -4288,7 +4302,7 @@
         "properties": {
           "chart": {
             "$ref": "#/components/schemas/SavedQueryChart",
-            "description": "Chart configuration; stored as sent and never interpreted, except that a string y_field becomes a one-element array"
+            "description": "Chart configuration; stored as sent and never interpreted, except that a string y_field becomes a one-element array. legend.position is free text; the client knows above, right, below and left"
           },
           "description": {
             "description": "Optional free-text description",

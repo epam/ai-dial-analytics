@@ -79,7 +79,8 @@ public record SavedQueryRequestDto(
         @JsonProperty("result_view") SavedQueryResultView resultView,
 
         @Schema(description = "Chart configuration; stored as sent and never interpreted, except that a"
-                + " string y_field becomes a one-element array")
+                + " string y_field becomes a one-element array. legend.position is free text; the client knows"
+                + " above, right, below and left")
         SavedQueryChart chart,
 
         @Schema(hidden = true) String id,

@@ -16,9 +16,12 @@ import java.util.List;
  * became a list hold one — in saved queries, their revision snapshots and dashboard widgets alike, all of
  * which are read through this record, so no stored row needs rewriting.
  *
+ * <p>{@code legend} is optional; a chart stored before it existed reads back without one.
+ *
  * <p>Null-tolerant by design: a partially configured chart is a legitimate saved state.
  */
 public record SavedQueryChart(
         String type,
         @JsonProperty("x_field") String fieldX,
-        @JsonProperty("y_field") @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY) List<String> fieldY) {}
+        @JsonProperty("y_field") @JsonFormat(with = JsonFormat.Feature.ACCEPT_SINGLE_VALUE_AS_ARRAY) List<String> fieldY,
+        SavedQueryChartLegend legend) {}

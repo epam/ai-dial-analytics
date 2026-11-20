@@ -168,6 +168,29 @@ class DashboardIntegrationTest extends AbstractPostgresIntegrationTest {
     }
 
     @Test
+    void inlineChartCarriesItsLegendAndReadsStoredChartWithoutOne() throws Exception {
+        final String widget = QUERY_WIDGET.replace("\"x_field\":\"project_id\"}",
+                "\"x_field\":\"project_id\",\"legend\":{\"visible\":true,\"position\":\"below\"}}");
+        final String created = mockMvc.perform(json(post(BASE)).content(body("Legend", "private", widget)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.legend.visible").value(true))
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.legend.position").value("below"))
+                .andReturn().getResponse().getContentAsString();
+        final String id = JsonPath.read(created, "$.id");
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.legend.visible").value(true))
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.legend.position").value("below"));
+
+        // A widget stored before legend existed has none; no row is migrated and none is returned.
+        jdbc.update("UPDATE dashboard SET widgets = widgets #- '{0,inline_query,chart,legend}' WHERE id = ?", id);
+        mockMvc.perform(get(BASE + "/" + id))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.x_field").value("project_id"))
+                .andExpect(jsonPath("$.widgets[0].inline_query.chart.legend").doesNotExist());
+    }
+
+    @Test
     void rejectsInlineChartSeriesHoldingAnObject() throws Exception {
         final String widget = QUERY_WIDGET.replace("\"x_field\":\"project_id\"}", "\"x_field\":\"project_id\",\"y_field\":[{}]}");
         mockMvc.perform(json(post(BASE)).content(body("Bad series", "private", widget)))

@@ -26,5 +26,6 @@ public record InlineQueryRequestDto(
         @JsonProperty("result_view") InlineResultView resultView,
 
         @Schema(description = "Chart configuration in the saved-query model; stored as sent, except that a string"
-                + " y_field becomes a one-element array")
+                + " y_field becomes a one-element array. legend.position is free text; the client knows above, right,"
+                + " below and left")
         SavedQueryChart chart) {}
