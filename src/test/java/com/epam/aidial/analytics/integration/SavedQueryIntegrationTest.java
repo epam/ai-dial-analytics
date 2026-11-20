@@ -9,6 +9,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -669,6 +670,73 @@ class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
                 .andExpect(jsonPath("$.chart.y_field", contains("requests")));
     }
 
+    @Test
+    void chartLegendIsCarriedOnEveryReadPath() throws Exception {
+        final Map<String, Object> legend = Map.of("visible", true, "position", "below");
+        final String created = createReturningBody(legendBody("Legend probe", "{\"visible\":true,\"position\":\"below\"}"));
+        assertThat(chartOf(created)).containsEntry("legend", legend);
+        final String id = com.jayway.jsonpath.JsonPath.read(created, "$.id");
+        final Integer revision = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
+
+        assertThat(chartOf(getBody(BASE + "/" + id))).containsEntry("legend", legend);
+        assertThat(read(listEntry("Legend probe"), "chart.legend")).isEqualTo(legend);
+        assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + revision))).containsEntry("legend", legend);
+
+        // A replace carries the new legend too, and the earlier revision keeps the old one.
+        final Map<String, Object> replaced = Map.of("visible", false, "position", "right");
+        final String updated = mockMvc.perform(put(BASE + "/" + id).contentType("application/json")
+                        .content(legendBody("Legend probe", "{\"visible\":false,\"position\":\"right\"}")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(chartOf(updated)).containsEntry("legend", replaced);
+        final Integer next = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
+        assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + next))).containsEntry("legend", replaced);
+        assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + revision))).containsEntry("legend", legend);
+    }
+
+    @Test
+    void chartLegendIsStoredAsSent() throws Exception {
+        // Exact-map equality: a member the caller left out must not come back, and false must not vanish.
+        assertThat(chartOf(createReturningBody(legendBody("Hidden legend", "{\"visible\":false,\"position\":\"left\"}"))))
+                .containsEntry("legend", Map.of("visible", false, "position", "left"));
+        assertThat(chartOf(createReturningBody(legendBody("Unknown legend position", "{\"position\":\"top-left\"}"))))
+                .containsEntry("legend", Map.of("position", "top-left"));
+        assertThat(chartOf(createReturningBody(legendBody("Null legend", "null")))).doesNotContainKey("legend");
+        assertThat(chartOf(createReturningBody(chartBody("Absent legend", "[\"requests\"]")))).doesNotContainKey("legend");
+        assertThat(chartOf(createReturningBody(legendBody("Empty legend", "{}")))).containsEntry("legend", Map.of());
+        assertThat(chartOf(createReturningBody(legendBody("All-null legend", "{\"visible\":null,\"position\":null}"))))
+                .containsEntry("legend", Map.of());
+    }
+
+    @Test
+    void chartStoredWithoutLegendIsReturnedWithoutOne() throws Exception {
+        // The shape every chart had before legend existed: no row is migrated, and no legend is invented.
+        final String id = create(chartBody("Stored without legend", "[\"requests\"]"));
+        final String stored = "{\"type\":\"line\",\"x_field\":\"project_id\",\"y_field\":[\"requests\"]}";
+        jdbc.update("UPDATE saved_query SET chart = ?::jsonb WHERE id = ?", stored, id);
+        final Integer revision = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
+        jdbc.update("UPDATE saved_query_aud SET chart = ?::jsonb WHERE id = ? AND rev = ?", stored, id, revision);
+
+        assertThat(chartOf(getBody(BASE + "/" + id))).doesNotContainKey("legend").containsKey("y_field");
+        assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + revision))).doesNotContainKey("legend").containsKey("y_field");
+    }
+
+    @Test
+    void rejectsMalformedChartLegend() throws Exception {
+        for (String legend : List.of("\"below\"", "true", "5", "[]",
+                "{\"visible\":{}}", "{\"visible\":[]}", "{\"position\":{}}", "{\"position\":[]}")) {
+            final var response = mockMvc.perform(post(BASE).contentType("application/json").content(legendBody("Bad legend", legend)))
+                    .andReturn().getResponse();
+            assertThat(response.getStatus()).as("legend %s", legend).isEqualTo(400);
+            assertThat(com.jayway.jsonpath.JsonPath.<String>read(response.getContentAsString(), "$.error")).as("legend %s", legend)
+                    .isEqualTo("bad_request");
+        }
+        mockMvc.perform(post(BASE).contentType("application/json").content(legendBody("Bad legend", "{\"align\":\"start\"}")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bad_request"))
+                .andExpect(jsonPath("$.message", containsString("align")));
+    }
+
     private static String chartBody(String name, String series) {
         return """
                 {"name":"%s","sql":"SELECT project_id FROM dial_usage_log","result_view":"chart",
@@ -676,12 +744,33 @@ class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
                 """.formatted(name, series);
     }
 
+    private static String legendBody(String name, String legend) {
+        return """
+                {"name":"%s","sql":"SELECT project_id FROM dial_usage_log","result_view":"chart",
+                 "chart":{"type":"line","x_field":"project_id","y_field":["requests"],"legend":%s}}
+                """.formatted(name, legend);
+    }
+
+    private String getBody(String path) throws Exception {
+        return mockMvc.perform(get(path))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+    }
+
+    private static Map<String, Object> chartOf(String response) {
+        return com.jayway.jsonpath.JsonPath.read(response, "$.chart");
+    }
+
     /** Creates a saved query and returns its server-assigned id. */
     private String create(String body) throws Exception {
-        final String response = mockMvc.perform(post(BASE).contentType("application/json").content(body))
+        return com.jayway.jsonpath.JsonPath.read(createReturningBody(body), "$.id");
+    }
+
+    /** Creates a saved query and returns the create response body. */
+    private String createReturningBody(String body) throws Exception {
+        return mockMvc.perform(post(BASE).contentType("application/json").content(body))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
-        return com.jayway.jsonpath.JsonPath.read(response, "$.id");
     }
 
     /**
