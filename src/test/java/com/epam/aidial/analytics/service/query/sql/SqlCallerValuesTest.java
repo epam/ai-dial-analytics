@@ -67,6 +67,12 @@ class SqlCallerValuesTest {
     }
 
     @Test
+    void aNotInListIsTheNegatedDisjunction() {
+        assertThat(filter("user_hash NOT IN (caller.user_hash(), 'x')")).isEqualTo(new LogicalNode(LogicalOp.NOT, List.of(
+                filter("user_hash IN (caller.user_hash(), 'x')"))));
+    }
+
+    @Test
     void longInListIsRefusedBeforeTheCallerValueIsReached() {
         // Calcite plans a list this long as a subquery over literal rows, which is refused before the caller value is
         // reached, exactly as a long list without one is.

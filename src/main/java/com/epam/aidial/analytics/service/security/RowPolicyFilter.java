@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -249,31 +250,13 @@ public class RowPolicyFilter {
      * caller values of the request being served — resolved here, per read, and never cached.
      */
     private String predicate(String table, List<RowPolicy> confining) {
+        final UnaryOperator<String> callerValues = CallerValues.of(claims, "row_policy");
         if (confining.size() == 1) {
-            return predicates.render(table, confining.getFirst().filter(), this::callerValue);
+            return predicates.render(table, confining.getFirst().filter(), callerValues);
         }
         return confining.stream()
-                .map(policy -> "(" + predicates.render(table, policy.filter(), this::callerValue) + ")")
+                .map(policy -> "(" + predicates.render(table, policy.filter(), callerValues) + ")")
                 .collect(Collectors.joining(" OR "));
-    }
-
-    /**
-     * The caller's value for a caller-value name, or {@code null} when it has none. An unknown value makes a
-     * comparison match nothing, which from the caller's side is indistinguishable from an empty table, so it
-     * is logged and put on the span — by name, never by content.
-     */
-    private String callerValue(String name) {
-        final String value = CallerValues.known(switch (name) {
-            case CallerValues.USER_HASH -> claims.getUserHash();
-            case CallerValues.PROJECT -> claims.getProject();
-            default -> null;
-        });
-        if (value == null) {
-            log.debug("Row policy references {}, which this caller does not have; the comparison matches no row", name);
-            // One attribute per name: a single shared key would keep only the last unknown value.
-            Span.current().setAttribute("adas.row_policy.unknown." + name, true);
-        }
-        return value;
     }
 
     /**

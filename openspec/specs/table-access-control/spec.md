@@ -709,7 +709,8 @@ A caller value SHALL be written in the condition as `caller.user_hash()` or `cal
 uses and matched as a query matches it (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values
 in SQL"), or as `caller.user_hash` or `caller.project` without the parentheses, exactly; either spelling SHALL become
 the `param` of that name, subject to the placement rule of "Caller values in row policies". An `IN` list holding a
-caller value, in either spelling, SHALL be stored as the disjunction of the equalities it abbreviates; in the `filter`
+caller value, in either spelling, SHALL be stored as the disjunction of the equalities it abbreviates, and a `NOT IN`
+list as the `not` of that disjunction; in the `filter`
 form a caller value as an `in` item stays refused. A string literal
 in the condition SHALL remain a literal whatever it spells, including the text of a caller value's name in either
 spelling.
@@ -752,6 +753,7 @@ whether a table or column outside the policy's own table exists. An enrichment a
   `"rows": {"where": "user_hash IN ('a', caller.user_hash())"}`
 - **THEN** both store the same filter, an `or` of the `eq` comparisons with `'a'` and with the `param`
   `caller.user_hash`
+- **AND** the same two spellings with `NOT IN` both store the `not` of that `or`
 
 #### Scenario: A literal spelling the call stays a literal
 

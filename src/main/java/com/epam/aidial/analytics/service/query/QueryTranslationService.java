@@ -37,6 +37,8 @@ public class QueryTranslationService {
                 .orElseThrow(() -> new QueryValidationException("entity '" + query.entity()
                         + "' is not queryable; supported entities: "
                         + catalog.queryableEntityNames(Privilege.TABLE_GET)));
-        return renderer.render(query, model);
+        // A caller value is checked where it stands but bound to a placeholder, and no identity is read; a pipeline
+        // preview renders through the same renderer outside this scope, so there it stays refused.
+        return CallerValues.validating(() -> renderer.render(query, model));
     }
 }

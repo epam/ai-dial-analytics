@@ -840,6 +840,14 @@ class RowPolicyIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .andExpect(jsonPath("$.rows.filter.args[1].args[1].name").value("caller.user_hash"));
             sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(3));
         }
+        // NOT IN is the negation of that disjunction, stored the same under either spelling.
+        final List<JsonNode> stored = new java.util.ArrayList<>();
+        for (final String spelling : List.of("caller.user_hash", "caller.user_hash()")) {
+            putPolicy("team-x", "{\"where\":\"project NOT IN ('P3', " + spelling + ")\"}").andExpect(status().isOk());
+            stored.add(access(PROBE).at("/roles/team-x/rows/filter"));
+            sql(callerToken("P1", "team-x"), COUNT).andExpect(jsonPath("$.rows[0].c").value(1));
+        }
+        assertThat(stored.getLast()).isEqualTo(stored.getFirst());
     }
 
     @Test

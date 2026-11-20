@@ -173,8 +173,8 @@ structured-query DSL (see [`sql-reference.md`](sql-reference.md#your-own-rows-ca
   credential: keep it in the deployment's secret store. Without the settings a caller has no user hash, and a
   policy matching on `caller.user_hash`, or a query filtering on `caller.user_hash()`, gives that caller no rows.
 - **Rollback.** A build older than 0.24 refuses a policy that uses a caller value, so every read that policy
-  confines fails. Replace or delete such policies before rolling back. It also refuses a query holding a caller
-  value `400`, so a saved query or dashboard widget that stores one fails to run until it is rewritten.
+  confines fails. Replace or delete such policies before rolling back. It also refuses, with `400`, a query that
+  holds a caller value, so a saved query or dashboard widget that stores one fails to run until it is rewritten.
 
 ## 9. Enrichment pipelines calling a DIAL application route
 

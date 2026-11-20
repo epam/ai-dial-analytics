@@ -32,7 +32,6 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.UnaryOperator;
 
 /**
@@ -49,7 +48,7 @@ import java.util.function.UnaryOperator;
  * enrichment field needs no rule of its own: the table-only model binds bare names only, so it is an
  * unknown field like any other.
  *
- * <p><b>Caller values.</b> A {@code param} named {@link #CALLER_USER_HASH} or {@link #CALLER_PROJECT} stands
+ * <p><b>Caller values.</b> A {@code param} named {@link CallerValues#USER_HASH} or {@link CallerValues#PROJECT} stands
  * for the reading caller's own identity and is admitted in one position only: a direct operand of {@code eq}
  * or {@code ne} against a {@code string} field. On a read the comparison is rewritten <em>before</em> it
  * reaches the translator: a known value becomes a string literal; an unknown one replaces the whole
@@ -65,16 +64,8 @@ public class RowPolicyPredicates {
     /** The rendered predicate cap per policy, in UTF-8 bytes; it travels in the request URL on every read. */
     public static final int MAX_RENDERED_BYTES = 16 * 1024;
 
-    /** The caller's user hash, comparable with a {@code user_hash} column. */
-    public static final String CALLER_USER_HASH = CallerValues.USER_HASH;
-
-    /** The project of the caller's project API key. */
-    public static final String CALLER_PROJECT = CallerValues.PROJECT;
-
-    private static final Set<String> CALLER_VALUES = CallerValues.NAMES;
-
-    private static final String CALLER_VALUE_PLACEMENT = "may use a caller value (" + CALLER_USER_HASH + ", "
-            + CALLER_PROJECT + ") only as a direct operand of 'eq' or 'ne' against a string field of the table";
+    private static final String CALLER_VALUE_PLACEMENT = "may use a caller value (" + CallerValues.USER_HASH + ", "
+            + CallerValues.PROJECT + ") only as a direct operand of 'eq' or 'ne' against a string field of the table";
 
     private final CatalogQueryService catalog;
     private final FilterTranslator filterTranslator;
@@ -143,16 +134,12 @@ public class RowPolicyPredicates {
         return op == LogicalOp.AND ? DSL.and(args) : DSL.or(args);
     }
 
-    private static boolean isCallerValue(Expr expr) {
-        return CallerValues.isCallerValue(expr);
-    }
-
     private static boolean usesCallerValue(FilterNode node) {
         return switch (node) {
             case LogicalNode logical -> logical.args() != null
                     && logical.args().stream().anyMatch(RowPolicyPredicates::usesCallerValue);
             case ComparisonNode comparison -> comparison.args() != null
-                    && comparison.args().stream().anyMatch(RowPolicyPredicates::isCallerValue);
+                    && comparison.args().stream().anyMatch(CallerValues::isCallerValue);
             case null, default -> false;
         };
     }
@@ -203,11 +190,11 @@ public class RowPolicyPredicates {
             case ValueExpr ignored -> { }
             case LambdaParamExpr ignored -> { }
             case ParamExpr param -> {
-                if (CALLER_VALUES.contains(param.name())) {
+                if (CallerValues.NAMES.contains(param.name())) {
                     throw new QueryValidationException(CALLER_VALUE_PLACEMENT);
                 }
                 throw new QueryValidationException("a row policy may not use a parameter ('" + param.name()
-                        + "') other than the caller values " + CALLER_USER_HASH + " and " + CALLER_PROJECT
+                        + "') other than the caller values " + CallerValues.USER_HASH + " and " + CallerValues.PROJECT
                         + ": there is nothing to bind it to when the policy is applied");
             }
             case FnExpr fn -> {

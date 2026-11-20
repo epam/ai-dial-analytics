@@ -6,6 +6,9 @@ import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
+import io.opentelemetry.api.trace.Span;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.jooq.Condition;
 import org.jooq.impl.DSL;
@@ -34,6 +37,7 @@ import java.util.function.UnaryOperator;
  * scope is a static thread-local rather than a bean because the translators are built by hand in many places; it is
  * opened and closed inside one call on one thread and holds only the function that call supplied.
  */
+@Slf4j
 public final class CallerValues {
 
     /** The caller's user hash, comparable with a {@code user_hash} column. */
@@ -67,6 +71,27 @@ public final class CallerValues {
     /** Whether one of {@code comparison}'s direct operands is a caller value. */
     public static boolean usesCallerValue(ComparisonNode comparison) {
         return comparison.args() != null && comparison.args().stream().anyMatch(CallerValues::isCallerValue);
+    }
+
+    /**
+     * The executing caller's values, read from {@code claims}: {@code null} for a name the caller has no value for. An
+     * unknown value makes a comparison match nothing, which from the caller's side looks like an empty table, so it is
+     * logged and put on the span as {@code adas.<surface>.unknown.<name>} — by name, never by content.
+     */
+    public static UnaryOperator<String> of(SecurityClaimsExtractor claims, String surface) {
+        return name -> {
+            final String value = known(switch (name) {
+                case USER_HASH -> claims.getUserHash();
+                case PROJECT -> claims.getProject();
+                default -> null;
+            });
+            if (value == null) {
+                log.debug("A {} references {}, which this caller does not have; the comparison matches no row", surface, name);
+                // One attribute per name: a single shared key would keep only the last unknown value.
+                Span.current().setAttribute("adas." + surface + ".unknown." + name, true);
+            }
+            return value;
+        };
     }
 
     /** {@code value} when it may be compared with, or {@code null}: absent, blank and over-long are unknown. */

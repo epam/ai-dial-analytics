@@ -5,6 +5,7 @@ import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.exception.RowPolicyConfinedException;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.RowPolicyPredicates;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
@@ -98,7 +99,7 @@ class RowPolicyFilterTest {
         given(claims.getProject()).willReturn("  ");
         given(predicates.render(anyString(), any(FilterNode.class), any())).willAnswer(inv -> {
             final java.util.function.UnaryOperator<String> values = inv.getArgument(2);
-            return values.apply(RowPolicyPredicates.CALLER_USER_HASH) + "/" + values.apply(RowPolicyPredicates.CALLER_PROJECT)
+            return values.apply(CallerValues.USER_HASH) + "/" + values.apply(CallerValues.PROJECT)
                     + "/" + values.apply("caller.email");
         });
 

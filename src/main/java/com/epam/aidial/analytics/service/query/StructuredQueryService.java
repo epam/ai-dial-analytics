@@ -11,9 +11,7 @@ import com.epam.aidial.analytics.service.query.translate.CompositeQueryBuilder;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.web.security.Privilege;
-import io.opentelemetry.api.trace.Span;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.SelectQuery;
@@ -38,7 +36,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>It is also where a query's caller values are resolved (see {@link CallerValues}): execution binds them to the
  * identity of the request being served, validation to a placeholder, and nothing else here reads an identity.
  */
-@Slf4j
 @Component
 @RequiredArgsConstructor
 public class StructuredQueryService {
@@ -72,7 +69,7 @@ public class StructuredQueryService {
     public QueryResultPage execute(StructuredQuery query, int maxLimit) {
         final QueryEntityModel model = resolve(query);
         try {
-            return CallerValues.resolving(this::callerValue,
+            return CallerValues.resolving(CallerValues.of(claims, "query"),
                     () -> executor.execute(model, query, maxLimit, QueryBudget.settings(budget)));
         } catch (RuntimeException ex) {
             // A ceiling breach becomes this capability's own 422; everything else rethrows untouched and
@@ -104,7 +101,7 @@ public class StructuredQueryService {
         }
         final AtomicBoolean anyFinal = new AtomicBoolean(false);
         final AtomicBoolean partitionLocal = new AtomicBoolean(true);
-        final SelectQuery<Record> select = CallerValues.resolving(this::callerValue,
+        final SelectQuery<Record> select = CallerValues.resolving(CallerValues.of(claims, "query"),
                 () -> compositeBuilder.build(renderContext, plan, this::resolve, maxLimit, model -> {
                     anyFinal.set(true);
                     if (!model.partitionLocal()) {
@@ -162,25 +159,6 @@ public class StructuredQueryService {
         }
         CallerValues.validating(() -> compositeBuilder.build(renderContext, plan,
                 entity -> resolve(entity, bar), StructuredQueryBuilder.MAX_LIMIT));
-    }
-
-    /**
-     * The executing caller's value for a caller-value name, or {@code null} when it has none. An unknown value makes a
-     * comparison match nothing, which from the caller's side looks like an empty table, so it is logged and put on the
-     * span — by name, never by content.
-     */
-    private String callerValue(String name) {
-        final String value = CallerValues.known(switch (name) {
-            case CallerValues.USER_HASH -> claims.getUserHash();
-            case CallerValues.PROJECT -> claims.getProject();
-            default -> null;
-        });
-        if (value == null) {
-            log.debug("Query references {}, which this caller does not have; the comparison matches no row", name);
-            // One attribute per name: a single shared key would keep only the last unknown value.
-            Span.current().setAttribute("adas.query.unknown." + name, true);
-        }
-        return value;
     }
 
     private QueryEntityModel resolve(StructuredQuery query) {

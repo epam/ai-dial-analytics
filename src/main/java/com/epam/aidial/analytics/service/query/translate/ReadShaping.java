@@ -439,6 +439,10 @@ final class ReadShaping {
         }
         final Expr left = args.get(0);
         final Expr right = args.get(1);
+        // eq is symmetric: a value written first is pushed as well (it is still no lookup, which reads field-first).
+        if (op == ComparisonOp.EQ && right instanceof FieldExpr && !(left instanceof FieldExpr)) {
+            return pushableConjunctField(model, new ComparisonNode(op, List.of(right, left)));
+        }
         if (left instanceof FieldExpr(String name)) {
             final QueryFieldType type = fieldType(model, name);
             if (type == null) {

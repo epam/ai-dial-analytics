@@ -295,6 +295,8 @@ public class FilterTranslator {
         if (position == Position.CASE_BRANCH || other == null) {
             throw new QueryValidationException(CallerValues.placementMessage(name));
         }
+        // Only for its refusals; the bound comparison translates it again. Its only effects, on a scalar subquery, are
+        // the final-read report, which is idempotent, and an alias number skipped.
         exprTranslator.toField(other, bindings);
         final boolean[] aggregate = {false};
         WindowExpressions.visit(other, expr -> aggregate[0] |= expr instanceof FnExpr fn && WindowExpressions.isAggregate(fn.name()));

@@ -153,26 +153,20 @@ final class RexToExprTranslator {
 
     // ---------------------------------------------------------------- filters
 
-    /**
-     * How deep the translation of one root (a condition or a projection entry) has recursed; {@code 0} at a root,
-     * where the caller values in the whole tree are checked before any of it is translated.
-     */
-    private int depth;
-
-    /** Translates a boolean condition (WHERE/HAVING/ON) into a DSL filter tree. */
-    FilterNode toFilter(RexNode node) {
-        if (depth == 0) {
-            requireCallerValuePlacement(node, true);
-        }
-        depth++;
-        try {
-            return filter(node);
-        } finally {
-            depth--;
-        }
+    /** A block's condition (WHERE/HAVING/ON), its caller values checked in the whole tree before any of it is translated. */
+    FilterNode rootFilter(RexNode node) {
+        requireCallerValuePlacement(node, true);
+        return toFilter(node);
     }
 
-    private FilterNode filter(RexNode node) {
+    /** A block's projection entry, its caller values checked in the whole tree before any of it is translated. */
+    Expr rootExpr(RexNode node) {
+        requireCallerValuePlacement(node, false);
+        return toExpr(node);
+    }
+
+    /** Translates a boolean condition into a DSL filter tree. */
+    FilterNode toFilter(RexNode node) {
         if (node instanceof RexInputRef ref) {
             // A bare boolean column used as a predicate: WHERE success.
             return requireBoolean(ref, "a bare column predicate");
@@ -352,6 +346,8 @@ final class RexToExprTranslator {
         if (!SqlTypeUtil.inCharFamily(node.getType()) || !RexUtil.containsInputRef(node)) {
             return false;
         }
+        // Translated here only to be typed, and again by the comparison; its one side effect, marking the statement
+        // composite when it holds a subquery, is idempotent.
         final Expr expr = node instanceof RexInputRef ref ? inputs.get(ref.getIndex()) : toExpr(node);
         return WindowExpressions.readsField(expr) && ExprFieldType.ofDeclared(expr, fieldTypes) == QueryFieldType.STRING;
     }
@@ -485,18 +481,6 @@ final class RexToExprTranslator {
 
     /** Translates a value expression (projection entry, comparison operand, function argument). */
     Expr toExpr(RexNode node) {
-        if (depth == 0) {
-            requireCallerValuePlacement(node, false);
-        }
-        depth++;
-        try {
-            return expr(node);
-        } finally {
-            depth--;
-        }
-    }
-
-    private Expr expr(RexNode node) {
         return switch (node) {
             case RexInputRef ref -> inputs.get(ref.getIndex());
             case RexLiteral literal -> literalExpr(literal);

@@ -3811,7 +3811,8 @@ field, that field belongs to that enrichment and is of type `string`, `integer`,
 conjunct is one of:
 
 - `co` or `ico` with a non-empty string literal;
-- `eq` against a non-null literal that is not the field type's default (`''` for `string`, `0` for a number);
+- `eq` against a non-null literal that is not the field type's default (`''` for `string`, `0` for a number), the
+  literal written on either side;
 - `in` whose every literal is non-null and not the field type's default;
 - `eq` of `starts_with(field, literal)` or `contains(field, literal)` against `true`, with a non-empty literal.
 
@@ -3852,6 +3853,12 @@ non-sorting-key `WHERE` after the merge, and the read path sends no setting that
 - **WHEN** the same conjunct stands in a query that also reads `dial_usage_log_payload.request_body` raw
 - **THEN** the derived table carries the copied condition and projects `request_body`, and the outer `WHERE`
   carries the conjunct itself
+
+#### Scenario: A literal written before the field is copied as well
+
+- **WHEN** a query's filter carries, beside `request_time >= T`, an `eq` whose first operand is the literal `'w'` and
+  whose second is a light `string` column of the payload
+- **THEN** the payload derived table carries `'w' = <column>`, and so does the outer `WHERE`
 
 #### Scenario: Conjuncts that are true on an unmatched row stay outside
 

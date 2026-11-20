@@ -4,7 +4,7 @@ import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
-import com.epam.aidial.analytics.service.query.RowPolicyPredicates;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
@@ -51,8 +51,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @RequiredArgsConstructor
 public class RowPolicyConditions {
 
-    private static final List<String> CALLER_VALUES =
-            List.of(RowPolicyPredicates.CALLER_USER_HASH, RowPolicyPredicates.CALLER_PROJECT);
+    private static final List<String> CALLER_VALUES = List.of(CallerValues.USER_HASH, CallerValues.PROJECT);
 
     private static final String SINGLE_CONDITION =
             "'where' must be a single condition over the table's own columns, with no subquery and no other clause";
