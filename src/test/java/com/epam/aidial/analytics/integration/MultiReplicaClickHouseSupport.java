@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.integration;
 
 import com.clickhouse.client.api.Client;
+import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.clickhouse.replication.ReplicaAddressing;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -189,14 +190,18 @@ final class MultiReplicaClickHouseSupport {
         }
     }
 
-    /** Waits until every replica has noticed a {@link #stopKeeper stopped} Keeper: its tables turned read-only. */
+    /**
+     * Waits until every replica has noticed a {@link #stopKeeper stopped} Keeper: it has replicated tables, and all of them
+     * turned read-only, so an insert answers {@code TABLE_IS_READ_ONLY}.
+     */
     void awaitKeeperLost() {
         final long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
         for (final String name : REPLICAS) {
             while (true) {
                 try (Client client = client(name)) {
-                    if (client.queryAll("SELECT count() AS n FROM system.replicas WHERE NOT (is_readonly OR is_session_expired)")
-                            .getFirst().getLong("n") == 0) {
+                    final GenericRecord row = client.queryAll("SELECT count() AS total, countIf(NOT is_readonly) AS writable FROM system.replicas")
+                            .getFirst();
+                    if (row.getLong("total") > 0 && row.getLong("writable") == 0) {
                         break;
                     }
                 } catch (Exception notYet) {

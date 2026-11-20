@@ -423,7 +423,7 @@ public class IngestFailureService {
                 .map(IngestFailureEntry::failure)
                 .map(failure -> IngestFailureEvent.requeued(failure.kind(), failure.subject(), failure.day(), failure.blobLastModified(), now))
                 .toList();
-        failures.append(events);
+        failures.appendPromptly(events);
         log.info("Requeued {} failure(s)", events.size());
         return events.size();
     }

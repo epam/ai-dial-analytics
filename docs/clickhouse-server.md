@@ -215,11 +215,12 @@ A replica whose Keeper metadata was lost stays `TABLE_IS_READ_ONLY` until an ope
 the code.
 
 Row writes (`POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`, OTel
-ingest) and pipeline runs cap ClickHouse's Keeper retries (`insert_keeper_max_retries = 8`,
-`insert_keeper_retry_max_backoff_ms = 2000`). Once a replica has noticed it lost its Keeper session, they fail
-after about ten seconds instead of the two minutes ClickHouse's defaults allow. Data-sync ingest keeps the
-defaults and pauses through a short Keeper outage. A settings profile constraint on the writer user must allow
-both settings.
+ingest), pipeline runs and the data-sync requeue (`POST /v1/data-sync/failures/retry`) cap ClickHouse's Keeper
+retries on each insert (`insert_keeper_max_retries = 8`, `insert_keeper_retry_max_backoff_ms = 2000`). Once a
+replica has noticed it lost its Keeper session, they fail after about ten seconds instead of the two minutes
+ClickHouse's defaults allow. Data-sync ingest and enrichment relayout copies keep the defaults and pause through a
+short Keeper outage. A settings profile constraint on the writer user must allow both settings, or those inserts
+are refused; no other statement sends them.
 
 ## Settled ingest days are force-merged
 

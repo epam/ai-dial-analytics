@@ -33,7 +33,9 @@ import java.util.Objects;
  * Connectivity failures surface as {@link ClickHouseUnavailableException} (503); a rejected statement
  * surfaces as {@link ClickHouseQueryException} (400). Raw ClickHouse messages are never propagated.
  *
- * <p>It runs only inside a pipeline run, on the run's home replica ({@link ReplicaScope#requirePipelineRun}).
+ * <p>It runs only inside a pipeline run, on the run's home replica ({@link ReplicaScope#requirePipelineRun}), and caps
+ * ClickHouse's Keeper retries ({@link KeeperRetries}): with Keeper gone the run fails within seconds and the next tick
+ * retries it.
  */
 @Component
 @Slf4j
@@ -81,6 +83,7 @@ public class ClickHouseInsertSelectExecutor {
         SqlLog.LOG.debug("Executing ClickHouse INSERT … SELECT into {}: {}", target, sql);
         final CommandSettings settings = FinalSettings.pipeline(new CommandSettings(), partitionLocal);
         settings.serverSetting(MAX_PARTITIONS_PER_INSERT_BLOCK, "0");
+        KeeperRetries.failFast(settings);
         ClickHouseBudget.apply(settings, Objects.requireNonNull(budget, "budget"));
         final String queryId = tag.applyTo(settings);
         final ReplicaTarget bound = ReplicaScope.requirePipelineRun("INSERT … SELECT into " + target);

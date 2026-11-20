@@ -3,10 +3,12 @@ package com.epam.aidial.analytics.clickhouse;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.ServerException;
 import com.clickhouse.client.api.insert.InsertResponse;
+import com.clickhouse.client.api.insert.InsertSettings;
 import com.clickhouse.data.ClickHouseFormat;
 import com.epam.aidial.analytics.exception.ClickHouseStorageFullException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -23,6 +25,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -301,5 +304,29 @@ class UsageLogWriterTest {
         assertThat(count(registry, "clickhouse.insert.failures", "table", TABLE, "reason", "other")).isEqualTo(1d);
         assertThat(count(registry, "clickhouse.insert.failures", "table", TABLE, "reason", "storage_full"))
                 .isZero();
+    }
+
+    /** Ingest keeps ClickHouse's own Keeper retries, so a Keeper restart pauses it rather than failing every blob in flight. */
+    @Test
+    void ingestInsertKeepsClickHouseKeeperRetries() {
+        Client client = clientAnswering(mock(InsertResponse.class), null);
+
+        writerOver(client, new SimpleMeterRegistry()).insert(TABLE, List.of(row("p", 1, "{}")));
+
+        verify(client).insert(eq(TABLE), any(InputStream.class), eq(ClickHouseFormat.JSONEachRow));
+    }
+
+    /** The operator requeue is answered within seconds with Keeper gone (openspec/specs/clickhouse-replication/spec.md). */
+    @Test
+    void promptInsertCapsKeeperRetries() {
+        Client client = mock(Client.class);
+        when(client.insert(eq(TABLE), any(InputStream.class), eq(ClickHouseFormat.JSONEachRow), any(InsertSettings.class)))
+                .thenReturn(CompletableFuture.completedFuture(mock(InsertResponse.class)));
+
+        writerOver(client, new SimpleMeterRegistry()).insertPromptly(TABLE, List.of(row("p", 1, "{}")));
+
+        ArgumentCaptor<InsertSettings> settings = ArgumentCaptor.forClass(InsertSettings.class);
+        verify(client).insert(eq(TABLE), any(InputStream.class), eq(ClickHouseFormat.JSONEachRow), settings.capture());
+        KeeperRetriesAssert.assertCapped(settings.getValue().getAllSettings());
     }
 }

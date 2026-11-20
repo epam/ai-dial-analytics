@@ -119,6 +119,12 @@ class ClickHouseInsertSelectExecutorTest {
                 .containsEntry("clickhouse_setting_" + ClickHouseInsertSelectExecutor.MAX_PARTITIONS_PER_INSERT_BLOCK, "0");
     }
 
+    /** With Keeper gone the run fails within seconds and the next tick retries it (openspec/specs/clickhouse-replication/spec.md). */
+    @Test
+    void writeCapsKeeperRetries() {
+        KeeperRetriesAssert.assertCapped(settingsSentFor(false).getAllSettings());
+    }
+
     @AfterEach
     void clearMdc() {
         StatementTag.clear();

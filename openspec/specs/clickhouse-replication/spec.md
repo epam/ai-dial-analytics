@@ -744,18 +744,27 @@ ClickHouse's default Keeper retries hold an insert into a replicated table whose
 for about two minutes. Each write path SHALL choose between those retries and failing promptly by how it recovers:
 
 - The catalog row writer (`POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`,
-  OTel ingest) SHALL fail promptly. Its caller waits on an
-  HTTP response, and a two-minute wait outlasts a typical proxy read timeout, after which the insert may still be
-  stored while the caller retries it.
+  OTel ingest) SHALL fail promptly. Its caller waits on an HTTP response, and a two-minute wait outlasts a typical
+  proxy read timeout, after which the insert may still be stored while the caller retries it.
 - A pipeline's `INSERT … SELECT`, on the primary or on the run's home replica, SHALL fail promptly. The run fails
   with its cursor unchanged and the next scheduled run retries it.
-- Data-sync ingest and its ledgers SHALL keep ClickHouse's default retries. A failed blob waits for the retry sweep
-  (`sync.retry.initial-backoff`), so failing promptly would turn a Keeper restart of a minute or two into that much
-  longer ingest delay and a failure-ledger entry per blob in flight.
+- The operator requeue (`POST /v1/data-sync/failures/retry`) SHALL fail promptly, with `503
+  clickhouse_unavailable`. The operator waits on the response, and a refused requeue writes nothing, so it is
+  safe to repeat.
+- Data-sync ingest, and the failure-ledger writes of its cycles and of the retry sweep, SHALL keep ClickHouse's
+  default retries. A failed blob waits for the retry sweep (`sync.retry.initial-backoff`), so failing promptly would
+  turn a Keeper restart of a minute or two into that much longer ingest delay and a failure-ledger entry per blob
+  in flight.
+- An enrichment relayout's copy SHALL keep ClickHouse's default retries. A failed copy is dropped and the relayout
+  is not resumed before the next start, so a Keeper restart of a minute or two would discard all the copying done
+  so far.
 
 Failing promptly SHALL bound `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` so that, with the
 replica's Keeper session already lost, the insert is answered within about ten seconds. The bound also covers a
 Keeper failure during the insert's commit, so a prompt failure there may be `UNKNOWN_STATUS_OF_INSERT`, as below.
+The bound SHALL be sent with each of those inserts and with no other statement, so a settings profile constraint
+that refuses either setting refuses only those inserts: DDL, the startup checks, replica syncs and every path that
+keeps the defaults are unaffected.
 
 An insert answered `UNKNOWN_STATUS_OF_INSERT` may already have been stored, so retrying it can store the rows
 twice. On an `upsert_by_key` table or an enrichment the copies collapse. On an `append` table and an OTel sink
@@ -774,6 +783,18 @@ the operator documentation.
 - **WHEN** `POST /v1/tables/{name}/rows` is called
 - **THEN** the response is HTTP 503 `clickhouse_unavailable`, not a 4xx
 - **AND** it is answered within 30 seconds, not after ClickHouse's default two-minute Keeper retry
+
+#### Scenario: Only the prompt writes carry the Keeper retry bound
+
+- **WHEN** a catalog row write, a pipeline `INSERT … SELECT` or an operator requeue is issued
+- **THEN** the insert carries `insert_keeper_max_retries = 8` and `insert_keeper_retry_max_backoff_ms = 2000`
+- **AND** a data-sync ingest insert carries neither setting
+
+#### Scenario: A requeue while Keeper is down is answered as unavailable
+
+- **GIVEN** the Keeper ensemble unavailable and the replica's tables read-only
+- **WHEN** `POST /v1/data-sync/failures/retry` selects an outstanding failure
+- **THEN** the response is HTTP 503 `clickhouse_unavailable`, not a 500
 
 #### Scenario: A pipeline run while Keeper is down is refused as unavailable
 

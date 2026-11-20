@@ -60,7 +60,7 @@ final class ReplicaClients implements AutoCloseable {
                 local = write;
                 if (local == null) {
                     requireOpen();
-                    local = ClickHouseClients.failFastWriterBuilder(connection, host, port, writer.user(), writer.password()).build();
+                    local = ClickHouseClients.builder(connection, host, port, writer.user(), writer.password()).build();
                     write = local;
                 }
             }

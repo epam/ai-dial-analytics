@@ -23,12 +23,6 @@ import com.epam.aidial.analytics.configuration.ClickHouseProperties;
  */
 public final class ClickHouseClients {
 
-    /** The Keeper retry bound {@link #failFastWriterBuilder} pins: setting names and values. */
-    static final String INSERT_KEEPER_MAX_RETRIES_SETTING = "insert_keeper_max_retries";
-    static final String INSERT_KEEPER_MAX_RETRIES = "8";
-    static final String INSERT_KEEPER_RETRY_MAX_BACKOFF_MS_SETTING = "insert_keeper_retry_max_backoff_ms";
-    static final String INSERT_KEEPER_RETRY_MAX_BACKOFF_MS = "2000";
-
     private ClickHouseClients() {
     }
 
@@ -57,29 +51,5 @@ public final class ClickHouseClients {
                 .setPassword(password == null ? "" : password)
                 .setDefaultDatabase(connection.sessionDatabase())
                 .retryOnFailures(ClickHouseFailures.transportFaults());
-    }
-
-    /**
-     * {@link #builder(ClickHouseProperties, String, String)} for a writer that must fail promptly when Keeper is gone:
-     * the catalog row writer behind {@code POST /v1/tables/{name}/rows}, the pipeline write-back and OTel ingest, whose
-     * caller is waiting on an HTTP response, and the pipeline {@code INSERT … SELECT} clients, whose run is retried on its
-     * next tick with its cursor unmoved. The writer client also carries DDL; both settings apply to inserts only.
-     *
-     * <p>An insert into a replicated table whose replica has lost its Keeper session retries
-     * {@value #INSERT_KEEPER_MAX_RETRIES} times with a backoff doubling from 100 ms to
-     * {@value #INSERT_KEEPER_RETRY_MAX_BACKOFF_MS} ms, so it answers {@code TABLE_IS_READ_ONLY} after about ten seconds.
-     * ClickHouse's own defaults (20 retries, up to 10 s apart) hold it for about two minutes: past a proxy's read timeout,
-     * after which the insert may still land while the caller retries it. Data-sync ingest does not use this builder; it
-     * keeps those defaults. See {@code openspec/specs/clickhouse-replication/spec.md}.
-     */
-    public static Client.Builder failFastWriterBuilder(ClickHouseProperties connection, String user, String password) {
-        return failFastWriterBuilder(connection, connection.host(), connection.port(), user, password);
-    }
-
-    /** {@link #failFastWriterBuilder(ClickHouseProperties, String, String)} pointed at {@code host:port}: a replica's writer. */
-    public static Client.Builder failFastWriterBuilder(ClickHouseProperties connection, String host, int port, String user, String password) {
-        return builder(connection, host, port, user, password)
-                .serverSetting(INSERT_KEEPER_MAX_RETRIES_SETTING, INSERT_KEEPER_MAX_RETRIES)
-                .serverSetting(INSERT_KEEPER_RETRY_MAX_BACKOFF_MS_SETTING, INSERT_KEEPER_RETRY_MAX_BACKOFF_MS);
     }
 }

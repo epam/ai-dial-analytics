@@ -1,7 +1,9 @@
 package com.epam.aidial.analytics.service;
 
 import com.clickhouse.client.api.query.GenericRecord;
+import com.epam.aidial.analytics.clickhouse.ClickHouseFailures;
 import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
+import com.epam.aidial.analytics.exception.ClickHouseUnavailableException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -22,7 +24,8 @@ import java.util.Optional;
  * the ingest ledger and on the same writer credential.
  *
  * <p>Writes are plain inserts through {@link UsageLogWriter#insert}, each event carrying its own {@code event_at}, so
- * recording a failure never reads first. Reads aggregate per {@code (kind, subject)} over the whole table: failures
+ * recording a failure never reads first. The operator requeue writes through {@link UsageLogWriter#insertPromptly}
+ * instead, so it answers {@code 503} within seconds with Keeper gone. Reads aggregate per {@code (kind, subject)} over the whole table: failures
  * are exceptional, so the table stays small, and the aggregation needs no {@code FINAL} because nothing is replaced.
  */
 @Component
@@ -93,9 +96,29 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
 
     @Override
     public void append(Collection<IngestFailureEvent> events) {
+        if (!events.isEmpty()) {
+            writer.insert(TABLE, rows(events));
+        }
+    }
+
+    @Override
+    public void appendPromptly(Collection<IngestFailureEvent> events) {
         if (events.isEmpty()) {
             return;
         }
+        try {
+            writer.insertPromptly(TABLE, rows(events));
+        } catch (ClickHouseUnavailableException ex) {
+            throw ex;
+        } catch (RuntimeException ex) {
+            if (ClickHouseFailures.isUnavailable(ex)) {
+                throw new ClickHouseUnavailableException("ClickHouse is unreachable", ex);
+            }
+            throw ex;
+        }
+    }
+
+    private static List<Map<String, Object>> rows(Collection<IngestFailureEvent> events) {
         List<Map<String, Object>> rows = new ArrayList<>(events.size());
         for (IngestFailureEvent event : events) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -113,7 +136,7 @@ public class ClickHouseIngestFailureLedger implements IngestFailureLedger {
             row.put("event_at", STORAGE.format(event.eventAt().truncatedTo(ChronoUnit.MILLIS)));
             rows.add(row);
         }
-        writer.insert(TABLE, rows);
+        return rows;
     }
 
     @Override

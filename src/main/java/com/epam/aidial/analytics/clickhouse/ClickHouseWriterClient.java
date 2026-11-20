@@ -91,7 +91,7 @@ public class ClickHouseWriterClient {
     }
 
     private Client buildClient() {
-        return ClickHouseClients.failFastWriterBuilder(properties, writerProperties.user(), writerProperties.password())
+        return ClickHouseClients.builder(properties, writerProperties.user(), writerProperties.password())
                 .build();
     }
 

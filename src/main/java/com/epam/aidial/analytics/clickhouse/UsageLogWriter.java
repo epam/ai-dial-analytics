@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.clickhouse;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.ServerException;
 import com.clickhouse.client.api.insert.InsertResponse;
+import com.clickhouse.client.api.insert.InsertSettings;
 import com.clickhouse.client.api.query.GenericRecord;
 import com.clickhouse.data.ClickHouseFormat;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
@@ -77,13 +78,27 @@ public class UsageLogWriter {
      * @throws ClickHouseStorageFullException if ClickHouse refused the write for lack of disk space
      */
     public void insert(String table, List<Map<String, Object>> rows) {
+        insertBatch(table, rows, null);
+    }
+
+    /**
+     * {@link #insert(String, List)} for a caller waiting on an HTTP response: the insert caps ClickHouse's Keeper retries
+     * ({@link KeeperRetries}), so with Keeper gone it fails within seconds. Ingest itself never uses it, because its
+     * failed blobs wait for the retry sweep.
+     */
+    public void insertPromptly(String table, List<Map<String, Object>> rows) {
+        insertBatch(table, rows, KeeperRetries.failFast(new InsertSettings()));
+    }
+
+    private void insertBatch(String table, List<Map<String, Object>> rows, InsertSettings settings) {
         if (rows.isEmpty()) {
             return;
         }
         clickHouseSpans.insert(table, () -> {
             try (InputStream data = batchStream(rows);
-                    InsertResponse response = client()
-                            .insert(table, data, ClickHouseFormat.JSONEachRow)
+                    InsertResponse response = (settings == null
+                            ? client().insert(table, data, ClickHouseFormat.JSONEachRow)
+                            : client().insert(table, data, ClickHouseFormat.JSONEachRow, settings))
                             .get()) {
                 log.debug("Inserted {} rows into {}", rows.size(), table);
             } catch (InterruptedException ex) {
@@ -306,8 +321,8 @@ public class UsageLogWriter {
     }
 
     private Client buildClient() {
-        // Not ClickHouseClients.failFastWriterBuilder: ingest keeps ClickHouse's own Keeper retries, so a Keeper restart
-        // of a minute or two pauses it instead of deferring every in-flight blob to the retry sweep.
+        // No KeeperRetries cap on the client: ingest keeps ClickHouse's own Keeper retries, so a Keeper restart of a minute
+        // or two pauses it instead of deferring every in-flight blob to the retry sweep.
         return ClickHouseClients.builder(properties, writerProperties.user(), writerProperties.password())
                 .serverSetting(ClickHouseWriterClient.ASYNC_INSERT, "0")
                 .build();
