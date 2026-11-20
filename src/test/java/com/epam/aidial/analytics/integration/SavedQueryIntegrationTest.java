@@ -692,6 +692,15 @@ class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
         final Integer next = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
         assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + next))).containsEntry("legend", replaced);
         assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + revision))).containsEntry("legend", legend);
+
+        // A replace that leaves legend out clears it (the client's "reset to default"); the earlier revision keeps it.
+        final String cleared = mockMvc.perform(put(BASE + "/" + id).contentType("application/json")
+                        .content(chartBody("Legend probe", "[\"requests\"]")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(chartOf(cleared)).doesNotContainKey("legend");
+        assertThat(chartOf(getBody(BASE + "/" + id))).doesNotContainKey("legend");
+        assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + next))).containsEntry("legend", replaced);
     }
 
     @Test
@@ -711,11 +720,13 @@ class SavedQueryIntegrationTest extends AbstractPostgresIntegrationTest {
     @Test
     void chartStoredWithoutLegendIsReturnedWithoutOne() throws Exception {
         // The shape every chart had before legend existed: no row is migrated, and no legend is invented.
-        final String id = create(chartBody("Stored without legend", "[\"requests\"]"));
-        final String stored = "{\"type\":\"line\",\"x_field\":\"project_id\",\"y_field\":[\"requests\"]}";
-        jdbc.update("UPDATE saved_query SET chart = ?::jsonb WHERE id = ?", stored, id);
+        // Saved with a legend and stripped in storage, so the rows really change shape.
+        final String created = createReturningBody(legendBody("Stored without legend", "{\"visible\":true,\"position\":\"below\"}"));
+        assertThat(chartOf(created)).containsKey("legend");
+        final String id = com.jayway.jsonpath.JsonPath.read(created, "$.id");
+        assertThat(jdbc.update("UPDATE saved_query SET chart = chart - 'legend' WHERE id = ?", id)).isEqualTo(1);
         final Integer revision = jdbc.queryForObject("SELECT max(rev) FROM saved_query_aud WHERE id = ?", Integer.class, id);
-        jdbc.update("UPDATE saved_query_aud SET chart = ?::jsonb WHERE id = ? AND rev = ?", stored, id, revision);
+        assertThat(jdbc.update("UPDATE saved_query_aud SET chart = chart - 'legend' WHERE id = ? AND rev = ?", id, revision)).isEqualTo(1);
 
         assertThat(chartOf(getBody(BASE + "/" + id))).doesNotContainKey("legend").containsKey("y_field");
         assertThat(chartOf(getBody(BASE + "/" + id + "/revision/" + revision))).doesNotContainKey("legend").containsKey("y_field");

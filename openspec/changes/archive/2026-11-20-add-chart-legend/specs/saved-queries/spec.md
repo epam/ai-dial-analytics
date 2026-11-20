@@ -112,6 +112,13 @@ The same chart model SHALL apply wherever a chart is carried, including a dashbo
 - **WHEN** a caller saves a chart with `legend` `null` or no `legend`
 - **THEN** the returned chart has no `legend` member
 
+#### Scenario: A replace without a legend clears it
+
+- **GIVEN** a saved query whose chart carries a `legend`
+- **WHEN** a caller replaces the saved query with a chart that has no `legend`
+- **THEN** the response and every later read carry no `legend` member, and the revision snapshot of the
+  earlier save still carries it
+
 #### Scenario: An empty legend is returned as an empty object
 
 - **WHEN** a caller saves a chart with `legend` `{}`, or `{ "visible": null, "position": null }`

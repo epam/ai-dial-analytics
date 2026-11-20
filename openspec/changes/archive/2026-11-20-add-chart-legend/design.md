@@ -36,10 +36,10 @@ OpenAPI component, so it is named after its parent. A nested `Legend` could coll
 
 **`position` is a `String`, not an enum.** The spec requires any string to round-trip unchanged, and the
 client maps unknown values itself. An enum would reject or rewrite unknown values and couple server releases
-to client vocabulary, the same reason `type` is a string. The four known values go in the record's Javadoc,
-not in an `@Schema`. No class under `service/` imports swagger annotations, and the sibling chart schemas
-carry no descriptions. An `allowableValues` would also publish an `enum` and tell generated clients the
-value is checked.
+to client vocabulary, the same reason `type` is a string. The four known values go in the record's Javadoc
+and in one clause of the `chart` `@Schema(description)` on the web request DTOs, never on the record itself:
+no class under `service/` imports swagger annotations. An `allowableValues` would publish an `enum` and tell
+generated clients the value is checked.
 
 **`visible` is a boxed `Boolean`.** Absent and `null` must stay distinguishable from `false`. The `NON_NULL`
 mapper omits a null and keeps `false`, which a primitive could not express.
@@ -52,13 +52,15 @@ phase confirms each spec case with a test instead of assuming it.
 
 ## Risks / Trade-offs
 
-- [A non-boolean `visible` such as `"true"` may be coerced by the mapper's default scalar coercion rather
-  than rejected] → The spec leaves scalar coercion deliberately undefined. The request asks for none, and a
-  client sends a JSON boolean.
-- [A build without `legend` refuses a write carrying one with `400`] → The server ships before the client
-  sends `legend`. A rollback while clients send it breaks chart saves until the client stops sending it.
-  Reads keep working, because the stored member is ignored. The change needs no operator action, so it adds
-  no upgrade-doc entry.
+- [Jackson's default scalar coercion applies: `{"visible": "false"}` is stored as `false`, and a number or
+  boolean `position` as its string] → The spec leaves scalar coercion deliberately undefined, and the record's
+  Javadoc says so. `type` and `x_field` behave the same way, so making `legend` alone strict would be
+  inconsistent, and a client sends a JSON boolean and string.
+- [A build without `legend` refuses a write carrying one with `400`, and drops a stored one] → The server ships
+  before the client sends `legend`. A rollback while clients send it breaks chart saves until the client stops
+  sending it. Reads keep working, but the older build leaves the stored member out of its responses, so a
+  client that reads a chart and saves it back deletes its `legend`. Operators cannot see either from the code,
+  so both go in the release upgrade notes (`docs/release-0.24-upgrade.md`, §19).
 
 ## Migration Plan
 

@@ -32,6 +32,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **A system table's revision snapshot answers `200`**, with `roles` and no `columns` member (§17).
 - **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
   route outputs may bind `object` and `map` columns (§18).
+- **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§19).
 
 ---
 
@@ -462,6 +463,19 @@ author sees it.
 - **Rollback.** A build older than 0.24 cannot read a `dial_app_route` pipeline at all (§9), so follow §9:
   re-declare each route pipeline as `chat_completion` on scalar columns, or delete it, before rolling back.
 
+## 19. Chart legend
+
+A chart, on a saved query and on a dashboard widget's `inline_query`, may now carry `legend` `{ visible, position }`
+(see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). The member is additive: a chart stored without it
+reads back without it, and no row is migrated.
+
+- **Deploy ADAS before the client sends `legend`.** A build older than 0.24 refuses every chart save that carries it
+  with `400 bad_request`.
+- **Rollback.** A build older than 0.24 refuses chart saves carrying `legend` again. It reads a stored `legend` but
+  leaves it out of its responses, so a client that reads a chart and saves it back, even without touching the
+  legend, deletes the stored `legend`. Stop the client sending `legend` before rolling back, and expect each chart's
+  legend to be lost on its next save.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -483,3 +497,4 @@ author sees it.
 | Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
 | System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |
+| Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§19) |
