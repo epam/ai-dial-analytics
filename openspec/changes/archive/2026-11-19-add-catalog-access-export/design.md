@@ -153,7 +153,9 @@ were created, and the import would have to retry around generations it does not 
 The validation pass runs in this order, all inside its rolled-back transaction:
 1. Create the tables and pipelines, so a column policy can name a column of a table the same import creates.
 2. Check every access entry with `entryFor`. Refusals become entry `FAIL`s carrying the `PUT`'s `error` code.
-3. If no access entry is `FAIL`, run the same `importEntries` the apply step runs. A refused pipeline, or a refused table the bundle
+3. If no access entry is `FAIL`, run the same `importEntries` the apply step runs, over the `CREATE` and `REPLACE` entries only. An
+   equal entry writes nothing, so leaving it out changes no result and keeps the pass from locking a table whose entries all equal
+   the target's. A refused pipeline, or a refused table the bundle
    carries no access for, does not block this step. A refused table that carries access does block it, because step 2 `FAIL`s that
    table's entries through the pass's `refused` set. If `importEntries` itself fails here (for example on a lock timeout), every access
    entry is `FAIL` with the failure, and every pipeline reports `not checked`.
@@ -165,13 +167,16 @@ real `PATCH enabled=true`. Because step 2 checks every entry before step 3 write
 some entry is `FAIL`, arming judges the target without the bundle's access, and `ineffective_grants` stay empty: a partial
 application would describe a state the import can never produce.
 
-The preview's cost: from step 3 until the pass rolls back, the pass holds row locks on every covered existing table, including system
-tables such as `dial_usage_log`. A concurrent `PUT .../access` or schema write on those tables, or the background enrichment relayout
+The preview's cost: from step 3 until the pass rolls back, the pass holds row locks on every covered existing table whose access it
+changes, including system tables such as `dial_usage_log`. A repeat promotion, whose entries all equal the target's, locks none. A concurrent `PUT .../access` or schema write on those tables, or the background enrichment relayout
 marking one aligned, waits up to `tables.lock-timeout` (`TableDefinitionLockingImpl`) and then fails; a request answers
 `409 table_busy`. A concurrent `/import`'s access step fails in the same way, and
 its compensation removes what it created. The runbook therefore says to edit access on, or import access into, the covered tables only
 when no preview with access is running. A preview is an operator action, and the pass already holds such locks on the tables it
 creates.
+
+*Rejected: read the covered tables without `FOR UPDATE` in the pass.* The pass's own flushed `UPDATE` of a changed table takes the
+same row lock anyway, without the `tables.lock-timeout` bound and in whatever order the flush picks.
 
 The pass checks every entry (step 2) before it writes any (step 3). If step 3 still fails partway, the access may be partly applied,
 so every pipeline gets `not checked` instead of being armed against a state the import can never produce.
@@ -189,16 +194,19 @@ compensation cannot restore without a snapshot of what it overwrote.
 
 It is the access API's own gate: an entry discloses which provider roles exist and what each may do. On `/export` and
 `/export/preview` alike it is checked after `REGISTRY_READ` and before the selection is resolved. The preview's `access` items name
-roles too. On import it joins `authorize(plan)`, so it comes before the collision check
-and the validation pass. Both checks are skipped when security is not enforced, like every other gate on these endpoints.
+roles too. On import it is checked once the bundle is parsed and before the target's access is read, so before the gates of
+`authorize(plan)` (`TABLE_MODIFY`, `REGISTRY_ADMIN`, `TABLE_SENSITIVE`), the collision check and the validation pass. It depends on
+nothing the plan holds, and a caller without it never has the target's access read on its behalf. Both checks are skipped when security is not enforced, like every other gate on these endpoints.
 
 ### D10. `format_version` `4`, and `REPLACE` in the response enum only
 
 Every export writes `4`, so an older ADAS refuses a new bundle readably (the pattern versions 2 and 3 set). Unreleased builds
 may already have written version-3 bundles. The rule that one version names one shape is what makes the refusal reliable, so access
-gets its own version rather than being folded into 3. `ImportAction.REPLACE`
+gets its own version rather than being folded into 3. `REPLACE`
 appears only in responses, never in a bundle, so it needs no format bump. Access entries use it for an upsert that changes an existing
-entry, which is neither `CREATE` nor `SKIP`.
+entry, which is neither `CREATE` nor `SKIP`. It lives in its own `AccessImportAction` (`CREATE`, `REPLACE`, `SKIP`, `FAIL`) rather
+than in `ImportAction`: import never changes an existing table or pipeline, so their entries' schema keeps offering only
+`CREATE`, `SKIP` and `FAIL`.
 
 ## Risks / Trade-offs
 

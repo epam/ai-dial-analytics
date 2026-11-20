@@ -59,9 +59,9 @@ None.
 ## Impact
 
 - **API**: `ExportRequest` gains `include_access`; both import endpoints gain the `include_access` query parameter;
-  `ExportPreview` gains an `access` list; `ImportPreview` / `ImportResult` gain an `access` group; `ImportAction` gains
-  `REPLACE`. When the flags are off, the only changes are that every export writes `format_version` `4` and import responses carry
-  an empty `access` list.
+  `ExportPreview` gains an `access` list; `ImportPreview` / `ImportResult` gain an `access` group whose entries carry
+  the new `AccessImportAction` (`CREATE`, `REPLACE`, `SKIP`, `FAIL`). When the flags are off, the only changes are that every
+  export writes `format_version` `4` and import responses carry an empty `access` list.
 - **Code**: `service/catalog/transfer/*` (`CatalogExportService`, `CatalogImportPlanner`, `CatalogImportValidator`,
   `CatalogImportService`, `ImportTargetReader`), `web/dto/catalog/*`, `CatalogTransferController`, and
   `TableAccessService` (an in-process entry write without a client generation).

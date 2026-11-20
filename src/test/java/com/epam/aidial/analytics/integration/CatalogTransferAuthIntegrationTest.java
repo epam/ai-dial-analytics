@@ -271,6 +271,26 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
     }
 
     @Test
+    void importingAccessChecksTableGrantBeforeTheObjectGates() throws Exception {
+        final String bundle = send(post("/v1/catalog/export"), fullAdmin(),
+                "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\"}],\"include_access\":true}")
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        mockMvc.perform(delete("/v1/tables/" + PLAIN).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+
+        // `importer` lacks both TABLE_GRANT and the TABLE_MODIFY that creating the table needs: the message names the first.
+        for (final String path : List.of("/v1/catalog/import", "/v1/catalog/import/preview")) {
+            upload(path, bundle, caller("importer"), "SKIP_IF_EXISTS", true)
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("forbidden"))
+                    .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_GRANT")));
+            upload(path, bundle, caller("importer"), "SKIP_IF_EXISTS", false)
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_MODIFY")));
+        }
+    }
+
+    @Test
     void anImportedRowPolicyThatConfinesTheImporterIsReportedAtArmTime() throws Exception {
         send(post("/v1/pipelines"), fullAdmin(), "{\"name\":\"cxa-draft\",\"kind\":\"aggregate\",\"target\":\"" + HIDDEN + "\","
                 + "\"inputs\":[\"" + PLAIN + "\"]}")

@@ -45,8 +45,8 @@
 - [x] 2.4 `ImportPreview` / `ImportResult`:
       - add the `access` list `{ table, role, import_action, prev, next, problems, ineffective_grants }`, plus `status`
         (`created` / `replaced` / `skipped` / `rolled_back`) on the result;
-      - add `REPLACE` to `ImportAction`;
-      - update the `ImportAction` and `ImportEntry.status` descriptions
+      - add `AccessImportAction` (`CREATE` / `REPLACE` / `SKIP` / `FAIL`) for the access entries, leaving `ImportAction` as it is;
+      - update the `ImportEntry.status` description
 - [x] 2.5 `CatalogTransferController`:
       - bind `include_access` on both export calls (body) and both import calls (query parameter, default `false`);
       - rewrite the `@Operation` texts that say grants never travel (export: "Grants, row policies and column policies never travel";
@@ -79,8 +79,9 @@
 
 ## 4. Import
 
-- [x] 4.1 `CatalogImportService.authorize`: with `include_access`, require global `TABLE_GRANT` (`403 forbidden`, before the collision
-      check); skip the check when security is not enforced
+- [x] 4.1 `CatalogImportService`: with `include_access`, require global `TABLE_GRANT` once the bundle is parsed (`403 forbidden`,
+      before the target's access is read, the object gates of `authorize` and the collision check); skip the check when security
+      is not enforced
 - [x] 4.2 `CatalogImportPlanner`, with `include_access`:
       - add a validation error when the bundle has no `access` member, names a table outside `tables` and `required_system_tables`,
         has a role key that is blank once trimmed, or has two role keys of one table that trim to the same role;
@@ -97,8 +98,8 @@
         `PUT`'s `error` code (`<code>: <message>`; `CatalogImportService.describe` alone gives only the message);
       - if `importEntries` fails inside the pass, `FAIL` every access entry with the failure and give every pipeline the `not checked`
         arm problem instead of arming it;
-      - if no access entry is `FAIL`, apply them all with `importEntries` and compute `ineffective_grants` on the entries as applied;
-        otherwise apply none and leave every `ineffective_grants` empty;
+      - if no access entry is `FAIL`, apply the `CREATE` and `REPLACE` ones with `importEntries` and compute `ineffective_grants`
+        on the entries as applied; otherwise apply none and leave every `ineffective_grants` empty;
       - arm in either case, so `armable` reflects the imported access whenever it would be written;
       - set `CREATE` / `REPLACE` / `SKIP`;
       - when the pass stops before the access checks, mark every access entry `FAIL` "not checked"

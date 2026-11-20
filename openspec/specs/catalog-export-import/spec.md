@@ -1105,6 +1105,12 @@ is true:
   a table that already exists on the target
 - **THEN** the response is `403` with `error` `forbidden`, not `409`
 
+#### Scenario: The TABLE_GRANT check precedes the object gates
+
+- **WHEN** a caller holding `TABLE_CREATE` but neither `TABLE_GRANT` nor `TABLE_MODIFY` imports, with `include_access=true`, a
+  bundle holding a table the target lacks
+- **THEN** the response is `403` with `error` `forbidden` and a message naming `TABLE_GRANT`, not `TABLE_MODIFY`
+
 #### Scenario: Access lands whole or not at all
 
 - **GIVEN** a bundle that creates table `t` and carries access for `t` and for `dial_usage_log`
