@@ -42,7 +42,8 @@ public class OtelSinkController {
     @PostMapping
     @RequiresPrivilege(Privilege.TABLE_CREATE)
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Create an OTLP sink",
+    @Operation(operationId = "createOtelSink",
+            summary = "Create an OTLP sink",
             description = "Creates one catalog source table per opted-in signal and materializes it in "
                     + "ClickHouse, then records the sink. All-or-nothing: if any signal's table cannot be "
                     + "created the tables created so far are dropped and no sink is recorded. Rejected if "
@@ -57,14 +58,16 @@ public class OtelSinkController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "List OTLP sinks", description = "Returns all sinks, ordered by name.")
+    @Operation(operationId = "listOtelSinks",
+            summary = "List OTLP sinks", description = "Returns all sinks, ordered by name.")
     public SinkListDto list() {
         return new SinkListDto(sinkService.list().stream().map(OtelSinkController::toDto).toList());
     }
 
     @GetMapping("/{name}")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Get an OTLP sink",
+    @Operation(operationId = "getOtelSink",
+            summary = "Get an OTLP sink",
             description = "Returns the sink, its OTLP base path, and the table backing each enabled "
                     + "signal. A signal whose table was deleted through /v1/tables reports a null status.")
     public SinkDto get(@Parameter(description = "Sink name", example = "app") @PathVariable String name) {
@@ -74,7 +77,8 @@ public class OtelSinkController {
     @DeleteMapping("/{name}")
     @RequiresPrivilege(Privilege.TABLE_DELETE)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Delete an OTLP sink",
+    @Operation(operationId = "deleteOtelSink",
+            summary = "Delete an OTLP sink",
             description = "Drops every catalog table backing the sink's signals (ClickHouse table and "
                     + "catalog rows) and removes the sink. A signal whose table is already gone is skipped.")
     public void delete(@Parameter(description = "Sink name", example = "app") @PathVariable String name) {

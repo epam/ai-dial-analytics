@@ -30,11 +30,13 @@ import com.epam.aidial.analytics.web.dto.pipeline.PipelineResponses.RefreshDto;
 import com.epam.aidial.analytics.web.dto.table.WriteRowsRequest;
 import com.epam.aidial.analytics.web.dto.table.WriteRowsResponse;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
+import com.epam.aidial.analytics.web.openapi.ApiInternal;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.enums.ParameterIn;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -146,7 +148,8 @@ public class PipelineDataController {
     @ApiResponse(responseCode = "422", description = "The declaration would not arm, or the body does not fit "
             + "the pipeline: any body on an `aggregate`, `group_key` on a row-grain or Class-1 one, `from`/`to` on a "
             + "`group` one (`pipeline_validation_failed`, one problem at a time), or a read exceeded the preview's budget (`pipeline_preview_budget_exceeded`)")
-    @Operation(summary = "Preview a pipeline (dry run)",
+    @Operation(operationId = "previewPipeline",
+            summary = "Preview a pipeline (dry run)",
             description = "Writes nothing, calls no model, and is allowed on a disabled pipeline — this is the "
                     + "checkpoint between declaring a pipeline and letting it write. A disabled pipeline is "
                     + "refused exactly as arming it would be refused; an enabled `aggregate` is re-gated too, an "
@@ -207,7 +210,8 @@ public class PipelineDataController {
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @RunnerContractExempt
     @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC)
-    @Operation(summary = "Refresh a pipeline now",
+    @Operation(operationId = "refreshPipeline",
+            summary = "Refresh a pipeline now",
             description = "Runs one bounded window immediately: probes the window end, then recomputes in "
                     + "full every group key that window touched. Idempotent — repeating it writes the same "
                     + "values, which the target collapses. `has_more` reports whether input remains, so a "
@@ -220,13 +224,15 @@ public class PipelineDataController {
     }
 
     @PostMapping("/scan")
+    @ApiInternal
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
-            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
+            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE, schema = @Schema(type = "string"))
     @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC)
     @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; the scan reads the "
             + "read source's identity and version columns, the grain key, a group key and an aligned target's partition column")
-    @Operation(summary = "Scan a page of source rows for an enrich pipeline",
+    @Operation(operationId = "scanPipelineSource",
+            summary = "Scan a page of source rows for an enrich pipeline",
             description = "Runs the pipeline's governed source-only keyset scan and returns a page plus an "
                     + "opaque next_cursor, has_more, and lag_seconds. Omit cursor to scan from the start; "
                     + "supply from/to to bound the scan to the version window (from, to]. For a row-trigger pipeline "
@@ -241,13 +247,15 @@ public class PipelineDataController {
     }
 
     @PostMapping("/group-rows")
+    @ApiInternal
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
-            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
+            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE, schema = @Schema(type = "string"))
     @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC)
     @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; group assembly reads "
             + "the group key and the read source's version and identity columns")
-    @Operation(summary = "Assemble a group's member rows for a group-triggered pipeline",
+    @Operation(operationId = "fetchPipelineGroupRows",
+            summary = "Assemble a group's member rows for a group-triggered pipeline",
             description = "Returns the source rows sharing the given group key that satisfy the pipeline's "
                     + "membership filter, in the source's total order, bounded by both a row cap and a "
                     + "response-byte cap (truncated reports either). The caller supplies only the group key. "
@@ -260,14 +268,16 @@ public class PipelineDataController {
     }
 
     @PostMapping("/materialize")
+    @ApiInternal
     @RequiresPrivilege(value = Privilege.TABLE_READ, deferred = true)
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
-            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
+            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE, schema = @Schema(type = "string"))
     @ApiResponse(responseCode = "409", description = WRITE_REFUSAL_DOC)
     @ApiResponse(responseCode = "503", description = RELAYOUT_HOLD_DOC)
     @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; materialize reads "
             + "the read source's version and identity columns, which its next_cursor carries")
-    @Operation(summary = "Materialize a window of a Class-1 (sql) pipeline",
+    @Operation(operationId = "materializePipelineWindow",
+            summary = "Materialize a window of a Class-1 (sql) pipeline",
             description = "Probes a bounded window of the pipeline's source, then writes its derived values "
                     + "for exactly that window with a single server-side INSERT … SELECT. Returns counts and "
                     + "cursor bookkeeping only — no row payload crosses the wire in either direction. "
@@ -287,12 +297,14 @@ public class PipelineDataController {
     }
 
     @PostMapping("/rows")
+    @ApiInternal
     @RequiresPrivilege(value = Privilege.TABLE_WRITE, deferred = true)
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
-            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
+            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE, schema = @Schema(type = "string"))
     @ApiResponse(responseCode = "409", description = WRITE_REFUSAL_DOC)
     @ApiResponse(responseCode = "503", description = RELAYOUT_HOLD_DOC)
-    @Operation(summary = "Write enrichment rows for an enrich pipeline",
+    @Operation(operationId = "writePipelineRows",
+            summary = "Write enrichment rows for an enrich pipeline",
             description = "Validates the row column-set against the declaration's outputs (plus grain and "
                     + "provenance) and writes to the target enrichment; ClickHouse stamps _updated_at. A "
                     + "disabled pipeline is refused with 409 `pipeline_conflict`: a disabled pipeline writes to "

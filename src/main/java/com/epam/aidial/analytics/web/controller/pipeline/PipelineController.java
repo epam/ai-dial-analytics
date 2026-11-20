@@ -112,7 +112,8 @@ public class PipelineController {
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @ResponseStatus(HttpStatus.CREATED)
     @ApiResponse(responseCode = "403", description = COLUMN_REFUSAL_DOC)
-    @Operation(summary = "Register a pipeline",
+    @Operation(operationId = "createPipeline",
+            summary = "Register a pipeline",
             description = "Stores a pipeline. Only `name`, `kind` and `target` are required: every other "
                     + "declaration member may be authored later by PATCH while the pipeline is disabled. The "
                     + "gate its `kind` selects runs when the pipeline is armed — by this call for an `enrich` "
@@ -127,7 +128,8 @@ public class PipelineController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "List pipelines",
+    @Operation(operationId = "listPipelines",
+            summary = "List pipelines",
             description = "Returns registered pipelines, optionally narrowed by target, kind, enabled, and "
                     + "a lower bound on updated_at — every filter optional, all applied together. With no "
                     + "enabled filter this is the whole registry, disabled pipelines included: a listing "
@@ -144,9 +146,6 @@ public class PipelineController {
                     + "`view=compiled` the same listing is the authored declaration and costs no "
                     + "resolution. Ordered `updated_at` then `name`, so the order is stable across calls "
                     + "over an unchanged registry.")
-    // Named for the generated OpenAPI rather than for the class: springdoc derives operationId from the
-    // method name, and a bare list() is one of six in this package, leaving them to be told apart by a
-    // scan-order-dependent list_N suffix.
     public PipelineListDto listPipelines(
             @Parameter(description = "Only pipelines writing this table")
             @RequestParam(required = false) String target,
@@ -197,7 +196,8 @@ public class PipelineController {
 
     @GetMapping("/{name}")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Get a pipeline",
+    @Operation(operationId = "getPipeline",
+            summary = "Get a pipeline",
             description = "Returns the declaration plus its read-only runtime state. Read with "
                     + "`view=compiled`, an `enrich` pipeline additionally carries the resolved "
                     + "`response_schema` the model is held to, its derived grain key, version column and "
@@ -230,7 +230,8 @@ public class PipelineController {
 
     @GetMapping("/{name}/revision/{revision}")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Get a pipeline as it stood at a revision",
+    @Operation(operationId = "getPipelineRevision",
+            summary = "Get a pipeline as it stood at a revision",
             description = "Returns the pipeline's own stored fields reconstructed from the audit trail at "
                     + "the end of the given revision. 404 if the pipeline did not exist at that revision or "
                     + "the revision is unknown. Revision ids come from the activity feed. Gated the same as "
@@ -244,7 +245,8 @@ public class PipelineController {
     @PatchMapping("/{name}")
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @ApiResponse(responseCode = "403", description = COLUMN_REFUSAL_DOC)
-    @Operation(summary = "Patch a pipeline",
+    @Operation(operationId = "patchPipeline",
+            summary = "Patch a pipeline",
             description = "Enables or disables it, and/or re-declares it. A declaration change replaces the "
                     + "stored declaration (an omitted member is cleared; an omitted `target` is kept). One that "
                     + "leaves the pipeline enabled must supply the whole declaration and is validated in full; "
@@ -267,7 +269,8 @@ public class PipelineController {
     @DeleteMapping("/{name}")
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    @Operation(summary = "Delete a pipeline",
+    @Operation(operationId = "deletePipeline",
+            summary = "Delete a pipeline",
             description = "Removes the process. The target table and its rows are left intact — a target "
                     + "that stops being fed is stale, not invalid.")
     public void delete(@Parameter(description = "Pipeline name") @PathVariable String name) {

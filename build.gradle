@@ -381,6 +381,8 @@ def arrowJvmArgs = [
 ]
 
 def MULTI_REPLICA_TESTS = '*.MultiReplica*IntegrationTest'
+def OPENAPI_DOCUMENT = file('docs/openapi.json')
+def OPENAPI_SNAPSHOT_TEST = '*.OpenApiDocumentSnapshotIntegrationTest.committedDocumentMatchesTheServedDocument'
 
 tasks.named('test') {
     useJUnitPlatform()
@@ -399,9 +401,32 @@ tasks.named('test') {
     // The ClickHouse server version the integration tests run against (ClickHouseContainerSupport): an input, so a
     // run against another version is never reported UP-TO-DATE from one against the default.
     inputs.property('clickhouseTestVersion', System.getenv('CLICKHOUSE_TEST_VERSION') ?: '26.8')
+    // OpenApiDocumentSnapshotIntegrationTest compares the served document with this file, so an edit to it alone must
+    // re-run the check. The test reads it relative to the working directory (the project directory), so no absolute path
+    // enters the task's inputs and the build cache stays relocatable.
+    inputs.files(OPENAPI_DOCUMENT).withPropertyName('openapiDocument').withPathSensitivity(PathSensitivity.RELATIVE)
     // The multi-replica classes start a Keeper and three ClickHouse servers; they run in multiReplicaTest instead.
     filter {
         excludeTestsMatching MULTI_REPLICA_TESTS
+    }
+}
+
+// Rewrites the committed OpenAPI document from the code (openspec/specs/openapi-document/spec.md). The drift check in
+// test names this task when the file no longer matches.
+tasks.register('updateOpenApi', Test) {
+    description = 'Regenerates docs/openapi.json from the document the code serves.'
+    group = 'documentation'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    jvmArgs arrowJvmArgs
+    systemProperty 'openapi.update', 'true'
+    // Its job is the side effect on docs/openapi.json, which is no declared output: never up to date, and never loaded
+    // from the build cache (org.gradle.caching), which would skip the test and leave the file unwritten.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    filter {
+        includeTestsMatching OPENAPI_SNAPSHOT_TEST
     }
 }
 

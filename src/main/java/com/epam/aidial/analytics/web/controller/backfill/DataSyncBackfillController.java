@@ -49,7 +49,8 @@ public class DataSyncBackfillController {
     @PostMapping
     @RequiresPrivilege(Privilege.DATA_SYNC_OPERATE)
     @ResponseStatus(HttpStatus.ACCEPTED)
-    @Operation(summary = "Trigger a backfill", description = "Starts an asynchronous backfill for an inclusive UTC date range. "
+    @Operation(operationId = "triggerBackfill",
+            summary = "Trigger a backfill", description = "Starts an asynchronous backfill for an inclusive UTC date range. "
             + "Blobs already ingested are skipped unless `includeIngested` is `true`.")
     @ApiResponse(
             responseCode = "202",
@@ -66,7 +67,8 @@ public class DataSyncBackfillController {
 
     @GetMapping
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "List backfill runs",
+    @Operation(operationId = "listBackfillRuns",
+            summary = "List backfill runs",
             description = "Returns the retained backfill runs, newest started first, each as `GET /{runId}` reports it. "
                     + "A runtime cache, not a history: at most the " + DataBackfillService.MAX_RETAINED_RUNS
                     + " most recently started runs, cleared on restart and "
@@ -86,7 +88,8 @@ public class DataSyncBackfillController {
 
     @GetMapping("/{runId}")
     @RequiresPrivilege(Privilege.REGISTRY_READ)
-    @Operation(summary = "Get backfill status", description = "Returns the current status of a backfill run.")
+    @Operation(operationId = "getBackfillRun",
+            summary = "Get backfill status", description = "Returns the current status of a backfill run.")
     @ApiResponse(
             responseCode = "200",
             description = "Backfill status",
