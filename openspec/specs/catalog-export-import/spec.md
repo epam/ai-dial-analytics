@@ -953,7 +953,8 @@ is true:
   the import's tables exist, and without a client `generation`. An entry a `PUT` would refuse SHALL be `FAIL` with a problem that starts with
   the `PUT`'s `error` code (`<code>: <message>`). An entry on a table whose own entry is refused, at planning or in the validation pass, SHALL be `FAIL`
   naming it, except that a `FAIL_IF_EXISTS` conflict does not refuse it, as for every other dependent. When the pass stops before an entry is checked, that entry SHALL be `FAIL`
-  with a problem saying it was not checked. The pass SHALL check every entry before it applies any. When applying the
+  with a problem saying it was not checked. The pass SHALL check every entry before it applies any, and SHALL apply only `CREATE` and
+  `REPLACE` entries, so it locks no table whose entries all equal the target's. When applying the
   access inside the pass still fails, for example on a lock timeout, every access entry SHALL be `FAIL` with a problem naming the
   failure, and every pipeline SHALL carry the `not checked` arm problem instead of being armed, since the access may be partly
   applied. Any `FAIL` SHALL make `/import` answer `422` with `error` `catalog_import_invalid`.
@@ -966,8 +967,8 @@ is true:
   as a `PUT` does, and an equal entry SHALL write nothing and move neither. The access step SHALL be audited as at most one revision, none when no entry
   changes, tagged with the import's `import_id`, so the activity feed records one `Update` per changed table, however many of its roles changed, each carrying that
   `importId`.
-- **Authorization.** Both calls SHALL require global `TABLE_GRANT`, checked after the programmatic gates of "Import authorization"
-  and so before the collision check. A caller without it SHALL receive `403` with `error` `forbidden`, and nothing SHALL be written.
+- **Authorization.** Both calls SHALL require global `TABLE_GRANT`, checked once the bundle is parsed and before the target's access
+  is read, so before the programmatic gates of "Import authorization" and the collision check. A caller without it SHALL receive `403` with `error` `forbidden`, and nothing SHALL be written.
   `TABLE_CREATE` at the endpoint SHALL still be required, even for a bundle that carries only access. When security is not enforced,
   this check SHALL be skipped.
 

@@ -1,11 +1,15 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.web.dto.catalog.AccessImportEntry;
 import com.epam.aidial.analytics.web.dto.catalog.EnvSpecificValue;
 import com.epam.aidial.analytics.web.dto.catalog.ImportEntry;
 import com.epam.aidial.analytics.web.dto.catalog.ImportPreview;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 /**
@@ -41,6 +45,14 @@ record ImportPlan(
 
     List<AccessImportEntry> accessEntries() {
         return access.stream().map(PlannedAccess::toEntry).toList();
+    }
+
+    /** The access entries {@code include} accepts, as {@code TableAccessService.importEntries} takes them: table, then role key, then body. */
+    Map<String, Map<String, EntryRequest>> accessBodies(Predicate<PlannedAccess> include) {
+        final Map<String, Map<String, EntryRequest>> bodies = new LinkedHashMap<>();
+        access.stream().filter(include).forEach(entry -> bodies.computeIfAbsent(entry.table(), table -> new LinkedHashMap<>())
+                .put(entry.key(), entry.bundled().toRequest()));
+        return bodies;
     }
 
     static List<ImportEntry> entries(List<PlannedObject> objects) {

@@ -565,23 +565,26 @@ class TableAccessServiceTest {
     void portableViewReducesStoredEntriesInStepOrder() {
         table.getAccess().setRead(List.of("*", "READ_ONLY_ANALYTIC", "X"));
         table.getAccess().setWrite(List.of("*"));
-        table.setColumnPolicies(columnPolicyCodec.write(Map.of("X", List.of("a", "e.note"))));
+        table.setColumnPolicies(columnPolicyCodec.write(Map.of("X", List.of("a", "e.note"), "Y", List.of("b"))));
         final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
         when(definitions.findBySourceTable("t")).thenReturn(List.of(enrichment));
         when(columns.findByTableNameOrderByOrdinal("e")).thenReturn(List.of(column("e", "note")));
+        clearInvocations(columns);
 
-        final TableAccessService.PortableAccess kept = service.portable(table, name -> false);
-        assertThat(kept.entries()).containsOnlyKeys("*", "X");
+        final TableAccessService.PortableAccess kept = service.portable(table);
+        verify(columns, times(1)).findByTableNameOrderByOrdinal("t");
+        assertThat(kept.entries()).containsOnlyKeys("*", "X", "Y");
         assertThat(kept.entries().get("*").privileges()).containsExactly(Privilege.TABLE_READ);
         assertThat(kept.leftBehind()).extracting(TableAccessService.LeftBehind::role, TableAccessService.LeftBehind::error)
                 .containsExactly(tuple("*", "validation_error"), tuple("READ_ONLY_ANALYTIC", "validation_error"));
         assertThat(kept.leftBehind().get(0).entry().privileges()).containsExactly(Privilege.TABLE_WRITE);
         assertThat(TableAccessService.enrichmentsNamed(kept.entries())).containsExactly("e");
 
-        final TableAccessService.PortableAccess skipped = service.portable(table, "e"::equals);
-        assertThat(skipped.entries()).containsOnlyKeys("*");
+        final TableAccessService.PortableAccess skipped = service.portable(table).withoutSkipped("e"::equals);
+        assertThat(skipped.entries()).containsOnlyKeys("*", "Y");
         assertThat(skipped.leftBehind()).extracting(TableAccessService.LeftBehind::role, TableAccessService.LeftBehind::error)
-                .contains(tuple("X", "dependency_skipped"));
+                .containsExactly(tuple("*", "validation_error"), tuple("READ_ONLY_ANALYTIC", "validation_error"),
+                        tuple("X", "dependency_skipped"));
     }
 
     @Test
@@ -589,7 +592,7 @@ class TableAccessServiceTest {
         final TableDefinitionEntity enrichment = table("e", TableType.ENRICHMENT);
         enrichment.getAccess().setRead(List.of("X"));
         enrichment.getAccess().setWrite(List.of("X"));
-        final TableAccessService.PortableAccess enriched = service.portable(enrichment, name -> false);
+        final TableAccessService.PortableAccess enriched = service.portable(enrichment);
         assertThat(enriched.entries().get("X")).isEqualTo(new AccessEntry(List.of(Privilege.TABLE_WRITE), null, null));
         assertThat(enriched.leftBehind()).extracting(TableAccessService.LeftBehind::error).containsExactly("enrichment_follows_source");
 
@@ -597,7 +600,7 @@ class TableAccessServiceTest {
         system.setSystem(true);
         system.getAccess().setRead(List.of("X"));
         system.getAccess().setWrite(List.of("X"));
-        final TableAccessService.PortableAccess systemAccess = service.portable(system, name -> false);
+        final TableAccessService.PortableAccess systemAccess = service.portable(system);
         assertThat(systemAccess.entries().get("X")).isEqualTo(new AccessEntry(List.of(Privilege.TABLE_READ), null, null));
         assertThat(systemAccess.leftBehind()).extracting(TableAccessService.LeftBehind::error).containsExactly("table_is_system");
     }

@@ -39,8 +39,7 @@ import java.util.Set;
  * export's visibility rules, never the full objects the planner compares: sensitive columns only with the clearance on
  * that table, no column a column policy hides, nothing for a table the caller may not {@code TABLE_GET}, and no pipeline
  * declaration without {@code REGISTRY_READ}. A table's access entries are read only for an import with
- * {@code include_access}; they reach a response only once the import's own {@code TABLE_GRANT} check has passed, which
- * runs after this read and before anything is returned.
+ * {@code include_access}, whose {@code TABLE_GRANT} check runs before this read.
  */
 @Component
 @RequiredArgsConstructor

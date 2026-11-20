@@ -127,19 +127,23 @@ public class CatalogImportService {
                     + "objects through their own endpoints");
         }
         final CatalogBundle bundle = parser.parseBundle(file);
+        // The access API's own gate, before the target's access is read: it depends on nothing the plan holds.
+        if (includeAccess && securityMode.isEnforced()) {
+            require(Privilege.TABLE_GRANT, "writing access entries");
+        }
         final ImportPlan plan = planner.plan(bundle, acknowledgeReusedNames, policy, targetReader.read(bundle, includeAccess),
                 includeAccess);
-        authorize(plan, includeAccess);
+        authorize(plan);
         return plan;
     }
 
     /**
      * The endpoint gates of the services import calls in-process, which it bypasses: define-schema's global
      * {@code TABLE_MODIFY}, pipeline registration's {@code REGISTRY_ADMIN}, and {@code TABLE_SENSITIVE}
-     * for a sensitive column, which on a table with no grants only the global clearance can satisfy; then, for an
-     * import with access, the access API's {@code TABLE_GRANT}. All before the collision check.
+     * for a sensitive column, which on a table with no grants only the global clearance can satisfy. All before the
+     * collision check.
      */
-    private void authorize(ImportPlan plan, boolean includeAccess) {
+    private void authorize(ImportPlan plan) {
         if (!securityMode.isEnforced()) {
             return;
         }
@@ -157,9 +161,6 @@ public class CatalogImportService {
                 .anyMatch(Boolean.TRUE::equals);
         if (sensitive) {
             require(Privilege.TABLE_SENSITIVE, "declaring sensitive columns on tables it creates");
-        }
-        if (includeAccess) {
-            require(Privilege.TABLE_GRANT, "writing access entries");
         }
     }
 
@@ -245,7 +246,7 @@ public class CatalogImportService {
      */
     private boolean importAccess(ImportPlan plan) {
         try {
-            final Map<String, Map<String, ImportStatus>> written = tableAccess.importEntries(CatalogImportValidator.bodies(plan));
+            final Map<String, Map<String, ImportStatus>> written = tableAccess.importEntries(plan.accessBodies(entry -> true));
             plan.access().forEach(entry -> entry.status(written.get(entry.table()).get(entry.role()).name().toLowerCase(Locale.ROOT)));
             return true;
         } catch (RuntimeException ex) {

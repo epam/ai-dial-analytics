@@ -74,9 +74,9 @@ The preview runs the same validation pass as the import and writes nothing. Chec
   reads. Edit the bundle, or skip the access, until each entry is right. Importing access needs `TABLE_GRANT`, and
   still `TABLE_CREATE`, even for a bundle that carries only access.
 
-While a preview with access runs, it holds locks on the covered tables, system tables included, so do not edit or
-import access on them at the same time: such a write waits up to `tables.lock-timeout` and then answers
-`409 table_busy`.
+While a preview with access runs, it holds locks on the covered tables whose access it would change (`CREATE` or
+`REPLACE`), system tables included, so do not edit or import access on them at the same time: such a write waits up
+to `tables.lock-timeout` and then answers `409 table_busy`.
 
 ## 3. Import
 

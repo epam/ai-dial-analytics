@@ -2,9 +2,9 @@ package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
 import com.epam.aidial.analytics.service.table.TableAccessService.IneffectiveGrant;
+import com.epam.aidial.analytics.web.dto.catalog.AccessImportAction;
 import com.epam.aidial.analytics.web.dto.catalog.AccessImportEntry;
 import com.epam.aidial.analytics.web.dto.catalog.BundleAccessEntry;
-import com.epam.aidial.analytics.web.dto.catalog.ImportAction;
 import com.epam.aidial.analytics.web.dto.table.access.AccessEntryReplacedDto.IneffectiveGrantDto;
 import org.apache.commons.lang3.StringUtils;
 
@@ -23,7 +23,7 @@ final class PlannedAccess {
     private final BundleAccessEntry bundled;
     private final AccessEntry stored;
     private BundleAccessEntry next;
-    private ImportAction action;
+    private AccessImportAction action;
     private final List<String> problems = new ArrayList<>();
     private List<IneffectiveGrant> ineffectiveGrants = List.of();
     private String status;
@@ -60,17 +60,22 @@ final class PlannedAccess {
     /** Checked: {@code entry} is what a {@code PUT} of the bundle's entry would store. */
     void checked(AccessEntry entry) {
         this.next = BundleAccessEntry.of(entry);
-        this.action = stored == null ? ImportAction.CREATE : entry.equals(stored) ? ImportAction.SKIP : ImportAction.REPLACE;
+        this.action = stored == null ? AccessImportAction.CREATE : entry.equals(stored) ? AccessImportAction.SKIP : AccessImportAction.REPLACE;
     }
 
     void fail(String problem) {
-        this.action = ImportAction.FAIL;
+        this.action = AccessImportAction.FAIL;
         this.next = bundled;
         problems.add(problem);
     }
 
     boolean failed() {
-        return action == ImportAction.FAIL;
+        return action == AccessImportAction.FAIL;
+    }
+
+    /** Whether the checked entry differs from the target's, so applying it changes the table. */
+    boolean changes() {
+        return action == AccessImportAction.CREATE || action == AccessImportAction.REPLACE;
     }
 
     void ineffectiveGrants(List<IneffectiveGrant> grants) {

@@ -1,5 +1,7 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.table.TableDefinitionLockingImpl;
+import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -8,18 +10,25 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMultipartHttpServletRequestBuilder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -68,6 +77,12 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     private JdbcTemplate jdbc;
     @Autowired
     private JsonMapper json;
+    @Autowired
+    private TableDefinitionRepository definitions;
+    @Autowired
+    private TableDefinitionLockingImpl locking;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     private String systemAccess;
 
@@ -680,6 +695,31 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.access[*].import_action", everyItem(is("SKIP"))))
                 .andExpect(jsonPath("$.access[*].status", everyItem(is("skipped"))));
         assertThat(generation(BASE)).isEqualTo(generation);
+    }
+
+    /** The pass applies only entries that change, so a preview whose access equals the target's waits on no row lock. */
+    @Test
+    void previewOfUnchangedAccessTakesNoRowLock() throws Exception {
+        putAccess(SYSTEM, "cx-kept", "get");
+        final String bundle = accessOnly("{\"cx-kept\":{\"privileges\":[\"get\"]}}");
+        final Object timeout = ReflectionTestUtils.getField(locking, "lockTimeout");
+        ReflectionTestUtils.setField(locking, "lockTimeout", Duration.ofMillis(300));
+        try {
+            final String preview = new TransactionTemplate(transactionManager).execute(status -> {
+                definitions.findForUpdate(SYSTEM).orElseThrow();
+                try (ExecutorService other = Executors.newSingleThreadExecutor()) {
+                    return other.submit(() -> importAccess("/v1/catalog/import/preview", bundle, "SKIP_IF_EXISTS")
+                            .andReturn().getResponse().getContentAsString()).get(30, TimeUnit.SECONDS);
+                } catch (Exception ex) {
+                    throw new IllegalStateException(ex);
+                }
+            });
+            final JsonNode entry = json.readTree(preview).get("access").get(0);
+            assertThat(entry.get("import_action").asString()).isEqualTo("SKIP");
+            assertThat(entry.get("problems")).isEmpty();
+        } finally {
+            ReflectionTestUtils.setField(locking, "lockTimeout", timeout);
+        }
     }
 
     @Test

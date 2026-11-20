@@ -17,7 +17,7 @@ public record AccessImportEntry(
 
         @Schema(description = "CREATE when the target has no entry for the role, REPLACE when it has a different one, SKIP "
                 + "when it has an equal one, FAIL when the entry is refused")
-        @JsonProperty("import_action") ImportAction importAction,
+        @JsonProperty("import_action") AccessImportAction importAction,
 
         @Schema(description = "The target's entry for the role, or null when it has none")
         @JsonInclude(JsonInclude.Include.ALWAYS) BundleAccessEntry prev,

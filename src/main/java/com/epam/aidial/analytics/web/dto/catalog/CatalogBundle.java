@@ -63,7 +63,8 @@ public record CatalogBundle(
      *       bundle with the readable newer-format 422 rather than the strict binder's unknown-field 400.</li>
      *   <li>{@code 3} — adds an {@code enrich} transform's {@code route} and the {@code dial_app_route} preset, and a
      *       {@code group} pipeline's {@code advanced.input_token_budget}.</li>
-     *   <li>{@code 4} — adds the top-level {@code access} member.</li>
+     *   <li>{@code 4} — adds the top-level {@code access} member. No release wrote {@code 3}, but pre-release builds
+     *       did, and one version naming one shape keeps their refusal of an {@code access} bundle the readable 422.</li>
      * </ul>
      */
     public static final int FORMAT_VERSION = 4;

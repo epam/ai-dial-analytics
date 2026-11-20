@@ -1,9 +1,6 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
-import com.epam.aidial.analytics.exception.EnrichmentFollowsSourceException;
-import com.epam.aidial.analytics.exception.SystemTableException;
-import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
 import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
@@ -24,7 +21,6 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -36,7 +32,7 @@ import java.util.stream.Stream;
  * one PostgreSQL transaction that is always rolled back, with ClickHouse DDL replaced by a no-op. Every check
  * those services make is therefore the check the import will meet, and nothing is written: no catalog row, no
  * ClickHouse table, no audit revision. Once every pipeline is created it checks every access entry of an import
- * with {@code include_access} and, when none is refused, applies them all, so the arm checks and the ineffective-grant
+ * with {@code include_access} and, when none is refused, applies every one that changes its table, so the arm checks and the ineffective-grant
  * reports see the access the import would write. It then arms each pipeline the same way {@code PATCH enabled=true}
  * does, inside the same transaction, to report {@code armable}; arming only after all are created means an enrich
  * pipeline reading another one's target is checked against that pipeline, whichever comes first. Existing objects
@@ -161,7 +157,7 @@ class CatalogImportValidator {
 
         /**
          * Checks every access entry with the rules of a {@code PUT}, against the target as the pass leaves it, and, when
-         * none is refused, applies them all, so arming and the reports see them. A refusal is reported as
+         * none is refused, applies every {@code CREATE} and {@code REPLACE}, so arming and the reports see them. A refusal is reported as
          * {@code <code>: <message>}.
          */
         private void checkAccess() {
@@ -188,11 +184,10 @@ class CatalogImportValidator {
                 }
                 try {
                     entry.checked(tableAccess.importEntryFor(definition, entry.key(), entry.bundled().toRequest()));
-                } catch (TableValidationException | SystemTableException | EnrichmentFollowsSourceException ex) {
-                    entry.fail(TableAccessService.errorCode(ex) + ": " + CatalogImportService.describe(ex));
                 } catch (RuntimeException ex) {
-                    entry.fail(CatalogImportService.describe(ex));
-                    if (transactionAborted()) {
+                    final String code = TableAccessService.refusalCode(ex);
+                    entry.fail(code == null ? CatalogImportService.describe(ex) : code + ": " + CatalogImportService.describe(ex));
+                    if (code == null && transactionAborted()) {
                         stoppedAt = entry.table();
                     }
                 }
@@ -200,10 +195,14 @@ class CatalogImportValidator {
             if (plan.access().stream().anyMatch(PlannedAccess::failed)) {
                 return;
             }
-            // The pass has loaded these rows before importEntries locks them, so the preview may judge a copy a moment
-            // older than the lock; nothing it writes survives, and the import itself locks first in a fresh transaction.
+            // Only a changing entry is applied, so a table whose entries all equal the target's is never locked. The pass
+            // has loaded these rows before importEntries locks them, so the preview may judge a copy a moment older than
+            // the lock; nothing it writes survives, and the import itself locks first in a fresh transaction.
+            final Map<String, Map<String, EntryRequest>> changes = plan.accessBodies(PlannedAccess::changes);
             try {
-                tableAccess.importEntries(bodies(plan));
+                if (!changes.isEmpty()) {
+                    tableAccess.importEntries(changes);
+                }
                 plan.access().forEach(entry -> entry.ineffectiveGrants(tableAccess.ineffectiveGrants(entry.table(), entry.role())));
             } catch (RuntimeException ex) {
                 accessFailed = true;
@@ -282,13 +281,5 @@ class CatalogImportValidator {
                 return true;
             }
         }
-    }
-
-    /** The bundle's access entries as {@code importEntries} takes them: table, then role key, then body. */
-    static Map<String, Map<String, EntryRequest>> bodies(ImportPlan plan) {
-        final Map<String, Map<String, EntryRequest>> bodies = new LinkedHashMap<>();
-        plan.access().forEach(entry -> bodies.computeIfAbsent(entry.table(), table -> new LinkedHashMap<>())
-                .put(entry.key(), entry.bundled().toRequest()));
-        return bodies;
     }
 }

@@ -49,6 +49,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -291,8 +292,8 @@ public class CatalogExportService {
         private final boolean includeAccess;
         /** Exporting everything with access: every system table the caller may get, reached or not. */
         private final Set<String> systemCandidates = new TreeSet<>();
-        /** The tables whose access edges the walk has followed, so each is followed once. */
-        private final Set<String> followed = new HashSet<>();
+        /** Each table whose access edges the walk has followed, with its portable access, so each is reduced once. */
+        private final Map<String, PortableAccess> followed = new HashMap<>();
         private Map<String, List<ColumnMappingEntity>> mappings = Map.of();
 
         private Walk(Set<String> otlp, List<PipelineEntity> all, boolean includeAccess) {
@@ -344,10 +345,11 @@ public class CatalogExportService {
          * making {@code definition} need it: a skipped one leaves only the entry naming it behind.
          */
         private void followAccess(TableDefinitionEntity definition) {
-            if (!followed.add(definition.getName())) {
+            if (followed.containsKey(definition.getName())) {
                 return;
             }
-            final PortableAccess kept = tableAccess.portable(definition, name -> false);
+            final PortableAccess kept = tableAccess.portable(definition);
+            followed.put(definition.getName(), kept);
             for (final String enrichment : TableAccessService.enrichmentsNamed(kept.entries())) {
                 table(enrichment, "column policy of " + definition.getName());
             }
@@ -557,7 +559,8 @@ public class CatalogExportService {
             final Map<String, PortableAccess> access = new TreeMap<>();
             final Map<String, String> required = new TreeMap<>(resolution.systemTables());
             for (final String name : candidates) {
-                final PortableAccess portable = tableAccess.portable(loadedTables.get(name), skippedTables::contains);
+                final PortableAccess portable = followed.computeIfAbsent(name, table -> tableAccess.portable(loadedTables.get(table)))
+                        .withoutSkipped(skippedTables::contains);
                 access.put(name, portable);
                 if (systemCandidates.contains(name) && !portable.entries().isEmpty()) {
                     required.putIfAbsent(name, "access");

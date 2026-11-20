@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * A table's access configuration as one entry per raw provider role, {@code {privileges, rows, columns}}: a view over
@@ -134,14 +135,39 @@ public class TableAccessService {
     public record LeftBehind(String role, AccessEntry entry, String error) {}
 
     /** A table's entries as an export carries them, sorted by role, and what it leaves behind, by role then step. */
-    public record PortableAccess(Map<String, AccessEntry> entries, List<LeftBehind> leftBehind) {}
+    public record PortableAccess(Map<String, AccessEntry> entries, List<LeftBehind> leftBehind) {
 
-    /** The {@code error} code a refusal of a {@code PUT}'s body checks answers with. */
-    public static String errorCode(RuntimeException refusal) {
-        if (refusal instanceof EnrichmentFollowsSourceException) {
-            return "enrichment_follows_source";
+        /**
+         * The step of {@link #portable} that needs the export's closure: an entry whose column policy names an enrichment
+         * {@code skippedEnrichment} accepts is left behind ({@code dependency_skipped}).
+         */
+        public PortableAccess withoutSkipped(Predicate<String> skippedEnrichment) {
+            final Map<String, AccessEntry> kept = new LinkedHashMap<>();
+            final List<LeftBehind> behind = new ArrayList<>(leftBehind);
+            entries.forEach((role, entry) -> {
+                if (enrichmentsNamed(Map.of(role, entry)).stream().anyMatch(skippedEnrichment)) {
+                    behind.add(new LeftBehind(role, entry, "dependency_skipped"));
+                } else {
+                    kept.put(role, entry);
+                }
+            });
+            // Stable, so each role's parts stay in step order, this one last.
+            behind.sort(Comparator.comparing(LeftBehind::role));
+            return new PortableAccess(kept, List.copyOf(behind));
         }
-        return refusal instanceof SystemTableException ? "table_is_system" : "validation_error";
+    }
+
+    /**
+     * The {@code error} code a {@code PUT} answers {@code refusal} of its body checks with, or {@code null} when
+     * {@code refusal} is not one of them: the one place that names the body checks' refusal types.
+     */
+    public static String refusalCode(RuntimeException refusal) {
+        return switch (refusal) {
+            case EnrichmentFollowsSourceException ex -> "enrichment_follows_source";
+            case SystemTableException ex -> "table_is_system";
+            case TableValidationException ex -> "validation_error";
+            default -> null;
+        };
     }
 
     /** Every role's entry on {@code table}, each reported on as stored now. */
@@ -189,8 +215,11 @@ public class TableAccessService {
         AccessEntry entry = null;
         RuntimeException refusal = null;
         try {
-            entry = validated(definition, role, request);
-        } catch (TableValidationException | SystemTableException ex) {
+            entry = validated(definition, role, request, () -> storedColumnNames(definition.getName()));
+        } catch (RuntimeException ex) {
+            if (refusalCode(ex) == null) {
+                throw ex;
+            }
             refusal = ex;
         }
         final Map<String, AccessEntry> stored = entries(definition);
@@ -234,8 +263,12 @@ public class TableAccessService {
      * transactional proxy would mark that transaction rollback-only.
      */
     public AccessEntry entryFor(TableDefinitionEntity definition, String role, EntryRequest body) {
+        return entryFor(definition, role, body, () -> storedColumnNames(definition.getName()));
+    }
+
+    private AccessEntry entryFor(TableDefinitionEntity definition, String role, EntryRequest body, Supplier<Set<String>> columnNames) {
         requireNoReadSideOnEnrichment(definition, body);
-        return validated(definition, role, body);
+        return validated(definition, role, body, columnNames);
     }
 
     /**
@@ -321,41 +354,45 @@ public class TableAccessService {
      * {@code definition}'s stored entries reduced to what a {@code PUT} on this ADAS accepts now, in the order of
      * {@code openspec/specs/catalog-export-import/spec.md} ("Access export"): an enrichment keeps only {@code write} and
      * {@code modify}; a {@code *} entry and every entry of a system table drop {@code write} and {@code modify}; what a
-     * {@code PUT}'s body checks still refuse is left behind; an entry naming an enrichment {@code skippedEnrichment}
-     * accepts is left behind ({@code dependency_skipped}); an emptied entry is omitted. Every removed part is reported,
-     * by role and then in step order. Not {@code @Transactional}, as {@link #entryFor}.
+     * {@code PUT}'s body checks still refuse is left behind; an emptied entry is omitted. Every removed part is reported,
+     * by role and then in step order. The step that needs the closure, an entry naming a skipped enrichment, is
+     * {@link PortableAccess#withoutSkipped}. Not {@code @Transactional}, as {@link #entryFor}.
      */
-    public PortableAccess portable(TableDefinitionEntity definition, Predicate<String> skippedEnrichment) {
+    public PortableAccess portable(TableDefinitionEntity definition) {
         final Map<String, AccessEntry> kept = new LinkedHashMap<>();
         final List<LeftBehind> leftBehind = new ArrayList<>();
-        for (final Map.Entry<String, AccessEntry> stored : entries(definition).entrySet()) {
+        final Map<String, AccessEntry> entries = entries(definition);
+        // Looked up once for every role's column policy, and only when one has a policy.
+        final Set<String> names = entries.values().stream().anyMatch(entry -> entry.columns() != null)
+                ? storedColumnNames(definition.getName()) : Set.of();
+        final Supplier<Set<String>> columnNames = () -> names;
+        for (final Map.Entry<String, AccessEntry> stored : entries.entrySet()) {
             final String role = stored.getKey();
             AccessEntry entry = stored.getValue();
             if (definition.getType() == TableType.ENRICHMENT) {
                 final AccessEntry readSide = new AccessEntry(entry.privileges().stream().filter(READ_SIDE_GRANTS::contains).toList(),
                         entry.rows(), entry.columns());
                 entry = new AccessEntry(entry.privileges().stream().filter(PrivilegeScope::isModifying).toList(), null, null);
-                leaveBehind(definition, role, readSide, leftBehind);
+                leaveBehind(definition, role, readSide, leftBehind, columnNames);
             }
             if (definition.isSystem() || SecurityClaimsExtractor.ANYONE.equals(role)) {
                 final AccessEntry modifying = new AccessEntry(entry.privileges().stream().filter(PrivilegeScope::isModifying).toList(),
                         null, null);
                 entry = new AccessEntry(entry.privileges().stream().filter(privilege -> !PrivilegeScope.isModifying(privilege)).toList(),
                         entry.rows(), entry.columns());
-                leaveBehind(definition, role, modifying, leftBehind);
+                leaveBehind(definition, role, modifying, leftBehind, columnNames);
             }
             if (!entry.isEmpty()) {
                 try {
-                    entry = entryFor(definition, role, body(entry));
-                } catch (TableValidationException | SystemTableException | EnrichmentFollowsSourceException ex) {
-                    leftBehind.add(new LeftBehind(role, entry, errorCode(ex)));
+                    entry = entryFor(definition, role, body(entry), columnNames);
+                } catch (RuntimeException ex) {
+                    final String error = refusalCode(ex);
+                    if (error == null) {
+                        throw ex;
+                    }
+                    leftBehind.add(new LeftBehind(role, entry, error));
                     entry = EMPTY;
                 }
-            }
-            if (entry.columns() != null && entry.columns().stream().anyMatch(name -> name.indexOf('.') > 0
-                    && skippedEnrichment.test(name.substring(0, name.indexOf('.'))))) {
-                leftBehind.add(new LeftBehind(role, entry, "dependency_skipped"));
-                entry = EMPTY;
             }
             if (!entry.isEmpty()) {
                 kept.put(role, entry);
@@ -382,21 +419,28 @@ public class TableAccessService {
     }
 
     /** Records {@code part} as left behind, with the code a {@code PUT}'s body checks give it, unless it is empty. */
-    private void leaveBehind(TableDefinitionEntity definition, String role, AccessEntry part, List<LeftBehind> leftBehind) {
+    private void leaveBehind(TableDefinitionEntity definition, String role, AccessEntry part, List<LeftBehind> leftBehind,
+            Supplier<Set<String>> columnNames) {
         if (part.isEmpty()) {
             return;
         }
         String error = "validation_error";
         try {
-            entryFor(definition, role, body(part));
-        } catch (TableValidationException | SystemTableException | EnrichmentFollowsSourceException ex) {
-            error = errorCode(ex);
+            entryFor(definition, role, body(part), columnNames);
+        } catch (RuntimeException ex) {
+            error = refusalCode(ex);
+            if (error == null) {
+                throw ex;
+            }
         }
         leftBehind.add(new LeftBehind(role, part, error));
     }
 
-    /** The entry a {@code PUT} would store: the role, then the system refusal, then the remaining body checks. */
-    private AccessEntry validated(TableDefinitionEntity definition, String role, EntryRequest request) {
+    /**
+     * The entry a {@code PUT} would store: the role, then the system refusal, then the remaining body checks.
+     * {@code columnNames} supplies what a column policy may name ({@link #storedColumnNames}).
+     */
+    private AccessEntry validated(TableDefinitionEntity definition, String role, EntryRequest request, Supplier<Set<String>> columnNames) {
         final String table = definition.getName();
         final String grantee = RowPolicyService.requireRole(role);
         final List<String> sentPrivileges = request.privileges() == null ? List.of() : request.privileges();
@@ -406,7 +450,7 @@ public class TableAccessService {
         }
         final List<Privilege> privileges = privileges(grantee, sentPrivileges);
         final RowPolicy rows = rows(table, grantee, request.rows());
-        final List<String> columnPolicy = columnPolicy(definition, grantee, request.columns());
+        final List<String> columnPolicy = columnPolicy(definition, grantee, request.columns(), columnNames);
         return new AccessEntry(privileges, rows, columnPolicy);
     }
 
@@ -577,7 +621,8 @@ public class TableAccessService {
      * catalog columns and of {@code <enrichment>.<column>} for its enrichments' columns, matched case-sensitively,
      * de-duplicated and sorted. Validated against the stored columns, whatever the writing caller may see.
      */
-    private List<String> columnPolicy(TableDefinitionEntity definition, String role, List<String> names) {
+    private static List<String> columnPolicy(TableDefinitionEntity definition, String role, List<String> names,
+            Supplier<Set<String>> columnNames) {
         if (names == null) {
             return null;
         }
@@ -585,7 +630,7 @@ public class TableAccessService {
             throw new TableValidationException("'columns' must not be empty: a role meant to see no column should not "
                     + "read the table; send 'columns': null for every column");
         }
-        final Set<String> stored = storedColumnNames(definition.getName());
+        final Set<String> stored = columnNames.get();
         for (final String name : names) {
             if (StringUtils.isBlank(name) || !stored.contains(name)) {
                 throw new TableValidationException("the column policy of role '" + role + "' names '" + name + "', which is "
