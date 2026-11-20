@@ -201,15 +201,17 @@ class MultiReplicaIntegrationTest {
     void withKeeperDownQueriesAreServedAndWritesAnswerUnavailable() throws Exception {
         createTable();
         CLUSTER.stopKeeper();
-        // Long enough for the replicas to notice the lost session.
-        MultiReplicaClickHouseSupport.sleep(7_000);
+        CLUSTER.awaitKeeperLost();
 
         assertThat(router.query(() -> clickHouse.query("SELECT count() AS c FROM " + TABLE).getFirst().getLong("c")))
                 .isZero();
+        final long started = System.nanoTime();
         mockMvc.perform(post("/v1/tables/" + TABLE + "/rows").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"rows\":[{\"widget_id\":\"w1\",\"score\":1}]}"))
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.error").value("clickhouse_unavailable"));
+        // The writers bound ClickHouse's Keeper retries (about nine seconds); its defaults would hold the write ~2 minutes.
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(30));
         assertThatThrownBy(() -> router.openRun("keeper-down", usageLog()).close())
                 .isInstanceOf(ClickHouseUnavailableException.class);
     }

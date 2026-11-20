@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.integration;
 
 import com.clickhouse.client.api.Client;
+import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.clickhouse.replication.ReplicaAddressing;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -186,6 +187,31 @@ final class MultiReplicaClickHouseSupport {
             keeper.getDockerClient().startContainerCmd(keeper.getContainerId()).exec();
         } catch (NotModifiedException alreadyRunning) {
             // Running already.
+        }
+    }
+
+    /**
+     * Waits until every replica has noticed a {@link #stopKeeper stopped} Keeper: it has replicated tables, and all of them
+     * turned read-only, so an insert answers {@code TABLE_IS_READ_ONLY}.
+     */
+    void awaitKeeperLost() {
+        final long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
+        for (final String name : REPLICAS) {
+            while (true) {
+                try (Client client = client(name)) {
+                    final GenericRecord row = client.queryAll("SELECT count() AS total, countIf(NOT is_readonly) AS writable FROM system.replicas")
+                            .getFirst();
+                    if (row.getLong("total") > 0 && row.getLong("writable") == 0) {
+                        break;
+                    }
+                } catch (Exception notYet) {
+                    // The replica did not answer this poll; ask again until the deadline.
+                }
+                if (System.nanoTime() > deadline) {
+                    throw new IllegalStateException("replica " + name + " did not notice that Keeper is down");
+                }
+                sleep(250);
+            }
         }
     }
 

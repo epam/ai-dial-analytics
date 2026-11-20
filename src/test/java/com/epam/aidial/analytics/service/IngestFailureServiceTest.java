@@ -157,6 +157,8 @@ class IngestFailureServiceTest {
         int requeued = service.requeue(new IngestFailureFilter(null, IngestFailureState.PARKED, null, null, null, null));
 
         assertThat(requeued).isEqualTo(1);
+        // The operator is waiting on the response, so the write fails promptly with Keeper gone.
+        assertThat(failureLedger.promptAppends).isEqualTo(1);
         IngestFailureEntry entry = single();
         assertThat(entry.state()).isEqualTo(IngestFailureState.PENDING);
         assertThat(entry.failure().attempts()).isZero();

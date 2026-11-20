@@ -20,6 +20,17 @@ public interface IngestFailureLedger {
     void append(Collection<IngestFailureEvent> events);
 
     /**
+     * {@link #append} for a caller waiting on an HTTP response, the operator requeue: with ClickHouse's coordination
+     * gone it fails within seconds, as {@code ClickHouseUnavailableException}, instead of waiting out ClickHouse's
+     * default Keeper retries.
+     *
+     * @param events the events; a no-op when empty
+     */
+    default void appendPromptly(Collection<IngestFailureEvent> events) {
+        append(events);
+    }
+
+    /**
      * The subjects whose latest event is not a resolution and which have failed at least once, aggregated. Not
      * yet filtered by the ingest ledger.
      *

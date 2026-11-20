@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.clickhouse;
 
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.insert.InsertResponse;
+import com.clickhouse.client.api.insert.InsertSettings;
 import com.clickhouse.data.ClickHouseFormat;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.configuration.ClickHouseWriterProperties;
@@ -39,6 +40,9 @@ import java.util.Map;
  * 400 tells it the rows are bad and must be discarded — so an insert that failed because ClickHouse was out
  * of memory used to destroy work that was never wrong. Raw ClickHouse messages are never propagated to API
  * callers.
+ *
+ * <p>Each insert caps ClickHouse's Keeper retries ({@link KeeperRetries}), so with Keeper gone the waiting caller hears
+ * {@code 503} within seconds rather than after a proxy's read timeout.
  */
 @Component
 @Slf4j
@@ -68,7 +72,7 @@ public class CatalogRowWriter {
         final byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
         clickHouseSpans.insert(table, () -> {
             try (InsertResponse response = client()
-                    .insert(table, new ByteArrayInputStream(bytes), ClickHouseFormat.JSONEachRow)
+                    .insert(table, new ByteArrayInputStream(bytes), ClickHouseFormat.JSONEachRow, KeeperRetries.failFast(new InsertSettings()))
                     .get()) {
                 log.debug("Inserted {} rows into {}", rows.size(), table);
             } catch (InterruptedException ex) {
@@ -83,7 +87,8 @@ public class CatalogRowWriter {
         });
     }
 
-    private Client client() {
+    /** Package-private, not private, so a test can substitute the driver client; never overridden in production. */
+    Client client() {
         Client local = client;
         if (local == null) {
             synchronized (this) {

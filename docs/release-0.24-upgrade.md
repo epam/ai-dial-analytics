@@ -35,6 +35,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
   route outputs may bind `object` and `map` columns (§18).
 - **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§19).
+- **With Keeper down, row writes, pipeline runs and the data-sync requeue answer `503` in about ten seconds**, and the writer user must be
+  allowed two `insert_keeper_*` settings (§20).
 
 ---
 
@@ -487,6 +489,24 @@ reads back without it, and no row is migrated.
   legend, deletes the stored `legend`. Stop the client sending `legend` before rolling back, and expect each chart's
   legend to be lost on its next save.
 
+## 20. Writes with Keeper down
+
+ClickHouse's default Keeper retries held an insert into a replicated table whose replica had lost Keeper for about
+two minutes. `POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`, OTel ingest,
+pipeline runs and `POST /v1/data-sync/failures/retry` now cap those retries and answer `503 clickhouse_unavailable`
+in about ten seconds once the replica has noticed the lost session; the requeue answered `500` before. Data-sync
+ingest and enrichment relayout copies keep ClickHouse's defaults and pause through a short Keeper outage (see
+[`clickhouse-replication`](../openspec/specs/clickhouse-replication/spec.md)).
+
+- **Settings.** Those inserts, and no other statement, now send `insert_keeper_max_retries` and
+  `insert_keeper_retry_max_backoff_ms` on the writer user. A settings profile constraint that makes either
+  read-only, or whose `min`/`max` excludes the value sent (`8`, `2000`), refuses those inserts; startup, DDL and
+  ingest are unaffected. Allow both before deploying.
+- **Callers** of `POST …/rows`, the OTel endpoints and the enrichment runner's write-back get the `503` they
+  already handle, sooner. Fewer retries also mean a Keeper blip during an insert's commit more often ends in
+  `UNKNOWN_STATUS_OF_INSERT`, whose retry on an `append` table can store the rows twice (at-least-once, as before).
+- **Rollback.** An earlier build sends neither setting and waits out ClickHouse's defaults again.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -509,3 +529,4 @@ reads back without it, and no row is migrated.
 | System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |
 | Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§19) |
+| Row writes, pipeline runs and the data-sync requeue cap ClickHouse's Keeper retries | With Keeper down they answer `503 clickhouse_unavailable` in about ten seconds, not two minutes; data-sync ingest and relayout copies are unchanged | Let the writer user set `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` (§20) |

@@ -29,6 +29,8 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
     boolean failAppends;
     /** Successful appends, one per insert ClickHouse would receive. */
     int appends;
+    /** Of {@link #appends}, those written promptly ({@link #appendPromptly}). */
+    int promptAppends;
 
     /** A failure service over this ledger and {@code ingestLedger}, with the test retry settings. */
     IngestFailureService service(IngestLedger ingestLedger) {
@@ -46,6 +48,12 @@ class InMemoryIngestFailureLedger implements IngestFailureLedger {
         }
         events.addAll(appended);
         appends++;
+    }
+
+    @Override
+    public void appendPromptly(Collection<IngestFailureEvent> appended) {
+        append(appended);
+        promptAppends++;
     }
 
     @Override
