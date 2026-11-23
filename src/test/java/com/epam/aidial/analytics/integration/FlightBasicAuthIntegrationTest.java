@@ -1,5 +1,11 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntry;
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
+import com.epam.aidial.analytics.service.table.TableAccessService.RowsRequest;
+import com.epam.aidial.analytics.service.table.grant.PrivilegeScope;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
 import com.sun.net.httpserver.HttpServer;
@@ -29,6 +35,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.databind.node.LongNode;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -91,7 +98,7 @@ class FlightBasicAuthIntegrationTest {
     private static final String ADMIN_SUFFIX = "-admin";
     private static final String VIEWER_SUFFIX = "-viewer";
     private static final String NO_ROLE_SUFFIX = "-norole";
-    /** A key Core resolves with an empty role list: nothing to match globally or by grant. */
+    /** A key Core resolves with an empty role list: it carries only '*'. */
     private static final String NO_ROLES_AT_ALL_SUFFIX = "-noroles";
 
     private static HttpServer coreServer;
@@ -99,6 +106,9 @@ class FlightBasicAuthIntegrationTest {
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;
+
+    @Autowired
+    private TableAccessService tableAccess;
 
     private BufferAllocator clientAllocator;
     private FlightClient flightClient;
@@ -231,12 +241,29 @@ class FlightBasicAuthIntegrationTest {
     }
 
     @Test
-    void keyWithNoRolesAtAllIsDeniedPermission() {
-        // Nothing to match, globally or by grant, so this caller can never reach a table. Rejected at the
-        // gate rather than served an empty catalog on every call.
-        assertThatThrownBy(() -> flightClient.authenticateBasicToken(SENTINEL, "empty" + NO_ROLES_AT_ALL_SUFFIX))
-                .isInstanceOfSatisfying(FlightRuntimeException.class,
-                        e -> assertThat(e.status().code()).isEqualTo(FlightStatusCode.UNAUTHORIZED));
+    void keyWithNoRolesAtAllReachesTablesGrantedToEveryone() {
+        // Every authenticated caller carries '*', so the gate admits a key with no role at all, and a table
+        // granting '*' is listed to it exactly as HTTP would serve it.
+        final Optional<CredentialCallOption> credential =
+                flightClient.authenticateBasicToken(SENTINEL, "empty" + NO_ROLES_AT_ALL_SUFFIX);
+        assertThat(credential).isPresent();
+        assertThat(listedTableNames(credential.orElseThrow())).doesNotContain("dial_usage_log");
+
+        final AccessEntries before = tableAccess.list("dial_usage_log");
+        final AccessEntry stored = before.roles().get("*");
+        final long granted = tableAccess.put("dial_usage_log", "*",
+                new EntryRequest(LongNode.valueOf(before.generation()), List.of("read"), null, null)).generation();
+        try {
+            assertThat(listedTableNames(credential.orElseThrow())).contains("dial_usage_log");
+        } finally {
+            if (stored == null) {
+                tableAccess.delete("dial_usage_log", "*", null);
+            } else {
+                tableAccess.put("dial_usage_log", "*", new EntryRequest(LongNode.valueOf(granted),
+                        stored.privileges().stream().map(PrivilegeScope::grantKey).toList(),
+                        stored.rows() == null ? null : new RowsRequest(stored.rows().filter(), null), stored.columns()));
+            }
+        }
     }
 
     @Test

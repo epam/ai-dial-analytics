@@ -11,7 +11,9 @@ ledger in ClickHouse, and every ingest path skips the blobs the ledger records, 
 written once; the duplicates that remain (a blob re-ingested after a crash between its rows and its
 ledger entry, a backfill that includes already-ingested blobs) are collapsed at the row level by the
 table's `ReplacingMergeTree` engine, which collapses records sharing its sort key.
+
 ## Requirements
+
 ### Requirement: Scheduled daily ingestion
 
 The service SHALL run a data-sync job automatically on a daily schedule driven by a configurable
@@ -1848,7 +1850,8 @@ definition, which the older server cannot load. No serialization-format default 
 By default the service SHALL provision the target ClickHouse tables (`dial_usage_log` and
 `dial_usage_log_payload`) and the ingest ledger table (`_dial_internal_ingested_blob`) on startup by running Flyway migrations under `classpath:db/migration` over
 the ClickHouse JDBC driver, using the writer credential (which must therefore additionally hold
-`CREATE TABLE` grants, and `ALTER DROP COLUMN` on `dial_usage_log`). Provisioning SHALL be gated by
+`CREATE TABLE` grants, and `ALTER ADD COLUMN` and `ALTER DROP COLUMN` on `dial_usage_log`, among the `ALTER`
+sub-privileges `docs/clickhouse-server.md` lists). Provisioning SHALL be gated by
 `clickhouse.migrations.enabled` (default true) and SHALL run before any sync run or startup schema
 validation; a migration failure SHALL abort startup. When migrations are disabled, the service SHALL
 issue no DDL and the operator SHALL provision the tables out of band by applying the same migration
@@ -1863,7 +1866,8 @@ Whether applied by Flyway or by an operator, the `dial_usage_log` definition SHA
 column set: a synthetic `event_id UUID` and an `event_kind` classifier; the direct columns carried from
 the source (timestamps, ids, `user_hash`, tokens — including the producer's reported cache-write count
 in `cache_creation_tokens` — prices, the producer's reported `operation_duration_ms`, the producer's
-reported route in `route_name` and `route_type`, etc.); and the calculated columns (`response_id`,
+reported route in `route_name` and `route_type`, the producer's reported spending-limits check in
+`spending_limits_mode`, `budget_cost_object`, `budget_outcome`, `budget_policy` and `budget_assignment`, etc.); and the calculated columns (`response_id`,
 `reasoning_tokens`, `number_request_messages`, `success`, `mcp_method`, `mcp_tool_call_name`,
 `request_body_bytes`, `response_body_bytes`). It SHALL NOT declare the five verbatim-content columns — the three bodies and the two JSON documents. They were created by
 `V1`/`V7`, moved to `dial_usage_log_payload` by `V10` and the mapping cutover, and dropped from
@@ -1881,7 +1885,7 @@ columns under the same codec before `V11` drops them. For record-level deduplica
 (`ORDER BY`) ending in the deduplication key columns `trace_id` and `core_span_id`, partitioned by
 `toYYYYMMDD(request_time)`. The definition SHALL also pin UTC on its timestamp columns, store monetary
 columns as `Decimal`, store `response_status` as `UInt16`, declare the producer-optional columns as
-`Nullable` — including every producer-reported token count and the two route columns — and apply a
+`Nullable` — including every producer-reported token count, the two route columns and the five spending-limit columns — and apply a
 row-level retention `TTL`.
 
 Each table SHALL leave exactly one column to a table-side `DEFAULT` and populate every other column its
@@ -4428,3 +4432,73 @@ the strict reading to a range.
 - **THEN** one WARN line names the table, column, kind, JSON type and blob without the value, the counter
   increases by one thousand, and the next line for that column after the minute reports how many were not
   logged
+
+### Requirement: Reported spending limits are persisted
+
+The service SHALL persist the spending-limits check a producer reports for a request, verbatim, in five columns of
+`dial_usage_log`: `spending_limits_mode`, `budget_cost_object`, `budget_outcome`, `budget_policy` and
+`budget_assignment`. It SHALL NOT reject a mode or an outcome it does not know.
+
+#### Scenario: A request paid by an assigned budget
+
+- **WHEN** a record reports `spending_limits` with `mode` `enforce`, `cost_object` `project-a`, `outcome` `paid`,
+  `policy` `engineering-pro` and `assignment` `project-a/a1`
+- **THEN** the ingested row's `spending_limits_mode` is `enforce`, its `budget_cost_object` is `project-a`, its
+  `budget_outcome` is `paid`, its `budget_policy` is `engineering-pro` and its `budget_assignment` is `project-a/a1`
+
+#### Scenario: An unrecognized mode or outcome
+
+- **WHEN** a record reports a `mode` other than `off`, `shadow` or `enforce`, or an `outcome` other than `paid`,
+  `no_budget` or `exhausted`
+- **THEN** the ingested row stores each value as reported, and the record is not rejected
+
+### Requirement: Absent spending-limit fields read NULL
+
+All five spending-limit columns SHALL be `Nullable`. A record that carries no spending-limits object, which the producer
+omits on every row but a token caller's model call whose limits it checked (an API key caller, a row that is not
+a model's, a pass whose limits it does not check), SHALL store NULL in all five
+and SHALL be ingested normally. A record that reports some fields SHALL store those and NULL for the rest, and a
+blank value SHALL be stored as NULL, like an absent one.
+
+#### Scenario: A request paid by a policy that applies by itself
+
+- **WHEN** a record reports `spending_limits` with `cost_object` `ORG`, `outcome` `paid` and `policy`
+  `ORG/personal` and no `assignment`
+- **THEN** the ingested row's `budget_policy` is `ORG/personal` and its `budget_assignment` is NULL
+
+#### Scenario: Every budget used up in shadow mode
+
+- **WHEN** a record reports `spending_limits` with `mode` `shadow`, `cost_object` `project-a` and `outcome`
+  `exhausted`
+- **THEN** the ingested row's `budget_outcome` is `exhausted`, and its `budget_policy` and `budget_assignment` are NULL
+
+#### Scenario: Spending limits off
+
+- **WHEN** a record reports `spending_limits` with `mode` `off` only
+- **THEN** the ingested row's `spending_limits_mode` is `off` and the other four columns are NULL
+
+#### Scenario: A request budgets did not apply to
+
+- **WHEN** a record carries no `spending_limits`
+- **THEN** the ingested row's five spending-limit columns are NULL, and the row is ingested normally
+
+#### Scenario: A blank field reads as absent
+
+- **WHEN** a record reports `spending_limits` with an empty `policy`
+- **THEN** the ingested row's `budget_policy` is NULL
+
+#### Scenario: Rows ingested before the columns existed
+
+- **WHEN** the spending-limit columns are added to a table that already holds rows
+- **THEN** those rows read NULL in the five columns until their source blobs are re-ingested
+
+### Requirement: The budget cost object is the producer's
+
+`budget_cost_object` SHALL hold the cost object the producer reports and SHALL NOT be derived from `project_id`. The
+two can differ: when the caller's token carries no project, `project_id` is empty while the producer charges a
+default cost object.
+
+#### Scenario: The cost object is not taken from the project
+
+- **WHEN** a record reports an empty `project.id` and `spending_limits` with `cost_object` `ORG`
+- **THEN** the ingested row's `project_id` is empty and its `budget_cost_object` is `ORG`

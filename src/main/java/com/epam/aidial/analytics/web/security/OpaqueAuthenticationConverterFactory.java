@@ -20,11 +20,11 @@ public class OpaqueAuthenticationConverterFactory {
                                                 IdentityProviderUtils identityProviderUtils) {
         this.identityProviderUtils = identityProviderUtils;
         Map<String, OpaqueAuthenticationConverter> tmpConvertersByProviderName = new HashMap<>();
-        opaqueProviders.forEach((name, config) -> tmpConvertersByProviderName.put(name, create(config)));
+        opaqueProviders.forEach((name, config) -> tmpConvertersByProviderName.put(name, create(name, config)));
         convertersByProviderName = Map.copyOf(tmpConvertersByProviderName);
     }
 
-    private OpaqueAuthenticationConverter create(ProviderConfig config) {
+    private OpaqueAuthenticationConverter create(String name, ProviderConfig config) {
         var grantedAuthoritiesTransformer = new UserRolesResolver(
                 identityProviderUtils.getRolesMapping(config)
         );
@@ -32,7 +32,8 @@ public class OpaqueAuthenticationConverterFactory {
         return new OpaqueAuthenticationConverter(
                 grantedAuthoritiesTransformer,
                 identityProviderUtils.getEmailClaims(config),
-                identityProviderUtils.isEmailRequired()
+                identityProviderUtils.isEmailRequired(),
+                config.userHasher(name)
         );
     }
 

@@ -222,8 +222,27 @@ public class SqlFunctionCatalog {
                         + "only where the validator would insert the same identity or widening cast itself.",
                 toString.name(), "SELECT CAST(response_status AS VARCHAR) AS status" + USAGE + " LIMIT 10",
                 List.of(expression("value"))));
+        entries.add(callerValue("caller.user_hash", "The user hash of the caller running the statement, as DIAL Core "
+                + "writes it to the usage log's user_hash", "\"user_hash\""));
+        entries.add(callerValue("caller.project", "The project of the project API key running the statement",
+                "\"project_id\""));
         entries.sort(Comparator.comparing(SqlFunctionDto::name, String.CASE_INSENSITIVE_ORDER));
         return List.copyOf(entries);
+    }
+
+    /**
+     * A caller value: resolved on the server for whoever runs the statement, and lowered onto the DSL {@code param} of
+     * its name rather than a catalog function, hence no {@code dsl_function}.
+     */
+    private static SqlFunctionDto callerValue(String name, String what, String column) {
+        return new SqlFunctionDto(
+                name, SqlFunctionForm.FUNCTION, List.of(), QueryFunctionGroup.SCALAR, name + "()",
+                QueryFunctionReturnType.STRING, false, false,
+                what + ", or unknown when it has none. Only a direct operand of = or <> against a string column, in a "
+                        + "WHERE, HAVING or ON condition; anywhere else the statement is refused. A comparison with an "
+                        + "unknown value is null, so it matches no row. Lowers onto the DSL param " + name
+                        + ", hence no dsl_function.",
+                null, "SELECT count(*) AS n" + USAGE + " WHERE " + column + " = " + name + "()", List.of());
     }
 
     private static SqlFunctionDto derived(QueryFunctionDto dsl) {

@@ -87,14 +87,17 @@ holder
 
 ```bash
 for t in otel_claude_code_logs otel_claude_code_metrics; do
-  curl -sS -X PUT "https://<adas-host>/v1/tables/$t/access" \
+  gen=$(curl -sS "https://<adas-host>/v1/tables/$t/access" -H "Api-Key: $ADAS_ADMIN_KEY" | jq .generation)
+  curl -sS -X PUT "https://<adas-host>/v1/tables/$t/access?role=claude-code-telemetry" \
     -H "Api-Key: $ADAS_ADMIN_KEY" \
     -H 'Content-Type: application/json' \
-    -d '{"write": ["claude-code-telemetry"], "modify": []}'
+    -d "{\"generation\": $gen, \"privileges\": [\"write\"]}"
 done
 ```
 
-`write` holds **raw provider role names** (the same names used as `roles-mapping` keys), matched against
+The `PUT` replaces the role's whole entry, and `generation` is the table's access generation as just read (if the
+role's entry changed after it, the `PUT` is refused `409 access_conflict`; read it again). The `role` query value is a
+**raw provider role name** (the same names used as `roles-mapping` keys), matched against
 the roles the exporter credential actually carries — for a DIAL API key, the roles Core returns for it.
 A credential holding global `TABLE_WRITE` may export without any grant, but don't hand one to every
 developer's CLI: a

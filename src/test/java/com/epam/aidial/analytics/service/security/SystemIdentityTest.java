@@ -55,6 +55,19 @@ class SystemIdentityTest {
     }
 
     @Test
+    void theSystemPrincipalDoesNotCarryTheWildcardEveryCallerDoes() {
+        final SecurityClaimsExtractor claims = new SecurityClaimsExtractor();
+        final var asSystem = new java.util.concurrent.atomic.AtomicReference<java.util.Set<String>>();
+
+        systemIdentity.runAsSystem(() -> asSystem.set(claims.getProviderRoles()));
+        SecurityContextHolder.getContext().setAuthentication(caller());
+
+        // A policy stored for everyone must never confine background work.
+        assertThat(asSystem.get()).isEmpty();
+        assertThat(claims.getProviderRoles()).containsExactly(SecurityClaimsExtractor.ANYONE);
+    }
+
+    @Test
     void theSystemPrincipalHoldsNoAdministrativePrivilege() {
         final var seen = new java.util.concurrent.atomic.AtomicReference<Authentication>();
 

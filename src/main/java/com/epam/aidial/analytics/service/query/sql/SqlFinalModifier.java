@@ -279,9 +279,9 @@ final class SqlFinalModifier {
 
     // ------------------------------------------------------------------ lexer
 
-    private enum Kind { WORD, QUOTED, OPEN, CLOSE, COMMA, DOT, OTHER }
+    enum Kind { WORD, QUOTED, OPEN, CLOSE, COMMA, DOT, OTHER }
 
-    private record Token(Kind kind, int start, int end) {
+    record Token(Kind kind, int start, int end) {
         String upper(String sql) {
             return sql.substring(start, end).toUpperCase(Locale.ROOT);
         }
@@ -290,9 +290,11 @@ final class SqlFinalModifier {
     /**
      * The statement's tokens, with string literals, comments and whitespace dropped. Only the distinctions
      * {@link #rewrite} needs are drawn: a word, a double-quoted identifier, parentheses, commas and dots; any
-     * other character is {@code OTHER}.
+     * other character is {@code OTHER}. Every comment form the parser accepts is dropped: {@code --}, {@code //}
+     * and {@code /* … *&#47;}. {@link SqlCallerValues} scans with the same lexer, so the two passes agree on what is
+     * text and what is a literal or a comment.
      */
-    private static List<Token> tokenize(String sql) {
+    static List<Token> tokenize(String sql) {
         final List<Token> tokens = new ArrayList<>();
         final int n = sql.length();
         int i = 0;
@@ -300,8 +302,9 @@ final class SqlFinalModifier {
             final char c = sql.charAt(i);
             if (Character.isWhitespace(c)) {
                 i++;
-            } else if (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-') {
-                while (i < n && sql.charAt(i) != '\n') {
+            } else if ((c == '-' || c == '/') && i + 1 < n && sql.charAt(i + 1) == c) {
+                // The parser ends a line comment at either line terminator.
+                while (i < n && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
                     i++;
                 }
             } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {

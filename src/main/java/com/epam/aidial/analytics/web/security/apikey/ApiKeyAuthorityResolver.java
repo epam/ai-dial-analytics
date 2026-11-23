@@ -1,15 +1,19 @@
 package com.epam.aidial.analytics.web.security.apikey;
 
+import com.epam.aidial.analytics.web.security.CallerAuthorities;
 import com.epam.aidial.analytics.web.security.ConditionalOnSecurityMode;
 import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.SecurityMode;
+import com.epam.aidial.analytics.web.security.UserHasher;
 import com.epam.aidial.analytics.web.security.UserRolesResolver;
+import com.epam.aidial.analytics.web.security.UserSecurityDetails;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
@@ -28,10 +32,36 @@ public class ApiKeyAuthorityResolver {
 
     private final UserRolesResolver projectKeyResolver;
     private final UserRolesResolver userClaimsResolver;
+    private final UserHasher userHasher;
 
     public ApiKeyAuthorityResolver(ApiKeyProperties properties) {
         this.projectKeyResolver = new UserRolesResolver(properties.getParsedRolesMapping());
         this.userClaimsResolver = new UserRolesResolver(properties.getParsedDefaultRolesMapping());
+        this.userHasher = UserHasher.of("security.api-key", properties.getLoggingKey(), properties.getLoggingSalt(),
+                properties.getObfuscateUserEmail());
+    }
+
+    /**
+     * The authentication an introspected key yields. The one builder for every surface that accepts an API
+     * key: the surfaces share an introspection cache entry per credential, so the identity must not depend
+     * on which of them populated it — authorities, project, claims and caller values alike.
+     */
+    public ApiKeyAuthenticationToken authenticate(IntrospectionResult result) {
+        final Set<Privilege> privileges = resolve(result.rawRoles(), result.fromProjectKey());
+        // Expanded privileges plus the raw provider roles (prefixed) for per-table grant matching.
+        final List<GrantedAuthority> authorities = CallerAuthorities.build(privileges, result.rawRoles());
+        final String project = result.fromProjectKey() ? result.principal() : null;
+        final ApiKeyAuthenticationToken token = new ApiKeyAuthenticationToken(
+                result.principal(), authorities, result.fromProjectKey(), project, new HashMap<>(result.claims()));
+        // A per-user key's claims arrive as lists and name no identity provider, hence the key's own settings.
+        final String userHash = result.fromProjectKey() || userHasher.loggingKey() == null
+                ? null : userHasher.hashSingle(result.claims().get(userHasher.loggingKey()));
+        token.setDetails(new UserSecurityDetails(result.email(), userHash, project));
+        if (privileges.isEmpty()) {
+            log.debug("Api-key principal '{}' (fromProjectKey={}) maps to no privilege; authenticated with "
+                    + "raw provider roles {}", result.principal(), result.fromProjectKey(), result.rawRoles());
+        }
+        return token;
     }
 
     /** The privileges {@code rawRoles} confer under the mapping the key shape selects. */

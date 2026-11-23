@@ -110,7 +110,7 @@ carried by its projection.
 `POST /v1/queries/translate` SHALL accept the same request body as `POST /v1/queries/execute`
 (a structured query DSL document), validate it against the catalog with the same rules as
 execution (entity resolution, field allowlist, closed function catalog, mode coherence, offset
-paging with limit governance, param rejection), and — without executing it — return `200` with
+paging with limit governance, param rejection, caller-value placement), and — without executing it — return `200` with
 `{"sql": "<SELECT statement>"}` in the external SQL dialect: the statement SHALL be within the
 subset accepted by `POST /v1/queries/execute-sql` and SHALL translate back (per
 `sql-query-translation`) to a structured query semantically equivalent to the input. The
@@ -123,6 +123,11 @@ catalog function (execution silently ignores the flag there, and rendering it wo
 statement outside the accepted SQL subset); literal values SHALL be normalized (trimmed and
 parsed) exactly as execution binds them before rendering, so a value execution accepts never
 renders with different semantics.
+A caller value — the `param` `caller.user_hash` or `caller.project` (see the `structured-query` capability's "Caller
+values in a query filter") — SHALL render as `caller.user_hash()` or `caller.project()`, unquoted and lowercase, and
+SHALL NOT be resolved: translation reads no caller value, so the rendered statement is the same for every caller,
+including one that has no value, and carries no caller's user hash or project. Every other `param` SHALL be rejected
+as before.
 Every output column SHALL render with an explicit `AS` alias carrying the resolved output name
 execution would use (per the structured-query output-column-naming contract) unless the expression
 already produces that name on its own — in practice a plain field reference whose resolved name is its
@@ -200,6 +205,20 @@ Validation failures — including an unknown/non-queryable entity — SHALL retu
 
 - **WHEN** the input DSL contains a boolean literal `" true "` (whitespace-padded) that `/v1/queries/execute` accepts as `TRUE`
 - **THEN** the rendered SQL contains `TRUE` — the parsed value, never a silently inverted or unparseable literal from the raw text
+
+#### Scenario: A caller value renders unresolved and round-trips
+
+- **WHEN** the input DSL filters `dial_usage_log` with
+  `{"op": "eq", "args": [{"type": "field", "name": "user_hash"}, {"type": "param", "name": "caller.user_hash"}]}`
+- **THEN** the response is `200` with SQL whose condition is `"user_hash" = caller.user_hash()`, the same for a caller
+  that has a user hash and one that has none, and `/v1/queries/translate-sql` translates that SQL back to the identical
+  filter
+
+#### Scenario: A misplaced caller value yields 400 without rendering
+
+- **WHEN** the input DSL uses the `param` `caller.project` as an argument of `lower`
+- **THEN** the response is a 400 `ErrorView` with code `bad_request` carrying the same message the execute endpoint
+  would produce, and no SQL is rendered
 
 #### Scenario: Unknown entity yields 400
 

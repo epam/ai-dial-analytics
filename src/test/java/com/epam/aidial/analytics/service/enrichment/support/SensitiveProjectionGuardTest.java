@@ -1,8 +1,11 @@
 package com.epam.aidial.analytics.service.enrichment.support;
 
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccessFixture;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -15,7 +18,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -37,7 +42,7 @@ class SensitiveProjectionGuardTest {
     private final TableAccessEvaluator evaluator = mock(TableAccessEvaluator.class);
     private final ColumnMappingRepository columns = mock(ColumnMappingRepository.class);
     private final SensitiveProjectionGuard guard = new SensitiveProjectionGuard(
-            new SensitiveColumnAccess(evaluator, new SecurityModeResolver(SecurityMode.OIDC.code())),
+            SensitiveColumnAccessFixture.withoutColumnPolicies(evaluator, new SecurityModeResolver(SecurityMode.OIDC.code())),
             columns, mock(CatalogQueryService.class));
 
     @BeforeEach
@@ -98,22 +103,90 @@ class SensitiveProjectionGuardTest {
         final CatalogQueryService catalog = mock(CatalogQueryService.class);
         when(catalog.activeEnrichmentsOf(SOURCE)).thenReturn(List.of(enrichment));
         final SensitiveProjectionGuard entityGuard = new SensitiveProjectionGuard(
-                new SensitiveColumnAccess(evaluator, new SecurityModeResolver(SecurityMode.OIDC.code())), columns, catalog);
+                SensitiveColumnAccessFixture.withoutColumnPolicies(evaluator, new SecurityModeResolver(SecurityMode.OIDC.code())), columns, catalog);
         when(evaluator.isAllowed(payload, Privilege.TABLE_SENSITIVE)).thenReturn(false);
         when(evaluator.isAllowed(payload, Privilege.TABLE_READ)).thenReturn(true);
 
         assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_full"), "scan"))
                 .isInstanceOf(SensitiveColumnNotEntitledException.class)
-                .hasMessageContaining(payload + ".request_body_full");
+                .hasMessageContaining(payload + ".request_body_full")
+                .as("the refusal names the source, whose grants the enrichment follows")
+                .hasMessageContaining("its source '" + SOURCE + "'");
         assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of(payload + ".request_body_rebuild"), "group-rows"))
                 .isInstanceOf(SensitiveColumnNotEntitledException.class);
+    }
+
+    @Test
+    @DisplayName("a policy-hidden column is refused column_not_entitled under either spelling, before the clearance")
+    void policyHiddenColumnIsRefusedFirst() {
+        final ColumnMappingEntity version = new ColumnMappingEntity();
+        version.setTableName(SOURCE);
+        version.setName("ingest_time");
+        version.setSourceName("ingested");
+        final ColumnMappingEntity claims = columns.findByTableNameOrderByOrdinal(SOURCE).getFirst();
+        when(columns.findByTableNameOrderByOrdinal(SOURCE)).thenReturn(List.of(claims, version));
+        final SensitiveColumnAccess access = mock(SensitiveColumnAccess.class);
+        when(access.visibleColumns(SOURCE)).thenReturn(new ColumnVisibility(Set.of("event_id")));
+        final SensitiveProjectionGuard restricted = new SensitiveProjectionGuard(access, columns, mock(CatalogQueryService.class));
+
+        assertThatThrownBy(() -> restricted.enforce(SOURCE, List.of("ingested"), "scan"))
+                .isInstanceOf(ColumnNotEntitledException.class)
+                .hasMessageContaining("'ingest_time'")
+                .hasMessageNotContaining("'ingested'");
+        assertThatThrownBy(() -> restricted.enforce(SOURCE, List.of("ingest_time"), "scan"))
+                .isInstanceOf(ColumnNotEntitledException.class);
+        assertThatThrownBy(() -> restricted.enforce(SOURCE, List.of("jwt_claims"), "scan"))
+                .as("hidden and unentitled-sensitive is column_not_entitled")
+                .isInstanceOf(ColumnNotEntitledException.class);
+        assertThat(restricted.reattribute(SOURCE, "scan", new IllegalStateException("parse")))
+                .isInstanceOf(ColumnNotEntitledException.class);
+    }
+
+    @Test
+    @DisplayName("an unentitled sensitive source column and a policy-hidden enrichment column are column_not_entitled")
+    void policyHiddenEnrichmentColumnWinsOverUnentitledSensitiveSourceColumn() {
+        final String labels = "usage_labels";
+        final ColumnMappingEntity label = new ColumnMappingEntity();
+        label.setTableName(labels);
+        label.setName("label");
+        label.setSourceName("label");
+        when(columns.findByTableNameOrderByOrdinal(labels)).thenReturn(List.of(label));
+        final TableDefinitionEntity enrichment = new TableDefinitionEntity();
+        enrichment.setName(labels);
+        final CatalogQueryService catalog = mock(CatalogQueryService.class);
+        when(catalog.activeEnrichmentsOf(SOURCE)).thenReturn(List.of(enrichment));
+        final SensitiveColumnAccess access = mock(SensitiveColumnAccess.class);
+        when(access.visibleColumns(SOURCE)).thenReturn(ColumnVisibility.ALL);
+        when(access.visibleColumns(labels)).thenReturn(new ColumnVisibility(Set.of()));
+        when(access.visibleColumns(enrichment)).thenReturn(new ColumnVisibility(Set.of()));
+        when(access.mayReadSensitive(SOURCE)).thenReturn(false);
+        when(access.maySeeSensitive(SOURCE)).thenReturn(false);
+        final SensitiveProjectionGuard entityGuard = new SensitiveProjectionGuard(access, columns, catalog);
+
+        // The sensitive source column comes first in the projection, so a per-table order would answer the clearance.
+        assertThatThrownBy(() -> entityGuard.enforceEntity(SOURCE, List.of("jwt_claims", labels + ".label"), "scan"))
+                .isInstanceOf(ColumnNotEntitledException.class)
+                .hasMessageContaining(labels + ".label");
+        assertThat(entityGuard.reattribute(SOURCE, "scan", new IllegalStateException("parse"), true))
+                .isInstanceOf(ColumnNotEntitledException.class);
+    }
+
+    @Test
+    @DisplayName("without a column policy hiding anything, a parse failure keeps today's attribution")
+    void reattributionFallsBackToTheClearance() {
+        when(evaluator.isAllowed(SOURCE, Privilege.TABLE_SENSITIVE)).thenReturn(false);
+        final RuntimeException failure = new IllegalStateException("parse");
+
+        assertThat(guard.reattribute(SOURCE, "scan", failure)).isInstanceOf(SensitiveColumnNotEntitledException.class);
+        when(evaluator.isAllowed(SOURCE, Privilege.TABLE_SENSITIVE)).thenReturn(true);
+        assertThat(guard.reattribute(SOURCE, "scan", failure)).isSameAs(failure);
     }
 
     @Test
     @DisplayName("none mode fails open")
     void noneModeFailsOpen() {
         final SensitiveProjectionGuard open = new SensitiveProjectionGuard(
-                new SensitiveColumnAccess(evaluator, new SecurityModeResolver(SecurityMode.NONE.code())),
+                SensitiveColumnAccessFixture.withoutColumnPolicies(evaluator, new SecurityModeResolver(SecurityMode.NONE.code())),
                 columns, mock(CatalogQueryService.class));
         assertThatCode(() -> open.enforce(SOURCE, List.of("jwt_claims"), "scan")).doesNotThrowAnyException();
     }

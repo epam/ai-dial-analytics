@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
+import com.epam.aidial.analytics.exception.TableBusyException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
@@ -11,7 +12,6 @@ import com.epam.aidial.analytics.service.enrichment.support.ProvenanceColumns;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.CreateSpec;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.DdlColumn;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -50,7 +50,6 @@ public class TableSchemaCreationService {
     private final ClickHouseDdlExecutor ddlExecutor;
     private final TableDdlRenderer ddlRenderer;
     private final ClickHouseTypeMapper typeMapper;
-    private final SensitiveGrantInvariant sensitiveGrants;
     private final SensitiveColumnAccess sensitiveAccess;
     private final ClickHouseTableInspector inspector;
 
@@ -82,7 +81,6 @@ public class TableSchemaCreationService {
         requireClearanceForSensitive(name, input);
         final DefineSchemaInput schema = withInjectedProvenance(definition.getType(), input);
         requireComplete(definition, schema);
-        requireSensitiveGrantsNotWidened(definition, schema);
 
         // Persist first (validates internal consistency and rolls back on failure), then materialize.
         // Re-load after the committed persist so the spec sees the stored columns/keys (the entity
@@ -98,16 +96,27 @@ public class TableSchemaCreationService {
             final CreateSpec spec = createSpec(persisted, executor != DdlExecutor.NO_OP, List.of());
             executor.execute(ddlRenderer.renderCreate(name, spec));
         } catch (RuntimeException ex) {
-            safeDrop(name, executor);
-            try {
-                writer.markStatus(name, TableStatus.FAILED);
-            } catch (RuntimeException ignored) {
-                // Leave the row PENDING (not queryable); surface the original ClickHouse error below.
-            }
+            undoCreate(name, executor);
             throw ex;
         }
-        writer.markStatus(name, TableStatus.ACTIVE);
+        try {
+            writer.markStatus(name, TableStatus.ACTIVE);
+        } catch (TableBusyException ex) {
+            // Refused before it wrote anything, so the row is not ACTIVE: undo the CREATE so the request can be retried as sent.
+            undoCreate(name, executor);
+            throw ex;
+        }
         return catalogService.get(name);
+    }
+
+    /** Forces the not-materialized outcome after a CREATE that failed or cannot be recorded: drop, then mark FAILED. */
+    private void undoCreate(String name, DdlExecutor executor) {
+        safeDrop(name, executor);
+        try {
+            writer.markStatus(name, TableStatus.FAILED);
+        } catch (RuntimeException ignored) {
+            // Leave the row PENDING (not queryable); the caller surfaces the original error.
+        }
     }
 
     /**
@@ -171,26 +180,6 @@ public class TableSchemaCreationService {
         return new DefineSchemaInput(columns, input.orderingKey(), input.partitionColumn(),
                 input.partitionGranularity(), input.grainKey(), input.cardinality(), input.ttl(),
                 input.identityColumn(), input.versionColumn());
-    }
-
-    /**
-     * The laundering subset rule for the <b>initial</b> schema, when it declares a {@code sensitive} column.
-     *
-     * <p>This is the third way a table first comes to carry one, and leaving it out left the whole invariant
-     * bypassable through the front door: grant {@code sensitive} on a {@code PENDING} enrichment while
-     * it has no columns (accepted — the pair has nothing to protect), then define a schema with a sensitive
-     * column. The stored state is then exactly what the rule forbids, and the next pipeline registration is
-     * refused over a grant edit the operator made days earlier.
-     *
-     * <p>Runs before anything is persisted, like every other check here, and on the same terms as the
-     * {@code add} branch of {@code PATCH .../schema}. Whether the caller may declare the column sensitive at
-     * all — the {@code TABLE_SENSITIVE} clearance — is a separate check, made first.
-     */
-    private void requireSensitiveGrantsNotWidened(TableDefinitionEntity definition, DefineSchemaInput schema) {
-        final List<ColumnInput> declared = schema.columns() == null ? List.of() : schema.columns();
-        if (declared.stream().anyMatch(ColumnInput::sensitive)) {
-            sensitiveGrants.requireNotWidenedWithNewSensitiveColumn(definition);
-        }
     }
 
     private void requireNotMaterialized(TableDefinitionEntity definition) {

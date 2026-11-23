@@ -20,6 +20,11 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
 `SYNC_SENSITIVE_COLUMNS`, which names the sensitive columns ingest writes. Startup fails while the old variable is
 set, so a deployment that set it changes one variable (§8).
 
+**0.23.3** is a patch on 0.23.2. It brings own-rows row policies and caller values, role-keyed table access with
+column policies, enrichments whose read access follows their source, and the spending-limit columns. The access
+changes are breaking: the old access and row-policy endpoints are removed, and a migration clears the enrichments'
+read-side grants. Check who gains and loses access before deploying (§9).
+
 ## Why 0.23 and not 0.4
 
 0.23 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of ADAS and
@@ -456,3 +461,262 @@ excluded from ingest").
 - **Rollback.** 0.23.0 ignores `SYNC_SENSITIVE_COLUMNS` and writes every sensitive column unless
   `SYNC_SENSITIVE_COLUMNS_ENABLED=false` is set again, so set it before rolling back a deployment that kept columns
   out.
+
+## 9. 0.23.3
+
+0.23.3 keeps runner contract version `4`, so the Enrichment Runner stays on its 0.23 release. It is more than a
+redeploy because the table-access changes are breaking. An environment still on 0.3 follows §1 to §8 first and
+deploys 0.23.3 in place of 0.23.0.
+
+**Before deploying:**
+
+1. **Check for a stored `*`** in `get`, `read` and `sensitive` lists and row policies, and remove the ones you did
+   not mean to open to every caller (§9a).
+2. **Run the two enrichment queries** in §9c: decide for each role that gains access whether to hide the columns
+   from it, and grant each role that loses access on the source. Save the lists and policies for a rollback.
+3. **Give runner roles the source's clearance** where the source's partition, version or identity column is
+   `sensitive` (§9d).
+4. **Update access-API clients**, the Admin UI included: move from the old `/access` and `/row-policies` calls to
+   `/v1/tables/{name}/access?role=`, and read `roles` instead of `access` and `row_policies` in revision snapshots
+   (§9d). Deploy ADAS and a client that speaks the new API in the same window.
+5. **Plan a freeze**: no access, table or pipeline edits until every ADAS pod runs 0.23.3 (§9c, §9d).
+
+**Migrations** (automatic on startup):
+
+| Store | Migration | Effect |
+|---|---|---|
+| Postgres | `V55` | Admits the `app-routes` instance-setting name, which this release does not offer |
+| Postgres | `V56` | Removes every enrichment's `get`, `read` and `sensitive` lists and its row policies (§9c) |
+| Postgres | `V57` | Adds per-role column policies and the access generation to the table catalog (§9d) |
+| Postgres | `V58` | Rewrites the description of `dial_usage_log_payload.request_body` |
+| Postgres | `V59` | Adds the catalog rows of the spending-limit columns (§9e) |
+| ClickHouse | `V18` | Adds the five spending-limit columns to `dial_usage_log` (§9e) |
+
+`V55` and `V58` ship unchanged from 0.24, so the migration history stays continuous and a later upgrade to 0.24 is
+not refused for an out-of-order migration. `V58`'s new description already mentions a 0.24 storage change:
+under `delta`, 0.24 stores a repeated large non-JSON body once. 0.23.3 still stores every body.
+
+### 9a. The `*` grantee
+
+`*` in a table's `get`, `read` or `sensitive` grant list, or as the role of a row policy, now stands for every
+authenticated caller (see [`row-level-security.md`](row-level-security.md#everyone-the--grantee)). Earlier builds
+stored `*` as an ordinary role name that matched only a caller carrying a provider role spelled `*`.
+
+- **Before upgrading, look for a stored `*`.** A table that already names `*` in a read-side list becomes readable
+  by every authenticated caller, with its sensitive columns when the list is `sensitive`. Remove the entry with
+  0.23.2's `PUT /v1/tables/{name}/access` unless that is what you want. After the upgrade, the startup log lists
+  every table on which the `*` entry carries a privilege or a row policy. It skips an enrichment's `get`, `read` and
+  `sensitive`, which confer nothing any more (and which `V56` clears, a `*` included); a `*` row policy on one is
+  still listed.
+- A `*` stored with `write` or `modify` grants nothing, and the next `PUT /v1/tables/{name}/access?role=*` drops it.
+- **Flight SQL admits every authenticated caller.** The connection gate used to turn away a caller holding no
+  privilege and no provider role; such a caller can now be reached by a `*` grant. Each call is still decided per
+  table.
+- **Rollback.** 0.23.2 reads `*` as an ordinary role name again. Callers who read a table only through a `*` grant
+  lose access to it, and a `*` row policy confines nobody, so a caller it confined who reads the table another way
+  sees every row. Delete `*` policies, or the read paths they narrow, before rolling back if a rollback must not
+  widen reads.
+
+### 9b. Row policies and queries on the caller's own rows
+
+A row policy may compare a `string` column with a value of the caller reading the table, `caller.user_hash` or
+`caller.project`, and an entry's `rows` (`PUT /v1/tables/{name}/access?role={role}`, §9d) accepts the policy as a SQL
+condition in `where` instead of `filter` (see
+[`row-level-security.md`](row-level-security.md#own-rows-comparing-a-column-with-the-caller)). Nothing changes for
+stored policies. A query may filter on the same values, so a caller whose roles read every row can still ask for its
+own: `caller.user_hash()` / `caller.project()` in SQL, the `param` of that name in the structured-query DSL (see
+[`sql-reference.md`](sql-reference.md#your-own-rows-caller-values)).
+
+- **`caller.user_hash` needs new settings.** It is derived the way DIAL Core derives its `user.id` log field, from
+  `providers.<name>.logging-key`, `.logging-salt` and `.obfuscate-user-email` for an identity provider
+  (see [`configuration.md`](configuration.md#identity-providers)), and from `API_KEY_LOGGING_KEY`,
+  `API_KEY_LOGGING_SALT` and `API_KEY_OBFUSCATE_USER_EMAIL` for a per-user API key
+  (see [`configuration.md`](configuration.md#api-key-authentication)). Set them to the values DIAL Core uses for
+  the same provider; leave the API-key settings unset when Core's providers use different salts. The salt is a
+  credential: keep it in the deployment's secret store. Without the settings a caller has no user hash, and a
+  policy matching on `caller.user_hash`, or a query filtering on `caller.user_hash()`, gives that caller no rows.
+- **Rollback.** 0.23.2 refuses a policy that uses a caller value, so every read that policy confines fails. Replace
+  or delete such policies before rolling back. It also refuses, with `400`, a query that holds a caller value, so a
+  saved query or dashboard widget that stores one fails to run until it is rewritten.
+
+### 9c. An enrichment's read-side access is its source's
+
+An enrichment is always read through its source, so its `get`, `read` and `sensitive` access and its rows now come
+from the source (see [`table-access-control`](../openspec/specs/table-access-control/spec.md)). `write` and `modify`
+stay its own.
+
+- `V56` removes every enrichment's `get`, `read` and `sensitive` lists and its row policies.
+- A `PUT .../access?role=` on an enrichment with anything but `write` and `modify` is
+  `409 enrichment_follows_source`.
+- **Source readers gain** the enrichments' columns (sensitive ones with the source's clearance). **Enrichment-only
+  grantees lose** them: the columns become unknown fields. **Enrichment row policies are dropped**, and a role they
+  confined reads the enrichment's values on every source row it can read. To keep the values from a role, leave the
+  `<enrichment>.<column>` names out of its column policy on the source, mark the columns `sensitive`, or confine the
+  role's rows on the source.
+- The sensitive-grant subset rule is gone for every derived table: its clearance holders no longer need clearance on
+  its input. Review who holds each derived table's clearance.
+
+**What to do before upgrading.** First, find who gains access: each source `read` or `sensitive` grantee the
+enrichment does not name, and each role whose enrichment row policy is dropped.
+
+```sql
+WITH pair AS (
+  SELECT e.name AS enrichment, e.access AS ea, e.row_policies AS ep, s.access AS sa
+    FROM table_definition e
+    JOIN table_definition s ON s.name = e.source_table
+   WHERE e.type = 'ENRICHMENT')
+SELECT enrichment, 'sensitive' AS gains, role
+  FROM pair, jsonb_array_elements_text(sa -> 'sensitive') AS role
+ WHERE NOT coalesce(ea -> 'sensitive', '[]'::jsonb) ? role
+UNION ALL
+SELECT enrichment, 'read', role
+  FROM pair, jsonb_array_elements_text(sa -> 'read') AS role
+ WHERE NOT coalesce(ea -> 'read', '[]'::jsonb) ? role
+UNION ALL
+SELECT enrichment, 'rows (policy dropped)', role
+  FROM pair, jsonb_object_keys(ep) AS role;
+```
+
+For each row, accept the gain or hide the columns from that role as described above. Column policies exist from
+0.23.3 on, so set them right after the upgrade; mark columns `sensitive` before it.
+
+Then find the roles that would lose access, and grant each the same key on the source. This query is expected to
+return nothing; a role mapped to the privilege globally can be ignored.
+
+```sql
+WITH pair AS (
+  SELECT e.name AS enrichment, e.access AS ea, s.access AS sa
+    FROM table_definition e
+    JOIN table_definition s ON s.name = e.source_table
+   WHERE e.type = 'ENRICHMENT')
+SELECT enrichment, 'sensitive' AS key, role
+  FROM pair, jsonb_array_elements_text(ea -> 'sensitive') AS role
+ WHERE NOT coalesce(sa -> 'sensitive', '[]'::jsonb) ?| ARRAY[role, '*']
+UNION ALL
+SELECT enrichment, 'read', role
+  FROM pair, jsonb_array_elements_text(ea -> 'read') AS role
+ WHERE NOT coalesce(sa -> 'read', '[]'::jsonb) ?| ARRAY[role, '*']
+UNION ALL
+SELECT enrichment, 'get', role
+  FROM pair, jsonb_array_elements_text(ea -> 'get') AS role
+ WHERE NOT coalesce(sa -> 'get', '[]'::jsonb) ?| ARRAY[role, '*']
+   AND NOT coalesce(sa -> 'read', '[]'::jsonb) ?| ARRAY[role, '*']
+   -- a '*' in a modify list confers nothing
+   AND NOT (role <> '*' AND coalesce(sa -> 'modify', '[]'::jsonb) ? role)
+   AND NOT (role <> '*' AND coalesce(ea -> 'modify', '[]'::jsonb) ? role);
+```
+
+Save the lists and policies for a rollback:
+`SELECT name, access, row_policies FROM table_definition WHERE type = 'ENRICHMENT';`
+
+**During the rollout**, make no access or pipeline edits until every pod runs 0.23.3. Until then, pods on 0.23.2
+judge enrichments by their own, now empty, lists: they may refuse enrichment columns to per-table readers of the
+source and to runner scans, and fail refreshes of rollups that read enrichment columns. These failures need no
+action and stop when the rollout finishes.
+
+**Rollback.** `V56` cannot be undone. After redeploying 0.23.2, restore the saved lists and policies through its
+`/access` and `/row-policies` endpoints. Upgrading again does not re-run `V56`; then reduce each restored enrichment
+entry to `write` and `modify`.
+
+### 9d. Role-keyed table access
+
+A table's access is now one entry per provider role, `{"privileges", "rows", "columns"}`, at
+`/v1/tables/{name}/access?role={role}` (see [`row-level-security.md`](row-level-security.md)). Stored grants and
+policies carry over as entries; `V57` adds the new columns.
+
+**Moving clients** (`...` is `/v1/tables/{name}`):
+
+| 0.23.2 call | 0.23.3 call |
+|---|---|
+| `GET .../access` (five lists) | `GET .../access`: `{"generation", "roles": {"<role>": <entry>}, "ineffective_grants"}` |
+| `PUT .../access` with lists | `PUT .../access?role={role}` with the whole entry, per role; `DELETE` a role left with nothing |
+| `GET .../row-policies` | `GET .../access` (each entry's `rows`) |
+| `PUT` / `DELETE .../row-policies/{role}` | `PUT .../access?role={role}` with `rows` set, or `null` |
+| `permissions` in the `PUT` response | `GET /v1/tables/{name}` |
+
+- URL-encode the role. A `PUT` replaces the whole entry and must send the `generation` it read; it gets
+  `409 access_conflict` only when that role changed since. Writes to one table that wait past `TABLES_LOCK_TIMEOUT`
+  get `409 table_busy`.
+- Revision snapshots carry `roles` instead of `access` and `row_policies`.
+- A `list` privilege or a bundle-named role (`FULL_ADMIN`, ...) is `422`. Firewall refusals are an `ErrorView` `400`.
+- Additive: `permissions.grant` and `permissions.columns_restricted`; `ineffective_grants` on both reads, with the new
+  reasons `lifts_column_policies` and `everyone_reads_all_rows`.
+
+**Column policies** are new. A hidden column is absent from every read surface, and pipeline, runner and export paths
+refuse it with `403 column_not_entitled`. A restricted runner's list must also name `event_id`, `_ingested_at` and, for
+an aligned target, `request_time` on `dial_usage_log`. Gaining a column-restricted role can hide columns (see
+[`row-level-security.md`](row-level-security.md#column-policies)). Revisions hide what the table's policies hide now,
+or, for a deleted table, what they hid when it was deleted. Catalog bundles carry no access, as before.
+
+**Runners and pipeline authors.** A runner needs the source's clearance when the source's partition, version or
+identity column is `sensitive`, or it gets `403 sensitive_column_not_entitled`. A malformed `enrich` fragment over a
+source with sensitive columns answers `403` instead of `422` to an author without the clearance.
+
+**During the rollout**, make no access or table edits until every pod runs 0.23.3: 0.23.2 pods ignore column
+policies.
+
+**Rollback.** 0.23.2 ignores column policies, so every column they hide becomes visible. Delete them first if that
+must not happen.
+
+### 9e. Spending-limit columns on `dial_usage_log`
+
+DIAL Core reports the spending-limits check of a token caller's model call as a `spending_limits` object. ADAS
+stores it in five nullable columns of `dial_usage_log`, tagged `cost`: `spending_limits_mode`, `budget_cost_object`,
+`budget_outcome`, `budget_policy` and `budget_assignment` (see
+[`data-sync`](../openspec/specs/data-sync/spec.md), "Reported spending limits are persisted").
+
+- **Migrations.** ClickHouse `V18` adds the columns with `ALTER ADD COLUMN`, a metadata-only change that needs no
+  new grant. Postgres `V59` adds their catalog rows. With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply `V18` by hand
+  **before** starting the new build: startup validation refuses a mapping whose columns the table lacks. With
+  `SYNC_VALIDATE_SCHEMA=false` as well, nothing stops that start: rows are then written without the five values,
+  their blobs are recorded as ingested, and a query that reads the columns, a wildcard included, fails until `V18`
+  is applied. With `POSTGRES_MIGRATIONS_ENABLED=false`, apply `V55` to `V59` by hand too: without `V59` ingest fills
+  the columns, but no query surface knows them (`unknown field`), and nothing warns at startup.
+- **Budget paths are sensitive.** `budget_policy` and `budget_assignment` hold paths an administrator chooses, which
+  can name a user, so a caller needs `TABLE_SENSITIVE` on `dial_usage_log` to see them (see
+  [`table-management`](../openspec/specs/table-management/spec.md), "Seeded column sensitivity on the built-in source
+  tables"). `spending_limits_mode`, `budget_cost_object` and `budget_outcome` are visible to every reader.
+- **A custom mapping file needs the five entries.** With `SYNC_MAPPING_FILE` set to your own copy, copy the five
+  `spending_limits.*` entries from `mapping/dial-usage-log.yaml`. Without them the columns stay `NULL`, which reads
+  the same as "budgets did not apply".
+- **Deploy order does not matter.** Until DIAL Core reports the object, the five columns read `NULL`, the same as
+  for a call budgets do not apply to.
+- **`NULL` means "did not apply" only from the day both sides are upgraded.** Earlier rows read `NULL` whether or
+  not budgets applied, and a query cannot tell the two apart. Note the first full UTC day on which both ADAS and a
+  DIAL Core that reports the object ran, and read `NULL` as "did not apply" only from then on.
+- **Rows ingested earlier read `NULL`** until their blobs are re-ingested. Under `delta`, re-ingest whole UTC days
+  on one release and configuration.
+- **A refused call has no row.** `budget_outcome` `no_budget` and `exhausted` appear in shadow mode only.
+- **Rollback.** 0.23.2 does not declare the columns, so it ignores them and they read `NULL` on the rows it ingests.
+
+### 9f. Revision snapshots of system tables
+
+`GET /v1/tables/{name}/revision/{revision}` answered `404 revision_not_found` at every revision of `dial_usage_log`,
+`rate_analytics` and `dial_usage_log_payload`: a migration creates them, so their creation is not in the audit trail.
+It now answers `200` at every revision from the first recorded state of the table's definition, so the access edits
+already recorded on these tables become readable, with no backfill (see
+[`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
+
+- **No `columns` member.** The trail does not track a system table's columns, so the snapshot leaves the member out
+  rather than send an empty list or today's. `ordering_key`, `partition_by`, `ttl` and `grain` are those last
+  recorded at or before the revision: a migration's change to the definition, such as `V40` setting
+  `dial_usage_log_payload`'s partitioning, shows only from the table's next recorded change. `roles` is served under
+  the usual `TABLE_GRANT` bar. A history client such as the Admin UI must not assume `columns` is present.
+- **`permissions.columns_restricted`** is `true` whenever a column policy confines the caller, one that lists every
+  column included.
+- A revision before the table's first recorded state still answers `404 revision_not_found`, as does every revision
+  of a non-system table created before the trail.
+- **Rollback.** 0.23.2 answers `404` for these tables again. No data changes.
+
+### 9g. Summary
+
+| Change | Effect | Action |
+|---|---|---|
+| `*` means every authenticated caller in read-side grant lists and row policies; Flight SQL admits every authenticated caller | A `*` stored earlier as a role name opens that table to all callers | Remove unintended `*` entries before upgrading; check the startup log after; before a rollback, delete `*` policies that must keep confining (§9a) |
+| Row policies and queries may use `caller.user_hash` / `caller.project` | `caller.user_hash` matches no row until the `logging-*` settings are set | Set the `logging-*` settings to DIAL Core's values where own-rows policies or queries use it; before a rollback, remove caller-value policies and rewrite saved queries and widgets that store a caller value (§9b) |
+| An enrichment's read access and rows follow its source (`V56`) | Source readers gain its columns, enrichment-only grantees lose them, its row policies are gone | Run the two §9c queries, hide or grant per role, save the lists for a rollback (§9c) |
+| Sensitive-grant subset rule removed | Derived tables no longer need clearance on their input | Review who holds each derived table's clearance (§9c) |
+| Role-keyed access API, column policies (breaking) | Old access and row-policy calls are gone; snapshots carry `roles`; hidden columns are absent and refused `403 column_not_entitled` | Move clients, the Admin UI included, to the calls in §9d; name the cursor columns in a restricted runner's list; delete column policies before a rollback (§9d) |
+| Runner clearance, `enrich` parse failures, new codes | New `403 sensitive_column_not_entitled` cases; `409 access_conflict`, `409 table_busy`, `409 column_in_column_policy` | Give runners the source's clearance; handle the new codes (§9d) |
+| Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V55` to `V59`; copy the five entries into a custom mapping file (§9e) |
+| System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§9f) |

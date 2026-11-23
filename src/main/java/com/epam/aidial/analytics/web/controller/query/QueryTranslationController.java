@@ -68,7 +68,7 @@ public class QueryTranslationController {
         // have to carry the bar — validating at TABLE_READ would reject, as an unknown entity, exactly the
         // schema-only caller the lower bar exists for.
         final StructuredQuery translated =
-                sqlQueryFrontEnd.translate(request.sql(), Privilege.TABLE_GET).query();
+                sqlQueryFrontEnd.translate(request.sql(), Privilege.TABLE_GET, true).query();
         // The front end validates the SQL against the catalog, but the row governance lives in the
         // builder — so without this pass the endpoint returned a document `/v1/queries/execute` then
         // rejected (most visibly one carrying a LIMIT above the maximum), contradicting this endpoint's

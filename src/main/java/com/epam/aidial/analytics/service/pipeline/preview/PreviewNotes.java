@@ -47,16 +47,37 @@ public final class PreviewNotes {
      */
     public static PreviewNote enrichmentBehind(String enrichment, long newestMillis, long boundMillis,
             boolean sampledUnclamped) {
-        final String consequence = sampledUnclamped
-                ? "the sample reads those rows' columns of it as unmatched (NULL, or the type default for a "
-                        + "non-nullable column), and an enabled run would not write them until it catches up"
-                : "those rows are left out of the sample, as an enabled run would leave them until it catches up";
+        return enrichmentBehind(enrichment, newestMillis, boundMillis, sampledUnclamped, true);
+    }
+
+    /**
+     * As {@link #enrichmentBehind(String, long, long, boolean)}; without {@code instants} — for a caller from whom the
+     * read source's version column is hidden — the message carries neither the newest sampled version nor the
+     * enrichment's materialized position, only the gap, a derived duration.
+     */
+    public static PreviewNote enrichmentBehind(String enrichment, long newestMillis, long boundMillis,
+            boolean sampledUnclamped, boolean instants) {
+        final String consequence = consequence(sampledUnclamped);
+        if (!instants) {
+            final String distance = newestMillis == boundMillis
+                    ? "at the materialized position of enrichment '" + enrichment + "' and past it only by identity"
+                    : humanize(newestMillis - boundMillis) + " past the materialized position of enrichment '" + enrichment + "'";
+            return PreviewNote.about(PreviewNoteCode.ENRICHMENT_BEHIND, enrichment, "matching input reaches " + distance
+                    + "; " + consequence);
+        }
         final String position = "the materialized position of enrichment '" + enrichment + "' (" + Instant.ofEpochMilli(boundMillis) + ")";
         final String distance = newestMillis == boundMillis
                 ? "at " + position + " and past it only by identity"
                 : humanize(newestMillis - boundMillis) + " past " + position;
         return PreviewNote.about(PreviewNoteCode.ENRICHMENT_BEHIND, enrichment, "matching input reaches "
                 + Instant.ofEpochMilli(newestMillis) + ", " + distance + "; " + consequence);
+    }
+
+    private static String consequence(boolean sampledUnclamped) {
+        return sampledUnclamped
+                ? "the sample reads those rows' columns of it as unmatched (NULL, or the type default for a "
+                        + "non-nullable column), and an enabled run would not write them until it catches up"
+                : "those rows are left out of the sample, as an enabled run would leave them until it catches up";
     }
 
     /**

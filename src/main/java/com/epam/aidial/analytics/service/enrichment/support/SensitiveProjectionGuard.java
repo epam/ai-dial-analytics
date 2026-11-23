@@ -1,10 +1,12 @@
 package com.epam.aidial.analytics.service.enrichment.support;
 
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
 import com.epam.aidial.analytics.service.query.ComputedFields;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -12,8 +14,10 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -26,6 +30,9 @@ import java.util.function.Supplier;
  * least-privilege caller from operating a pipeline an entitled author registered — and it closes
  * the raw-name projection fallback, which would otherwise still select a sensitive column that the
  * role-filtered query model omitted from its bindings.
+ *
+ * <p>A column a column policy hides from the calling identity is refused the same way, as {@code 403
+ * column_not_entitled}, and before the clearance is checked.
  *
  * <p>Sensitive columns are rejected, never silently stripped: a projection missing the very column a
  * pipeline was written to read would produce a quietly wrong result, so the misconfiguration fails loudly.
@@ -58,6 +65,42 @@ public class SensitiveProjectionGuard {
      * misdescribes the very thing the operator has to go and look at.
      */
     public void enforce(String source, Collection<String> projection, String operation, String kind) {
+        enforceVisible(source, projection, operation, kind);
+        enforceSensitive(source, projection, operation, kind);
+    }
+
+    /**
+     * Refuses {@code 403 column_not_entitled} when {@code projection} names a column of {@code table} that a column
+     * policy hides from the calling identity — under either spelling, each mapped to its catalog column and judged by
+     * that column's exposed name, and a computed field by the columns it returns. Checked before the clearance, and by a
+     * caller judging several tables across all of them first, so the code never depends on the order tables are visited.
+     */
+    public void enforceVisible(String table, Collection<String> projection, String operation, String kind) {
+        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(table);
+        if (visibility.isAll()) {
+            return;
+        }
+        final List<ColumnMappingEntity> catalogColumns = columns.findByTableNameOrderByOrdinal(table);
+        final Map<String, ColumnMappingEntity> bySpelling = new HashMap<>();
+        for (ColumnMappingEntity column : ComputedFields.withComputed(table, catalogColumns)) {
+            bySpelling.putIfAbsent(column.getName(), column);
+            bySpelling.putIfAbsent(column.getSourceName(), column);
+        }
+        for (String name : projection) {
+            final ColumnMappingEntity column = bySpelling.get(name);
+            if (column != null && !visibility.allows(column, catalogColumns)) {
+                throw hidden(operation, kind, table, column.getName());
+            }
+        }
+    }
+
+    private static ColumnNotEntitledException hidden(String operation, String kind, String table, String column) {
+        return new ColumnNotEntitledException(operation + " of " + kind + " '" + table + "' reads column '" + column
+                + "', which a column policy hides from the caller");
+    }
+
+    /** The clearance half of {@link #enforce(String, Collection, String, String)}, without the column-policy check. */
+    private void enforceSensitive(String source, Collection<String> projection, String operation, String kind) {
         // Read AND clearance, not the clearance alone: nothing on these paths enforces TABLE_READ on the
         // owning table first, so the clearance by itself would let a caller with no read reach the values.
         if (sensitiveAccess.mayReadSensitive(source)) {
@@ -76,7 +119,8 @@ public class SensitiveProjectionGuard {
             if (sensitive.contains(name)) {
                 throw new SensitiveColumnNotEntitledException(operation + " of " + kind + " '" + source
                         + "' reads sensitive column '" + name
-                        + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on '" + source + "'");
+                        + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on '" + source + "'"
+                        + ("enrichment".equals(kind) ? ", which an enrichment takes from its source's grants" : ""));
             }
         }
     }
@@ -120,16 +164,29 @@ public class SensitiveProjectionGuard {
     public RuntimeException reattribute(
             String source, String operation, RuntimeException failure, boolean includeEnrichments) {
         // Entitlement is per owning table, so "is anything hidden from this caller?" is asked per table:
-        // the read source, and — for a caller whose predicates may name one — each of its enrichments.
+        // the read source, and — for a caller whose predicates may name one — each of its enrichments. A column
+        // policy first, across every such table: it is the stricter refusal, and the parse failure does not say which
+        // column caused it.
+        final List<TableDefinitionEntity> enrichments = includeEnrichments ? catalog.activeEnrichmentsOf(source) : List.of();
+        if (hidesByPolicy(source) || enrichments.stream().anyMatch(enrichment -> hidesByPolicy(enrichment.getName()))) {
+            return new ColumnNotEntitledException(operation + " of source '" + source + "' could not be validated for a "
+                    + "caller from whom a column policy hides some of its columns (or its enrichments')");
+        }
         boolean anythingHidden = hidesSensitive(source)
-                || (includeEnrichments && catalog.activeEnrichmentsOf(source).stream()
-                        .anyMatch(enrichment -> hidesSensitive(enrichment.getName())));
+                || enrichments.stream().anyMatch(enrichment -> hidesSensitive(enrichment.getName()));
         if (!anythingHidden) {
             return failure;
         }
         return new SensitiveColumnNotEntitledException(operation + " of source '" + source
                 + "' could not be validated for a caller who may not read its sensitive columns;"
-                + " reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table");
+                + " reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table (for an enrichment column, on '" + source + "')");
+    }
+
+    /** Whether a column policy hides one of {@code table}'s columns from the caller. */
+    private boolean hidesByPolicy(String table) {
+        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(table);
+        return !visibility.isAll() && columns.findByTableNameOrderByOrdinal(table).stream()
+                .anyMatch(column -> !visibility.allows(column.getName()));
     }
 
     /**
@@ -190,8 +247,10 @@ public class SensitiveProjectionGuard {
      * fallback is preserved exactly.
      */
     public void enforceEntity(String source, Collection<String> projection, String operation) {
-        enforce(source, projection, operation);
-        for (TableDefinitionEntity enrichment : catalog.activeEnrichmentsOf(source)) {
+        // Column policies across the whole entity before any clearance check (see enforceVisible).
+        final List<TableDefinitionEntity> enrichments = enforceVisibleEntity(source, projection, operation);
+        enforceSensitive(source, projection, operation, "source");
+        for (TableDefinitionEntity enrichment : enrichments) {
             String owner = enrichment.getName();
             if (sensitiveAccess.mayReadSensitive(owner)) {
                 continue;
@@ -208,9 +267,38 @@ public class SensitiveProjectionGuard {
                 if (qualified.contains(name)) {
                     throw new SensitiveColumnNotEntitledException(operation + " projects sensitive column '"
                             + name + "' on enrichment '" + owner
-                            + "'; reading them requires TABLE_READ and TABLE_SENSITIVE on the owning table");
+                            + "'; reading it requires TABLE_READ and TABLE_SENSITIVE on its source '" + source
+                            + "', whose grants an enrichment follows");
                 }
             }
         }
+    }
+
+    /**
+     * The column-policy half of {@link #enforceEntity}: refuses {@code 403 column_not_entitled} for a name of
+     * {@code projection} — a source column under either spelling, or an active enrichment's under its qualified flat
+     * name — that a column policy hides from the caller. Returns the active enrichments it judged.
+     */
+    public List<TableDefinitionEntity> enforceVisibleEntity(String source, Collection<String> projection, String operation) {
+        final List<TableDefinitionEntity> enrichments = catalog.activeEnrichmentsOf(source);
+        enforceVisible(source, projection, operation, "source");
+        for (TableDefinitionEntity enrichment : enrichments) {
+            final String owner = enrichment.getName();
+            final String prefix = owner + ".";
+            final List<String> bare = projection.stream()
+                    .filter(name -> name.startsWith(prefix))
+                    .map(name -> name.substring(prefix.length()))
+                    .toList();
+            if (!bare.isEmpty()) {
+                final ColumnVisibility visibility = sensitiveAccess.visibleColumns(enrichment);
+                final List<ColumnMappingEntity> catalogColumns = columns.findByTableNameOrderByOrdinal(owner);
+                for (ColumnMappingEntity column : fieldsOf(owner)) {
+                    if (bare.contains(column.getName()) && !visibility.allows(column, catalogColumns)) {
+                        throw hidden(operation, "enrichment", owner, prefix + column.getName());
+                    }
+                }
+            }
+        }
+        return enrichments;
     }
 }

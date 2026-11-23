@@ -94,7 +94,7 @@ public class SavedQueryBodyResolver {
      * body never needed that document.
      */
     private List<String> resolveSql(String sql) {
-        return switch (sqlQueryFrontEnd.plan(sql)) {
+        return switch (sqlQueryFrontEnd.plan(sql, Privilege.TABLE_READ, true)) {
             case SqlTranslation translation -> List.of(requireModel(translation.query().entity()).entity());
             case SqlCompositeTranslation composite -> resolveComposite(composite);
             // A statement against INFORMATION_SCHEMA has no entity and cannot be a saved query's body

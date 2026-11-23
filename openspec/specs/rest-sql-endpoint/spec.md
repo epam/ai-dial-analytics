@@ -637,7 +637,8 @@ column's existence.
 ### Requirement: Ad-hoc SQL requires TABLE_READ on every resolved table
 
 `POST /v1/queries/execute-sql` SHALL require `TABLE_READ` — held globally or granted on the table —
-for **every** table the statement resolves, including each enrichment the flattened entity reads.
+for **every** table the statement resolves, including each enrichment the flattened entity reads, whose
+`TABLE_READ` is its source's (see [table-access-control](../table-access-control/spec.md)).
 A caller lacking it on any resolved table SHALL be refused as though that table did not exist: the
 statement SHALL fail as referring to an unknown relation or column with `400 bad_request`, never
 `403`.

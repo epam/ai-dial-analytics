@@ -13,6 +13,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.util.unit.DataSize;
@@ -132,11 +133,19 @@ class AggregateSchedulerTest {
         given(pipelines.findDue(any())).willReturn(List.of(pipeline("caught_up")));
         given(refreshService.refresh("caught_up")).willReturn(new RefreshOutcome(3L, false, 1L));
 
+        final ZonedDateTime before = ZonedDateTime.now(ZoneOffset.UTC);
         scheduler(true).runDue();
+        final ZonedDateTime after = ZonedDateTime.now(ZoneOffset.UTC);
 
-        // The fixture's cron is hourly, so a caught-up pipeline must be parked well beyond the next tick.
+        // A caught-up pipeline is parked on its own cron, not on the next tick. The fixture's cron is hourly, so
+        // the armed time is the next top of the hour from when the run happened. It is compared with that fire
+        // time, not with "now plus a margin": a run in the last minute of an hour has its next fire under a
+        // minute away. The run's start and end bound it, since the scheduler reads the clock in between.
         verify(stateWriter).setNextRunAt(eq("caught_up"), armed.capture());
-        assertThat(armed.getValue()).isAfter(Instant.now().plusSeconds(60));
+        final CronExpression hourly = CronExpression.parse("0 0 * * * *");
+        assertThat(armed.getValue())
+                .isAfter(before.toInstant())
+                .isIn(hourly.next(before).toInstant(), hourly.next(after).toInstant());
     }
 
     @Test

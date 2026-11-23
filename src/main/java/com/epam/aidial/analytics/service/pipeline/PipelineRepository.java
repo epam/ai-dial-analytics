@@ -82,40 +82,6 @@ public interface PipelineRepository
     List<PipelineEntity> findByTargetInAndInputTableIsNull(Collection<String> targets);
 
     /**
-     * The table the pipeline writing {@code target} <b>effectively reads</b> — its declared
-     * {@code input_table}, or its target's {@code source_table} when it declares none. An {@link Optional}
-     * because {@code target} is UNIQUE, so there is at most one such pipeline.
-     *
-     * <p>The same resolution {@link #findEffectiveInputTable} performs, keyed the other way round: that one
-     * answers "what does pipeline <em>p</em> read", this one "what does the pipeline writing table
-     * <em>t</em> read". The laundering invariant needs the second form, because it starts from a table
-     * whose grants are being edited and has no pipeline name in hand.
-     *
-     * <p><b>A scalar projection, not an entity load, for the reason
-     * {@link #findEffectiveInputTable} spells out</b>: {@link PipelineEntity}'s JSON-converted columns
-     * compare unequal on every dirty check, so loading one inside the write transaction that is editing
-     * grants would flush a full-row {@code UPDATE} and open an Envers revision on a pipeline nobody
-     * touched. The same hazard cost {@code TableAccess} two audit-feed failures before it was given value
-     * equality.
-     */
-    @Query("select coalesce(p.inputTable, d.sourceTable) from PipelineEntity p "
-            + "left join TableDefinitionEntity d on d.name = p.target where p.target = :target")
-    Optional<String> findEffectiveInputTableOfTarget(@Param("target") String target);
-
-    /**
-     * The targets of every pipeline declaring {@code inputTable} as its read source, of any kind — the
-     * tables derived <b>from</b> it through a pipeline rather than through catalog parentage.
-     *
-     * <p>Names rather than entities, for the dirty-check reason above, and the counterpart of
-     * {@link #findEffectiveInputTableOfTarget}: together they give the laundering invariant both
-     * directions of the reads-from edge. {@code TableDefinitionRepository.findBySourceTable} covers only
-     * the catalog edge, which an {@code AGGREGATE} rollup target does not have at all and an
-     * {@code ENRICH} pipeline declaring its own read source does not follow.
-     */
-    @Query("select p.target from PipelineEntity p where p.inputTable = :inputTable")
-    List<String> findTargetsByInputTable(@Param("inputTable") String inputTable);
-
-    /**
      * The {@code target} of every pipeline of one kind — the exact set of tables that kind writes, since
      * {@code target} is UNIQUE in the schema.
      *

@@ -1,14 +1,16 @@
 package com.epam.aidial.analytics.web.mapper.table;
 
+import com.epam.aidial.analytics.service.audit.TableSnapshot;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableView;
 import com.epam.aidial.analytics.service.table.grant.EffectivePermissions;
 import com.epam.aidial.analytics.service.table.grant.TableCallerPermissions;
-import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.table.TableDto;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,10 +19,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -35,11 +40,17 @@ class TableMapperColumnVisibilityTest {
     private final SensitiveColumnAccess sensitiveAccess = mock(SensitiveColumnAccess.class);
     private final com.epam.aidial.analytics.service.table.relayout.TableLayouts layouts =
             mock(com.epam.aidial.analytics.service.table.relayout.TableLayouts.class);
-    private final TableMapper mapper = new TableMapper(permissions, sensitiveAccess, mock(RowPolicyCodec.class), layouts);
+    private final TableMapper mapper = new TableMapper(permissions, sensitiveAccess, mock(TableAccessService.class), layouts);
 
     @BeforeEach
     void permissionsAreIrrelevantHere() {
-        when(permissions.resolve(any())).thenReturn(EffectivePermissions.uniform(true));
+        when(permissions.resolve(any(), any(), any())).thenReturn(EffectivePermissions.uniform(true));
+        when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
+        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class), any(), any())).thenReturn(ColumnVisibility.ALL);
+    }
+
+    private static TableSnapshot snapshot() {
+        return new TableSnapshot(view(), null, null);
     }
 
     private static TableView view() {
@@ -81,11 +92,46 @@ class TableMapperColumnVisibilityTest {
     }
 
     @Test
+    @DisplayName("a column hidden by a column policy is omitted like an unentitled sensitive one")
+    void policyHiddenColumnIsOmitted() {
+        when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
+        when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("employee_name")));
+
+        assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("employee_name");
+    }
+
+    @Test
+    @DisplayName("a revision is judged by the decision that also applies the table's current column policies")
+    void revisionUsesTheRevisionDecision() {
+        when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
+        final TableView view = view();
+        final TableDefinitionEntity life = new TableDefinitionEntity();
+        final TableDefinitionEntity sourceLife = new TableDefinitionEntity();
+        when(sensitiveAccess.visibleColumnsAtRevision(same(view.definition()), same(life), same(sourceLife)))
+                .thenReturn(new ColumnVisibility(Set.of("k")));
+
+        assertThat(mapper.toDto(new TableSnapshot(view, life, sourceLife), true).columns())
+                .extracting(TableDto.ColumnDto::name).containsExactly("k");
+        verify(sensitiveAccess).visibleColumnsAtRevision(same(view.definition()), same(life), same(sourceLife));
+        assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
+    }
+
+    @Test
+    @DisplayName("visibility intersects: a column either decision hides stays hidden")
+    void visibilitiesIntersect() {
+        final ColumnVisibility then = new ColumnVisibility(Set.of("a", "b"));
+        assertThat(then.and(ColumnVisibility.ALL)).isEqualTo(then);
+        assertThat(ColumnVisibility.ALL.and(then)).isEqualTo(then);
+        assertThat(then.and(new ColumnVisibility(Set.of("b", "c"))).visible()).containsExactly("b");
+        assertThat(ColumnVisibility.ALL.and(ColumnVisibility.ALL)).isEqualTo(ColumnVisibility.ALL);
+    }
+
+    @Test
     @DisplayName("the layout is the table's current state, so the revision read omits it")
     void revisionReadCarriesNoLayout() {
         when(layouts.layout(any())).thenReturn("aligned");
 
         assertThat(mapper.toDto(view()).layout()).isEqualTo("aligned");
-        assertThat(mapper.toDto(view(), true).layout()).isNull();
+        assertThat(mapper.toDto(snapshot(), true).layout()).isNull();
     }
 }

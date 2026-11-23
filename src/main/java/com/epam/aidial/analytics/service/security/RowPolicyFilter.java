@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.service.security;
 import com.clickhouse.client.api.query.QuerySettings;
 import com.epam.aidial.analytics.configuration.ClickHouseProperties;
 import com.epam.aidial.analytics.exception.RowPolicyConfinedException;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.RowPolicyPredicates;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -50,6 +52,11 @@ import java.util.stream.Collectors;
  * globally <em>and</em> the caller actually holds {@code TABLE_READ} globally on this request — the second half
  * because the role-name lookup ({@link ProviderRolePrivileges}) is a union across every configured mapping, and
  * enforcement must not credit a role with a read the caller's own provider does not give it.
+ *
+ * <p>The wildcard {@link SecurityClaimsExtractor#ANYONE} is a role like any other here, one every real caller
+ * carries: a {@code read} grant naming it lets anyone read the table, a policy stored for it confines those
+ * who read through that grant alone, and a caller whose own role reads the table with no policy is still
+ * unconfined by the second case.
  *
  * <p>A policy never grants a read — whether the table is readable at all is still decided by the grant
  * evaluator — and a policy on a role takes that role out of the second case, so a broadly-entitled role is
@@ -220,26 +227,35 @@ public class RowPolicyFilter {
             return List.of();
         }
         for (final String role : roles) {
-            if (!policies.containsKey(role) && readsTable(role, access, globalRead)) {
+            if (!policies.containsKey(role) && readsTable(role, access, globalRead, rolePrivileges)) {
                 return List.of();
             }
         }
         return matching;
     }
 
-    /** Whether {@code role} by itself confers a read of the table: a {@code read} grant, or a global mapping. */
-    private boolean readsTable(String role, TableAccess access, boolean globalRead) {
+    /**
+     * Whether {@code role} by itself confers a read of the table: a {@code read} grant, or a global mapping while the
+     * caller holds {@code TABLE_READ} globally. Shared with column visibility ({@link SensitiveColumnAccess}), so the
+     * roles that lift confinement and the roles that govern columns cannot drift. Static, because the query model
+     * this filter depends on consults column visibility.
+     */
+    public static boolean readsTable(String role, TableAccess access, boolean globalRead, ProviderRolePrivileges rolePrivileges) {
         return TableCallerPermissions.isGranted(access, Privilege.TABLE_READ, Set.of(role))
                 || globalRead && rolePrivileges.holdsGlobally(role, Privilege.TABLE_READ);
     }
 
-    /** The OR of the confining policies' filters, each rendered against the table's own columns. */
+    /**
+     * The OR of the confining policies' filters, each rendered against the table's own columns with the
+     * caller values of the request being served — resolved here, per read, and never cached.
+     */
     private String predicate(String table, List<RowPolicy> confining) {
+        final UnaryOperator<String> callerValues = CallerValues.of(claims, "row_policy");
         if (confining.size() == 1) {
-            return predicates.render(table, confining.getFirst().filter());
+            return predicates.render(table, confining.getFirst().filter(), callerValues);
         }
         return confining.stream()
-                .map(policy -> "(" + predicates.render(table, policy.filter()) + ")")
+                .map(policy -> "(" + predicates.render(table, policy.filter(), callerValues) + ")")
                 .collect(Collectors.joining(" OR "));
     }
 

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.sql;
 
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.FinalDecision;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
@@ -630,6 +631,8 @@ public class StructuredQueryToSqlRenderer {
             // DSL translator reports, so the two surfaces refuse the same document.
             case LambdaExpr lambda -> lambda(lambda);
             case LambdaParamExpr param -> param.name();
+            // A caller value is never resolved here: it renders as the call SQL spells it, the same for every caller.
+            case ParamExpr param when CallerValues.isCallerValue(param) -> param.name() + "()";
             case ParamExpr param -> throw new QueryValidationException("param expressions are not supported: '" + param.name() + "'");
             case ArrayExpr ignored -> throw new QueryValidationException("array expressions are only valid as the right operand of 'in'");
             case ScalarSubqueryExpr ignored -> throw new QueryValidationException(

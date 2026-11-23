@@ -289,6 +289,12 @@ Guardrails on `/v1/tables`; a violation is rejected with 422.
 | `TABLES_MAX_TABLES`            | `tables.limits.max-tables`            | `1000`  | No       | Maximum table definitions in the catalog, enforced at create.                                                      |
 | `TABLES_MAX_WRITE_BATCH_ROWS`  | `tables.limits.max-write-batch-rows`  | `10000` | No       | Maximum rows accepted in one `POST /v1/tables/{name}/rows` batch, and the chunk size an OTLP export is written in. |
 
+### Table definition writes
+
+| Variable              | Property              | Default | Required | Description                                                                                                              |
+|-----------------------|-----------------------|---------|----------|--------------------------------------------------------------------------------------------------------------------------|
+| `TABLES_LOCK_TIMEOUT` | `tables.lock-timeout` | `10s`   | No       | Longest a write to a table definition waits for another change to that table; past it, `409 table_busy`. At least `1ms`. |
+
 ### OTLP sinks
 
 The OpenTelemetry sink surface: `/v1/otel/sinks` to provision, `/v1/otel/sink/{name}/v1/{logs,traces,metrics}`
@@ -563,18 +569,18 @@ earlier release needs these edits:
 
 - a value naming `TABLE_READ_SENSITIVE` becomes `TABLE_READ` plus `TABLE_SENSITIVE` — the old name no longer
   exists and fails startup;
-- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` must also name `TABLE_GRANT`, which
-  the endpoint requires;
+- a `READ_ONLY_ADMIN` role that reads `GET /v1/tables/{name}/access` or `GET /v1/tables/{name}/access?role={role}`
+  must also name `TABLE_GRANT`, which those endpoints require;
 - a role mapped to `READ_ONLY_ADMIN`, `READ_ONLY_ANALYTIC` or bare verbs that audits or manages sensitivity
   must also name `TABLE_SENSITIVE`: without the clearance, `GET /v1/tables` and `GET /v1/tables/{name}`
   omit sensitive columns, and a schema change can neither see them nor set a `sensitive` flag.
 
-See the `authentication` and `table-access-control` capabilities for why the grant lists are not a catalog
-read and why sensitivity is a clearance.
+See the `authentication` and `table-access-control` capabilities for why a table's access entries are not a
+catalog read and why sensitivity is a clearance.
 
 Six privileges are **table-scoped** — `TABLE_LIST`, `TABLE_GET`, `TABLE_READ`, `TABLE_SENSITIVE`,
-`TABLE_WRITE`, `TABLE_MODIFY` — and may be held globally or granted on a single table at
-`PUT /v1/tables/{name}/access`, with effective access the union of the two. `TABLE_LIST` is the one
+`TABLE_WRITE`, `TABLE_MODIFY` — and may be held globally or granted to a role on a single table at
+`PUT /v1/tables/{name}/access?role={role}`, with effective access the union of the two. `TABLE_LIST` is the one
 with no per-table grant: held globally it lists every table, and a `get` grant already lists its own. A
 valid token mapping to no privilege at all is still authenticated and may be authorized for one table by a
 matching grant, which is the intended shape for a BI tool or an exporter.
@@ -628,6 +634,9 @@ comma-separated value; `roles-mapping` takes a JSON string.
 | `providers.<name>.principal-claim`    | `providers.azure.principal-claim`     | No               | Claim used as the principal name; falls back to `SECURITY_USER_CLAIM`.                                                                                                                                         |
 | `providers.<name>.roles-mapping`      | `providers.azure.roles-mapping`       | No               | JSON mapping of this provider's role names to privilege or bundle names, merged over `SECURITY_ROLES_MAPPING`.                                                                                                 |
 | `providers.<name>.aliases`            | `providers.azure.aliases`             | No               | Host aliases used to expand Azure v1/v2 issuer URLs from a tenant id in `issuer`. JWT providers.                                                                                                               |
+| `providers.<name>.logging-key`        | `providers.azure.logging-key`         | No               | Top-level claim the caller's user hash is derived from, as in DIAL Core's `loggingKey` for the same provider; unset, callers of this provider have no user hash.                                               |
+| `providers.<name>.logging-salt`       | `providers.azure.logging-salt`        | If `logging-key` | Salt of the user hash, equal to DIAL Core's `loggingSalt`. A credential. Not needed when `obfuscate-user-email` is `false`.                                                                                    |
+| `providers.<name>.obfuscate-user-email` | `providers.azure.obfuscate-user-email` | No             | `false` uses the claim value itself as the user hash, as DIAL Core's `obfuscateUserEmail` does; default `true`.                                                                                                |
 
 An opaque provider whose userinfo returns no role information — plain Google userinfo, for instance —
 yields no privilege, so such callers reach only what a per-table grant naming one of their raw provider
@@ -681,6 +690,9 @@ Inactive unless `SECURITY_MODE=oidc`, and that mode still requires at least one 
 | `API_KEY_CACHE_MAX_SIZE`     | `security.api-key.cache-max-size`     | `10000`   | No                   | Maximum cached introspection entries.                                                                                                |
 | `API_KEY_REQUEST_TIMEOUT_MS` | `security.api-key.request-timeout-ms` | `3000`    | No                   | Connect and read timeout for the Core introspection call.                                                                            |
 | `API_KEY_STARTUP_PROBE`      | `security.api-key.startup-probe`      | `true`    | No                   | Probe Core reachability at startup and fail fast if unreachable. Set `false` to skip.                                                |
+| `API_KEY_LOGGING_KEY`        | `security.api-key.logging-key`        | _(empty)_ | No                   | Claim the user hash of a per-user API key is derived from; leave unset when Core's providers use different salts.                    |
+| `API_KEY_LOGGING_SALT`       | `security.api-key.logging-salt`       | _(empty)_ | If `API_KEY_LOGGING_KEY` | Salt of that user hash. A credential. Not needed when `API_KEY_OBFUSCATE_USER_EMAIL` is `false`.                                 |
+| `API_KEY_OBFUSCATE_USER_EMAIL` | `security.api-key.obfuscate-user-email` | `true` | No                   | `false` uses the claim value itself as the user hash.                                                                                |
 
 ## Exposing endpoints from a cluster
 

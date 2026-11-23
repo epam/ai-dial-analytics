@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.query.repository.QueryResultPage;
 import com.epam.aidial.analytics.service.query.repository.StructuredQueryExecutor;
 import com.epam.aidial.analytics.service.query.translate.CompositeQueryBuilder;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import org.jooq.DSLContext;
@@ -31,6 +32,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Arrow Flight SQL transport — so all three inherit the same ceilings and the same refusal. The enrichment
  * scan, group-fetch, materialize and aggregate-refresh paths share the executor but not this boundary, so
  * they keep their own bounds.
+ *
+ * <p>It is also where a query's caller values are resolved (see {@link CallerValues}): execution binds them to the
+ * identity of the request being served, validation to a placeholder, and nothing else here reads an identity.
  */
 @Component
 @RequiredArgsConstructor
@@ -50,6 +54,7 @@ public class StructuredQueryService {
     private final CompositeQueryBuilder compositeBuilder;
     private final DSLContext renderContext;
     private final QueryBudgetProperties budget;
+    private final SecurityClaimsExtractor claims;
 
     /** Resolves {@code query.entity()} against the catalog and executes it under the shared row governance. */
     public QueryResultPage execute(StructuredQuery query) {
@@ -64,7 +69,8 @@ public class StructuredQueryService {
     public QueryResultPage execute(StructuredQuery query, int maxLimit) {
         final QueryEntityModel model = resolve(query);
         try {
-            return executor.execute(model, query, maxLimit, QueryBudget.settings(budget));
+            return CallerValues.resolving(CallerValues.of(claims, "query"),
+                    () -> executor.execute(model, query, maxLimit, QueryBudget.settings(budget)));
         } catch (RuntimeException ex) {
             // A ceiling breach becomes this capability's own 422; everything else rethrows untouched and
             // keeps its existing mapping (a malformed statement stays a 400, an outage stays a 503).
@@ -95,12 +101,13 @@ public class StructuredQueryService {
         }
         final AtomicBoolean anyFinal = new AtomicBoolean(false);
         final AtomicBoolean partitionLocal = new AtomicBoolean(true);
-        final SelectQuery<Record> select = compositeBuilder.build(renderContext, plan, this::resolve, maxLimit, model -> {
-            anyFinal.set(true);
-            if (!model.partitionLocal()) {
-                partitionLocal.set(false);
-            }
-        });
+        final SelectQuery<Record> select = CallerValues.resolving(CallerValues.of(claims, "query"),
+                () -> compositeBuilder.build(renderContext, plan, this::resolve, maxLimit, model -> {
+                    anyFinal.set(true);
+                    if (!model.partitionLocal()) {
+                        partitionLocal.set(false);
+                    }
+                }));
         final QuerySettings settings = QueryBudget.settings(budget).serverSetting(JOIN_USE_NULLS, "1");
         try {
             return executor.executeComposite(select, settings, anyFinal.get() && partitionLocal.get());
@@ -116,7 +123,8 @@ public class StructuredQueryService {
      * budget is reactive, observable only once a statement runs.
      */
     public void validate(StructuredQuery query) {
-        executor.validate(resolve(query), query, StructuredQueryBuilder.MAX_LIMIT);
+        final QueryEntityModel model = resolve(query);
+        CallerValues.validating(() -> executor.validate(model, query, StructuredQueryBuilder.MAX_LIMIT));
     }
 
     /**
@@ -127,7 +135,8 @@ public class StructuredQueryService {
         if (query == null) {
             throw new QueryValidationException("query must not be null");
         }
-        executor.validate(resolve(query.entity(), bar), query, StructuredQueryBuilder.MAX_LIMIT);
+        final QueryEntityModel model = resolve(query.entity(), bar);
+        CallerValues.validating(() -> executor.validate(model, query, StructuredQueryBuilder.MAX_LIMIT));
     }
 
     /**
@@ -148,8 +157,8 @@ public class StructuredQueryService {
         if (plan == null) {
             throw new QueryValidationException("query must not be null");
         }
-        compositeBuilder.build(renderContext, plan,
-                entity -> resolve(entity, bar), StructuredQueryBuilder.MAX_LIMIT);
+        CallerValues.validating(() -> compositeBuilder.build(renderContext, plan,
+                entity -> resolve(entity, bar), StructuredQueryBuilder.MAX_LIMIT));
     }
 
     private QueryEntityModel resolve(StructuredQuery query) {

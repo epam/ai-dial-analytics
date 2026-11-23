@@ -144,7 +144,10 @@ A catalog column MAY be marked `sensitive`. Sensitivity SHALL be governed by one
 SHALL confer nothing. A verb SHALL reach a table's sensitive columns only when the caller holds
 **both that verb and `TABLE_SENSITIVE` on the table that owns the column**. Each SHALL be resolved
 independently as the union of what the caller holds globally and what that table grants it, so a
-global verb combined with a per-table clearance qualifies, and so does the reverse.
+global verb combined with a per-table clearance qualifies, and so does the reverse. For a column of an enrichment,
+`TABLE_READ` and `TABLE_SENSITIVE` SHALL be resolved on the enrichment's source, `TABLE_GET` on the source or by
+implication from `modify` held on the enrichment, and `TABLE_MODIFY` on the enrichment itself (see
+`table-access-control`, "An enrichment's read-side access is its source's").
 
 The clearance SHALL modify exactly three verbs:
 
@@ -162,8 +165,10 @@ columns SHALL be filtered out of the resolved query model before it is used. The
 absent from schema discovery and SHALL NOT be referenceable in any clause of a structured or SQL query
 (`select`, `filter`, `group_by`, `having`, `sort`). They SHALL also be absent from the catalog read
 surface and from the column set a schema mutation resolves against (see `table-management`).
-Ownership SHALL be decided per physical table, so within one flattened entity a caller MAY see the
-source's sensitive columns and not an enrichment's, or the reverse.
+Because an enrichment's clearance is its source's, one flattened entity SHALL have one clearance: a caller holding
+the clearance on the source SHALL hold it on every enrichment's sensitive columns, and one that does not SHALL see
+none of them. Column policies still decide which of those columns a cleared caller sees (see
+[table-access-control](../table-access-control/spec.md), "Column visibility by caller role").
 
 A caller lacking the clearance SHALL NOT be able to distinguish a sensitive column from a non-existent
 one on the query surface or the catalog read surface. Referencing it in a query SHALL fail as an
@@ -219,9 +224,11 @@ surface SHALL apply the same per-table predicate.
 
 #### Scenario: The privilege is evaluated per owning table
 
-- **WHEN** a caller holds `TABLE_READ` and `TABLE_SENSITIVE` on a source table and only `TABLE_READ`
-  on one of its enrichments, and both carry sensitive columns
-- **THEN** the flattened entity exposes the source's sensitive columns and omits the enrichment's
+- **GIVEN** a source and one of its enrichments that both carry sensitive columns
+- **WHEN** a caller holding `TABLE_READ` and `TABLE_SENSITIVE` on the source queries the flattened entity
+- **THEN** both the source's and the enrichment's sensitive columns resolve
+- **AND WHEN** a caller holding `TABLE_READ` on the source without the clearance queries it
+- **THEN** neither table's sensitive columns resolve
 
 #### Scenario: Security disabled shows sensitive columns
 
@@ -508,10 +515,11 @@ The service SHALL additionally define **bundles** — reserved names that expand
 A bundle SHALL be expanded when configuration is parsed, and SHALL NOT be observable by any
 authorization check thereafter: no endpoint, filter or evaluator SHALL branch on a bundle name.
 `FULL_ADMIN` and `READ_ONLY_ADMIN` SHALL expand to exactly the authority the corresponding
-application role carries today, with **declared exceptions**. First, `GET /v1/tables/{name}/access` now
-requires `TABLE_GRANT`, which `READ_ONLY_ADMIN` does not hold, so a caller that could read grant
-lists under that bundle receives `403`. The grant lists disclose which provider roles exist and what
-each may do, which is not a catalog read (see `table-access-control`). `READ_ONLY_ADMIN` and
+application role carries today, with **declared exceptions**. First, reading a table's access entries
+(`GET /v1/tables/{name}/access` and `GET /v1/tables/{name}/access?role=<role>`) requires `TABLE_GRANT`, which
+`READ_ONLY_ADMIN` does not hold, so a caller that could read a table's access under that bundle receives `403`. The
+entries disclose which provider roles exist and what each may do, which is not a catalog read (see
+`table-access-control`). `READ_ONLY_ADMIN` and
 `READ_ONLY_ANALYTIC` hold no clearance, so under them the catalog read surface omits sensitive
 columns (see `table-management`). A second declared exception narrows `FULL_ADMIN`: it no longer sees
 another caller's `personal` saved query anywhere, the saved-query revision endpoint and the activity feed
@@ -522,8 +530,11 @@ privilege implication** states. No other bundle's authority changes. A fourth is
 `READ_ONLY_SENSITIVE_ANALYTIC` gain `SETTINGS_READ`, and `FULL_ADMIN`, being every privilege, gains
 `SETTINGS_READ` and `SETTINGS_WRITE`. A `roles-mapping` that names raw privileges rather than a bundle gains
 neither, and must name `SETTINGS_READ` for its holders to read the settings. Apart from those four, an
-unmodified `roles-mapping` changes nothing observable. Bundle names SHALL NOT be valid grantees in a table's access lists, which name raw
-provider roles.
+unmodified `roles-mapping` changes nothing observable. A table's access entries are keyed by raw provider roles, so a
+bundle name SHALL be refused as the role of `PUT /v1/tables/{name}/access?role=<role>` (`422 validation_error`). An entry
+stored under a bundle name by an earlier build, which matches a raw provider role of that name, SHALL keep applying as
+stored until it is removed with `DELETE /v1/tables/{name}/access?role=<role>` (see `table-access-control`, "Role-keyed
+access API").
 
 Every `roles-mapping` (`security.defaults.roles-mapping`, `providers.<name>.roles-mapping`,
 `security.api-key.roles-mapping`) SHALL accept bundle names and privilege names in the same list.
@@ -548,8 +559,9 @@ implication edges in four places and let a bundle drift out of step with them.
 - **THEN** its holder holds `TABLE_READ`, `TABLE_SENSITIVE` and `SETTINGS_READ` globally, plus `TABLE_GET`
   and `TABLE_LIST` by implication, and reads every table's sensitive values
 
-#### Scenario: A read of grant lists is the one thing READ_ONLY_ADMIN loses
-- **WHEN** a caller mapped to `READ_ONLY_ADMIN` reads `GET /v1/tables/{name}/access`
+#### Scenario: A read of access entries is the one thing READ_ONLY_ADMIN loses
+- **WHEN** a caller mapped to `READ_ONLY_ADMIN` reads `GET /v1/tables/{name}/access` or
+  `GET /v1/tables/{name}/access?role=<role>`
 - **THEN** the response is `403 forbidden`, while every catalog, registry, audit and saved-query read
   that bundle reached before still succeeds
 
@@ -626,8 +638,9 @@ write privilege is not a disclosure. What makes either authorize a write on its 
 saved-query and dashboard write endpoint defers its check to the point where the request body's `scope`
 or `visibility` is known (see `saved-queries` and `dashboards`).
 
-Implication SHALL be **derived when a check runs**, never materialised into stored grant lists: a
-grant list SHALL return exactly the grantees that were written to it.
+Implication SHALL be **derived when a check runs**, never materialised into stored access entries: a
+role's entry SHALL return exactly the privileges that were written to it (see `table-access-control`, "Role-keyed
+access API").
 
 #### Scenario: The top rung reads without a separate read grant
 - **WHEN** a caller holds `TABLE_READ`, now the top rung, on a table and nothing else
@@ -670,9 +683,9 @@ grant list SHALL return exactly the grantees that were written to it.
 - **THEN** the caller can read that table's definition and its non-sensitive column inventory, but
   not its rows
 
-#### Scenario: A stored grant list is returned as written
-- **WHEN** a grant list names a role for `read` only, and the caller then reads the access lists
-- **THEN** the response lists that role under `read` alone, with no derived entry under `get`
+#### Scenario: A stored entry is returned as written
+- **WHEN** a role's entry on a table carries `read` only, and the caller then reads that role's entry
+- **THEN** the entry carries `privileges` `["read"]`, with no derived `get`
 
 ### Requirement: Endpoint authorization by privilege
 
@@ -749,9 +762,13 @@ opaque-token introspection, DIAL API key over HTTP, and DIAL API key over the Fl
 expanded privilege set **and** the caller's raw provider role names under the reserved prefix.
 An entry point SHALL NOT omit the raw provider roles, because per-table grants match on them.
 
+Every entry point SHALL likewise carry the caller values (see "Caller values derived from the
+credential"), because row policies and queries compare rows with them.
+
 Where two entry points share an introspection cache entry for the same credential, the cached
 identity SHALL be independent of which surface populated it: the same API key SHALL yield the same
-privileges and the same provider roles whether it is first presented over HTTP or over Flight.
+privileges, the same provider roles and the same caller values whether it is first presented over HTTP
+or over Flight.
 
 #### Scenario: An API key yields the same identity on both surfaces
 - **WHEN** the same DIAL API key is presented first over the Flight surface and then over HTTP
@@ -762,6 +779,11 @@ privileges and the same provider roles whether it is first presented over HTTP o
 - **WHEN** a caller authenticates to the Flight surface with an API key whose Core role is listed in
   a table's `read` grant list, and holds no global read privilege
 - **THEN** the caller can read that table over Flight
+
+#### Scenario: An API key yields the same caller values on both surfaces
+- **WHEN** the same project API key is presented first over the Flight surface and then over HTTP, and
+  its role carries the row policy `project_id = caller.project`
+- **THEN** both reads return the rows of that key's project
 
 ### Requirement: Changing sensitivity requires the clearance
 
@@ -780,8 +802,8 @@ A request by a caller lacking the clearance that attempts it SHALL be rejected w
 visible non-sensitive one), so the refusal discloses nothing. A request that names a column **hidden**
 from the caller is instead rejected as naming an unknown column (see `table-management`).
 
-The subset rule on derived tables (see `enrichment-runtime`) and the restriction that a cursor column
-may not be made sensitive (see `table-management`) SHALL continue to apply on top of this.
+The restriction that a cursor column may not be made sensitive (see `table-management`) SHALL continue to apply on
+top of this.
 
 #### Scenario: A modify grantee without the clearance cannot declassify a column
 - **WHEN** a caller holding `TABLE_MODIFY` but not `TABLE_SENSITIVE` on a table submits a schema patch
@@ -797,8 +819,7 @@ may not be made sensitive (see `table-management`) SHALL continue to apply on to
 #### Scenario: A delegated owner changes the flag in both directions
 - **WHEN** a caller whose provider role is in a table's `modify` and `sensitive` lists, holding no
   global privilege, sets `sensitive` on one column and clears it on another
-- **THEN** both changes are applied, subject to the cursor-column restriction and the derived-table
-  subset rule
+- **THEN** both changes are applied, subject to the cursor-column restriction
 
 #### Scenario: A grant holder alone may not change the flag
 - **WHEN** a caller holding `TABLE_GRANT` but neither `TABLE_MODIFY` nor `TABLE_SENSITIVE` on the
@@ -830,3 +851,113 @@ publish one.
 
 - **WHEN** a caller holding the `READ_ONLY_ANALYTIC` bundle creates a `public` dashboard
 - **THEN** the response is `403 forbidden`
+
+### Requirement: Caller values derived from the credential
+
+The system SHALL derive two caller values from an authenticated credential, for use in row policies
+(see [table-access-control](../table-access-control/spec.md), "Caller values in row policies") and in queries
+(see [structured-query](../structured-query/spec.md), "Caller values in a query filter"). Either MAY be absent; an
+absent value is unknown to a policy and to a query alike. In `none` security mode no credential is read, so every
+request has neither value.
+
+**`caller.project`** SHALL be the project name of a project API key, and absent for every other
+credential.
+
+**`caller.user_hash`** SHALL equal the value DIAL Core writes as `user.id` in its usage log for the same
+user, so that it can be compared with a `user_hash` column. It SHALL be derived from three settings:
+
+- `logging-key`: the name of the claim identifying the user;
+- `logging-salt`: the salt, a credential;
+- `obfuscate-user-email`: default `true`.
+
+With obfuscation on, the value SHALL be the lowercase hexadecimal SHA-256 digest of the UTF-8 bytes of the
+salt followed by the claim value. With obfuscation off, it SHALL be the claim value itself. `logging-key`
+SHALL name a top-level claim, not a dotted path. For a Bearer JWT and an introspected opaque token the
+claim SHALL be a string; for a per-user API key, whose claims are read as lists of strings (a lone string
+counting as a list of one, non-string items ignored), it SHALL have exactly one string value. The value
+SHALL be absent when `logging-key` is not set, when the claim is missing, when it has any other shape, or
+when it is blank.
+
+The settings SHALL be read per identity provider (`providers.<name>.*`) for a Bearer JWT and for an
+introspected opaque token, using the provider that authenticated the credential, and from
+`security.api-key.*` for a per-user API key, whose claims arrive without naming a provider. A deployment
+whose providers use different salts SHALL leave the API-key settings unset, so that per-user API keys have
+no user hash rather than a wrong one. A project API key SHALL have no user hash.
+
+`logging-key` set without `logging-salt` while obfuscation is on SHALL fail startup. The salt SHALL NOT be
+logged or returned by any endpoint.
+
+#### Scenario: A JWT caller's hash matches the stored column
+
+- **WHEN** a provider is configured with `logging-key` `email` and `logging-salt` `s1`, and a JWT of that
+  provider carries `email` `user1@example.com`
+- **THEN** the caller's user hash is the lowercase hex SHA-256 of `s1user1@example.com`
+
+#### Scenario: Obfuscation off yields the raw claim
+
+- **WHEN** the same provider sets `obfuscate-user-email` to `false`
+- **THEN** the caller's user hash is `user1@example.com`
+
+#### Scenario: A missing or non-string claim yields no hash
+
+- **WHEN** the configured claim is absent from the token, is an array of several values, or is blank
+- **THEN** the caller has no user hash
+
+#### Scenario: A provider without the settings yields no hash
+
+- **WHEN** a caller authenticates through a provider that sets no `logging-key`
+- **THEN** the caller has no user hash, and authentication succeeds as before
+
+#### Scenario: A per-user API key uses the API-key settings
+
+- **WHEN** `security.api-key.logging-key` and `security.api-key.logging-salt` are set, and Core's
+  introspection of a per-user key returns that claim with one string value
+- **THEN** the caller's user hash is derived from that value with the API-key salt
+
+#### Scenario: A project API key has a project and no hash
+
+- **WHEN** a project API key of project `P1` authenticates
+- **THEN** the caller's project is `P1` and it has no user hash
+
+#### Scenario: none mode yields no caller values
+
+- **WHEN** the service runs in `none` security mode and a request carrying a Bearer JWT whose configured claim is set
+  runs a query filtering `user_hash = caller.user_hash`
+- **THEN** the request has no user hash and no project, and the query returns no rows
+
+#### Scenario: A key without a salt fails startup
+
+- **WHEN** a provider sets `logging-key`, leaves `logging-salt` unset and does not turn obfuscation off
+- **THEN** startup fails naming the provider and the missing setting
+
+### Requirement: Encoded path separators are refused
+
+The service SHALL refuse with HTTP 400 a request whose path carries a percent-encoded slash (`%2F`, `%2f`) or
+percent-encoded percent sign (`%25`) in a path segment, on every path it serves and in both security modes, so no
+encoded character acts as a path separator when a request is matched to a handler or to an authentication rule, and
+none reaches a handler inside a path variable. No `/v1` endpoint carries a value that would need one in a path
+segment: a value that may contain any character, such as the role of a table access entry (see
+`table-access-control`, "Role-keyed access API"), travels as a query parameter. Every other rule of the request
+firewall SHALL stay: a path carrying `;`, `\`, `//` (encoded or not), an encoded `.`, a NUL, carriage-return or
+line-feed character, U+2028 or U+2029, or a segment that is exactly `.` or `..`, SHALL be refused.
+
+A request the service's request firewall refuses SHALL be answered as `ErrorView` `400 bad_request`, in both security
+modes. A request the servlet container rejects before the service sees it (an encoded slash or an encoded NUL, for
+two) gets the container's own `400` response, which is not an `ErrorView`; the service promises only HTTP 400 for
+those.
+
+#### Scenario: An encoded slash in a path segment is refused
+
+- **WHEN** a caller holding `TABLE_GET` globally reads `GET /v1/tables/a%2Fb`
+- **THEN** the response is HTTP 400, in either security mode
+
+#### Scenario: An encoded traversal never leaves its public path
+
+- **WHEN** an anonymous caller in `oidc` mode requests `/actuator/health/%2F..%2Fenv`
+- **THEN** the response is HTTP 400, and the request reaches no endpoint
+
+#### Scenario: A firewall refusal is an ErrorView
+
+- **WHEN** a caller requests a `/v1` path carrying `%3B` (an encoded `;`) in a path segment
+- **THEN** the response is an `ErrorView` with `status` 400 and `error` `bad_request`
+

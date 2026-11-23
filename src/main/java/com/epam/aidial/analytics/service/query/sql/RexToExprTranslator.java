@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.sql;
 
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.DocumentComparisons;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
@@ -22,6 +23,7 @@ import com.epam.aidial.analytics.service.query.model.LambdaParamExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
 import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
+import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.RelationColumn;
 import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
@@ -33,6 +35,8 @@ import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.service.query.model.WindowFrame;
 import com.epam.aidial.analytics.service.query.model.WindowOrder;
+import com.epam.aidial.analytics.service.query.translate.ExprFieldType;
+import com.epam.aidial.analytics.service.query.translate.WindowExpressions;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rex.RexCall;
@@ -44,6 +48,7 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexOver;
 import org.apache.calcite.rex.RexSubQuery;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.rex.RexWindow;
 import org.apache.calcite.rex.RexWindowBound;
 import org.apache.calcite.sql.SqlKind;
@@ -148,7 +153,19 @@ final class RexToExprTranslator {
 
     // ---------------------------------------------------------------- filters
 
-    /** Translates a boolean condition (WHERE/HAVING) into a DSL filter tree. */
+    /** A block's condition (WHERE/HAVING/ON), its caller values checked in the whole tree before any of it is translated. */
+    FilterNode rootFilter(RexNode node) {
+        requireCallerValuePlacement(node, true);
+        return toFilter(node);
+    }
+
+    /** A block's projection entry, its caller values checked in the whole tree before any of it is translated. */
+    Expr rootExpr(RexNode node) {
+        requireCallerValuePlacement(node, false);
+        return toExpr(node);
+    }
+
+    /** Translates a boolean condition into a DSL filter tree. */
     FilterNode toFilter(RexNode node) {
         if (node instanceof RexInputRef ref) {
             // A bare boolean column used as a predicate: WHERE success.
@@ -238,7 +255,101 @@ final class RexToExprTranslator {
     }
 
     private ComparisonNode comparison(ComparisonOp op, RexCall call) {
+        final RexNode left = withoutTextCasts(call.getOperands().get(0));
+        final RexNode right = withoutTextCasts(call.getOperands().get(1));
+        // A caller value's comparison was admitted before translation began (requireCallerValuePlacement), so here
+        // it is a string column against the caller value: the column, then the param.
+        final String leftCaller = callerValueOf(left);
+        final String rightCaller = callerValueOf(right);
+        if (leftCaller != null || rightCaller != null) {
+            return new ComparisonNode(op, List.of(toExpr(leftCaller != null ? right : left),
+                    new ParamExpr(leftCaller != null ? leftCaller : rightCaller)));
+        }
         return comparisonOf(op, toExpr(call.getOperands().get(0)), toExpr(call.getOperands().get(1)));
+    }
+
+    /**
+     * Refuses a caller value anywhere but the one admitted position, before any of {@code node} is translated: a
+     * direct operand of {@code =} or {@code <>} against a string column, reached from a condition's root through
+     * {@code AND}, {@code OR} and {@code NOT} alone. Running first is what makes the refusal name the caller value:
+     * the enclosing node — a cast to another type, a {@code LIKE}, an {@code IS NULL}, a function, a {@code CASE} —
+     * would otherwise be refused on its own terms. A subquery's plan is translated, and checked, on its own.
+     */
+    private void requireCallerValuePlacement(RexNode node, boolean predicate) {
+        if (!(node instanceof RexCall call)) {
+            return;
+        }
+        final String caller = callerValueOf(call);
+        if (caller != null) {
+            throw new SqlTranslationException(CallerValues.placementMessage(caller));
+        }
+        if (predicate && (call.getKind() == SqlKind.AND || call.getKind() == SqlKind.OR || call.getKind() == SqlKind.NOT)) {
+            call.getOperands().forEach(operand -> requireCallerValuePlacement(operand, true));
+            return;
+        }
+        if (predicate && (call.getKind() == SqlKind.EQUALS || call.getKind() == SqlKind.NOT_EQUALS)) {
+            final RexNode left = withoutTextCasts(call.getOperands().get(0));
+            final RexNode right = withoutTextCasts(call.getOperands().get(1));
+            final String leftCaller = callerValueOf(left);
+            final String rightCaller = callerValueOf(right);
+            if (leftCaller != null || rightCaller != null) {
+                final String name = leftCaller != null ? leftCaller : rightCaller;
+                if (leftCaller != null && rightCaller != null) {
+                    throw new SqlTranslationException(CallerValues.placementMessage(name));
+                }
+                final RexNode other = leftCaller != null ? right : left;
+                // A caller value inside the other operand is misplaced like anywhere else in an expression.
+                requireCallerValuePlacement(other, false);
+                if (!isStringOperand(other)) {
+                    throw new SqlTranslationException(CallerValues.placementMessage(name));
+                }
+                return;
+            }
+        }
+        call.getOperands().forEach(operand -> requireCallerValuePlacement(operand, false));
+        if (call instanceof RexOver over) {
+            over.getWindow().partitionKeys.forEach(key -> requireCallerValuePlacement(key, false));
+            over.getWindow().orderKeys.forEach(key -> requireCallerValuePlacement(key.getKey(), false));
+        }
+    }
+
+    /**
+     * {@code node} without the casts that leave a text value as it is: a written or identity character cast of an
+     * operand that is already text. A written cast of a non-text operand stays, as the {@code to_string} it translates to.
+     */
+    private static RexNode withoutTextCasts(RexNode node) {
+        RexNode current = node;
+        while (current instanceof RexCall call && !call.getOperands().isEmpty()
+                && (call.getOperator() == SqlQueryOperators.TO_STRING_CAST
+                || call.getKind() == SqlKind.CAST && SqlTypeUtil.inCharFamily(call.getType()))
+                && SqlTypeUtil.inCharFamily(call.getOperands().getFirst().getType())) {
+            current = call.getOperands().getFirst();
+        }
+        return current;
+    }
+
+    /** The caller value {@code node} is a call of, or {@code null}. */
+    private static String callerValueOf(RexNode node) {
+        return node instanceof RexCall call ? SqlCallerValues.callerValueOf(call.getOperator()) : null;
+    }
+
+    /**
+     * Whether {@code node} is an expression a caller value may be compared with: one over at least one column whose
+     * type is {@code string} — a column, a grouped or derived column, an output alias, a computed expression or an
+     * aggregate output, never a literal — typed by the
+     * structured query's own rule over the block's declared column types, so an {@code enum} or {@code uuid}, and an
+     * aggregate over one, is not. Where the engine refuses an aggregate (outside {@code HAVING}) it already has.
+     * Whether it reads a column is decided on the translation, as the structured query decides it: a reference to a
+     * folded derived table's literal column reads none.
+     */
+    private boolean isStringOperand(RexNode node) {
+        if (!SqlTypeUtil.inCharFamily(node.getType()) || !RexUtil.containsInputRef(node)) {
+            return false;
+        }
+        // Translated here only to be typed, and again by the comparison; its one side effect, marking the statement
+        // composite when it holds a subquery, is idempotent.
+        final Expr expr = node instanceof RexInputRef ref ? inputs.get(ref.getIndex()) : toExpr(node);
+        return WindowExpressions.readsField(expr) && ExprFieldType.ofDeclared(expr, fieldTypes) == QueryFieldType.STRING;
     }
 
     /** Builds a comparison, retyping a literal operand to its field counterpart's declared type. */
@@ -383,6 +494,10 @@ final class RexToExprTranslator {
     }
 
     private Expr callExpr(RexCall call) {
+        final String caller = callerValueOf(call);
+        if (caller != null) {
+            throw new SqlTranslationException(CallerValues.placementMessage(caller));
+        }
         if (call.getKind() == SqlKind.CAST || call.getKind() == SqlKind.SAFE_CAST) {
             return castExpr(call);
         }

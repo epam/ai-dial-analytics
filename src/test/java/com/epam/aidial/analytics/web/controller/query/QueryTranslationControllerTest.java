@@ -74,7 +74,7 @@ class QueryTranslationControllerTest {
         // ClickHouse, so a caller that may only `get` a table can translate a statement over it.
         BDDMockito.given(sqlQueryFrontEnd.translate(
                         "SELECT project_id FROM dial_usage_log WHERE deployment ILIKE '%gpt%'",
-                        Privilege.TABLE_GET))
+                        Privilege.TABLE_GET, true))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
 
         mockMvc.perform(post("/v1/queries/translate-sql").contentType(MediaType.APPLICATION_JSON).content(SQL_BODY))
@@ -99,7 +99,7 @@ class QueryTranslationControllerTest {
     @Test
     void translateSqlAppliesTheRowGovernance() throws Exception {
         BDDMockito.given(sqlQueryFrontEnd.translate(
-                        ArgumentMatchers.anyString(), ArgumentMatchers.any(Privilege.class)))
+                        ArgumentMatchers.anyString(), ArgumentMatchers.any(Privilege.class), ArgumentMatchers.eq(true)))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), true));
         BDDMockito.willThrow(new QueryValidationException("page limit 50000 exceeds the maximum of 1000 rows"))
                 .given(queryService).validate(TRANSLATED, Privilege.TABLE_GET);
@@ -113,7 +113,7 @@ class QueryTranslationControllerTest {
     @Test
     void translateSqlMapsTranslationErrorToBadRequest() throws Exception {
         BDDMockito.given(sqlQueryFrontEnd.translate(
-                        ArgumentMatchers.anyString(), ArgumentMatchers.any(Privilege.class)))
+                        ArgumentMatchers.anyString(), ArgumentMatchers.any(Privilege.class), ArgumentMatchers.eq(true)))
                 .willThrow(new SqlTranslationException("unsupported SQL construct: JOIN"));
 
         mockMvc.perform(post("/v1/queries/translate-sql").contentType(MediaType.APPLICATION_JSON).content(SQL_BODY))

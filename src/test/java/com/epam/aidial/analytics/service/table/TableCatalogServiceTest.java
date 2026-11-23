@@ -1,13 +1,18 @@
 package com.epam.aidial.analytics.service.table;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
+import com.epam.aidial.analytics.exception.ColumnInColumnPolicyException;
 import com.epam.aidial.analytics.exception.SystemTableException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
+import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,13 +25,16 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -63,10 +71,17 @@ class TableCatalogServiceTest {
 
     private TableCatalogService service;
 
+    private final ColumnPolicyCodec codec = new ColumnPolicyCodec(new JsonMapperConfiguration().jsonMapper());
+
     @BeforeEach
     void setUp() {
+        // Every definition writer locks the row as its first load; the stubs below describe the stored row once.
+        lenient().when(definitions.findForUpdate(anyString())).thenAnswer(inv -> definitions.findById(inv.getArgument(0)));
+        lenient().when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
+        lenient().when(sensitiveAccess.visibleColumns(anyString())).thenReturn(ColumnVisibility.ALL);
         service = new TableCatalogService(definitions, columns, callerPermissions, sensitiveAccess, writer, ddlExecutor, ddlRenderer,
-                new TableLimitsProperties(256, 1000, 10000), pipelines, pipelineReads, pipelineTargetCascade);
+                new TableLimitsProperties(256, 1000, 10000), pipelines, pipelineReads, pipelineTargetCascade,
+                new ColumnPolicyRewriter(codec, new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
     }
 
     private static CreateTableInput source(String name) {
@@ -140,7 +155,8 @@ class TableCatalogServiceTest {
     @Test
     void exceedingTableCapIsValidationError() {
         service = new TableCatalogService(definitions, columns, callerPermissions, sensitiveAccess, writer, ddlExecutor, ddlRenderer,
-                new TableLimitsProperties(256, 1, 10000), pipelines, pipelineReads, pipelineTargetCascade);
+                new TableLimitsProperties(256, 1, 10000), pipelines, pipelineReads, pipelineTargetCascade,
+                new ColumnPolicyRewriter(codec, new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
         given(definitions.existsById("widget_metrics")).willReturn(false);
         given(definitions.count()).willReturn(1L);
 
@@ -294,6 +310,90 @@ class TableCatalogServiceTest {
         final InOrder order = inOrder(pipelineTargetCascade, ddlExecutor);
         order.verify(pipelineTargetCascade).deletePipelineTargetingTable("widget_labels");
         order.verify(ddlExecutor).execute("DROP TABLE IF EXISTS `widget_labels`");
+    }
+
+    /** Deleting an enrichment prunes its qualified names from the source's lists and bumps the source's generation. */
+    @Test
+    void deleteEnrichmentPrunesTheSourcesColumnPolicies() {
+        final TableDefinitionEntity source = definition("widget_metrics", TableType.SOURCE, null, TableStatus.ACTIVE);
+        source.setColumnPolicies(codec.write(Map.of("X", List.of("widget_id", "widget_labels.label"))));
+        source.setAccessGeneration(3);
+        final TableDefinitionEntity enrichment = definition("widget_labels", TableType.ENRICHMENT, "widget_metrics", TableStatus.ACTIVE);
+        enrichment.setAccessGeneration(1);
+        given(definitions.findById("widget_labels")).willReturn(Optional.of(enrichment));
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(source));
+        given(columns.findByTableNameOrderByOrdinal("widget_labels")).willReturn(List.of(column("widget_labels", "label")));
+
+        service.delete("widget_labels");
+
+        assertThat(codec.read(source.getColumnPolicies())).containsEntry("X", List.of("widget_id"));
+        assertThat(source.getAccessGeneration()).isEqualTo(4);
+        assertThat(enrichment.getAccessGeneration()).isEqualTo(1);
+    }
+
+    /** An enrichment delete that would empty a list is refused before anything is dropped. */
+    @Test
+    void deleteEnrichmentThatWouldEmptyListIsRefusedBeforeTheDrop() {
+        final TableDefinitionEntity source = definition("widget_metrics", TableType.SOURCE, null, TableStatus.ACTIVE);
+        source.setColumnPolicies(codec.write(Map.of("X", List.of("widget_labels.label"))));
+        given(definitions.findById("widget_labels")).willReturn(
+                Optional.of(definition("widget_labels", TableType.ENRICHMENT, "widget_metrics", TableStatus.ACTIVE)));
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(source));
+        given(columns.findByTableNameOrderByOrdinal("widget_labels")).willReturn(List.of(column("widget_labels", "label")));
+
+        assertThatThrownBy(() -> service.delete("widget_labels")).isInstanceOf(ColumnInColumnPolicyException.class);
+        verify(ddlExecutor, never()).execute(any());
+        verify(pipelineTargetCascade, never()).deletePipelineTargetingTable(any());
+    }
+
+    /** The list item's count leaves out a column hidden by a column policy, and counts one both hidden and sensitive once. */
+    @Test
+    void columnCountLeavesOutPolicyHiddenColumns() {
+        final TableDefinitionEntity t = definition("t", TableType.SOURCE, null, TableStatus.ACTIVE);
+        given(definitions.findAll(any(org.springframework.data.domain.Sort.class))).willReturn(List.of(t));
+        final ColumnRepositoryCount count = new ColumnRepositoryCount("t", 3, 1);
+        given(columns.countByTable()).willReturn(List.of(count));
+        final ColumnMappingEntity secret = column("t", "s");
+        secret.setSensitive(true);
+        final List<ColumnMappingEntity> own = List.of(column("t", "a"), column("t", "b"), secret);
+        given(columns.findByTableNameOrderByOrdinal("t")).willReturn(own);
+        final ColumnVisibility visibility = new ColumnVisibility(java.util.Set.of("a", "s"));
+        given(sensitiveAccess.visibleColumns(t)).willReturn(visibility);
+        given(callerPermissions.resolve(t, visibility, own)).willReturn(new com.epam.aidial.analytics.service.table.grant.EffectivePermissions(
+                true, true, true, false, false, false, false, false, true));
+
+        assertThat(service.list()).singleElement().satisfies(summary -> assertThat(summary.columnCount()).isEqualTo(1));
+        // One visibility decision and one column read, shared by the count and columns_restricted.
+        verify(sensitiveAccess).visibleColumns(t);
+        verify(columns).findByTableNameOrderByOrdinal("t");
+    }
+
+    /** A {@code countByTable} row for the list test. */
+    private record ColumnRepositoryCount(String tableName, long columnCount, long sensitiveCount)
+            implements ColumnMappingRepository.TableColumnCount {
+
+        @Override
+        public String getTableName() {
+            return tableName;
+        }
+
+        @Override
+        public long getColumnCount() {
+            return columnCount;
+        }
+
+        @Override
+        public long getSensitiveCount() {
+            return sensitiveCount;
+        }
+    }
+
+    private static ColumnMappingEntity column(String table, String name) {
+        final ColumnMappingEntity column = new ColumnMappingEntity();
+        column.setTableName(table);
+        column.setName(name);
+        column.setSourceName(name);
+        return column;
     }
 
     @Test

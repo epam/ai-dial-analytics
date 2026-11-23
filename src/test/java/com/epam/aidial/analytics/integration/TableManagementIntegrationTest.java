@@ -609,6 +609,20 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(jsonPath("$.columns[0].heavy").value(true));
     }
 
+    /** The refusal constrains what may be stored, so it holds in none mode, where nothing else is enforced. */
+    @Test
+    void noneModeStillRefusesReadGrantOrRowPolicyOnEnrichment() throws Exception {
+        // The enrichment check runs before the generation check, so neither body needs a current generation.
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access?role=analytics-viewers").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"generation\":0,\"privileges\":[\"read\"]}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+        mockMvc.perform(put("/v1/tables/dial_usage_log_payload/access?role=team-x").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"generation\":0,\"rows\":{\"where\":\"trace_id = 'x'\"}}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+    }
+
     @Test
     void seededPayloadColumnsAreHeavyOnTheReadSurface() throws Exception {
         // The migration's seed, visible unfiltered to an operator (V18, extended by V29 and re-keyed
@@ -965,11 +979,11 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     @Test
     void seededSystemTablesExposeColumnDescriptions() throws Exception {
         // 34 after V38 re-keyed the five verbatim-content columns onto dial_usage_log_payload, plus the two
-        // route columns V49 registered.
+        // route columns V49 registered and the five spending-limit columns V59 registered.
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(36)))
-                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(36)))
+                .andExpect(jsonPath("$.columns", hasSize(41)))
+                .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(41)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")));
         // The moved rows kept their descriptions: V38 re-keys them rather than re-declaring them.
@@ -977,12 +991,13 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns", hasSize(6)))
                 .andExpect(jsonPath("$.columns[?(@.description != null && @.description != '')]", hasSize(6)))
-                // V50 extends the seeded description with the delta form.
+                // V50 extends the seeded description with the delta form, V58 with the empty body of a copy.
                 .andExpect(jsonPath("$.columns[?(@.name=='request_body')].description",
                         contains("Raw request body payload. Under delta storage a chat request is re-serialized (keys sorted, no "
                                 + "whitespace) without the cache_control markers of its history, carries only the history "
                                 + "elements its parent request did not have, and leaves out the system keys and tools it "
-                                + "shares with it.")));
+                                + "shares with it; a large body that is not JSON and repeats an earlier one exactly is "
+                                + "stored as an empty string. request_body_full returns the whole body in both cases.")));
         mockMvc.perform(get("/v1/tables/rate_analytics"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns", hasSize(10)))
@@ -1012,11 +1027,35 @@ class TableManagementIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     @Test
+    void seededSpendingLimitColumnsAreNullableCostAttributes() throws Exception {
+        // V59 registers the five columns V18 appended. Nullable matches their Nullable physical type — NULL is
+        // "budgets did not apply to the request" — and the tag groups them with the prices. Policy and assignment
+        // paths are chosen by an administrator and can name a user, so those two are sensitive.
+        String budget = "@.name=='spending_limits_mode' || @.name=='budget_cost_object' || @.name=='budget_outcome'"
+                + " || @.name=='budget_policy' || @.name=='budget_assignment'";
+        mockMvc.perform(get("/v1/tables/dial_usage_log"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].type", contains("string", "string", "string", "string", "string")))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].nullable", contains(true, true, true, true, true)))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].tag", contains("cost", "cost", "cost", "cost", "cost")))
+                .andExpect(jsonPath("$.columns[?(@.name=='spending_limits_mode' || @.name=='budget_cost_object'"
+                        + " || @.name=='budget_outcome')].sensitive", contains(false, false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_policy' || @.name=='budget_assignment')].sensitive",
+                        contains(true, true)))
+                .andExpect(jsonPath("$.columns[?(" + budget + ")].heavy", contains(false, false, false, false, false)))
+                .andExpect(jsonPath("$.columns[?(@.name=='spending_limits_mode')].display_name", contains("Spending limits mode")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_outcome')].display_name", contains("Budget outcome")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_cost_object')].display_name", contains("Budget cost object")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_policy')].display_name", contains("Budget policy")))
+                .andExpect(jsonPath("$.columns[?(@.name=='budget_assignment')].display_name", contains("Budget assignment")));
+    }
+
+    @Test
     void seededSystemTablesExposeColumnDisplayNames() throws Exception {
         mockMvc.perform(get("/v1/tables/dial_usage_log"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.columns", hasSize(36)))
-                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(36)))
+                .andExpect(jsonPath("$.columns", hasSize(41)))
+                .andExpect(jsonPath("$.columns[?(@.display_name != null && @.display_name != '')]", hasSize(41)))
                 .andExpect(jsonPath("$.columns[?(@.name=='event_id')].display_name", contains("Event ID")));
         mockMvc.perform(get("/v1/tables/dial_usage_log_payload"))
                 .andExpect(status().isOk())

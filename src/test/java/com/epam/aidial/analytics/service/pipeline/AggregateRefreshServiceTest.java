@@ -34,6 +34,7 @@ import com.epam.aidial.analytics.service.pipeline.preview.PreviewNoteSeverity;
 import com.epam.aidial.analytics.service.pipeline.preview.PreviewValueCapper;
 import com.epam.aidial.analytics.service.query.DialUsageLogTestModel;
 import com.epam.aidial.analytics.service.query.PortableRenderers;
+import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
@@ -575,7 +576,26 @@ class AggregateRefreshServiceTest {
             assertThat(note.code()).isEqualTo(PreviewNoteCode.ENRICHMENT_BEHIND);
             assertThat(note.severity()).isEqualTo(PreviewNoteSeverity.INFO);
             assertThat(note.subject()).isEqualTo(ENRICHMENT);
-            assertThat(note.message()).contains("1h");
+            assertThat(note.message()).contains("1h").contains("1970-");
+        });
+    }
+
+    @Test
+    void previewNoteOmitsTheInstantsWhenTheVersionColumnIsHiddenFromTheCaller() {
+        final QueryEntityModel full = DialUsageLogTestModel.model();
+        given(scanSources.entityModel(INPUT)).willReturn(new QueryEntityModel(full.entity(), full.table(), full.bindings(),
+                full.enrichments(), full.baseSchema().stream().filter(field -> !"_ingested_at".equals(field.source())).toList(),
+                full.tagOrder(), full.partitionLocal(), full.collapsing(), full.finalCapable()));
+        given(freshness.bound(any(), eq(INPUT)))
+                .willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 1_000L, "a")));
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(List.of(sampleRow("gpt-4", 2L, 3_601_000L, 2L)));
+
+        final PipelinePreview preview = service.preview(NAME);
+
+        assertThat(preview.notes()).singleElement().satisfies(note -> {
+            assertThat(note.code()).isEqualTo(PreviewNoteCode.ENRICHMENT_BEHIND);
+            assertThat(note.subject()).isEqualTo(ENRICHMENT);
+            assertThat(note.message()).contains("1h past").doesNotContain("1970-");
         });
     }
 
