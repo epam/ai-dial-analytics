@@ -14,6 +14,7 @@ import com.epam.aidial.analytics.service.query.sql.SqlMetadataResult;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlStatementPlan;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
+import com.epam.aidial.analytics.web.security.Privilege;
 import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
@@ -121,7 +122,7 @@ public class AdasFlightSqlProducer extends BasicFlightSqlProducer {
             // Plan under the caller's identity so the advertised Arrow schema reflects only the
             // columns that caller may see (a sensitive column is hidden without TABLE_SENSITIVE on
             // the table that owns it).
-            final SqlStatementPlan plan = asCaller(context, () -> frontEnd.plan(sql));
+            final SqlStatementPlan plan = asCaller(context, () -> frontEnd.plan(sql, Privilege.TABLE_READ, true));
             // Nothing here depends on the row cap any more: an oversized LIMIT is clamped at execution
             // rather than refused, and whether a clamped result actually truncated is only knowable
             // once it has run — so it is decided at doGet, like the no-LIMIT case always was.
@@ -556,7 +557,7 @@ public class AdasFlightSqlProducer extends BasicFlightSqlProducer {
             // same reason the catalog RPCs stay available at saturation.
             // Planned and executed under the caller's identity so sensitive-column filtering matches
             // the caller's role (see getFlightInfoStatement).
-            final SqlStatementPlan plan = asCaller(context, () -> frontEnd.plan(sql));
+            final SqlStatementPlan plan = asCaller(context, () -> frontEnd.plan(sql, Privilege.TABLE_READ, true));
             final Streamable streamable = switch (plan) {
                 case SqlMetadataResult metadata -> new Streamable(metadata.columns(), metadata.rows());
                 case SqlExecutableStatement translation -> {

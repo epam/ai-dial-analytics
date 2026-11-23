@@ -1583,8 +1583,8 @@ refuses from a caller and which the read would then serve as if the author had w
   An `aggregate` declaration in SQL mode SHALL be held to its **full** SQL gate — the statement parsed,
   its eligibility for incremental refresh checked, and every governance rule of the form path applied
   to it — at exactly the moments the form gate runs: when a write arms it, on every preview, and on
-  every refresh. A refresh SHALL NOT reuse a verdict from arming, because the input's schema, the
-  referenced enrichments and the sensitive grants may all have moved since.
+  every refresh. A refresh SHALL NOT reuse a verdict from arming, because the input's schema and the
+  referenced enrichments may both have moved since.
 - **The pipeline-scoped data plane SHALL NOT run the whole gate.** It refuses a declaration whose
   required members are **absent**, and the materialize path additionally re-checks the two rules whose
   absence produces a silently wrong row rather than a loud failure — the result-type fit against the
@@ -2463,3 +2463,4 @@ status.
 - **GIVEN** an enabled `enrich` pipeline that the runner's dead-letter circuit breaker has paused
 - **WHEN** `GET /v1/pipelines/{name}` is called
 - **THEN** it reports `enabled: true`
+

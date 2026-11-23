@@ -1,6 +1,5 @@
 package com.epam.aidial.analytics.service.enrichment;
 
-import com.epam.aidial.analytics.exception.DeclarationUnresolvableException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
@@ -234,52 +233,6 @@ public class PipelineGenerationService implements PipelineGenerationBump, Pipeli
         return definitions.findById(declaration.target())
                 .map(TableDefinitionEntity::getSourceTable)
                 .orElse(null);
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<String> targetsReadingEnrichment(String enrichment) {
-        return declarations().stream()
-                .filter(declaration -> referencedEnrichmentsOrRefuse(declaration).contains(enrichment))
-                .map(PipelineDeclaration::target)
-                .filter(StringUtils::isNotBlank)
-                .distinct()
-                .toList();
-    }
-
-    @Override
-    @Transactional(readOnly = true)
-    public List<String> enrichmentsReadByPipelineTargeting(String target) {
-        // `target` is UNIQUE across both kinds, so this selects at most one declaration; expressed as a
-        // stream anyway so it cannot break if that ever stops being true.
-        return declarations().stream()
-                .filter(declaration -> target.equals(declaration.target()))
-                .flatMap(declaration -> referencedEnrichmentsOrRefuse(declaration).stream())
-                .distinct()
-                .toList();
-    }
-
-    /**
-     * {@link #referencedEnrichments} for the two lookups above, which back the laundering subset rule and
-     * so must not read a drifted declaration as "reads nothing".
-     *
-     * <p>The lenient resolver degrades to the empty set, which is right for the delete guard and the
-     * freshness diagnostics and wrong here: under the subset rule an empty answer <em>accepts</em> a grant.
-     * The lenient one also differs by kind — the aggregate resolver swallows, the enrich one does not — so
-     * one drifted row either reopened the laundering path or turned every grant edit into a 500 naming an
-     * unrelated pipeline. Both are refused here instead, named, and in one shape.
-     */
-    private Set<String> referencedEnrichmentsOrRefuse(PipelineDeclaration declaration) {
-        try {
-            return declaration.kind() == PipelineKind.AGGREGATE
-                    ? aggregateGovernance.referencedEnrichmentsOrThrow(declaration)
-                    : enrichGovernance.referencedEnrichmentsOrThrow(declaration);
-        } catch (RuntimeException unresolvable) {
-            throw new DeclarationUnresolvableException("pipeline '" + declaration.name()
-                    + "' cannot be resolved, so what it reads is unknown and a grant on a table it may"
-                    + " touch cannot be decided. Repair or delete that pipeline, then retry: "
-                    + unresolvable.getMessage(), unresolvable);
-        }
     }
 
     @Override

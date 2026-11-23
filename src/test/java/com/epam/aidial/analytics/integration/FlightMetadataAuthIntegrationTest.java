@@ -1,5 +1,8 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.service.table.TableAccessService;
+import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
+import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import com.epam.aidial.analytics.web.security.TestSecurityConfig;
@@ -28,6 +31,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import tools.jackson.databind.node.LongNode;
 
 import java.io.ByteArrayInputStream;
 import java.nio.channels.Channels;
@@ -82,13 +86,11 @@ class FlightMetadataAuthIntegrationTest {
     /**
      * The entity whose wildcard schema can still show a sensitive column being filtered.
      *
-     * <p>Asserted on {@code rate_analytics}, not on {@code dial_usage_log}, and the reason is the split.
-     * {@code GetTables} reports an entity's STAR schema, and a star never fans out into a grain join —
-     * so every enrichment column is absent from it for admin and read-only callers alike. Since all
-     * five of {@code dial_usage_log}'s sensitive columns moved to {@code dial_usage_log_payload}, that
-     * table can no longer show a filtering difference here at all: both callers would see the same
-     * list, and the assertion would pass while testing nothing. {@code rate_analytics.comment} (V3) is
-     * the remaining sensitive SOURCE column, so it is what can still demonstrate the rule.
+     * <p>{@code GetTables} reports an entity's STAR schema, and a star never fans out into a grain join —
+     * so every enrichment column is absent from it for admin and read-only callers alike. On
+     * {@code dial_usage_log} the difference would rest on the two budget paths V59 seeds sensitive, while most
+     * of its sensitive columns live on {@code dial_usage_log_payload}. {@code rate_analytics.comment} (V3) is
+     * the only sensitive column of its table and has no enrichment beside it, so it shows the rule alone.
      *
      * <p>The enrichment columns' filtering is not left unguarded — it is
      * {@link #catalogSqlHidesSensitiveColumnsFromReadOnlyCaller} that covers them, because
@@ -103,7 +105,8 @@ class FlightMetadataAuthIntegrationTest {
      * Every column reachable from {@code dial_usage_log} that is marked {@code sensitive} — seeded by
      * migrations V3 ({@code jwt_claims}, {@code request_body}, {@code response_body}), V12
      * ({@code request_tags}) and V29 ({@code assembled_response}), all five re-keyed onto the
-     * payload enrichment by V38, and the cache markers V50 seeds there. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
+     * payload enrichment by V38, the cache markers V50 seeds there, and the two budget paths V59 seeds on
+     * {@code dial_usage_log} itself. This is the set that matters for {@code INFORMATION_SCHEMA.COLUMNS},
      * which enumerates the entity's full binding list rather than its wildcard expansion, so the
      * payload columns ARE visible to an admin there — which is what makes this the channel that can
      * still prove the filtering the wildcard schema no longer can.
@@ -117,10 +120,15 @@ class FlightMetadataAuthIntegrationTest {
             "dial_usage_log_payload.request_cache_control",
             // The computed rebuild fields carry request_body's flag and are listed like any column of the entity.
             "dial_usage_log_payload.request_body_full",
-            "dial_usage_log_payload.request_body_rebuild");
+            "dial_usage_log_payload.request_body_rebuild",
+            "budget_policy",
+            "budget_assignment");
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;
+
+    @Autowired
+    private TableAccessService tableAccess;
 
     private BufferAllocator clientAllocator;
     private FlightSqlClient sqlClient;
@@ -196,6 +204,32 @@ class FlightMetadataAuthIntegrationTest {
             throw new AssertionError(e);
         }
         return names;
+    }
+
+    /**
+     * A column policy hides a column on every Flight channel exactly as the clearance does: the {@code GetTables}
+     * schema, {@code INFORMATION_SCHEMA.COLUMNS} and a star query's result schema. {@code viewer} reads globally, so an
+     * entry on it with no privileges and a column list confines it.
+     */
+    @Test
+    void columnPolicyHidesColumnsOnEveryFlightChannel() throws Exception {
+        final AccessEntries before = tableAccess.list("dial_usage_log");
+        assertThat(before.roles()).doesNotContainKey("viewer");
+        tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(), null,
+                List.of("event_id", "project_id", "request_time")));
+        try {
+            final CallOption readOnly = bearer(readOnlyToken());
+            assertThat(tableSchemaFields("dial_usage_log", readOnly)).contains("project_id").doesNotContain("deployment");
+            assertThat(catalogSqlColumnNames(readOnly)).containsExactlyInAnyOrder("event_id", "project_id", "request_time");
+            final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1", readOnly);
+            assertThat(info.getSchemaOptional().orElseThrow().getFields().stream().map(Field::getName).toList())
+                    .containsExactlyInAnyOrder("event_id", "project_id", "request_time");
+            assertThatThrownBy(() -> drain("SELECT deployment FROM dial_usage_log LIMIT 1", readOnly)).hasMessageContaining("deployment");
+
+            assertThat(tableSchemaFields("dial_usage_log", bearer(fullAdminToken()))).contains("deployment");
+        } finally {
+            tableAccess.delete("dial_usage_log", "viewer", null);
+        }
     }
 
     @Test

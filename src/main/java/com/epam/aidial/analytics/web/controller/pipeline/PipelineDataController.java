@@ -137,8 +137,9 @@ public class PipelineDataController {
     @ApiResponse(responseCode = "200", description = "The sample, its typed columns and coded notes")
     @ApiResponse(responseCode = "400", description = "A malformed body, or one carrying an unknown member such "
             + "as `cursor` (`bad_request`)")
-    @ApiResponse(responseCode = "403", description = "The caller may not read a `sensitive` column the "
-            + "declaration reads (`sensitive_column_not_entitled`), is row-confined (`row_policy_confined`), lacks the "
+    @ApiResponse(responseCode = "403", description = "The caller may not read a column the declaration reads — one a "
+            + "column policy hides from it (`column_not_entitled`, checked first) or a `sensitive` one it lacks the "
+            + "clearance for (`sensitive_column_not_entitled`) —, is row-confined (`row_policy_confined`), lacks the "
             + "target's grant (`pipeline_access_denied`), or lacks `REGISTRY_ADMIN` (`forbidden`)")
     @ApiResponse(responseCode = "404", description = "No such pipeline (`unknown_pipeline`)")
     @ApiResponse(responseCode = "409", description = "A conflict arming would also report (`pipeline_conflict`, `table_is_system`)")
@@ -205,6 +206,7 @@ public class PipelineDataController {
     @PostMapping("/refresh")
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @RunnerContractExempt
+    @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC)
     @Operation(summary = "Refresh a pipeline now",
             description = "Runs one bounded window immediately: probes the window end, then recomputes in "
                     + "full every group key that window touched. Idempotent — repeating it writes the same "
@@ -222,6 +224,8 @@ public class PipelineDataController {
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
             description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
     @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC)
+    @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; the scan reads the "
+            + "read source's identity and version columns, the grain key, a group key and an aligned target's partition column")
     @Operation(summary = "Scan a page of source rows for an enrich pipeline",
             description = "Runs the pipeline's governed source-only keyset scan and returns a page plus an "
                     + "opaque next_cursor, has_more, and lag_seconds. Omit cursor to scan from the start; "
@@ -241,6 +245,8 @@ public class PipelineDataController {
     @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
             description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
     @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC)
+    @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; group assembly reads "
+            + "the group key and the read source's version and identity columns")
     @Operation(summary = "Assemble a group's member rows for a group-triggered pipeline",
             description = "Returns the source rows sharing the given group key that satisfy the pipeline's "
                     + "membership filter, in the source's total order, bounded by both a row cap and a "
@@ -259,6 +265,8 @@ public class PipelineDataController {
             description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE)
     @ApiResponse(responseCode = "409", description = WRITE_REFUSAL_DOC)
     @ApiResponse(responseCode = "503", description = RELAYOUT_HOLD_DOC)
+    @ApiResponse(responseCode = "403", description = PipelineController.COLUMN_REFUSAL_DOC + "; materialize reads "
+            + "the read source's version and identity columns, which its next_cursor carries")
     @Operation(summary = "Materialize a window of a Class-1 (sql) pipeline",
             description = "Probes a bounded window of the pipeline's source, then writes its derived values "
                     + "for exactly that window with a single server-side INSERT … SELECT. Returns counts and "

@@ -602,6 +602,7 @@ class ReadShapingRenderTest {
         shapes.put(cmp(ComparisonOp.ICO, field(NOTE), str("error")), "\"dial_usage_log_payload\".\"note\" ilike '%error%'");
         shapes.put(cmp(ComparisonOp.CO, field(NOTE), str("x")), "\"dial_usage_log_payload\".\"note\" like '%x%'");
         shapes.put(cmp(ComparisonOp.EQ, field(NOTE), str("v")), "\"dial_usage_log_payload\".\"note\" = 'v'");
+        shapes.put(cmp(ComparisonOp.EQ, str("w"), field(NOTE)), "'w' = \"dial_usage_log_payload\".\"note\"");
         shapes.put(cmp(ComparisonOp.EQ, field(STATUS), new ValueExpr(ValueType.LONG, "500")),
                 "\"dial_usage_log_payload\".\"status_code\" = 500");
         shapes.put(cmp(ComparisonOp.IN, field(NOTE), new ArrayExpr(List.of(str("a"), str("b")))),

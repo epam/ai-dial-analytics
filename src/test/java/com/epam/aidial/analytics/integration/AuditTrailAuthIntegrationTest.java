@@ -131,7 +131,7 @@ class AuditTrailAuthIntegrationTest {
 
     @Test
     void theSnapshotRouteMatchesTheLiveReadsAuthorization() throws Exception {
-        final String path = "/v1/tables/dial_usage_log/revision/1";
+        final String path = "/v1/tables/dial_usage_log/revision/0";
 
         mockMvc.perform(get(path)).andExpect(status().isUnauthorized());
         // A caller with no read privilege on the table is told the table is not there, not that it may not
@@ -140,8 +140,9 @@ class AuditTrailAuthIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
         // A caller holding TABLE_GET gets past authorization; whether that revision exists is a separate
-        // question, and 404 revision_not_found is the honest answer for a table whose history predates the
-        // trail.
+        // question. Revision 0 is never issued, so the answer is 404 revision_not_found whatever other tests
+        // recorded for this table. The 200 at a recorded revision, for the same READ_ONLY_ADMIN caller, is pinned by
+        // TableGrantRevisionIntegrationTest#systemTableAccessChangesAreReadableAtTheirRevisions.
         mockMvc.perform(authored(get(path), readOnlyAdmin()))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("revision_not_found"));

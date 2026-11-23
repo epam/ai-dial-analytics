@@ -61,7 +61,7 @@ public class SqlValidationService {
      */
     public SqlValidation validate(String sql) {
         try {
-            return switch (frontEnd.plan(sql, Privilege.TABLE_GET)) {
+            return switch (frontEnd.plan(sql, Privilege.TABLE_GET, true)) {
                 case SqlTranslation translation -> {
                     queryService.validate(translation.query(), Privilege.TABLE_GET);
                     yield SqlValidation.accepted(

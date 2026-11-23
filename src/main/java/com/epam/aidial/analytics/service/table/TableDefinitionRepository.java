@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Spring Data JPA repository for {@link TableDefinitionEntity}, keyed by table {@code name}. */
 @Repository
-public interface TableDefinitionRepository extends JpaRepository<TableDefinitionEntity, String> {
+public interface TableDefinitionRepository extends JpaRepository<TableDefinitionEntity, String>, TableDefinitionLocking {
 
     /** Enrichments that reference {@code sourceTable} — used to flatten schemas and block source deletes. */
     List<TableDefinitionEntity> findBySourceTable(String sourceTable);

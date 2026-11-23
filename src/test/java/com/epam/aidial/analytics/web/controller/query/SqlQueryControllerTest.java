@@ -13,6 +13,7 @@ import com.epam.aidial.analytics.service.query.sql.ResultColumnKind;
 import com.epam.aidial.analytics.service.query.sql.SqlMetadataResult;
 import com.epam.aidial.analytics.service.query.sql.SqlQueryFrontEnd;
 import com.epam.aidial.analytics.service.query.sql.SqlTranslation;
+import com.epam.aidial.analytics.web.security.Privilege;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.BDDMockito;
@@ -53,7 +54,7 @@ class SqlQueryControllerTest {
 
     @Test
     void returnsRowsWithNullTotalCount() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan("SELECT project_id FROM dial_usage_log"))
+        BDDMockito.given(sqlQueryFrontEnd.plan("SELECT project_id FROM dial_usage_log", Privilege.TABLE_READ, true))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
         final Map<String, Object> row = new HashMap<>();
         row.put("project_id", "p1");
@@ -70,7 +71,7 @@ class SqlQueryControllerTest {
 
     @Test
     void mapsSqlTranslationErrorToBadRequest() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willThrow(new SqlTranslationException("unsupported SQL construct: JOIN"));
 
         mockMvc.perform(post("/v1/queries/execute-sql").contentType(MediaType.APPLICATION_JSON).content(BODY))
@@ -84,7 +85,7 @@ class SqlQueryControllerTest {
 
     @Test
     void mapsQueryValidationToBadRequest() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
         BDDMockito.given(queryService.execute(TRANSLATED))
                 .willThrow(new QueryValidationException("limit 50000 exceeds the maximum of 1000"));
@@ -97,7 +98,7 @@ class SqlQueryControllerTest {
 
     @Test
     void mapsClickHouseUnavailableToServiceUnavailable() throws Exception {
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willReturn(new SqlTranslation(TRANSLATED, List.of(), false));
         BDDMockito.given(queryService.execute(TRANSLATED))
                 .willThrow(new ClickHouseUnavailableException("down", new IllegalStateException("connect")));
@@ -141,7 +142,7 @@ class SqlQueryControllerTest {
         final Map<String, Object> row = new HashMap<>();
         row.put("COLUMN_NAME", "event_kind");
         row.put("DATA_TYPE", "CHARACTER VARYING");
-        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString()))
+        BDDMockito.given(sqlQueryFrontEnd.plan(ArgumentMatchers.anyString(), ArgumentMatchers.eq(Privilege.TABLE_READ), ArgumentMatchers.eq(true)))
                 .willReturn(new SqlMetadataResult(
                         List.of(new ResultColumn("COLUMN_NAME", ResultColumnKind.STRING),
                                 new ResultColumn("DATA_TYPE", ResultColumnKind.STRING)),

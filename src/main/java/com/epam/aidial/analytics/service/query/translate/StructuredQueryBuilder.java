@@ -828,7 +828,7 @@ public class StructuredQueryBuilder {
             select.addGroupBy(groupFields);
         }
         if (query.having() != null) {
-            select.addHaving(filterTranslator.toCondition(query.having(), aliasBindings));
+            select.addHaving(filterTranslator.toHavingCondition(query.having(), aliasBindings));
         }
         return aliasBindings;
     }

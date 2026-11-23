@@ -21,7 +21,7 @@ public class JwtAuthenticationConverterFactory {
         this.identityProviderUtils = identityProviderUtils;
         Map<String, JwtAuthenticationConverter> tmpConvertersByIssuer = new HashMap<>();
         providers.forEach((name, config) -> {
-            var converter = create(config);
+            var converter = create(name, config);
             var acceptedIssuers = this.identityProviderUtils.getAcceptedIssuers(config);
             for (var issuer : acceptedIssuers) {
                 tmpConvertersByIssuer.put(issuer, converter);
@@ -30,7 +30,7 @@ public class JwtAuthenticationConverterFactory {
         convertersByIssuer = Map.copyOf(tmpConvertersByIssuer);
     }
 
-    private JwtAuthenticationConverter create(ProviderConfig config) {
+    private JwtAuthenticationConverter create(String name, ProviderConfig config) {
         var grantedAuthoritiesConverter = new MultiPathGrantedAuthoritiesConverter<Jwt>();
         var authoritiesPaths = identityProviderUtils.getRoleClaims(config).stream()
                 .map(String::trim)
@@ -47,7 +47,8 @@ public class JwtAuthenticationConverterFactory {
                 grantedAuthoritiesTransformer,
                 identityProviderUtils.getPrincipalClaim(config),
                 identityProviderUtils.getEmailClaims(config),
-                identityProviderUtils.isEmailRequired()
+                identityProviderUtils.isEmailRequired(),
+                config.userHasher(name)
         );
     }
 

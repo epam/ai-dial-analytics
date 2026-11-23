@@ -53,6 +53,9 @@ public class ApiKeyProperties {
     private int requestTimeoutMs;
     private String rolesMapping;
     private boolean startupProbe;
+    private String loggingKey;
+    private String loggingSalt;
+    private Boolean obfuscateUserEmail;
 
     private Map<String, Set<Privilege>> parsedRolesMapping = Collections.emptyMap();
     private Map<String, Set<Privilege>> parsedDefaultRolesMapping = Collections.emptyMap();

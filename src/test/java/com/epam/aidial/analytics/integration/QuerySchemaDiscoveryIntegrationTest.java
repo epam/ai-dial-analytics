@@ -33,9 +33,9 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
         mockMvc.perform(get("/v1/queries/entities/schema/dial_usage_log"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.entity").value("dial_usage_log"))
-                // All 34 columns dial_usage_log still owns (order is asserted separately — the seeded
-                // tag_order groups/sorts them, so these checks stay order-independent by name). 34, not
-                // the 39 it declared before the payload split: the five verbatim-content columns are
+                // All 41 columns dial_usage_log still owns (order is asserted separately — the seeded
+                // tag_order groups/sorts them, so these checks stay order-independent by name). 34 after
+                // the payload split, not the 39 it declared before: the five verbatim-content columns are
                 // dial_usage_log_payload's now, and are counted below under their qualified names.
                 //
                 // Counted on the UNQUALIFIED names only. A flat entity schema also publishes each ACTIVE
@@ -44,7 +44,8 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 // It was already so; provenance injection merely made the dependency visible by adding
                 // five columns to every enrichment created through the API. That is why this filters
                 // rather than asserting the 39-field total the pre-split test could safely assert.
-                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(36)))
+                // 36 plus the five spending-limit columns V59 registered.
+                .andExpect(jsonPath("$.fields[?(!(@.name =~ /.*\\..*/))]", hasSize(41)))
                 // The five that moved and the cache markers (V50), under the qualified names the grain join publishes them at,
                 // plus the two computed rebuild fields the service appends after them.
                 .andExpect(jsonPath("$.fields[?(@.name =~ /^dial_usage_log_payload\\..*/)]", hasSize(8)))
@@ -93,9 +94,11 @@ class QuerySchemaDiscoveryIntegrationTest extends AbstractClickHouseIntegrationT
                 .andExpect(jsonPath("$.fields[?(@.name=='deployment')].tag", contains("deployment")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_tokens')].tag", contains("token-usage")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].tag", contains("cost")))
+                .andExpect(jsonPath("$.fields[?(@.tag=='cost')].name", containsInAnyOrder("total_price", "deployment_price",
+                        "spending_limits_mode", "budget_cost_object", "budget_outcome", "budget_policy", "budget_assignment")))
                 // Column descriptions backfilled by the migration are surfaced on the flat schema, and
-                // every one of the 44 fields (36 own, 6 payload, 2 computed) carries a non-empty description.
-                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(44)))
+                // every one of the 49 fields (41 own, 6 payload, 2 computed) carries a non-empty description.
+                .andExpect(jsonPath("$.fields[?(@.description != null && @.description != '')]", hasSize(49)))
                 .andExpect(jsonPath("$.fields[?(@.name=='event_id')].description",
                         contains("Unique identifier of this usage-log event.")))
                 .andExpect(jsonPath("$.fields[?(@.name=='total_price')].description",

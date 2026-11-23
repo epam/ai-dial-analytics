@@ -20,6 +20,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -144,6 +145,43 @@ class ApiKeyAuthenticationFilterTest {
         assertThat(authentication.getAuthorities()).extracting(GrantedAuthority::getAuthority)
                 .containsExactly(ProviderRoleAuthority.PREFIX + "admin");
         assertThat(authentication.getDetails()).isEqualTo(new UserSecurityDetails("u1@test"));
+    }
+
+    @Test
+    void projectKeyCarriesItsProjectAndNoUserHash() throws ServletException, IOException {
+        given(introspector.introspect("admin-key"))
+                .willReturn(new IntrospectionResult("acme", null, List.of("admin"), true));
+
+        MockHttpServletRequest request = request();
+        request.addHeader("Api-Key", "admin-key");
+        filter.doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
+
+        assertThat(SecurityContextHolder.getContext().getAuthentication().getDetails())
+                .isEqualTo(new UserSecurityDetails(null, null, "acme"));
+    }
+
+    @Test
+    void perUserKeyHashesItsSingleValuedClaimWithTheApiKeySettings() {
+        ApiKeyProperties properties = new ApiKeyProperties(jsonMapper, "");
+        properties.setEnabled(true);
+        properties.setCoreUrl("https://core.test");
+        properties.setRolesMapping("{}");
+        properties.setLoggingKey("email");
+        properties.setLoggingSalt("s1");
+        properties.validate();
+        ApiKeyAuthorityResolver resolver = new ApiKeyAuthorityResolver(properties);
+
+        // Core returns a per-user key's claims as lists; exactly one string is a value, anything else is not.
+        assertThat(resolver.authenticate(new IntrospectionResult("u1", "u1@test", List.of(), false,
+                Map.of("email", List.of("user1@example.com")))).getDetails())
+                .isEqualTo(new UserSecurityDetails("u1@test",
+                        "34d2ba3434e49df221c0150d3d11ef737bac223e81cce74ff59f5873429375d9", null));
+        assertThat(resolver.authenticate(new IntrospectionResult("u1", "u1@test", List.of(), false,
+                Map.of("email", List.of("a@example.com", "b@example.com")))).getDetails())
+                .isEqualTo(new UserSecurityDetails("u1@test"));
+        assertThat(resolver.authenticate(new IntrospectionResult("u1", "u1@test", List.of(), false,
+                Map.of())).getDetails())
+                .isEqualTo(new UserSecurityDetails("u1@test"));
     }
 
     @Test

@@ -177,6 +177,6 @@ scanned.
 
 The service applies no masking. All five are seeded `sensitive`, so only callers holding
 `TABLE_READ` and `TABLE_SENSITIVE` on the owning table see
-them — gate them with column-level access controls (see [`column-tags.md`](column-tags.md) and
+them; the payload table is an enrichment, so those are `dial_usage_log`'s grants. Gate them with column-level access controls (see [`column-tags.md`](column-tags.md) and
 [`heavy-columns.md`](heavy-columns.md)) plus the payload table's retention. Removing a column from
 the payload mapping is the off switch for capturing it; it is the only mapping declaring those five.

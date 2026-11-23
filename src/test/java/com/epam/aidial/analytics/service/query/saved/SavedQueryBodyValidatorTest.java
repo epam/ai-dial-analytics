@@ -195,6 +195,18 @@ class SavedQueryBodyValidatorTest {
     }
 
     @Test
+    void acceptsCallerValueWhichIsNoTemplateParameter() {
+        final FilterNode filter = new ComparisonNode(
+                ComparisonOp.EQ, List.of(new FieldExpr("user_hash"), new ParamExpr("caller.user_hash")));
+        assertThatCode(() -> validator.validate(request("Mine", queryFiltering(filter), null))).doesNotThrowAnyException();
+        final FilterNode other = new ComparisonNode(
+                ComparisonOp.EQ, List.of(new FieldExpr("user_hash"), new ParamExpr("caller.email")));
+        assertThatThrownBy(() -> validator.validate(request("Templated", queryFiltering(other), null)))
+                .isInstanceOf(SavedQueryValidationException.class)
+                .hasMessageContaining("parameter");
+    }
+
+    @Test
     void acceptsNullTimeIntent() {
         assertThatCode(() -> validator.validate(withTime(null))).doesNotThrowAnyException();
     }

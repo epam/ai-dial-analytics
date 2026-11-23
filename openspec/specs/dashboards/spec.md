@@ -8,9 +8,7 @@ client stores here rather than in its own memory. A dashboard stores authored **
 its widgets' query references or inline bodies, and how each widget renders. It stores nothing a run
 produces; every widget is executed by the client through the query surface under the viewer's own
 credential, so every read rule applies per viewer exactly as it does to any other query.
-
 ## Requirements
-
 ### Requirement: Dashboard storage model
 
 The system SHALL persist a dashboard in the metadata database (PostgreSQL), independently of the queried
@@ -304,9 +302,11 @@ validation" and "A saved query is not a template"): against the **calling caller
 by the same translation the query surface performs, without executing it. A body the translation rejects
 SHALL be reported with the status and machine code the query surface gives it, usually `400 bad_request`,
 and with that message prefixed by `widget <id>: ` so the client can tell which widget failed. A parameter
-expression, an absent
+expression other than a caller value, an absent
 or doubled body, or a body larger than the saved-query body maximum SHALL be `422 validation_error`. A body
-binding a literal to a `sensitive` column SHALL be accepted, as a saved query body is.
+binding a literal to a `sensitive` column SHALL be accepted, as a saved query body is. A body holding a caller value
+SHALL be accepted and stored unchanged, as a saved query body is, and each viewer whose client runs the widget
+receives the rows of its own caller values.
 
 An inline query is a snapshot. When a client copies a saved query into a widget, the copy SHALL NOT follow
 the saved query afterwards, and the service SHALL keep no link between them.
@@ -340,6 +340,18 @@ the saved query afterwards, and the service SHALL keep no link between them.
 - **WHEN** a widget's `inline_query` carries a saved query's `time` or `scope` member
 - **THEN** the response is `400` with machine code `bad_request` naming that member, and nothing is
   persisted
+
+#### Scenario: An inline body with a caller value is stored as written
+
+- **WHEN** a caller creates a dashboard whose widget holds the inline `sql` body
+  `SELECT count(*) AS n FROM "dial_usage_log" WHERE "user_hash" = caller.user_hash()`
+- **THEN** the response is `201`, the widget's `inline_query` is returned with that `sql` unchanged, and two viewers
+  whose clients run it each receive the count of their own rows
+
+#### Scenario: An inline body with another parameter is rejected
+
+- **WHEN** a widget's structured inline `query` carries `{"type": "param", "name": "caller.email"}`
+- **THEN** the response is `422` with machine code `validation_error`, and nothing is persisted
 
 #### Scenario: An inline query with two bodies is rejected
 
@@ -785,3 +797,4 @@ query result per dashboard.
 
 - **WHEN** a caller posts to a dashboard's id with an execute path segment
 - **THEN** the response is `404` with machine code `not_found`
+

@@ -7,8 +7,7 @@ import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.service.table.TableWriteMode;
 import com.epam.aidial.analytics.service.table.TtlUnit;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
-import com.epam.aidial.analytics.web.dto.table.access.AccessDto;
-import com.epam.aidial.analytics.web.dto.table.rowpolicy.RowPolicyDto;
+import com.epam.aidial.analytics.web.dto.table.access.AccessEntryBodyDto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -30,9 +29,9 @@ import java.util.Map;
  * legitimately not among {@code columns}: the seeded sources' {@code _ingested_at}, or an
  * {@code upsert_by_key} source's {@code _updated_at}.
  *
- * <p>{@code access} and {@code row_policies} are carried by the revision read alone, and only to a caller
- * holding {@code TABLE_GRANT} (or in {@code none} mode) — the bar both live grant reads set — so a change
- * to either is visible in a before/after of two revisions. Every other response leaves them null.
+ * <p>{@code roles} is carried by the revision read alone, and only to a caller holding {@code TABLE_GRANT} (or in
+ * {@code none} mode) — the bar the live access read sets — so a change to an entry is visible in a before/after of
+ * two revisions. Every other response leaves it null.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record TableDto(
@@ -94,7 +93,7 @@ public record TableDto(
                 + "the columns list is returned sorted by this ordering.")
         @JsonProperty("tag_order") List<String> tagOrder,
 
-        @Schema(description = "Exposed columns (single-get only)")
+        @Schema(description = "Exposed columns (single-get only; absent on a system table's revision snapshot, whose columns are not tracked)")
         List<ColumnDto> columns,
 
         @Schema(description = "Number of exposed columns (list only; single-get carries `columns` instead)",
@@ -106,17 +105,11 @@ public record TableDto(
                 accessMode = Schema.AccessMode.READ_ONLY)
         PermissionsDto permissions,
 
-        @Schema(description = "The table's grant lists as of the revision, in the shape of "
-                + "GET /v1/tables/{name}/access. Revision read only, and only for a caller holding TABLE_GRANT "
-                + "(always in `none` mode); absent means withheld, not empty.",
-                accessMode = Schema.AccessMode.READ_ONLY)
-        AccessDto access,
-
-        @Schema(description = "The table's row policies as of the revision, keyed by role, in the shape of the "
-                + "`policies` member of GET /v1/tables/{name}/row-policies. Revision read only, and only for a "
+        @Schema(description = "The table's access entries as of the revision, keyed by role, in the shape of the "
+                + "`roles` member of GET /v1/tables/{name}/access (no generation). Revision read only, and only for a "
                 + "caller holding TABLE_GRANT (always in `none` mode); absent means withheld, not empty.",
                 accessMode = Schema.AccessMode.READ_ONLY)
-        @JsonProperty("row_policies") Map<String, RowPolicyDto> rowPolicies,
+        Map<String, AccessEntryBodyDto> roles,
 
         @Schema(description = "An enrichment's current layout relative to its source (absent from the list and "
                 + "the revision read, and when there is nothing to report): `aligned` — partitioned like its source and joined on (grain key, partition "
@@ -145,7 +138,7 @@ public record TableDto(
             boolean heavy) {}
 
     /**
-     * The caller's effective permissions on the table, one flag per grantable privilege, mirroring what
+     * The caller's effective permissions on the table, one flag per grantable privilege plus {@code grant}, mirroring what
      * enforcement would decide and reported <b>after</b> implication — so a role granted only {@code read}
      * reports {@code read} and {@code get} both true. Always present, every flag a boolean. There is no
      * {@code list} flag: a caller seeing the table at all can list it, so it would always read {@code true}.
@@ -155,8 +148,13 @@ public record TableDto(
      * evaluated from the grant lists like any other table's. In {@code none} security mode every
      * non-system privilege flag is {@code true}.
      *
-     * <p>{@code rows_restricted} is not a privilege: it reports whether row policies confine the caller's reads
-     * to some of the table's rows, and is {@code false} in {@code none} mode.
+     * <p>{@code grant} reports the caller's global {@code TABLE_GRANT}, which no entry confers: it is the same on every
+     * table, {@code system} tables and enrichments included, and {@code true} in {@code none} mode.
+     *
+     * <p>{@code rows_restricted} and {@code columns_restricted} are not privileges: they report whether row policies
+     * confine the caller's reads to some of the table's rows and whether column policies hide one of its columns, and
+     * both are {@code false} in {@code none} mode. A system table's revision snapshot carries no columns, so there
+     * {@code columns_restricted} is {@code true} whenever a column policy confines the caller.
      */
     public record PermissionsDto(
             @Schema(description = "Whether the caller may read this table's definition and columns") boolean get,
@@ -166,9 +164,17 @@ public record TableDto(
             boolean sensitive,
             @Schema(description = "Whether the caller may insert rows into this table") boolean write,
             @Schema(description = "Whether the caller may change this table's schema or description") boolean modify,
+            @Schema(description = "Whether the caller holds TABLE_GRANT and so may use GET/PUT/DELETE "
+                    + "/v1/tables/{name}/access; held only globally, so the same on every table, and true in `none` mode")
+            boolean grant,
             @Schema(description = "Whether row policies confine the caller's reads of this table to some of its rows; "
-                    + "the policy itself is readable only through GET /v1/tables/{name}/row-policies")
-            @JsonProperty("rows_restricted") boolean rowsRestricted) {}
+                    + "the policy itself is readable only through GET /v1/tables/{name}/access")
+            @JsonProperty("rows_restricted") boolean rowsRestricted,
+            @Schema(description = "Whether column policies hide at least one of this table's columns from the caller; "
+                    + "false for a caller no column policy narrows. On a system table's revision snapshot, which carries "
+                    + "no columns, true whenever a column policy confines the caller. The policies are readable only "
+                    + "through GET /v1/tables/{name}/access")
+            @JsonProperty("columns_restricted") boolean columnsRestricted) {}
 
     /** Source time-partitioning descriptor. */
     public record PartitionByDto(String column, PartitionGranularity granularity) {}

@@ -51,15 +51,24 @@ import org.springframework.test.web.servlet.MockMvc;
         // repeated check behind them is decided by grants or refused.
         // `drafter` may author pipelines and see a table's schema but not read its rows: the persona a copied
         // preview statement must not let through.
+        // `author` may author pipelines and holds no table privilege: a caller with no governing role on any table,
+        // which column policies do not narrow.
         "providers.full.roles-mapping={\"admin\":[\"FULL_ADMIN\"],"
                 + "\"registry\":[\"REGISTRY_ADMIN\",\"TABLE_READ\"],\"granter\":[\"TABLE_GRANT\"],"
                 + "\"exporter\":[\"REGISTRY_READ\"],\"importer\":[\"TABLE_CREATE\"],"
-                + "\"drafter\":[\"REGISTRY_ADMIN\",\"TABLE_GET\"]}",
+                + "\"drafter\":[\"REGISTRY_ADMIN\",\"TABLE_GET\"],\"author\":[\"REGISTRY_ADMIN\"]}",
         "providers.readonly.issuer=" + AbstractOidcAuthIntegrationTest.READONLY_ISSUER,
         "providers.readonly.jwk-set-uri=https://issuer.test/readonly/jwks",
         "providers.readonly.audiences=" + AbstractOidcAuthIntegrationTest.AUDIENCE,
         "providers.readonly.role-claims=roles",
         "providers.readonly.roles-mapping={\"viewer\":[\"READ_ONLY_ADMIN\"]}",
+        // The row-policy caller value `caller.user_hash` of a readonly-issuer token is its `email` claim as
+        // is, so a test states the value it compares with instead of a digest. Inert for every other test.
+        "providers.readonly.logging-key=email",
+        "providers.readonly.obfuscate-user-email=false",
+        // The Flight SQL listener on an ephemeral port, for the Flight tests; idle for the REST ones.
+        "flight.enabled=true",
+        "flight.port=0",
 })
 @AutoConfigureMockMvc
 @Import(TestSecurityConfig.class)

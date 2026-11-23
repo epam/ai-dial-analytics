@@ -25,6 +25,21 @@ class PreviewNotesTest {
     }
 
     @Test
+    void withoutInstantsTheNoteKeepsSubjectAndGapButPrintsNoVersion() {
+        final PreviewNote note = PreviewNotes.enrichmentBehind("usage_sentiment", 1_700_007_200_000L, 1_700_000_000_000L, true, false);
+
+        assertThat(note.code()).isEqualTo(PreviewNoteCode.ENRICHMENT_BEHIND);
+        assertThat(note.subject()).isEqualTo("usage_sentiment");
+        assertThat(note.message()).contains("2h past the materialized position of enrichment 'usage_sentiment'")
+                .doesNotContain("2023-");
+        assertThat(PreviewNotes.enrichmentBehind("usage_sentiment", 5_000L, 5_000L, true, false).message())
+                .contains("at the materialized position of enrichment 'usage_sentiment' and past it only by identity")
+                .doesNotContain("1970-");
+        assertThat(PreviewNotes.enrichmentBehind("usage_sentiment", 1_700_007_200_000L, 1_700_000_000_000L, true, true).message())
+                .contains("2023-11-15T00:13:20Z, 2h past").contains("2023-11-14T22:13:20Z);");
+    }
+
+    @Test
     void heldWithPositionGivesTheGapRatherThanClaimingNoPosition() {
         final PreviewNote note = PreviewNotes.heldByEnrichment("usage_sentiment", 3_600_000L, 0L);
 

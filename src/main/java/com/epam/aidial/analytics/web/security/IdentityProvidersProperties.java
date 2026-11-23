@@ -39,6 +39,9 @@ public record IdentityProvidersProperties(
      * @param principalClaim  claim used as the authenticated principal name; falls back to the default when blank
      * @param rolesMapping    JSON object mapping this provider's role names to lists of {@link Privilege} or
      *                        {@link RoleBundle} names
+     * @param loggingKey      top-level claim the caller's user hash is derived from (see {@link UserHasher})
+     * @param loggingSalt     salt of the user hash; a credential
+     * @param obfuscateUserEmail {@code false} to use the claim value itself as the user hash; on when unset
      */
     public record ProviderConfig(
             String issuer,
@@ -49,7 +52,21 @@ public record IdentityProvidersProperties(
             List<String> roleClaims,
             List<String> emailClaims,
             String principalClaim,
-            String rolesMapping) {
+            String rolesMapping,
+            String loggingKey,
+            String loggingSalt,
+            Boolean obfuscateUserEmail) {
+
+        /** The user hasher these settings describe; fails when a claim is named without a salt. */
+        public UserHasher userHasher(String providerName) {
+            return UserHasher.of("providers." + providerName, loggingKey, loggingSalt, obfuscateUserEmail);
+        }
+
+        /** Names the provider only: the generated form would print the salt, which is a credential. */
+        @Override
+        public String toString() {
+            return "ProviderConfig[issuer=" + issuer + "]";
+        }
 
         public boolean hasJwkSetUri() {
             return StringUtils.isNotBlank(jwkSetUri);

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query;
 
 import com.epam.aidial.analytics.exception.QueryEntityNotFoundException;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
 import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
@@ -132,8 +133,8 @@ public class CatalogQueryService {
      *
      * <p>An entity is visible if and only if its <b>source</b> is: the source table is the statement's
      * {@code FROM}, so there is nothing to serve without it. An enrichment is never addressable on its own
-     * (only a {@code SOURCE} passes the filter below), which is why a {@code read} grant on an enrichment
-     * alone is inert — and why serving one through its source's entity is refused rather than accommodated:
+     * (only a {@code SOURCE} passes the filter below), which is why its read side is its source's — and why
+     * serving one to a caller who cannot see its source is refused rather than accommodated:
      * the grain key is the <em>source's</em> column, so projecting it would disclose the source's row
      * population and its grain-key values, a source read in disguise.
      */
@@ -187,15 +188,20 @@ public class CatalogQueryService {
         // and in the empty-projection "select all" expansion.
         //
         // Per owning table rather than once per request, because a queryable entity is a composite: a
-        // source flattened with its active enrichments. One caller can legitimately read the source and not
-        // an enrichment, or see the source's sensitive columns and not the enrichment's. The decision is
-        // taken where each column's owning table is in hand, which is the argument this method already had.
+        // source flattened with its active enrichments. An enrichment's read side is its source's, so its
+        // read and clearance answers match the source's; asking per table keeps the one evaluation
+        // (GoverningAccess) the single place that decides it.
         final String sourceName = source.getName();
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         final List<QuerySchemaFieldDto> schema = new ArrayList<>();
+        // Column policies are applied alongside the clearance, through the one per-caller decision, computed once per
+        // owning table for this build and never kept beyond it.
         final boolean maySeeSourceSensitive = sensitiveAccess.maySeeSensitive(sourceName);
+        final ColumnVisibility sourceVisibility = sensitiveAccess.visibleColumns(source);
         for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(sourceName)) {
-            addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col, null);
+            if (sourceVisibility.allows(col.getName())) {
+                addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col, null);
+            }
         }
 
         // Partition locality is decided for the whole entity, not per statement: one table whose key
@@ -227,10 +233,14 @@ public class CatalogQueryService {
                 continue;
             }
             final boolean maySeeEnrichmentSensitive = sensitiveAccess.maySeeSensitive(enrichment.getName());
+            final ColumnVisibility enrichmentVisibility = sensitiveAccess.visibleColumns(enrichment);
             final String grainKey = enrichment.getGrainKey();
             final Set<String> exposed = new LinkedHashSet<>();
             final List<ColumnMappingEntity> enrichmentColumns = columns.findByTableNameOrderByOrdinal(enrichment.getName());
             for (final ColumnMappingEntity col : enrichmentColumns) {
+                if (!enrichmentVisibility.allows(col.getName())) {
+                    continue;
+                }
                 // Enrichment columns are exposed qualified by their owning table ("table.column") so that
                 // two enrichments (or a source) can share a bare column name without colliding in the flat
                 // schema. The qualified name is what the query path references and joins fire on.
@@ -244,6 +254,9 @@ public class CatalogQueryService {
             // exposed like them so naming one pulls the grain join in. Never in tableBindings: a row policy judges
             // what the store holds.
             for (final ComputedFields.Descriptor computed : ComputedFields.of(enrichment.getName(), enrichmentColumns)) {
+                if (!enrichmentVisibility.allows(computed.column(), enrichmentColumns)) {
+                    continue;
+                }
                 final String flatName = addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive,
                         computed.column(), computed.field());
                 if (flatName != null) {

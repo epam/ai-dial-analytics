@@ -1423,7 +1423,8 @@ rule SHALL hold identically across them, because they all delegate to the shared
 versions — its source when the source is `upsert_by_key`, and every enrichment table the query joins for it
 (an enrichment always collapses) — and its separate `count(*)` total-count statement likewise; a raw read
 SHALL deduplicate none of them. An entity is **final-capable** when anything it reads collapses versions:
-its source is `upsert_by_key`, or it has at least one active enrichment the caller may read. Capability SHALL
+its source is `upsert_by_key`, or it has at least one active enrichment the caller may read — every active enrichment, for a caller that may
+read the source, because an enrichment's read is its source's. Capability SHALL
 be decided at `TABLE_READ` — the bar execution resolves the entity at — on every surface, including translation
 (resolved at `TABLE_GET`) and discovery (`TABLE_LIST`), so an enrichment the caller may get but not read
 never makes an entity final-capable on one surface and not on another. An `append`
@@ -1577,9 +1578,16 @@ and not a courtesy.
 
 #### Scenario: An enrichment the caller cannot read does not make the entity final-capable
 
-- **WHEN** a caller holds `list` and `get` but not `read` on the only enrichment of an `append` source it may
-  read, and sends `"final": true` (or writes `FINAL`) to execute or to translate
-- **THEN** both are rejected with `illegal_final`, and a query omitting `final` is read and translated raw
+- **WHEN** a caller holds `list` and `get` but not `read` on an `append` source with an active enrichment, so it may
+  not read that enrichment either, and sends `"final": true` (or writes `FINAL`) to translate
+- **THEN** the translation is rejected with `illegal_final`, a query omitting `final` is translated raw, and executing
+  either reports an unknown entity
+
+#### Scenario: An absent final reads an enriched append source final for a reader of the source
+
+- **WHEN** `query.force-final` is off, a caller holding `read` on an `append` source and nothing on its enrichment
+  sends a query that omits `final` and projects an enrichment column holding two unmerged versions for a grain key
+- **THEN** the query is read final and the source row is returned once with the latest enrichment value
 
 #### Scenario: The flag forces final reads
 
@@ -3340,45 +3348,6 @@ path SHALL confirm the table's or column's existence.
 - **THEN** the response is `400 bad_request` reporting an unknown entity, and does not reveal that
   the entity exists
 
-### Requirement: Composite entity visibility is decided per owning table
-
-A queryable entity is a source table flattened with its active enrichments. Read visibility SHALL be
-decided **per owning physical table** at the single point where the resolved query model is
-assembled, so the same entity resolves to different flat schemas for different callers.
-
-An entity SHALL be visible if and only if its **source** is readable by the caller. For a visible
-entity, the columns of each enrichment the caller cannot read SHALL be **absent** from the model, so
-they are omitted from discovery and referencing one fails as an ordinary unknown field. Omitting an
-enrichment SHALL NOT change the result's row count, because the grain join contributes at most one
-row per source row.
-
-A `read` grant on an enrichment table alone SHALL confer nothing on the query surface: an enrichment
-is not a queryable entity, so there is no statement that can reach its rows. The service SHALL NOT
-serve an enrichment-only read through its source's entity, because the grain key is the source's
-column and the statement's `FROM` is the source table, so doing so would disclose the source's row
-population and its grain-key values.
-
-#### Scenario: An unreadable enrichment's columns are absent
-
-- **GIVEN** an entity whose source the caller may read and one of whose enrichments it may not
-- **WHEN** the caller requests that entity's schema and then queries it
-- **THEN** the enrichment's columns are absent from the schema, referencing one fails as an unknown
-  field, and the row count matches what a fully-privileged caller receives
-
-#### Scenario: An entity is invisible when its source is
-
-- **GIVEN** an entity whose source the caller may not read but one of whose enrichments grants it
-  `read`
-- **WHEN** the caller lists entities or queries that entity
-- **THEN** the entity is absent from discovery and the query reports an unknown entity
-
-#### Scenario: Sensitive columns are decided per owning table too
-
-- **GIVEN** an entity whose source and one enrichment both carry sensitive columns, and a caller
-  holding `read` on both tables and `sensitive` on the source only
-- **WHEN** the caller queries the entity
-- **THEN** the source's sensitive columns resolve and the enrichment's do not
-
 ### Requirement: Lambda expressions
 
 The system SHALL accept a `lambda` expression — the eighth `Expr` kind — spelled
@@ -3842,7 +3811,8 @@ field, that field belongs to that enrichment and is of type `string`, `integer`,
 conjunct is one of:
 
 - `co` or `ico` with a non-empty string literal;
-- `eq` against a non-null literal that is not the field type's default (`''` for `string`, `0` for a number);
+- `eq` against a non-null literal that is not the field type's default (`''` for `string`, `0` for a number), the
+  literal written on either side;
 - `in` whose every literal is non-null and not the field type's default;
 - `eq` of `starts_with(field, literal)` or `contains(field, literal)` against `true`, with a non-empty literal.
 
@@ -3883,6 +3853,12 @@ non-sorting-key `WHERE` after the merge, and the read path sends no setting that
 - **WHEN** the same conjunct stands in a query that also reads `dial_usage_log_payload.request_body` raw
 - **THEN** the derived table carries the copied condition and projects `request_body`, and the outer `WHERE`
   carries the conjunct itself
+
+#### Scenario: A literal written before the field is copied as well
+
+- **WHEN** a query's filter carries, beside `request_time >= T`, an `eq` whose first operand is the literal `'w'` and
+  whose second is a light `string` column of the payload
+- **THEN** the payload derived table carries `'w' = <column>`, and so does the outer `WHERE`
 
 #### Scenario: Conjuncts that are true on an unmatched row stay outside
 
@@ -4611,6 +4587,178 @@ enrichment version fans a row out in the page and must fan it out in the count t
 - **WHEN** a composite SQL statement's block projects a heavy enrichment column, or a non-heavy column of an
   aligned enrichment, under a `LIMIT`
 - **THEN** the block renders as "SQL translation" describes, with no page-key subquery
+
+### Requirement: Composite entity visibility follows the source
+
+A queryable entity is a source table flattened with its active enrichments. Read visibility SHALL be
+decided **per owning physical table** at the single point where the resolved query model is
+assembled, so the same entity resolves to different flat schemas for different callers. For an enrichment, the
+read-side privileges are its source's (see `table-access-control`, "An enrichment's read-side access is its
+source's"), so per-owning-table evaluation differs between the source and an enrichment only in which columns are
+which table's.
+
+An entity SHALL be visible if and only if its **source** is readable by the caller. For a visible
+entity, every active enrichment's non-sensitive columns SHALL be present in the model, and its sensitive columns
+SHALL be present exactly when the caller holds the source's clearance. A caller SHALL therefore never see a different set of enrichments
+than another caller with the same privileges on the source.
+
+There SHALL be no read of an enrichment without a read of its source: an enrichment is not a queryable entity, so
+there is no statement that can reach its rows, and the service SHALL NOT serve an enrichment's columns through its
+source's entity to a caller that may not read the source, because the grain key is the source's column and the
+statement's `FROM` is the source table, so doing so would disclose the source's row population and its grain-key
+values.
+
+#### Scenario: A reader of the source sees every enrichment
+
+- **GIVEN** an entity with two active enrichments, and a caller that may read the source and holds nothing on either
+  enrichment
+- **WHEN** the caller requests that entity's schema and then queries a column of each enrichment
+- **THEN** both enrichments' non-sensitive columns are present in the schema, the query resolves, and the row count
+  matches what a fully-privileged caller receives
+
+#### Scenario: An entity is invisible when its source is
+
+- **GIVEN** an entity whose source the caller may not read, and one of whose enrichments lists the caller's role in
+  its `write` or `modify` list
+- **WHEN** the caller lists entities or queries that entity
+- **THEN** the entity is absent from discovery and the query reports an unknown entity
+
+#### Scenario: Sensitive columns follow the source's clearance
+
+- **GIVEN** an entity whose source and one enrichment both carry sensitive columns, and a caller
+  holding `read` on the source and no clearance
+- **WHEN** the caller queries the entity
+- **THEN** neither the source's nor the enrichment's sensitive columns resolve
+- **AND WHEN** the caller is granted `sensitive` on the source
+- **THEN** both resolve
+
+### Requirement: Caller values in a query filter
+
+A query's `filter` and `having` SHALL accept a **caller value**: a `param` expression whose `name` is exactly
+`caller.user_hash` or `caller.project`, the closed set row policies use (see
+[table-access-control](../table-access-control/spec.md), "Caller values in row policies"). The names SHALL be matched
+case-sensitively. A caller value stands for the value of that name carried by the caller executing the query, derived
+as [authentication](../authentication/spec.md) "Caller values derived from the credential" specifies. A `param` with
+any other name, including one that differs only in case, SHALL be rejected `400 bad_request` as before.
+
+A caller value SHALL appear only as a direct operand of an `eq` or `ne` comparison whose other operand is an
+expression of type `string` that reads at least one field and holds no caller value: a source or enrichment field, a
+computed expression such as `lower(user_hash)`, and in `having` also a grouped field, an output, or an expression over
+an aggregate. An aggregate in the other operand SHALL be accepted only in `having`. An expression of any other type,
+`enum` and `uuid` included, does not qualify, nor does a value or an expression reading no field, and a field the query
+cannot resolve is refused as an unknown field whether or not the caller has a value. The comparison MAY
+sit under any logical operator, `not` included, and SHALL be reached from `filter` or `having` through logical
+operators alone; a comparison inside an expression, such as a `case` branch nested in another comparison, is
+misplaced. Anywhere else the query SHALL be rejected `400 bad_request` with a
+message naming the caller value and the rule: as a `select` expression; as a function argument; in a `case` branch,
+its condition or its result; as an item of an `in` list; in a comparison with any other operator; and in a comparison
+with a field of another type, with a value, or with another caller value.
+
+Validation that does not execute the query — the translation endpoints, and saved-query and dashboard body
+validation — SHALL apply the same placement rule with the same outcome, and SHALL NOT read the caller's values.
+
+A caller value SHALL only narrow what the query returns. The query SHALL still be governed by everything that governs
+any other query of that caller: its read bar, its column visibility, and the row policies that confine it on each
+table it reads (see table-access-control, "Row-policy evaluation by caller role").
+
+#### Scenario: An administrator reads its own rows
+
+- **GIVEN** `dial_usage_log` whose entry for `*` grants `read` with the policy `user_hash = caller.user_hash`, and a
+  role `admin` that reads it with no policy
+- **WHEN** a caller holding `admin`, whose user hash is `aaaa…01`, posts to `POST /v1/queries/execute` a query with
+  the filter
+  `{"op": "eq", "args": [{"type": "field", "name": "user_hash"}, {"type": "param", "name": "caller.user_hash"}]}`
+- **THEN** the response is `200` with only the rows whose `user_hash` is `aaaa…01`
+- **AND** the same query without that filter returns every row
+
+#### Scenario: One query serves user and project callers
+
+- **WHEN** a query filters `user_hash = caller.user_hash OR project_id = caller.project`, and it is run by a user
+  whose hash is known and who has no project, and by a project key of project `P1` with no user hash
+- **THEN** the user receives the rows with its own hash, and the project key receives the rows of `P1`
+
+#### Scenario: A caller value in having
+
+- **WHEN** an aggregate query grouped by `user_hash` has the `having`
+  `{"op": "eq", "args": [{"type": "field", "name": "user_hash"}, {"type": "param", "name": "caller.user_hash"}]}`
+- **THEN** the response is `200` with the one group of the caller's own hash, or none
+- **AND** a `having` comparing the caller value with the output `m` of `max(user_hash)` is accepted, while one comparing
+  it with the output of `count()` is rejected `400 bad_request`
+
+#### Scenario: A computed text operand is compared like a field
+
+- **WHEN** a query filters `{"op": "eq", "args": [{"type": "fn", "name": "lower", "args": [{"type": "field", "name":
+  "user_hash"}]}, {"type": "param", "name": "caller.user_hash"}]}`
+- **THEN** the response is `200` with the rows whose lowercased `user_hash` equals the caller's own
+
+#### Scenario: An unknown field is reported for every caller
+
+- **WHEN** a query compares the field `no_such_field` with `caller.user_hash`, run by a caller with a user hash and by
+  one without
+- **THEN** both responses are `400` with machine code `bad_request` naming `no_such_field`
+
+#### Scenario: A caller value does not widen a confined read
+
+- **GIVEN** a caller confined on `dial_usage_log` by a policy admitting only `project_id = 'P1'`
+- **WHEN** it runs a query filtering `NOT (user_hash = caller.user_hash)`
+- **THEN** every returned row has `project_id` `P1`
+
+#### Scenario: A misplaced caller value is rejected
+
+- **WHEN** a query uses the `param` `caller.user_hash` as a `select` expression, as an argument of `lower`, in the
+  condition of a `case` branch, as an item of an `in` list, in a `gt` comparison, compared with the `integer` field
+  `prompt_tokens` or with an `enum` field, compared with the value `'x'`, compared with the `param`
+  `caller.project`, or compared in `filter` with `max(user_hash)`
+- **THEN** the response is `400` with machine code `bad_request` naming `caller.user_hash`, and nothing is executed
+
+#### Scenario: Another parameter is still rejected
+
+- **WHEN** a query contains `{"type": "param", "name": "caller.email"}` or `{"type": "param", "name": "Caller.User_Hash"}`
+- **THEN** the response is `400` with machine code `bad_request`, and nothing is executed
+
+### Requirement: Caller values in a query resolve per execution
+
+On every execution of a query — `POST /v1/queries/execute`, `POST /v1/queries/execute-csv`, and every SQL surface
+whose statement holds a caller value (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values in
+SQL") — each caller value SHALL be replaced by the executing caller's own value, inlined as an escaped string literal.
+It SHALL be resolved from the identity of the request being served and SHALL NOT be cached across requests, so the
+same query body run by two callers returns each its own rows.
+
+A caller value SHALL be **unknown** when the caller has none, when it is blank, or when it is longer than 512 bytes,
+the same bounds that apply to a row policy. A comparison with an unknown caller value SHALL evaluate as SQL `NULL`
+does in a predicate: it SHALL match no row, its negation SHALL match no row, and a disjunction SHALL still match
+through another branch that is true. An unknown value SHALL NOT be rendered as an empty string or any other constant,
+because rows written for callers without that identity store an empty value. A query whose caller value is unknown
+SHALL succeed, returning the rows for which its filter, with each such comparison evaluated as `NULL`, is true; for a
+filter that is only the comparison, that is none.
+
+#### Scenario: Two callers run the same body
+
+- **WHEN** callers with user hashes `aaaa…01` and `aaaa…02` post the same query filtering
+  `user_hash = caller.user_hash` to `POST /v1/queries/execute`
+- **THEN** the first receives only rows with `aaaa…01` and the second only rows with `aaaa…02`
+
+#### Scenario: A caller with no value reads nothing
+
+- **WHEN** a caller with no user hash runs a query whose filter is `user_hash = caller.user_hash`
+- **THEN** the response is `200` with no rows, including none of the rows whose `user_hash` is empty
+
+#### Scenario: Negation of an unknown value matches nothing
+
+- **WHEN** a caller with no user hash runs a query filtering `NOT (user_hash = caller.user_hash)` or
+  `user_hash != caller.user_hash`
+- **THEN** the response is `200` with no rows
+
+#### Scenario: A blank or oversized value is unknown
+
+- **WHEN** a caller's credential yields a whitespace-only user hash, or one longer than 512 bytes, and it runs a
+  query filtering `user_hash = caller.user_hash`
+- **THEN** the response is `200` with no rows
+
+#### Scenario: The CSV twin resolves the same way
+
+- **WHEN** a caller posts a query filtering `user_hash = caller.user_hash` to `POST /v1/queries/execute-csv`
+- **THEN** the CSV body holds exactly the rows `POST /v1/queries/execute` returns to that caller for the same query
 
 ## Implementation notes
 

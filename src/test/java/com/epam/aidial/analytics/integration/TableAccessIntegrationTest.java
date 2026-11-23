@@ -1,15 +1,20 @@
 package com.epam.aidial.analytics.integration;
 
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
+import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.List;
 import java.util.Map;
 
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -32,6 +37,9 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String BASE = "/v1/tables";
     private static final String PROBE = "access_probe";
     private static final String WRITER_ROLE = "analytics-writer";
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -79,82 +87,112 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 Map.of("sub", "reading-writer", "roles", List.of("viewer", WRITER_ROLE), "email", "rw@test"));
     }
 
-    private void putAccess(String body) throws Exception {
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isOk());
+    /** The table's current access generation, read as FULL_ADMIN. */
+    private long generation(String table) throws Exception {
+        final String body = mockMvc.perform(get(BASE + "/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return ((Number) JsonPath.read(body, "$.generation")).longValue();
+    }
+
+    /** PUTs {@code role}'s entry on {@code table} as {@code token}: {@code members} plus the table's current generation. */
+    private ResultActions putEntry(String token, String table, String role, String members) throws Exception {
+        return putAs(token, BASE + "/" + table + "/access?role=" + role,
+                "{\"generation\":" + generation(table) + (members.isEmpty() ? "" : "," + members) + "}");
+    }
+
+    /** Replaces the writer role's entry on the probe with {@code privileges}. */
+    private void grant(String... privileges) throws Exception {
+        putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges(privileges)).andExpect(status().isOk());
+    }
+
+    private static String privileges(String... privileges) {
+        return privileges.length == 0 ? "\"privileges\":[]" : "\"privileges\":[\"" + String.join("\",\"", privileges) + "\"]";
     }
 
     // --- grant management (TABLE_GRANT on both the read and the write) ---------------------------
 
     @Test
-    void grantAdminGetsAndMergesGrants() throws Exception {
+    void grantAdminReadsAndReplacesAnEntry() throws Exception {
+        final long before = generation(PROBE);
         mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.list").doesNotExist())
-                .andExpect(jsonPath("$.get").isArray())
-                .andExpect(jsonPath("$.read").isArray())
-                .andExpect(jsonPath("$.sensitive").isArray())
-                .andExpect(jsonPath("$.write").isArray())
-                .andExpect(jsonPath("$.modify").isArray());
+                .andExpect(jsonPath("$.roles").isMap())
+                .andExpect(jsonPath("$.roles").isEmpty())
+                .andExpect(jsonPath("$.read").doesNotExist());
 
-        // The PUT answers with the stored lists AND the effective flags, because the stored lists alone do
-        // not say what a grant achieved — two rules live in one document.
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"write\":[\"" + WRITER_ROLE + "\",\"" + WRITER_ROLE + "\"],\"modify\":[]}"))
+        // The PUT answers with the entry as stored (a privilege named twice is stored once) and the new
+        // generation; the caller's own permissions are on the table read, not here.
+        putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges("write", "write"))
                 .andExpect(status().isOk())
-                // The five lists stay at the top level, exactly where GET puts them: a client reading
-                // response.write must keep working, which is the whole point of the merge semantics.
-                .andExpect(jsonPath("$.write.length()").value(1))
-                .andExpect(jsonPath("$.write[0]").value(WRITER_ROLE))
-                .andExpect(jsonPath("$.permissions.write").value(true));
+                .andExpect(jsonPath("$.generation").value(before + 1))
+                .andExpect(jsonPath("$.role").value(WRITER_ROLE))
+                .andExpect(jsonPath("$.privileges.length()").value(1))
+                .andExpect(jsonPath("$.privileges[0]").value("write"))
+                .andExpect(jsonPath("$.rows").value(nullValue()))
+                .andExpect(jsonPath("$.columns").value(nullValue()))
+                .andExpect(jsonPath("$.permissions").doesNotExist());
+
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.generation").value(before + 1))
+                .andExpect(jsonPath("$.role").value(WRITER_ROLE))
+                .andExpect(jsonPath("$.privileges[0]").value("write"));
     }
 
     @Test
-    void absentKeyKeepsTheStoredListAndEmptyArrayRevokes() throws Exception {
-        putAccess("{\"read\":[\"" + WRITER_ROLE + "\"]}");
+    void putForOneRoleLeavesOtherEntriesAndEmptyEntryRemovesTheRole() throws Exception {
+        grant("read");
 
-        // A client written against the old two-key body must not revoke the read grants it never mentioned.
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"write\":[],\"modify\":[]}"))
+        // Another role's PUT does not touch the writer role's entry.
+        putEntry(fullAdminToken(), PROBE, "other-role", privileges("write")).andExpect(status().isOk());
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.read[0]").value(WRITER_ROLE));
+                .andExpect(jsonPath("$.roles['" + WRITER_ROLE + "'].privileges[0]").value("read"))
+                .andExpect(jsonPath("$.roles['other-role'].privileges[0]").value("write"));
 
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"read\":[]}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.read").isEmpty());
+        // An entry left with nothing is removed, and DELETE removes a role's entry outright.
+        grant();
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("not_found"));
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=other-role").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(jsonPath("$.roles").isEmpty());
     }
 
     @Test
     void readOnlyAdminCanNeitherReadNorReplaceGrants() throws Exception {
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}");
+        grant("write");
 
-        // The read moved from "any application role" to TABLE_GRANT: the lists disclose which provider
+        // The read moved from "any application role" to TABLE_GRANT: the entries disclose which provider
         // roles exist and what each may do, which is organisational structure.
         mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"));
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}"))
+        mockMvc.perform(get(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                .andExpect(status().isForbidden());
+        putEntry(readOnlyToken(), PROBE, WRITER_ROLE, privileges("write"))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"));
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                .andExpect(status().isForbidden());
+        // A body that does not bind is refused 400 before the TABLE_GRANT check answers 403.
+        putEntry(readOnlyToken(), PROBE, WRITER_ROLE, "\"privileges\":[1]")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bad_request"));
+        putEntry(readOnlyToken(), PROBE, WRITER_ROLE, "\"list\":[\"x\"]")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("bad_request"));
     }
 
     @Test
     void rolelessCallerCannotReadAccess() throws Exception {
         // Authorized per table for writes, but carries no application role — catalog reads stay closed.
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}");
+        grant("write");
 
         mockMvc.perform(get(BASE + "/" + PROBE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
                 .andExpect(status().isForbidden());
@@ -162,27 +200,20 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void systemTableRefusesWriteGrantsAndAcceptsReadGrants() throws Exception {
-        // The refusal moved from the object to the keys. A system table is fed out of band, so every
+        // The refusal moved from the object to the privileges. A system table is fed out of band, so every
         // modifying operation on it is refused whatever a grant says — but that is a reason to keep
-        // `write`/`modify` empty, not a reason to refuse a read grant, and refusing every PUT made
+        // `write`/`modify` off its entries, not a reason to refuse a read grant, and refusing every PUT made
         // per-table read grants inapplicable to dial_usage_log, the primary analytics table.
-        mockMvc.perform(put(BASE + "/dial_usage_log/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}"))
+        putEntry(fullAdminToken(), "dial_usage_log", WRITER_ROLE, privileges("read", "write"))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error").value("table_is_system"));
 
         try {
-            // A read-side key on the same table is stored, and a five-key body with empty write/modify
-            // succeeds — which is what lets an existing two-key client keep working.
-            mockMvc.perform(put(BASE + "/dial_usage_log/access")
-                            .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"read\":[\"" + WRITER_ROLE + "\"],\"write\":[],\"modify\":[]}"))
+            // A read-side privilege on the same table is stored.
+            putEntry(fullAdminToken(), "dial_usage_log", WRITER_ROLE, privileges("read"))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.read[0]").value(WRITER_ROLE))
-                    .andExpect(jsonPath("$.write").isEmpty());
+                    .andExpect(jsonPath("$.privileges.length()").value(1))
+                    .andExpect(jsonPath("$.privileges[0]").value("read"));
 
             // And the reported permissions tell the truth about it: the read-side flags follow the grant
             // while write/modify stay hard false for every caller.
@@ -193,11 +224,9 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .andExpect(jsonPath("$.permissions.write").value(false))
                     .andExpect(jsonPath("$.permissions.modify").value(false));
         } finally {
-            mockMvc.perform(put(BASE + "/dial_usage_log/access")
-                            .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"get\":[],\"read\":[],\"sensitive\":[]}"))
-                    .andExpect(status().isOk());
+            mockMvc.perform(delete(BASE + "/dial_usage_log/access?role=" + WRITER_ROLE)
+                            .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNoContent());
         }
     }
 
@@ -206,13 +235,16 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
         mockMvc.perform(get(BASE + "/does_not_exist/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("not_found"));
+        mockMvc.perform(get(BASE + "/does_not_exist/access?role=" + WRITER_ROLE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("not_found"));
     }
 
     // --- per-table authorization by role ---------------------------------------------------------
 
     @Test
     void writeRoleAllowsRowsButNotModify() throws Exception {
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}");
+        grant("write");
 
         mockMvc.perform(post(BASE + "/" + PROBE + "/rows")
                         .header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
@@ -230,7 +262,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void modifyRoleAllowsDescriptionUpdate() throws Exception {
-        putAccess("{\"write\":[],\"modify\":[\"" + WRITER_ROLE + "\"]}");
+        grant("modify");
 
         mockMvc.perform(put(BASE + "/" + PROBE)
                         .header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
@@ -258,7 +290,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
      */
     @Test
     void getGrantAllowsTranslationAndValidationButNotExecution() throws Exception {
-        putAccess("{\"get\":[\"" + WRITER_ROLE + "\"]}");
+        grant("get");
         final String statement = "{\"sql\":\"SELECT k FROM " + PROBE + " LIMIT 1\"}";
 
         mockMvc.perform(post("/v1/queries/translate-sql")
@@ -284,7 +316,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
     /** And a table below even the `get` rung is unresolvable on the translation path too. */
     @Test
     void noReadSideGrantMakesTranslationReportAnUnknownRelation() throws Exception {
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"]}");
+        grant("write");
 
         mockMvc.perform(post("/v1/queries/translate-sql")
                         .header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
@@ -295,7 +327,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void writeOnlyCallerCannotReadOrList() throws Exception {
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}");
+        grant("write");
 
         // Authorized to write the specific table...
         mockMvc.perform(post(BASE + "/" + PROBE + "/rows")
@@ -318,7 +350,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void readGrantMakesTheTableVisibleAndReadable() throws Exception {
-        putAccess("{\"read\":[\"" + WRITER_ROLE + "\"]}");
+        grant("read");
 
         // A grant alone authorizes: this caller holds no global privilege at all.
         mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
@@ -338,7 +370,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
     /** A {@code get} grant is what shows one table in the listing; there is no narrower per-table key. */
     @Test
     void getGrantListsTheTable() throws Exception {
-        putAccess("{\"get\":[\"" + WRITER_ROLE + "\"]}");
+        grant("get");
 
         mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
                 .andExpect(status().isOk())
@@ -347,21 +379,19 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     /**
      * {@code TABLE_LIST} has no per-table key: held globally it enumerates every table, and on one table it
-     * is conferred by any grant that already shows it. A body still carrying {@code list} is refused like any
-     * unknown member rather than silently dropped, so a client cannot believe it granted something.
+     * is conferred by any grant that already shows it. An entry naming {@code list} is refused like any
+     * unknown privilege rather than silently dropped, so a client cannot believe it granted something.
      */
     @Test
     void listKeyIsRefused() throws Exception {
-        mockMvc.perform(put(BASE + "/" + PROBE + "/access")
-                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"list\":[\"" + WRITER_ROLE + "\"]}"))
-                .andExpect(status().isBadRequest());
+        putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges("list"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
     }
 
     @Test
     void modifyRoleAllowsTtlPatch() throws Exception {
-        putAccess("{\"write\":[],\"modify\":[\"" + WRITER_ROLE + "\"]}");
+        grant("modify");
 
         // One PATCH by the grantee: add a timestamp column and point the table TTL at it — both ride
         // the same single ALTER, authorized by the modify access role.
@@ -378,17 +408,141 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void deleteStaysAdminOnlyEvenWithModifyAccess() throws Exception {
-        putAccess("{\"write\":[],\"modify\":[\"" + WRITER_ROLE + "\"]}");
+        grant("modify");
 
         mockMvc.perform(delete(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
                 .andExpect(status().isForbidden());
+    }
+
+    // --- an enrichment's read side is its source's -------------------------------------------------
+
+    private static final String ENRICHMENT = "access_probe_labels";
+
+    /** An ACTIVE enrichment of the probe, with one plain and one sensitive column. */
+    private void createEnrichment() throws Exception {
+        mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + ENRICHMENT + "\",\"type\":\"enrichment\",\"source_table\":\"" + PROBE + "\"}"))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post(BASE + "/" + ENRICHMENT + "/schema").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"grain_key\":\"k\",\"columns\":[{\"source_name\":\"label\",\"name\":\"label\",\"type\":\"string\"},"
+                                + "{\"source_name\":\"secret\",\"name\":\"secret\",\"type\":\"string\",\"sensitive\":true}]}"))
+                .andExpect(status().isOk());
+    }
+
+    private void dropEnrichment() throws Exception {
+        mockMvc.perform(delete(BASE + "/" + ENRICHMENT).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())));
+    }
+
+    private ResultActions putAs(String token, String path, String body) throws Exception {
+        return mockMvc.perform(put(path).header(HttpHeaders.AUTHORIZATION, bearer(token))
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    @Test
+    void readSideGrantsAndRowPoliciesOnAnEnrichmentAreRefused() throws Exception {
+        createEnrichment();
+        try {
+            // Judged on the body as sent and before the generation, so none of these bodies carries one.
+            final String access = BASE + "/" + ENRICHMENT + "/access?role=";
+            for (final String privileges : List.of("[\"get\"]", "[\"read\"]", "[\"sensitive\"]", "[\"read\",\"modify\"]")) {
+                putAs(fullAdminToken(), access + "x", "{\"privileges\":" + privileges + "}")
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error").value("enrichment_follows_source"))
+                        .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString(PROBE)));
+            }
+            putAs(fullAdminToken(), BASE + "/dial_usage_log_payload/access?role=x", "{\"privileges\":[\"read\",\"write\"]}")
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+            putEntry(fullAdminToken(), ENRICHMENT, "labeler", privileges("write"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.privileges.length()").value(1))
+                    .andExpect(jsonPath("$.privileges[0]").value("write"));
+
+            final String filter = "{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"label\"},"
+                    + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"x\"}]}";
+            for (final String[] put : List.of(
+                    new String[] {"team-x", "{\"rows\":{\"filter\":" + filter + "}}"},
+                    new String[] {"team-x", "{\"rows\":{\"where\":\"no_such_column = 'x'\"}}"},
+                    new String[] {"READ_ONLY_ANALYTIC", "{\"rows\":{\"filter\":" + filter + "}}"},
+                    new String[] {"team-x", "{\"rows\":{\"filter\":" + filter + ",\"where\":\"label = 'x'\"}}"},
+                    new String[] {"team-x", "{\"privileges\":[\"write\"],\"columns\":[\"label\"]}"})) {
+                putAs(fullAdminToken(), access + put[0], put[1])
+                        .andExpect(status().isConflict())
+                        .andExpect(jsonPath("$.error").value("enrichment_follows_source"));
+            }
+            mockMvc.perform(delete(access + "team-x").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNotFound());
+            putAs(fullAdminToken(), BASE + "/no_such_table/access?role=team-x", "{\"rows\":{\"filter\":" + filter + ",\"where\":\"a = 1\"}}")
+                    .andExpect(status().isNotFound());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void sourceReaderQueriesAnEnrichmentItHoldsNothingOn() throws Exception {
+        createEnrichment();
+        try {
+            grant("read");
+
+            mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.tables[?(@.name == '" + ENRICHMENT + "')].permissions.read").value(true))
+                    .andExpect(jsonPath("$.tables[?(@.name == '" + ENRICHMENT + "')].permissions.sensitive").value(false));
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT k, \\\"" + ENRICHMENT + ".label\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isOk());
+            mockMvc.perform(post("/v1/queries/execute").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"entity\":\"" + PROBE + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\","
+                                    + "\"name\":\"" + ENRICHMENT + ".label\"}}],\"page\":{\"type\":\"offset\",\"limit\":1}}"))
+                    .andExpect(status().isOk());
+            // The sensitive column follows the source's clearance, which this caller lacks.
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT \\\"" + ENRICHMENT + ".secret\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isBadRequest());
+
+            grant("read", "sensitive");
+            mockMvc.perform(post("/v1/queries/execute-sql").header(HttpHeaders.AUTHORIZATION, bearer(writerToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sql\":\"SELECT \\\"" + ENRICHMENT + ".secret\\\" FROM " + PROBE + " LIMIT 1\"}"))
+                    .andExpect(status().isOk());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void enrichmentMaintainerGetsTheDefinitionButNotTheSource() throws Exception {
+        createEnrichment();
+        try {
+            putEntry(fullAdminToken(), ENRICHMENT, WRITER_ROLE, privileges("modify"))
+                    .andExpect(status().isOk());
+            // A source clearance for the maintainer extends its modify to the sensitive columns: not ineffective.
+            putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges("sensitive"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+            mockMvc.perform(get(BASE + "/" + ENRICHMENT).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.get").value(true))
+                    .andExpect(jsonPath("$.permissions.read").value(false));
+            mockMvc.perform(get(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(writerToken())))
+                    .andExpect(status().isNotFound());
+        } finally {
+            dropEnrichment();
+        }
     }
 
     // --- caller-effective permissions reporting ---------------------------------------------------
 
     @Test
     void matchingWriteRoleIsReportedOnGetAndList() throws Exception {
-        putAccess("{\"write\":[\"" + WRITER_ROLE + "\"],\"modify\":[]}");
+        grant("write");
 
         mockMvc.perform(get(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(readingWriterToken())))
                 .andExpect(status().isOk())
@@ -403,7 +557,7 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     @Test
     void unlistedCallerIsReportedNoPermissions() throws Exception {
-        putAccess("{\"write\":[],\"modify\":[]}");
+        grant("read");
 
         mockMvc.perform(get(BASE + "/" + PROBE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
                 .andExpect(status().isOk())
@@ -423,5 +577,159 @@ class TableAccessIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.permissions.write").value(false))
                 .andExpect(jsonPath("$.permissions.modify").value(false));
+    }
+
+    @Test
+    void grantFlagFollowsTableGrantOnGetListAndCreate() throws Exception {
+        for (final String table : List.of(PROBE, "dial_usage_log")) {
+            mockMvc.perform(get(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.grant").value(true));
+            mockMvc.perform(get(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.permissions.read").value(true))
+                    .andExpect(jsonPath("$.permissions.grant").value(false));
+        }
+        mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name=='" + PROBE + "')].permissions.grant").value(true));
+        mockMvc.perform(get(BASE).header(HttpHeaders.AUTHORIZATION, bearer(readOnlyToken())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name=='" + PROBE + "')].permissions.grant").value(false));
+
+        final String created = "access_probe_created";
+        try {
+            mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken()))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"name\":\"" + created + "\",\"type\":\"source\"}"))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.permissions.grant").value(true));
+            mockMvc.perform(delete(BASE + "/" + created).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNoContent());
+            // `importer` holds TABLE_CREATE alone.
+            mockMvc.perform(post(BASE).header(HttpHeaders.AUTHORIZATION, bearer(JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
+                                    Map.of("sub", "importer-user", "roles", List.of("importer"), "email", "importer@test"))))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"name\":\"" + created + "\",\"type\":\"source\"}"))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.permissions.grant").value(false));
+        } finally {
+            mockMvc.perform(delete(BASE + "/" + created).header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())));
+        }
+    }
+
+    // --- ineffective_grants on the reads ------------------------------------------------------------
+
+    private ResultActions readAccess(String table, String role) throws Exception {
+        return mockMvc.perform(get(BASE + "/" + table + "/access" + (role == null ? "" : "?role=" + role))
+                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void readForEveryoneOverRowPolicyIsReportedOnBothReadsAndFollowsOtherRoles() throws Exception {
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read")).andExpect(status().isOk());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        // Another role's policy makes lifts_row_policies true on the `*` entry saved before it.
+        putEntry(fullAdminToken(), PROBE, "X", "\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(2))
+                .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[0].key").value("read"))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[0].message").isString())
+                .andExpect(jsonPath("$.ineffective_grants[1].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "*")
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(2))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("lifts_row_policies"))
+                .andExpect(jsonPath("$.ineffective_grants[1].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "X")
+                .andExpect(jsonPath("$.ineffective_grants").isArray())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+        mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=X").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                .andExpect(status().isNoContent());
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+    }
+
+    @Test
+    void everyoneReadsAllRowsIsReportedOnSaveAndReadUntilRowsAreGiven() throws Exception {
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                .andExpect(jsonPath("$.ineffective_grants[0].role").value("*"))
+                .andExpect(jsonPath("$.ineffective_grants[0].key").value("read"))
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read") + ",\"rows\":{\"where\":\"k = 'v'\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+        // A column list does not narrow rows.
+        putEntry(fullAdminToken(), PROBE, "*", privileges("read") + ",\"columns\":[\"k\"]")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+        readAccess(PROBE, "*").andExpect(jsonPath("$.ineffective_grants[0].reason").value("everyone_reads_all_rows"));
+
+        putEntry(fullAdminToken(), PROBE, "*", privileges("get")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        putEntry(fullAdminToken(), PROBE, "*", privileges() + ",\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+    }
+
+    @Test
+    void clearanceWarningOnReadDisappearsWhenTheRoleGainsVerb() throws Exception {
+        createEnrichment();
+        try {
+            putEntry(fullAdminToken(), PROBE, "pii-analysts", privileges("sensitive")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts")
+                    .andExpect(jsonPath("$.ineffective_grants.length()").value(1))
+                    .andExpect(jsonPath("$.ineffective_grants[0].reason").value("sensitive_without_verb"));
+
+            putEntry(fullAdminToken(), PROBE, "*", privileges("get")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+
+            mockMvc.perform(delete(BASE + "/" + PROBE + "/access?role=*").header(HttpHeaders.AUTHORIZATION, bearer(fullAdminToken())))
+                    .andExpect(status().isNoContent());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants[0].reason").value("sensitive_without_verb"));
+            putEntry(fullAdminToken(), ENRICHMENT, "pii-analysts", privileges("modify")).andExpect(status().isOk());
+            readAccess(PROBE, "pii-analysts").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void readForEveryoneLeftOnAnEnrichmentIsNotReported() throws Exception {
+        createEnrichment();
+        try {
+            // Raw SQL: the API refuses a read-side entry on an enrichment, and the clean-up migration has already run.
+            jdbc.update("UPDATE table_definition SET access = ?::jsonb WHERE name = ?", "{\"read\":[\"*\"]}", ENRICHMENT);
+            readAccess(ENRICHMENT, null)
+                    .andExpect(jsonPath("$.roles['*'].privileges[0]").value("read"))
+                    .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+            readAccess(ENRICHMENT, "*").andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        } finally {
+            dropEnrichment();
+        }
+    }
+
+    @Test
+    void readsWithNothingToReportCarryAnEmptyReport() throws Exception {
+        readAccess(PROBE, null)
+                .andExpect(jsonPath("$.ineffective_grants").isArray())
+                .andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        putEntry(fullAdminToken(), PROBE, WRITER_ROLE, privileges("read") + ",\"rows\":{\"where\":\"k = 'v'\"}").andExpect(status().isOk());
+        readAccess(PROBE, null).andExpect(jsonPath("$.ineffective_grants").isEmpty());
+        readAccess(PROBE, WRITER_ROLE).andExpect(jsonPath("$.ineffective_grants").isEmpty());
     }
 }

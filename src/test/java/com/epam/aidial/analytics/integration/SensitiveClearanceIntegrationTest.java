@@ -52,10 +52,8 @@ class SensitiveClearanceIntegrationTest extends AbstractOidcAuthIntegrationTest 
                         + "{\"source_name\":\"employee_name_raw\",\"name\":\"employee_name\",\"type\":\"string\","
                         + "\"sensitive\":true}],\"ordering_key\":[\"k\"]}")
                 .andExpect(status().isOk());
-        perform(put(BASE + "/" + TABLE + "/access"), fullAdmin(),
-                "{\"read\":[\"" + OWNERS + "\"],\"modify\":[\"" + OWNERS + "\",\"" + STEWARDS + "\"],"
-                        + "\"sensitive\":[\"" + OWNERS + "\"]}")
-                .andExpect(status().isOk());
+        grant(TABLE, OWNERS, "read", "sensitive", "modify").andExpect(status().isOk());
+        grant(TABLE, STEWARDS, "modify").andExpect(status().isOk());
     }
 
     @AfterEach
@@ -151,8 +149,7 @@ class SensitiveClearanceIntegrationTest extends AbstractOidcAuthIntegrationTest 
         perform(post(BASE), fullAdmin(), "{\"name\":\"" + pending + "\",\"description\":\"p\",\"type\":\"source\"}")
                 .andExpect(status().isCreated());
         try {
-            perform(put(BASE + "/" + pending + "/access"), fullAdmin(), "{\"modify\":[\"" + STEWARDS + "\"]}")
-                    .andExpect(status().isOk());
+            grant(pending, STEWARDS, "modify").andExpect(status().isOk());
             final String schema = "{\"columns\":[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},"
                     + "{\"source_name\":\"ssn\",\"name\":\"ssn\",\"type\":\"string\",\"sensitive\":true}],"
                     + "\"ordering_key\":[\"k\"]}";
@@ -200,11 +197,22 @@ class SensitiveClearanceIntegrationTest extends AbstractOidcAuthIntegrationTest 
 
     @Test
     void theRemovedGrantKeyIsRefused() throws Exception {
-        perform(put(BASE + "/" + TABLE + "/access"), fullAdmin(), "{\"read_sensitive\":[\"" + OWNERS + "\"]}")
-                .andExpect(status().isBadRequest());
+        grant(TABLE, OWNERS, "read_sensitive")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("validation_error"));
     }
 
     // --- helpers --------------------------------------------------------------------------------------
+
+    /** Replaces {@code role}'s entry on {@code table} with {@code privileges}, at the table's current generation. */
+    private ResultActions grant(String table, String role, String... privileges) throws Exception {
+        final String access = mockMvc.perform(get(BASE + "/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return perform(put(BASE + "/" + table + "/access?role=" + role), fullAdmin(),
+                "{\"generation\":" + com.jayway.jsonpath.JsonPath.read(access, "$.generation")
+                        + ",\"privileges\":[\"" + String.join("\",\"", privileges) + "\"]}");
+    }
 
     private ResultActions perform(MockHttpServletRequestBuilder request, String token, String body) throws Exception {
         return mockMvc.perform(request

@@ -10,7 +10,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Per-table authorization: whether the caller holds a table-scoped {@link Privilege} on a named table,
- * either <b>globally</b> or by a grant in that table's access lists. Invoked by
+ * either <b>globally</b> or by a grant in that table's access lists — for an enrichment's read side, its
+ * source's (see {@link GoverningAccess}). Invoked by
  * {@code PrivilegeAuthorizationManager} for an annotated endpoint, and programmatically where the table is
  * only known mid-request (the pipeline data plane, OTLP ingest, the query model).
  *
@@ -27,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class TableAccessEvaluator {
 
     private final TableDefinitionRepository definitions;
+    private final GoverningAccess governing;
     private final SecurityClaimsExtractor claimsExtractor;
 
     /** Whether the caller holds {@code required} on {@code tableName}, globally or by grant. */
@@ -43,7 +45,7 @@ public class TableAccessEvaluator {
             return false;
         }
         return TableCallerPermissions.isGranted(
-                definition.getAccess(), required, claimsExtractor.getProviderRoles());
+                governing.of(definition), required, claimsExtractor.getProviderRoles());
     }
 
     /** Whether the caller may insert rows into {@code tableName}. */

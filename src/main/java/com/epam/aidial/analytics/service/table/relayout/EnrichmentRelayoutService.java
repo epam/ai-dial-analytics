@@ -469,7 +469,8 @@ public class EnrichmentRelayoutService {
 
     private void markAligned(Plan plan) {
         transactions.executeWithoutResult(status -> {
-            final TableDefinitionEntity definition = definitions.findById(plan.table()).orElseThrow();
+            // Locked as the first load, like every definition writer, so it never writes back stale access state.
+            final TableDefinitionEntity definition = definitions.findForUpdate(plan.table()).orElseThrow();
             definition.setPartitionColumn(plan.alignment());
             definition.setPartitionGranularity(plan.granularity());
             definitions.save(definition);

@@ -188,7 +188,8 @@ public final class AggregateSqlValidator {
      * identifiers, its {@code table.column} tokens and its double-quoted names, never re-parsed) and put through the
      * entity-wide sensitive gate of the table it reads (with no declared input, of every source table it names): a
      * sensitive column it mentions that the caller may not read is
-     * the 403, naming the column. Anything else is the original 422. The scan only ever runs on a statement that
+     * the 403, naming the column; a mentioned column a column policy hides is {@code 403 column_not_entitled}, checked
+     * across every candidate table first. Anything else is the original 422. The scan only ever runs on a statement that
      * already failed, so its over-approximation can turn one refusal into another, never an acceptance into a
      * refusal.
      *
@@ -207,7 +208,12 @@ public final class AggregateSqlValidator {
         } catch (PipelineValidationException ex) {
             if (StringUtils.isNotBlank(sql)) {
                 final Set<String> mentioned = mentionedNames(sql);
-                for (final String source : inputTable != null ? Set.of(inputTable) : readTablesOf(sql, target)) {
+                final Set<String> candidates = inputTable != null ? Set.of(inputTable) : readTablesOf(sql, target);
+                // A mentioned column a column policy hides, across every candidate, before any unentitled sensitive one.
+                for (final String source : candidates) {
+                    sensitiveGuard.enforceVisibleEntity(source, mentioned, operation);
+                }
+                for (final String source : candidates) {
                     sensitiveGuard.enforceEntity(source, mentioned, operation);
                 }
             }
@@ -296,8 +302,6 @@ public final class AggregateSqlValidator {
             }
         }
 
-        governance.requireSensitiveGrantsNotWidened(target, inputTable);
-        governance.requireSensitiveGrantsNotWidened(target, AggregateGovernance.referencedEnrichmentsOf(input, referenced));
         governance.requireAggregatableEnrichments(inputTable, input, referenced);
         return new Analysis(plan, keys, bucket);
     }

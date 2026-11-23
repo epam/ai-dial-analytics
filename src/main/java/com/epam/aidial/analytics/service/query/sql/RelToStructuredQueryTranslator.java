@@ -354,7 +354,7 @@ final class RelToStructuredQueryTranslator {
             // table and the filter applies to it, which is exactly the statement's meaning.
             ctx = seal(ctx, filter.getInput());
         }
-        final FilterNode node = ctx.rex().toFilter(filter.getCondition());
+        final FilterNode node = ctx.rex().rootFilter(filter.getCondition());
         if (ctx.aggregated) {
             ctx.having = and(ctx.having, node);
         } else {
@@ -397,7 +397,7 @@ final class RelToStructuredQueryTranslator {
         final RexToExprTranslator rex = ctx.rex();
         final List<Expr> outputs = new ArrayList<>(project.getProjects().size());
         for (final RexNode node : project.getProjects()) {
-            outputs.add(rex.toExpr(node));
+            outputs.add(rex.rootExpr(node));
         }
         return outputs;
     }
@@ -962,7 +962,7 @@ final class RelToStructuredQueryTranslator {
             kind = JoinKind.CROSS;
             on = null;
         } else {
-            on = ctx.rex().toFilter(join.getCondition());
+            on = ctx.rex().rootFilter(join.getCondition());
             requireEquiConjunct(on, leftNames);
         }
         composite = true;

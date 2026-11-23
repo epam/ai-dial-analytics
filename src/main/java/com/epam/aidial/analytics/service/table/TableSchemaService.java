@@ -4,20 +4,23 @@ import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
+import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException;
 import com.epam.aidial.analytics.exception.TableConflictException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
 import com.epam.aidial.analytics.service.enrichment.support.ProvenanceColumns;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
+import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.PatchInput.Rename;
 import com.epam.aidial.analytics.service.table.TableDdlRenderer.DdlColumn;
-import com.epam.aidial.analytics.service.table.grant.SensitiveGrantInvariant;
 import com.epam.aidial.analytics.service.table.relayout.RelayoutStateStore;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -74,7 +77,6 @@ public class TableSchemaService {
     private final TableDefinitionRepository definitions;
     private final ColumnMappingRepository columns;
     private final SensitiveColumnAccess sensitiveAccess;
-    private final SensitiveGrantInvariant sensitiveGrants;
     private final CatalogSchemaWriter writer;
     private final TableCatalogService catalogService;
     private final ClickHouseDdlExecutor ddlExecutor;
@@ -85,6 +87,8 @@ public class TableSchemaService {
     private final RowPolicyService rowPolicies;
     private final ClickHouseTableInspector inspector;
     private final RelayoutStateStore relayouts;
+    private final ColumnPolicyRewriter columnPolicyRewriter;
+    private final PlatformTransactionManager transactionManager;
 
     /** A resolved add: the declared column, its rendered DDL type, and its target ordinal. */
     private record ResolvedAdd(ColumnInput column, String ddlType, int ordinal) {}
@@ -100,9 +104,26 @@ public class TableSchemaService {
             String exposedName, Change<String> tag, Change<String> displayName,
             Change<String> description, Change<Boolean> sensitive, Change<Boolean> heavy) {}
 
+    /**
+     * Applies {@code patch} in one transaction, from the row lock of the table (and, for an enrichment whose patch drops or
+     * renames a column, then of its source, before anything else loads it) through every validation, the ClickHouse {@code ALTER} and the catalog
+     * writes, so the column policies it decides on before the {@code ALTER} are the ones it commits against. The
+     * response is read after the commit.
+     */
     public TableView patchSchema(String name, PatchInput patch) {
-        final TableDefinitionEntity definition = definitions.findById(name)
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch));
+        return catalogService.get(name);
+    }
+
+    private void patchLocked(String name, PatchInput patch) {
+        final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
+        // The source's lists name an enrichment's columns, so its row is locked too, enrichment first, when the request
+        // drops or renames one. Decided on the request alone, because the lock must be the first load of the source row,
+        // and taken whether or not the source has column policies now, so that a concurrent PUT cannot add one meanwhile.
+        final TableDefinitionEntity policyOwner = definition.getType() != TableType.ENRICHMENT ? definition
+                : patch.drop().isEmpty() && patch.rename().isEmpty() ? null
+                : definitions.findForUpdate(definition.getSourceTable()).orElse(null);
         definition.requireModifiable();
         // PATCH is the live-schema surface: it emits immediate ClickHouse ALTERs, so it applies only to a
         // materialized table. A not-yet-materialized table's schema is defined and materialized via
@@ -128,8 +149,15 @@ public class TableSchemaService {
         final Map<String, ColumnMappingEntity> byExposed = new LinkedHashMap<>();
         final Set<String> hidden = new LinkedHashSet<>();
         final Set<String> hiddenPhysical = new LinkedHashSet<>();
+        // A column a column policy hides from the caller is unknown to it exactly like an unentitled sensitive one.
+        final ColumnVisibility visibility = sensitiveAccess.visibleColumns(definition);
+        final Map<String, String> policyHiddenPhysical = new LinkedHashMap<>();
         for (final ColumnMappingEntity col : current) {
-            if (col.isSensitive() && !cleared) {
+            final boolean policyHidden = !visibility.allows(col.getName());
+            if (policyHidden) {
+                policyHiddenPhysical.put(col.getSourceName(), col.getName());
+            }
+            if (col.isSensitive() && !cleared || policyHidden) {
                 hidden.add(col.getName());
                 hiddenPhysical.add(col.getSourceName());
             } else {
@@ -172,6 +200,8 @@ public class TableSchemaService {
         final Map<String, Set<String>> policyColumns = rowPolicies.referencedColumns(definition);
 
         final List<String> drops = new ArrayList<>();
+        final List<String> droppedExposed = new ArrayList<>();
+        final List<ColumnPolicyRewriter.Rename> renamedExposed = new ArrayList<>();
         for (final String drop : patch.drop()) {
             final ColumnMappingEntity col = requireColumn(byExposed, drop);
             requireNoRowPolicy(name, col.getName(), policyColumns, "dropped");
@@ -191,6 +221,7 @@ public class TableSchemaService {
             physical.remove(col.getSourceName());
             physicalByExposed.remove(drop);
             drops.add(col.getSourceName());
+            droppedExposed.add(col.getName());
         }
 
         final List<ResolvedRename> renames = new ArrayList<>();
@@ -235,11 +266,11 @@ public class TableSchemaService {
             physicalByExposed.remove(rename.from());
             physicalByExposed.put(rename.to(), rename.to());
             renames.add(new ResolvedRename(col.getSourceName(), rename.to()));
+            renamedExposed.add(new ColumnPolicyRewriter.Rename(col.getName(), rename.to()));
         }
 
         int nextOrdinal = current.stream().mapToInt(ColumnMappingEntity::getOrdinal).max().orElse(-1) + 1;
         final List<ResolvedAdd> adds = new ArrayList<>();
-        boolean addsSensitiveColumn = false;
         for (final ColumnInput declared : patch.add()) {
             TableColumnRules.requireValidUserColumn(declared);
             if (Boolean.TRUE.equals(declared.sensitive()) && !cleared) {
@@ -267,19 +298,9 @@ public class TableSchemaService {
                     pendingAlignment.sourceColumn())) {
                 throw pendingAlignment.collision();
             }
-            addsSensitiveColumn |= Boolean.TRUE.equals(add.sensitive());
             adds.add(new ResolvedAdd(add,
                     typeMapper.toDdlType(add.type(), add.elementType(), add.enumValues(), nullable), nextOrdinal++));
         }
-        if (addsSensitiveColumn) {
-            // An `add` that declares the column sensitive is the other way an enrichment first comes to
-            // carry a derived sensitive column, so the subset rule has to run here too. Missing it left the
-            // whole invariant bypassable: grant `sensitive` on an enrichment while it has no sensitive
-            // column (accepted, nothing to protect), then add one.
-            // (Declaring the column sensitive at all needed the clearance, checked in the loop above.)
-            sensitiveGrants.requireNotWidenedWithNewSensitiveColumn(definition);
-        }
-
         if (exposed.size() > limits.maxColumnsPerTable()) {
             throw new TableValidationException(
                     "a table may declare at most " + limits.maxColumnsPerTable() + " columns");
@@ -305,7 +326,6 @@ public class TableSchemaService {
         // exception: `sensitive` on a cursor column, which the scan reads (see ScanMetadataRules).
         final List<ResolvedMetadataUpdate> updates = new ArrayList<>();
         final Set<String> updated = new LinkedHashSet<>();
-        boolean marksColumnSensitive = false;
         for (final PatchInput.ColumnMetadataUpdate update : patch.update()) {
             if (!exposed.contains(update.name()) || hidden.contains(update.name())) {
                 throw new TableValidationException("unknown column '" + update.name() + "'");
@@ -329,13 +349,6 @@ public class TableSchemaService {
                 if (Boolean.TRUE.equals(update.sensitive().value())) {
                     ScanMetadataRules.requireNotSensitive(
                             identityColumn, versionColumn, physicalByExposed.get(update.name()));
-                    // Marking an enrichment column sensitive is one of the moments its grants first have
-                    // something to launder, so the subset rule is checked here as well as on a grant edit.
-                    // Accumulated rather than checked inline, like the `add` branch above: the rule's
-                    // verdict is a property of the pair, not of the column, and it parses every stored
-                    // declaration to find the grain-join edge — running it once per patched column would
-                    // multiply that scan for an answer that cannot differ.
-                    marksColumnSensitive = true;
                 }
             }
             updates.add(new ResolvedMetadataUpdate(
@@ -346,12 +359,6 @@ public class TableSchemaService {
                     update.sensitive(),
                     update.heavy()));
         }
-        if (marksColumnSensitive && !addsSensitiveColumn) {
-            // Once for the whole patch, and skipped when the `add` branch above already ran it: both ask
-            // the same question of the same pair.
-            sensitiveGrants.requireNotWidenedWithNewSensitiveColumn(definition);
-        }
-
         // Resolve the TTL merge-patch against the post-op physical columns (type + nullability), so a
         // just-added or just-renamed column is referenceable. A removal when no TTL is stored is an
         // idempotent no-op (no REMOVE TTL command is emitted).
@@ -360,6 +367,11 @@ public class TableSchemaService {
         // column would let its validation errors reveal the column's type and nullability, and an accepted one
         // would expire rows by sensitive values — observable afterwards through row counts. For the same reason
         // such a caller may not change a stored TTL that is on a hidden column, in either direction.
+        if (patch.ttl().present() && policyHiddenPhysical.containsKey(definition.getTtlColumn())) {
+            throw new ColumnNotEntitledException("the TTL of table '" + name + "' is on column '"
+                    + policyHiddenPhysical.get(definition.getTtlColumn()) + "', which a column policy hides from the "
+                    + "caller, so the caller may not change it");
+        }
         if (patch.ttl().present() && !cleared && hiddenPhysical.contains(definition.getTtlColumn())) {
             throw clearanceRequired(name, "changing a TTL that is on a sensitive column");
         }
@@ -396,6 +408,11 @@ public class TableSchemaService {
             }
         }
 
+        // Decided on the locked lists before any DDL: drops prune, renames rewrite the pruned lists, and a list the prune
+        // would empty refuses the whole request. Written after the ALTER, in this transaction and revision.
+        final Map<String, List<String>> columnPolicies = policyOwner == null ? null : columnPolicyRewriter.plan(policyOwner,
+                policyOwner == definition ? "" : name + ".", name, droppedExposed, renamedExposed);
+
         // All valid — apply: one multi-command ALTER (validated by ClickHouse as a whole, so it is
         // rejected or applied in its entirety), then all catalog changes in one transaction.
         final List<String> commands = new ArrayList<>();
@@ -422,7 +439,7 @@ public class TableSchemaService {
             ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
         }
 
-        writer.applyPatch(name,
+        writer.applyPatch(definition,
                 drops,
                 renames.stream().map(r -> new CatalogSchemaWriter.RenameWrite(r.fromSourceName(), r.to())).toList(),
                 adds.stream().map(a -> new CatalogSchemaWriter.AppendWrite(a.column(),
@@ -430,7 +447,9 @@ public class TableSchemaService {
                 updates.stream().map(u -> new CatalogSchemaWriter.MetadataWrite(u.exposedName(),
                         u.tag(), u.displayName(), u.description(), u.sensitive(), u.heavy())).toList(),
                 ttlChange);
-        return catalogService.get(name);
+        if (policyOwner != null) {
+            columnPolicyRewriter.apply(policyOwner, columnPolicies);
+        }
     }
 
     /**
@@ -535,8 +554,7 @@ public class TableSchemaService {
      * wrong.</b> A rename preserves the {@code sensitive} flag and changes only the name, so on a source a
      * holder of {@code TABLE_MODIFY} and the {@code TABLE_SENSITIVE} clearance — which together confer no
      * {@code TABLE_READ} — could free the name an expression reads and move a protected column into it. The
-     * declaration is untouched, the flag is untouched, so neither the clearance rule on the flag nor the
-     * grant subset rule fires; the
+     * declaration is untouched and the flag is untouched, so the clearance rule on the flag does not fire; the
      * pipeline's elevated runner then copies the protected values into an unflagged enrichment column that
      * plain {@code TABLE_READ} can read. Before privileges existed this was unreachable because
      * {@code PATCH .../schema} required the full administrative role, which conferred global sensitive

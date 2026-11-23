@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -152,23 +153,29 @@ class AuditActivityFeedIntegrationTest extends AbstractClickHouseIntegrationTest
     @Test
     void snapshotCarriesTheGrantsInNoneModeAndTheLiveReadDoesNot() throws Exception {
         IntegrationTables.source(mockMvc, table, COLUMNS, ORDERING);
-        mockMvc.perform(put("/v1/tables/" + table + "/access").contentType(JSON)
-                        .content("{\"read\":[\"team-a\"]}"))
+        final Number generation = com.jayway.jsonpath.JsonPath.read(mockMvc.perform(get("/v1/tables/" + table + "/access"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.generation");
+        mockMvc.perform(put("/v1/tables/" + table + "/access?role=team-a").contentType(JSON)
+                        .content("{\"generation\":" + generation + ",\"privileges\":[\"read\"],\"columns\":[\"widget_id\"]}"))
                 .andExpect(status().isOk());
         final int granted = revisionOf(table);
 
-        // In none mode the grant reads are open, so the snapshot carries both members to every caller —
-        // the policy map present and empty, never absent.
+        // In none mode the grant reads are open, so the snapshot carries the role map to every caller; column
+        // policies are not evaluated, so it hides no column.
         mockMvc.perform(get("/v1/tables/" + table + "/revision/" + granted))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.access.read[0]").value("team-a"))
-                .andExpect(jsonPath("$.access.write").isEmpty())
-                .andExpect(jsonPath("$.row_policies").isMap())
-                .andExpect(jsonPath("$.row_policies").isEmpty());
-        mockMvc.perform(get("/v1/tables/" + table))
-                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roles").isMap())
+                .andExpect(jsonPath("$.roles['team-a'].privileges", hasSize(1)))
+                .andExpect(jsonPath("$.roles['team-a'].privileges[0]").value("read"))
+                .andExpect(jsonPath("$.roles['team-a'].rows").value(nullValue()))
+                .andExpect(jsonPath("$.roles['team-a'].columns[0]").value("widget_id"))
+                .andExpect(jsonPath("$.columns", hasSize(2)))
+                .andExpect(jsonPath("$.generation").doesNotExist())
                 .andExpect(jsonPath("$.access").doesNotExist())
                 .andExpect(jsonPath("$.row_policies").doesNotExist());
+        mockMvc.perform(get("/v1/tables/" + table))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roles").doesNotExist());
     }
 
     @Test

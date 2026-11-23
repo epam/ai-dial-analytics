@@ -22,6 +22,7 @@ import com.epam.aidial.analytics.web.security.Privilege;
 import com.epam.aidial.analytics.web.security.RequiresPrivilege;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -96,6 +97,11 @@ import java.util.List;
 @Tag(name = "Pipelines", description = "Declare and operate pipelines: in-DB rollups and enrichments.")
 public class PipelineController {
 
+    /** The 403 an authoring or data-plane path answers for a column the calling identity may not read. */
+    static final String COLUMN_REFUSAL_DOC = "The calling identity may not read a column the declaration reads: one a "
+            + "column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the "
+            + "clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant";
+
     private final PipelineService service;
     private final PipelineFreshnessDiagnostics freshness;
     private final PipelineJsonReadNotes jsonReadNotes;
@@ -105,6 +111,7 @@ public class PipelineController {
     @PostMapping
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
     @ResponseStatus(HttpStatus.CREATED)
+    @ApiResponse(responseCode = "403", description = COLUMN_REFUSAL_DOC)
     @Operation(summary = "Register a pipeline",
             description = "Stores a pipeline. Only `name`, `kind` and `target` are required: every other "
                     + "declaration member may be authored later by PATCH while the pipeline is disabled. The "
@@ -236,6 +243,7 @@ public class PipelineController {
 
     @PatchMapping("/{name}")
     @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
+    @ApiResponse(responseCode = "403", description = COLUMN_REFUSAL_DOC)
     @Operation(summary = "Patch a pipeline",
             description = "Enables or disables it, and/or re-declares it. A declaration change replaces the "
                     + "stored declaration (an omitted member is cleared; an omitted `target` is kept). One that "

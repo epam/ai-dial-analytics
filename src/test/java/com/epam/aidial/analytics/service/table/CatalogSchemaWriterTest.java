@@ -1,15 +1,20 @@
 package com.epam.aidial.analytics.service.table;
 
+import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
+import com.epam.aidial.analytics.exception.ColumnInColumnPolicyException;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.TableNotFoundException;
 import com.epam.aidial.analytics.exception.TableValidationException;
+import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
+import com.epam.aidial.analytics.service.table.grant.RoleGenerationCodec;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyService;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -21,7 +26,11 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -49,7 +58,13 @@ class CatalogSchemaWriterTest {
     @BeforeEach
     void setUp() {
         writer = new CatalogSchemaWriter(definitions, columns, pipelineGenerations,
-                new TableLimitsProperties(256, 1000, 10000), rowPolicies);
+                new TableLimitsProperties(256, 1000, 10000), rowPolicies,
+                new ColumnPolicyRewriter(new ColumnPolicyCodec(new JsonMapperConfiguration().jsonMapper()),
+                        new RoleGenerationCodec(new JsonMapperConfiguration().jsonMapper())));
+        // Every definition writer locks the row as its first load; the stubs below describe the stored row once.
+        lenient().when(definitions.findForUpdate(anyString())).thenAnswer(inv -> definitions.findById(inv.getArgument(0)));
+        // A define reads the table's stored columns to find what it drops; a table a test does not stub has none.
+        lenient().when(columns.findByTableNameOrderByOrdinal(anyString())).thenReturn(List.of());
     }
 
     private static TableDefinitionEntity definition(String name, TableType type, String sourceTable) {
@@ -163,6 +178,61 @@ class CatalogSchemaWriterTest {
     }
 
     @Test
+    void persistSchemaRefusesEmptyingColumnPolicyOfFailedTableBeforeAnyWrite() {
+        // The CREATE follows persistSchema, so a refusal here leaves ClickHouse untouched.
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.FAILED);
+        def.setColumnPolicies("{\"X\": [\"project_id\"]}");
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
+                column("widget_metrics", "widget_id", QueryFieldType.STRING), column("widget_metrics", "project_id", QueryFieldType.STRING)));
+
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(col("widget_id", QueryFieldType.STRING)), List.of("widget_id"), null, null, null, null, null)))
+                .isInstanceOf(ColumnInColumnPolicyException.class)
+                .hasMessageContaining("project_id");
+        verify(columns, never()).deleteByTableName(any());
+        verify(columns, never()).saveAll(any());
+        assertThat(def.getColumnPolicies()).isEqualTo("{\"X\": [\"project_id\"]}");
+    }
+
+    @Test
+    void persistSchemaJudgesStoredPoliciesAgainstTheColumnsItWrote() {
+        // A kept column may be retyped: the stored policies decide, after the write and its flush, and a
+        // refusal propagates so the transaction rolls the write back.
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.FAILED);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        given(rowPolicies.referencedColumns(def)).willReturn(Map.of("project_id", Set.of("team-x")));
+        willThrow(new ColumnInRowPolicyException("does not fit the row policy of role 'team-x'"))
+                .given(rowPolicies).requireStillValid(def);
+
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(col("widget_id", QueryFieldType.STRING), col("project_id", QueryFieldType.LONG)),
+                List.of("widget_id"), null, null, null, null, null)))
+                .isInstanceOf(ColumnInRowPolicyException.class)
+                .hasMessageContaining("team-x");
+        final InOrder order = inOrder(columns, rowPolicies);
+        order.verify(columns).saveAll(any());
+        order.verify(columns).flush();
+        order.verify(rowPolicies).requireStillValid(def);
+    }
+
+    @Test
+    void persistSchemaReportsAnInvalidColumnBeforeTheRowPolicyGuard() {
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+
+        // An element type on a scalar column is invalid whether or not a policy filters on it.
+        assertThatThrownBy(() -> writer.persistSchema("widget_metrics", new DefineSchemaInput(
+                List.of(new ColumnInput("project_id", "project_id", QueryFieldType.STRING, QueryFieldType.LONG, null, null, null,
+                        null, null, false, false)),
+                List.of("project_id"), null, null, null, null, null)))
+                .isInstanceOf(TableValidationException.class);
+        verifyNoInteractions(rowPolicies);
+    }
+
+    @Test
     void persistSchemaAcceptsKeptRowPolicyColumn() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
@@ -173,6 +243,7 @@ class CatalogSchemaWriterTest {
                 List.of("widget_id"), null, null, null, null, null));
 
         verify(columns).saveAll(any());
+        verify(rowPolicies).requireStillValid(def);
     }
 
     @Test
@@ -565,6 +636,28 @@ class CatalogSchemaWriterTest {
         assertThat(def.getGrainKey()).isEqualTo("widget_id");
         assertThat(def.getOrderingKey()).containsExactly("widget_id");
         verify(columns).saveAll(any());
+        // A define dropping none of the enrichment's stored columns cannot change a source list: the source stays unlocked.
+        verify(definitions, never()).findForUpdate("widget_metrics");
+    }
+
+    @Test
+    void enrichmentRedefineDroppingColumnPrunesTheSourceListUnderItsLock() {
+        final TableDefinitionEntity def = definition("widget_labels", TableType.ENRICHMENT, "widget_metrics");
+        final TableDefinitionEntity source = definition("widget_metrics", TableType.SOURCE, null);
+        source.setColumnPolicies("{\"X\": [\"widget_id\", \"widget_labels.old\"]}");
+        given(definitions.findById("widget_labels")).willReturn(Optional.of(def));
+        given(definitions.findById("widget_metrics")).willReturn(Optional.of(source));
+        given(columns.findByTableNameOrderByOrdinal("widget_labels"))
+                .willReturn(List.of(column("widget_labels", "old", QueryFieldType.STRING)));
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
+                .willReturn(List.of(column("widget_metrics", "widget_id", QueryFieldType.STRING)));
+
+        writer.persistSchema("widget_labels", new DefineSchemaInput(
+                List.of(col("label", QueryFieldType.STRING)), null, null, null, "widget_id", null, null));
+
+        verify(definitions).findForUpdate("widget_metrics");
+        assertThat(source.getColumnPolicies()).contains("widget_id").doesNotContain("widget_labels.old");
+        assertThat(source.getAccessGeneration()).isEqualTo(1);
     }
 
     @Test
@@ -596,15 +689,34 @@ class CatalogSchemaWriterTest {
     // --- applyPatch: one-transaction catalog write of a live PATCH -----------------------------
 
     @Test
+    void applyPatchFlushesTheDropsBeforeAddingColumnUnderDroppedName() {
+        // Hibernate flushes inserts before deletes, so without the flush the add would hit exposed_name_unique_per_table.
+        final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
+        def.setStatus(TableStatus.ACTIVE);
+        final ColumnMappingEntity dropped = column("widget_metrics", "c", QueryFieldType.STRING);
+        given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(dropped));
+
+        writer.applyPatch(def, List.of("c"), List.of(),
+                List.of(new CatalogSchemaWriter.AppendWrite(new ColumnInput("c_new", "c", QueryFieldType.STRING, null, null, null, null, null,
+                        null, false, false), false, 1)),
+                List.of(), Change.leave());
+
+        final InOrder order = inOrder(columns);
+        order.verify(columns).delete(dropped);
+        order.verify(columns).flush();
+        order.verify(columns).save(any(ColumnMappingEntity.class));
+    }
+
+    @Test
     void applyPatchRenameOfTtlColumnRenamesStoredTtl() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         def.setStatus(TableStatus.ACTIVE);
         def.setTtl(new TtlInput("created_at", 90, TtlUnit.DAY));
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
         given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
                 .willReturn(List.of(column("widget_metrics", "created_at", QueryFieldType.TIMESTAMP)));
 
-        writer.applyPatch("widget_metrics", List.of(),
+        writer.applyPatch(def, List.of(),
                 List.of(new CatalogSchemaWriter.RenameWrite("created_at", "created_ts")),
                 List.of(), List.of(), Change.leave());
 
@@ -625,11 +737,11 @@ class CatalogSchemaWriterTest {
         def.setStatus(TableStatus.ACTIVE);
         def.setIdentityColumn("widget_id");
         def.setVersionColumn("seen_at");
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
         given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
                 .willReturn(List.of(column("widget_metrics", "widget_id", QueryFieldType.STRING)));
 
-        writer.applyPatch("widget_metrics", List.of(),
+        writer.applyPatch(def, List.of(),
                 List.of(new CatalogSchemaWriter.RenameWrite("widget_id", "widget_key")),
                 List.of(), List.of(), Change.leave());
 
@@ -644,11 +756,11 @@ class CatalogSchemaWriterTest {
         def.setStatus(TableStatus.ACTIVE);
         def.setIdentityColumn("widget_id");
         def.setVersionColumn("seen_at");
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
         given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
                 .willReturn(List.of(column("widget_metrics", "seen_at", QueryFieldType.TIMESTAMP)));
 
-        writer.applyPatch("widget_metrics", List.of(),
+        writer.applyPatch(def, List.of(),
                 List.of(new CatalogSchemaWriter.RenameWrite("seen_at", "ingested_at")),
                 List.of(), List.of(), Change.leave());
 
@@ -664,11 +776,11 @@ class CatalogSchemaWriterTest {
         def.setStatus(TableStatus.ACTIVE);
         def.setIdentityColumn("widget_id");
         def.setVersionColumn("seen_at");
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
         given(columns.findByTableNameOrderByOrdinal("widget_metrics"))
                 .willReturn(List.of(column("widget_metrics", "score", QueryFieldType.LONG)));
 
-        writer.applyPatch("widget_metrics", List.of(),
+        writer.applyPatch(def, List.of(),
                 List.of(new CatalogSchemaWriter.RenameWrite("score", "rating")),
                 List.of(), List.of(), Change.leave());
 
@@ -684,12 +796,12 @@ class CatalogSchemaWriterTest {
         def.setStatus(TableStatus.ACTIVE);
         def.setVersionColumn("seen_at");
         def.setTtl(new TtlInput("created_at", 90, TtlUnit.DAY));
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
         given(columns.findByTableNameOrderByOrdinal("widget_metrics")).willReturn(List.of(
                 column("widget_metrics", "seen_at", QueryFieldType.TIMESTAMP),
                 column("widget_metrics", "created_at", QueryFieldType.TIMESTAMP)));
 
-        writer.applyPatch("widget_metrics", List.of(),
+        writer.applyPatch(def, List.of(),
                 List.of(new CatalogSchemaWriter.RenameWrite("seen_at", "ingested_at"),
                         new CatalogSchemaWriter.RenameWrite("created_at", "created_ts")),
                 List.of(), List.of(), Change.leave());
@@ -703,15 +815,15 @@ class CatalogSchemaWriterTest {
     void applyPatchSetsAndClearsTtl() {
         final TableDefinitionEntity def = definition("widget_metrics", TableType.SOURCE, null);
         def.setStatus(TableStatus.ACTIVE);
-        given(definitions.findById("widget_metrics")).willReturn(Optional.of(def));
+        lenient().when(definitions.findById("widget_metrics")).thenReturn(Optional.of(def));
 
-        writer.applyPatch("widget_metrics", List.of(), List.of(), List.of(), List.of(),
+        writer.applyPatch(def, List.of(), List.of(), List.of(), List.of(),
                 Change.set(new TtlInput("created_at", 30, TtlUnit.MONTH)));
         assertThat(def.getTtlColumn()).isEqualTo("created_at");
         assertThat(def.getTtlInterval()).isEqualTo(30);
         assertThat(def.getTtlUnit()).isEqualTo(TtlUnit.MONTH);
 
-        writer.applyPatch("widget_metrics", List.of(), List.of(), List.of(), List.of(), Change.set(null));
+        writer.applyPatch(def, List.of(), List.of(), List.of(), List.of(), Change.set(null));
         assertThat(def.getTtlColumn()).isNull();
         assertThat(def.getTtlInterval()).isNull();
         assertThat(def.getTtlUnit()).isNull();
