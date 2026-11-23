@@ -14,7 +14,7 @@ RUN --mount=type=secret,id=GPR_USERNAME,env=GPR_USERNAME \
     gradle --no-daemon clean bootJar
 
 # Runtime stage
-FROM eclipse-temurin:25-jre-alpine AS runtime
+FROM eclipse-temurin:25.0.5.1_2-jre-alpine AS runtime
 WORKDIR /app
 
 RUN adduser -u 1001 --disabled-password --gecos "" appuser && \
