@@ -37,6 +37,7 @@ class SensitiveColumnsDisabledStartupIntegrationTest extends AbstractClickHouseI
         assertThat(columnsByTable.get("dial_usage_log_payload")).doesNotContainAnyElementsOf(PAYLOAD_SENSITIVE)
                 .contains("event_id", "request_time", "trace_id", "core_span_id", "project_id", "user_hash");
         assertThat(columnsByTable.get("rate_analytics")).doesNotContain("comment").contains("trace_id", "rate", "rate_raw");
-        assertThat(columnsByTable.get("dial_usage_log")).contains("event_id", "trace_id", "deployment", "user_hash");
+        assertThat(columnsByTable.get("dial_usage_log")).doesNotContain("budget_assignment")
+                .contains("event_id", "trace_id", "deployment", "user_hash", "budget_policy");
     }
 }

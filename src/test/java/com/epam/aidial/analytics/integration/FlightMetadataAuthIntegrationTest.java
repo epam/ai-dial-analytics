@@ -95,7 +95,6 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
             // The computed rebuild fields carry request_body's flag and are listed like any column of the entity.
             "dial_usage_log_payload.request_body_full",
             "dial_usage_log_payload.request_body_rebuild",
-            "budget_policy",
             "budget_assignment");
 
     @Autowired

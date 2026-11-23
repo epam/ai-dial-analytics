@@ -404,17 +404,20 @@ stores it in five nullable columns of `dial_usage_log`, tagged `cost`: `spending
 [`data-sync`](../openspec/specs/data-sync/spec.md), "Reported spending limits are persisted").
 
 - **Migrations.** ClickHouse `V18` adds the columns with `ALTER ADD COLUMN`, a metadata-only change that needs no
-  new grant. Postgres `V59` adds their catalog rows. With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply `V18` by hand
+  new grant. Postgres `V59` adds their catalog rows and `V60` clears `budget_policy`'s sensitive flag. With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, apply `V18` by hand
   **before** starting the new build: startup validation refuses a mapping whose columns the table lacks. With
   `SYNC_VALIDATE_SCHEMA=false` as well, nothing stops that start: rows are then written without the five values,
   their blobs are recorded as ingested, and a query that reads the columns, a wildcard included, fails until
   `V18` is applied. With
-  `POSTGRES_MIGRATIONS_ENABLED=false`, apply `V59` by hand too: without it ingest fills the columns, but no query
-  surface knows them (`unknown field`), and nothing warns at startup.
-- **Budget paths are sensitive.** `budget_policy` and `budget_assignment` hold paths an administrator chooses, which
-  can name a user, so a caller needs `TABLE_SENSITIVE` on `dial_usage_log` to see them (see
+  `POSTGRES_MIGRATIONS_ENABLED=false`, apply `V59` and `V60` by hand too: without `V59` ingest fills the columns, but
+  no query surface knows them (`unknown field`), and nothing warns at startup; without `V60` a reader needs
+  `TABLE_SENSITIVE` to see `budget_policy`.
+- **The budget assignment is sensitive.** `budget_assignment` holds a path an administrator chooses, which can name
+  a user, so a caller needs `TABLE_SENSITIVE` on `dial_usage_log` to see it (see
   [`table-management`](../openspec/specs/table-management/spec.md), "Seeded column sensitivity on the built-in source
-  tables"). `spending_limits_mode`, `budget_cost_object` and `budget_outcome` are visible to every reader.
+  tables"). The other four, `budget_policy` included, are visible to every reader, so a role with `TABLE_READ` sees
+  the policy that paid for each row it may read. Under `SYNC_SENSITIVE_COLUMNS=none`, or a list that does not name
+  it, ingest leaves `budget_assignment` out.
 - **A custom mapping file needs the five entries.** With `SYNC_MAPPING_FILE` set to your own copy, copy the five
   `spending_limits.*` entries from `mapping/dial-usage-log.yaml`. Without them the columns stay `NULL`, which reads
   the same as "budgets did not apply".
@@ -525,7 +528,7 @@ ingest and enrichment relayout copies keep ClickHouse's defaults and pause throu
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§13) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§14) |
 | Catalog bundles are `format_version` `4`; access travels on request | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`; import responses carry an `access` list | Upgrade an import target before promoting to it from 0.24; accept `access` and `REPLACE` in import responses (§15) |
-| Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_policy` and `budget_assignment` need `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59`; copy the five entries into a custom mapping file (§16) |
+| Spending-limit columns on `dial_usage_log` (ClickHouse `V18`, Postgres `V59`, `V60`) | Five nullable `cost` columns hold DIAL Core's reported spending-limits check; earlier rows read `NULL`; `budget_assignment` needs `TABLE_SENSITIVE` | With ClickHouse migrations disabled, apply `V18` before starting the new build; with Postgres migrations disabled, apply `V59` and `V60`; copy the five entries into a custom mapping file (§16) |
 | System-table revision snapshots | `GET /v1/tables/{name}/revision/{revision}` answers `200` for `dial_usage_log`, `rate_analytics` and `dial_usage_log_payload`, with `roles` and no `columns` | Let history clients handle an absent `columns` (§17) |
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |
 | Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§19) |

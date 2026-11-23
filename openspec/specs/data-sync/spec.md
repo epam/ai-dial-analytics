@@ -3474,8 +3474,7 @@ The excluded set SHALL be resolved once per target at startup, from the catalog 
 migrations have run. A column flagged `sensitive` by a later migration is therefore excluded, unless an entry names
 it, without a code or mapping change once the service restarts. With the seeded catalog, `none` excludes
 `jwt_claims`, `request_tags`, `request_body`, `response_body`, `assembled_response` and `request_cache_control` from
-`dial_usage_log_payload`, and `comment` from `rate_analytics`. `dial_usage_log` has no sensitive column and is
-written as before.
+`dial_usage_log_payload`, `budget_assignment` from `dial_usage_log`, and `comment` from `rate_analytics`.
 
 Startup SHALL fail, naming the setting and the offending entry, when:
 
