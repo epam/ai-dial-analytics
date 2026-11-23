@@ -20,6 +20,9 @@ There is **no rollback to 0.3 once a table is aligned** (§3): a 0.3 build write
 `SYNC_SENSITIVE_COLUMNS`, which names the sensitive columns ingest writes. Startup fails while the old variable is
 set, so a deployment that set it changes one variable (§8).
 
+**0.23.2** is a patch on 0.23.1. It pins the runtime base image to a patched Temurin JRE and changes nothing
+else, so it is an ordinary redeploy (§9).
+
 ## Why 0.23 and not 0.4
 
 0.23 comes straight after 0.3. There were no releases from 0.4 to 0.22. This is the first release of ADAS and
@@ -456,3 +459,11 @@ excluded from ingest").
 - **Rollback.** 0.23.0 ignores `SYNC_SENSITIVE_COLUMNS` and writes every sensitive column unless
   `SYNC_SENSITIVE_COLUMNS_ENABLED=false` is set again, so set it before rolling back a deployment that kept columns
   out.
+
+## 9. 0.23.2
+
+0.23.2 pins the runtime base image to `eclipse-temurin:25.0.5.1_2-jre-alpine` (OpenJDK 25.0.5.1). Earlier
+images were built from the floating `25-jre-alpine` tag and could carry the vulnerable OpenJDK 25.0.5. It keeps runner
+contract version `4` and changes no migration, configuration or API, so it is an ordinary redeploy. A rollback to
+0.23.1 is one too, but may bring the vulnerable JRE back. An environment on 0.23.0 or 0.3 deploys 0.23.2 directly,
+following the sections above for the versions it skips.
