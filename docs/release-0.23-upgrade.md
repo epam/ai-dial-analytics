@@ -466,7 +466,7 @@ excluded from ingest").
 
 0.23.3 keeps runner contract version `4`, so the Enrichment Runner stays on its 0.23 release. It is more than a
 redeploy because the table-access changes are breaking. An environment still on 0.3 follows §1 to §8 first and
-deploys 0.23.3 in place of 0.23.0.
+deploys 0.23.3 in place of 0.23.0. Where §9 names 0.23.2, read the build you upgrade from.
 
 **Before deploying:**
 
@@ -495,6 +495,14 @@ deploys 0.23.3 in place of 0.23.0.
 `V55` and `V58` ship unchanged from 0.24, so the migration history stays continuous and a later upgrade to 0.24 is
 not refused for an out-of-order migration. `V58`'s new description already mentions a 0.24 storage change:
 under `delta`, 0.24 stores a repeated large non-JSON body once. 0.23.3 still stores every body.
+
+**New configuration:**
+
+- `TABLES_LOCK_TIMEOUT` (default `10s`) — how long a write to a table definition waits for another change to the
+  same table before it is refused `409 table_busy` (§9d); see
+  [`configuration.md`](configuration.md#table-definition-writes).
+- `providers.<name>.logging-key`, `.logging-salt` and `.obfuscate-user-email`, and `API_KEY_LOGGING_KEY`,
+  `API_KEY_LOGGING_SALT` and `API_KEY_OBFUSCATE_USER_EMAIL` — derive `caller.user_hash`; set them as §9b describes.
 
 ### 9a. The `*` grantee
 
