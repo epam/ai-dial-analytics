@@ -63,23 +63,78 @@ role that reads the table with **no** policy sees every row, so give that role a
 
 - Names are the exposed column names, case-sensitive. Enrichment columns are listed on the source as
   `<enrichment>.<column>`.
-- A hidden column is absent everywhere, revision snapshots included, and referencing it fails as an unknown field.
-- `sensitive` still applies on top: a sensitive column needs the policy **and** the clearance.
+- `sensitive` still applies on top: a sensitive column needs the policy **and** the clearance, or it is hidden.
 - A rename updates every list. A drop that would empty a list is refused `409 column_in_column_policy`.
-- `permissions.columns_restricted` is `true` when a policy hides at least one column from the caller. A system
-  table's revision snapshot carries no columns to judge, so there it is `true` whenever a column policy confines the
-  caller (see [`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
 
-**Gaining a column-restricted role can hide columns.** A column shows when a role with no row policy allows it, or
-when every role the caller reads through allows it. So a caller with role `A` (rows of project `P1`, all columns) who
-gains role `B` (all rows, `"columns": ["x"]`) sees only `x`. List `A`'s columns on `B`, or leave `B` without a column
-policy; giving `B` a row policy does not help.
+**Each role shows its columns on its rows.** For one caller, each column is one of:
 
-### Pipelines and export
+| State | When | What the caller gets |
+|---|---|---|
+| visible | a role with no row policy allows it, or every role the caller reads through allows it | its value on every row |
+| masked | not visible, but some role the caller reads through allows it | its value on the rows an allowing role's `rows` admit, absent (null) on the others |
+| hidden | no role the caller reads through allows it | nothing: it is absent everywhere, revision snapshots included, and referencing it fails as an unknown field |
 
-Pipeline authoring, the runner and catalog export refuse a hidden column with `403 column_not_entitled`. A restricted
-runner's list must also name the columns it reads back: on `dial_usage_log`, `event_id`, `_ingested_at` and, for an
-aligned target, `request_time`.
+So a caller with role `A` (rows of project `P1`, all columns) who gains role `B` (all rows, `"columns": ["x"]`) reads
+every row: `x` everywhere, and `A`'s other columns on the rows of `P1` only. Gaining a role never removes a column from
+the rows your other roles admit.
+
+A **rows-only entry**, one carrying `rows` on a role with no read path, adds its rows to a confined caller, and its
+`columns` narrow what those rows show: a column its list leaves out is absent on the rows only it adds. With
+`"columns": null` it shows the other roles' columns there.
+
+**How a masked column reads.**
+
+- Every clause reads the masked value: filters, grouping, sorting, joins, functions and aggregates never see a value
+  that is absent to the caller. An absent cell reads as `NULL`, or as an empty array, map or object inside an
+  expression; an output that is the bare composite column returns `null`.
+- A JSON row lists the output columns it holds absent or partial cells for under the reserved member `$masked`. An
+  aggregate or window cell is partial, and listed, when any row it summarizes had the cell absent; a row-collapsing
+  distinct or `UNION` marks a row when any row it merged did. Clients that sum a masked column must read `$masked`.
+- Expanding an absent array yields no element, and so no mark: a count over the expansion covers the present rows only.
+- CSV export and Flight SQL return absent cells as empty fields and Arrow nulls, with no flag.
+- Schema discovery marks the field `"masked": true`, and `permissions.columns_restricted` is `true` when a policy
+  hides **or** masks at least one column. A system table's revision snapshot carries no columns to judge, so there it
+  is `true` whenever a column policy confines the caller (see
+  [`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
+- Two query shapes are refused `400` beside a masked field: `INTERSECT` or `EXCEPT` over an output that reads it, and
+  an output name or lambda parameter that equals a table the query reads or begins with `<table>.`. An enrichment field
+  projected without `as`, whose output carries its own qualified name, is allowed. A wildcard query that ran before can
+  meet either refusal once a masked column joins the wildcard.
+- `$masked` is refused as an output name on every surface, for every caller.
+
+**Hiding instead of masking.** On a table where the source, or one of its enrichments, stores a column whose physical
+name is the name of the source or of one of its enrichments, a column that would be masked is hidden instead. The data
+store reads a table-qualified name through such a column, so no mask could be trusted there.
+
+### Pipelines, TTL and export
+
+Pipeline authoring and the runner refuse a hidden **or masked** column with `403 column_not_entitled`: a pipeline reads
+without a row filter or a mask. A restricted runner's list must also name the columns it reads back: on
+`dial_usage_log`, `event_id`, `_ingested_at` and, for an aligned target, `request_time`. A TTL may not be on a masked
+column (`403 column_not_entitled`), since which rows it removes would disclose the values absent to the caller. Catalog
+export refuses a hidden column and exports a masked one.
+
+### What masking discloses
+
+Masking shows each role's columns on its rows, and accepts these disclosures to do so. Avoid each by listing the
+column on every role the caller reads through and on every rows-only entry, which makes it visible.
+
+- **Which rows an allowing role admits.** A cell is present exactly where an allowing role's `rows` admit the row. On
+  that role's own rows this is no news; on rows only another role admits it is, even when the policy reads a column
+  the caller cannot see, such as a sensitive one. Keep a policy over a sensitive column off a role whose users hold
+  other reading roles.
+- **Filter cost.** A filter on a masked column keeps the table's key and partition pruning, so how much a query reads,
+  and with it its latency and its share of the query budget, depends on stored values, granule by granule. The same
+  holds for an enrichment conjunct copied into its join and for an aligned lookup's partition pre-selection. Repeated
+  probes can recover a single row's value when the caller's filter isolates it in a granule.
+- **Row order.** Without a total sort, rows come back in roughly storage order, which follows the ordering-key and
+  partition values. An absent key cell can be read off its neighbours. List key columns on every reading role, or keep
+  them off roles whose rows interleave with another role's in storage order.
+- **Enrichment keys.** The enrichment join runs on stored keys, so a visible enrichment column keyed by a masked source
+  column still shows the value its absent key selects. Allow the key wherever its enrichment's columns are allowed.
+
+A sort on a masked column that leads the ordering key cannot read in key order: a raw read of such a table scans every
+row its filter selects before keeping the page.
 
 ## Own rows: comparing a column with the caller
 
@@ -131,4 +186,5 @@ every other role's row policies.
   `columns_restricted` and the listed columns show what applies. In ClickHouse, row policies appear as the
   `additional_table_filters` setting in `system.query_log`.
 - **Rollback.** An older build ignores column policies, so a rollback reveals the columns they hide. Delete them
-  first if that must not happen.
+  first if that must not happen. A build that predates masking hides masked columns again, so queries over them fail
+  with `unknown field` for those callers.

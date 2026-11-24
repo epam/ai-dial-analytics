@@ -110,18 +110,6 @@ final class MaskMarking {
         return flags;
     }
 
-    /** Whether some output reads a masked field through a window. */
-    static boolean readsThroughWindow(Map<String, QueryFieldBinding> bindings, Map<String, Expr> outputs) {
-        for (final Expr expr : outputs.values()) {
-            final Set<Key> keys = new LinkedHashSet<>();
-            collect(expr, null, Set.of(), bindings, keys);
-            if (keys.stream().anyMatch(key -> key.window() != null)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
      * The masked binding {@code expr} is when it is a bare masked composite field — an {@code array}, {@code map} or
      * {@code object} — whose absent value inside expressions is its empty value, and whose output cell is therefore

@@ -37,6 +37,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§19).
 - **With Keeper down, row writes, pipeline runs and the data-sync requeue answer `503` in about ten seconds**, and the writer user must be
   allowed two `insert_keeper_*` settings (§20).
+- **A column one of a caller's roles allows but another does not is masked, not hidden**: JSON rows carry a reserved
+  `$masked` member, and `$masked` is refused as an output name for everyone (§21).
 
 ---
 
@@ -507,6 +509,32 @@ ingest and enrichment relayout copies keep ClickHouse's defaults and pause throu
   `UNKNOWN_STATUS_OF_INSERT`, whose retry on an `append` table can store the rows twice (at-least-once, as before).
 - **Rollback.** An earlier build sends neither setting and waits out ClickHouse's defaults again.
 
+## 21. Masked columns and `$masked`
+
+A caller whose roles each carry their own row and column policies sees each role's columns on that role's rows. A
+column some role it reads through allows, but that is not visible on every row it reads, is **masked**: listed and
+queryable, its value present on the rows an allowing role admits and absent elsewhere
+([`row-level-security.md`](row-level-security.md#column-policies)). Gaining a role no longer removes a column.
+
+- **JSON rows.** `POST /v1/queries/execute` and `/execute-sql`, and so the saved queries and dashboard widgets run
+  through them, add a reserved `$masked` member to each row holding an absent cell or a partial aggregate or window
+  cell, listing those output columns. A client that renders every row member as a column, such as a generic JSON
+  panel, shows one more column on those rows: declare its columns. A consumer that sums a masked column reads
+  `$masked`, or it reads a partial total as complete. CSV export and Flight SQL return nulls with no flag.
+- **A reserved name, for every caller.** An output column named `$masked` is refused `400 bad_request` on every query
+  surface, and a saved query or widget that projects one is refused on save. Rename such outputs before upgrading.
+- **New refusals beside a masked column.** `INTERSECT` and `EXCEPT` over an output that reads one, and an output name
+  or lambda parameter equal to a table the statement reads or beginning with `<table>.`, are refused `400`. A query
+  that names the column failed before with `unknown field`; one that reaches it through `SELECT *` ran before and is
+  refused now.
+- **Rows-only entries narrow.** An entry carrying `rows` on a role with no read path now narrows, through its
+  `columns`, what the rows it adds show; with `columns: null` it narrows nothing.
+- **Paths without a row filter.** Pipeline authoring and the runner refuse a masked column as a hidden one
+  (`403 column_not_entitled`), and so does a TTL over one.
+- **Discovery** marks a masked field `"masked": true`, and `permissions.columns_restricted` counts masked columns.
+- **Rollback.** An earlier build hides masked columns again: queries, saved queries and widgets over them fail with
+  `unknown field` for those callers. No data is at risk.
+
 ## Summary
 
 | Change | Effect | Action |
@@ -530,3 +558,4 @@ ingest and enrichment relayout copies keep ClickHouse's defaults and pause throu
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §9 for route pipelines (§18) |
 | Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§19) |
 | Row writes, pipeline runs and the data-sync requeue cap ClickHouse's Keeper retries | With Keeper down they answer `503 clickhouse_unavailable` in about ten seconds, not two minutes; data-sync ingest and relayout copies are unchanged | Let the writer user set `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` (§20) |
+| Masked columns; reserved `$masked` (breaking) | A column one role allows shows on that role's rows; JSON rows list absent cells under `$masked`; `$masked`, and for masked callers `INTERSECT`/`EXCEPT` and table-named aliases, are refused `400` | Rename `$masked` outputs; declare columns in generic JSON panels; read `$masked` where a masked column is summed (§21) |

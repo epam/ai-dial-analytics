@@ -341,19 +341,6 @@ public class SensitiveColumnAccess {
             return visible(column) || masks(column) != null;
         }
 
-        /** Whether the column exposed as {@code column} is visible: its stored value on every row the caller reads. */
-        public boolean visible(String column) {
-            return visible == null || visible.contains(column);
-        }
-
-        /** The filters whose disjunction is {@code column}'s mask condition when it is masked, else {@code null}. */
-        public List<FilterNode> masks(String column) {
-            if (visible(column)) {
-                return null;
-            }
-            return named.contains(column) ? masked.get(column) : otherwise;
-        }
-
         /**
          * Whether {@code column} — a catalog column or a computed field's transient descriptor ({@link ComputedFields})
          * among {@code columns} — is visible or masked. A computed field is so exactly when no catalog column whose
@@ -363,9 +350,22 @@ public class SensitiveColumnAccess {
             return inputs(column, columns).stream().allMatch(this::allows);
         }
 
+        /** Whether the column exposed as {@code column} is visible: its stored value on every row the caller reads. */
+        public boolean visible(String column) {
+            return visible == null || visible.contains(column);
+        }
+
         /** As {@link #allows(ColumnMappingEntity, List)}, for visible: every column whose values it returns is visible. */
         public boolean visible(ColumnMappingEntity column, List<ColumnMappingEntity> columns) {
             return inputs(column, columns).stream().allMatch(this::visible);
+        }
+
+        /** The filters whose disjunction is {@code column}'s mask condition when it is masked, else {@code null}. */
+        public List<FilterNode> masks(String column) {
+            if (visible(column)) {
+                return null;
+            }
+            return named.contains(column) ? masked.get(column) : otherwise;
         }
 
         /**

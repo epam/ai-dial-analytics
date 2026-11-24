@@ -134,6 +134,15 @@ only the limit note, because its blocks reference relation columns rather than o
   A star whose expansion would be empty is rejected. `COUNT(*)` is unaffected.
 - `SELECT DISTINCT` is accepted in row mode. It is refused over a bare `array`, `object` or `map`
   column (see column-type rules) but allowed over a scalar extracted from one.
+- `$masked` is reserved: an output column of the statement named exactly that is refused `400` (a column
+  of a derived table or CTE may carry it, and `$Masked` is a different name). A JSON response lists a
+  row's absent and partial cells under it, see
+  [`row-level-security.md`](row-level-security.md#column-policies).
+- In a statement that reads a column a column policy masks for you, an alias or lambda parameter that
+  equals a table the statement reads, or begins with `<table>.`, is refused `400`: such a name could
+  capture the table-qualified columns the mask reads. An alias that names the enrichment column it
+  projects (`"deployment_ref.display_name"` over that column) is allowed. A `SELECT *` beside such an
+  alias meets the refusal once a masked column joins the star.
 - A bare comparison in the select list (`SELECT a > b`) is rejected; wrap it in `CASE` or use a
   boolean function.
 
@@ -644,6 +653,10 @@ SELECT model FROM (
   with one exception when the operation is nested, below.
 - **A set operation over `INFORMATION_SCHEMA`**, or one mixing a catalog relation with an entity. Catalog
   relations are answered in process by an evaluator that has no set-operation support.
+- **`INTERSECT` or `EXCEPT` over an output that reads a masked column**, for a caller a column policy
+  masks it for (see [`row-level-security.md`](row-level-security.md#column-policies)): the rows they
+  compare have no single source an absent cell's mark could come from. The `400` names the column. A
+  `SELECT * ... INTERSECT SELECT * ...` that ran before is refused once a masked column joins the star.
 - ClickHouse's `SELECT * EXCEPT (col)` column-exclusion syntax, which is a different construct. It is
   the one refusal here whose message does not name what went wrong: the statement parses and then fails
   validation with `Unknown identifier '*'`. Name the columns you want instead.

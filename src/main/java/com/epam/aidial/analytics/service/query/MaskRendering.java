@@ -48,7 +48,7 @@ public final class MaskRendering {
         @Override
         public void visitStart(VisitContext context) {
             final State state = STATE.get();
-            if (state == null) {
+            if (state == null || !state.renders(context.context())) {
                 return;
             }
             final QueryPart part = context.queryPart();
@@ -64,7 +64,8 @@ public final class MaskRendering {
         @Override
         public void visitEnd(VisitContext context) {
             final State state = STATE.get();
-            if (state != null && context.queryPart() instanceof SelectQuery<?> && !state.scopes.isEmpty()) {
+            if (state != null && state.renders(context.context()) && context.queryPart() instanceof SelectQuery<?>
+                    && !state.scopes.isEmpty()) {
                 state.scopes.pop();
             }
         }
@@ -110,14 +111,15 @@ public final class MaskRendering {
     /** Renders one reference to {@code mask}, whose condition text is {@code definition}. */
     static void reference(ColumnMask mask, Field<Boolean> definition, Context<?> ctx) {
         final State state = STATE.get();
-        final Scope scope = state == null ? null : state.scopes.peek();
+        // A render of a part on its own, nested in the statement's (jOOQ renders one to compare or print it), inlines.
+        final Scope scope = state == null || !state.renders(ctx) ? null : state.scopes.peek();
         if (scope == null) {
             ctx.visit(definition);
             return;
         }
         if (!state.emitting) {
             state.seen.add(mask);
-            if (scope.lambdaDepth == 0) {
+            if (scope.lambdas.isEmpty()) {
                 state.outer.computeIfAbsent(scope.index, ignored -> new HashSet<>()).add(mask);
             }
             ctx.visit(definition);
@@ -129,12 +131,13 @@ public final class MaskRendering {
             return;
         }
         final boolean defines;
-        if (scope.lambdaDepth == 0) {
+        if (scope.lambdas.isEmpty()) {
             defines = scope.defined.add(mask);
         } else if (state.outer.getOrDefault(scope.index, Set.of()).contains(mask)) {
             defines = false;
         } else {
-            defines = scope.lambdaDefined.add(mask);
+            // Visible in this body and the bodies nested in it, never in the body enclosing it.
+            defines = scope.lambdas.peek().add(mask);
         }
         if (defines) {
             ctx.sql('(').visit(definition).sql(" AS ").visit(DSL.name(alias)).sql(')');
@@ -155,12 +158,23 @@ public final class MaskRendering {
         /** Every alias and lambda parameter the statement declares (first pass). */
         private final Set<String> declared = new HashSet<>();
         private final Map<ColumnMask, String> aliases = new HashMap<>();
+        /** The render context of the statement in the current pass: the one that visits a SELECT first. */
+        private Context<?> statement;
+
+        /** Whether {@code ctx} renders the statement, rather than a part of it on its own; claims the first context seen. */
+        private boolean renders(Context<?> ctx) {
+            if (statement == null) {
+                statement = ctx;
+            }
+            return statement == ctx;
+        }
 
         /** Ends the first pass: names each mask apart from every declared name. */
         private void emit() {
             emitting = true;
             nextScope = 0;
             scopes.clear();
+            statement = null;
             int next = 0;
             for (final ColumnMask mask : seen) {
                 String alias;
@@ -176,9 +190,8 @@ public final class MaskRendering {
     private static final class Scope {
         private final int index;
         private final Set<ColumnMask> defined = new HashSet<>();
-        private int lambdaDepth;
-        /** The masks defined inside the outermost lambda body being rendered. */
-        private Set<ColumnMask> lambdaDefined = new HashSet<>();
+        /** Per lambda body being rendered, innermost first: the masks defined in it or in a body enclosing it. */
+        private final Deque<Set<ColumnMask>> lambdas = new ArrayDeque<>();
 
         private Scope(int index) {
             this.index = index;
@@ -203,18 +216,16 @@ public final class MaskRendering {
             if (state != null && !state.emitting) {
                 state.declared.add(param);
             }
-            final Scope scope = state == null ? null : state.scopes.peek();
+            final Scope scope = state == null || !state.renders(ctx) ? null : state.scopes.peek();
             if (scope == null) {
                 ctx.visit(body);
                 return;
             }
-            if (scope.lambdaDepth++ == 0) {
-                scope.lambdaDefined = new HashSet<>();
-            }
+            scope.lambdas.push(scope.lambdas.isEmpty() ? new HashSet<>() : new HashSet<>(scope.lambdas.peek()));
             try {
                 ctx.visit(body);
             } finally {
-                scope.lambdaDepth--;
+                scope.lambdas.pop();
             }
         }
     }

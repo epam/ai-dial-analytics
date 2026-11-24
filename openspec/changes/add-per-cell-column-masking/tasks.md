@@ -1,6 +1,6 @@
 ## 1. Column decision
 
-- [ ] 1.1 Give `SensitiveColumnAccess.ColumnVisibility` three states per column — visible, masked with the allowing
+- [x] 1.1 Give `SensitiveColumnAccess.ColumnVisibility` three states per column — visible, masked with the allowing
   governing roles' `RowPolicy` filters, hidden — keeping `allows(column)` as "visible or masked", adding `masks(column)`
   and a strict `visible(column)`; computed fields follow "Column visibility by caller role" (masked when no input is
   hidden and one is masked); row-contributing roles (the rows-only roles whose policy enters the row filter, the set
@@ -32,7 +32,7 @@
   own-rows `*` policy succeeds on a DSL query, discovery and a pipeline preview), OR them and wrap the
   result `ifNull(…, 0)` into one condition shared per allowing-role set, and set `absent` by type (`NULL`, `[]`,
   `map()`, `'{}'::JSON`); keep the clearance check in `addColumn` first
-- [ ] 2.4 Add `masked` to `QuerySchemaFieldDto` and set it in discovery; update the `@Schema` descriptions that go
+- [x] 2.4 Add `masked` to `QuerySchemaFieldDto` and set it in discovery; update the `@Schema` descriptions that go
   stale (`columns_restricted` "hide or mask", `StructuredQueryResultDto.rows` naming `$masked`, the
   `403 column_not_entitled` descriptions naming masked columns); regenerate `docs/openapi.json`
 - [ ] 2.5 `CatalogQueryServiceTest`: replace `columnsHiddenByColumnPolicyLeaveTheModel` and
@@ -192,7 +192,7 @@
 
 ## 7. Docs
 
-- [ ] 7.1 `docs/row-level-security.md`: rewrite "Column policies" for visible, masked and hidden columns, `$masked`, partial
+- [x] 7.1 `docs/row-level-security.md`: rewrite "Column policies" for visible, masked and hidden columns, `$masked`, partial
   aggregates, expanding an absent array (no element, no mark), CSV and Flight nulls, the pipeline refusal, the
   discovery `masked` flag, `columns_restricted` set by a masked column too, the `intersect`/`except` and table-named
   name refusals (equal to a table, or beginning with `<table>.`, with the exemption for an enrichment field projected
@@ -205,14 +205,14 @@
   row-order disclosure of masked ordering-key and partition columns
   with how an administrator avoids it, and an enrichment value disclosing its absent key (allow the key wherever its
   enrichment's columns are allowed)
-- [ ] 7.2 Upgrade notes of the release that ships the change: the behaviour switch, `$masked` and the reserved name,
+- [x] 7.2 Upgrade notes of the release that ships the change: the behaviour switch, `$masked` and the reserved name,
   clients that render every row member, wildcard `intersect`/`except` and wildcard-beside-a-table-named-alias
   statements now refused for masked callers, rows-only entries with a `columns` list now narrowing the rows they add,
   rollback
-- [ ] 7.3 `docs/sql-reference.md`: the `$masked` alias refusal and the table-named alias refusal (with its exemption for
+- [x] 7.3 `docs/sql-reference.md`: the `$masked` alias refusal and the table-named alias refusal (with its exemption for
   an alias naming the enrichment field it projects) in the alias rules, the
   `intersect`/`except` refusal over a masked output in the set-operation section, including the wildcard case
-- [ ] 7.4 Check the Infinity panels in `grafana/dashboards/` for a stray `$masked` column (declare explicit columns
+- [x] 7.4 Check the Infinity panels in `grafana/dashboards/` for a stray `$masked` column (declare explicit columns
   where a panel renders every row member) and note `$masked` in `docs/grafana-dashboards.md`
 
 ## 8. Verification

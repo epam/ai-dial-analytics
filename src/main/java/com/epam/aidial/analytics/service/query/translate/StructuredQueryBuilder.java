@@ -273,11 +273,6 @@ public class StructuredQueryBuilder {
         }
     }
 
-    /** The single-entity read path's statement unshaped, marking its outputs' masked inputs. */
-    private SelectQuery<Record> unshaped(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
-        return render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, LeafRestriction.NONE, Map.of(), false, true, List.of(), true);
-    }
-
     /**
      * As {@link #build(DSLContext, QueryEntityModel, StructuredQuery, int)} under an explicit
      * {@link LimitPolicy}. {@link LimitPolicy#NESTED} is reached only from the composite SQL renderer, for
@@ -314,6 +309,11 @@ public class StructuredQueryBuilder {
         ComputedFieldUse.requirePlainProjection(model, query);
         final StructuredQueryBuilder renderer = windowTransfer ? withoutWindowTransfer() : this;
         return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of(), false);
+    }
+
+    /** The single-entity read path's statement unshaped, marking its outputs' masked inputs. */
+    private SelectQuery<Record> unshaped(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
+        return render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, LeafRestriction.NONE, Map.of(), false, true, List.of(), true);
     }
 
     /**
@@ -525,37 +525,52 @@ public class StructuredQueryBuilder {
 
         List<Field<?>> flags = List.of();
         final boolean grouped = query.distinct() && mode == QueryMode.ROW;
-        if (marks) {
-            if (query.distinct() && MaskMarking.readsThroughWindow(effective.bindings(), outputs)) {
-                // shortcut: a distinct block whose window output reads a masked field is refused until it is planned as an
-                // inner window block under an outer grouped one; such a query named a field the caller could not see before.
-                throw new QueryValidationException("a distinct projection with a window output over a masked field is not"
-                        + " supported yet; drop 'distinct' or the window");
+        // A bare masked composite output's row flag (row mode) or group flag (aggregate mode): a distinct keeps it in the
+        // rows it compares, so an absent cell, whose expression reads the empty value, never merges with a stored empty one.
+        final List<Field<?>> bareFlags = new ArrayList<>();
+        outputs.values().forEach(expr -> {
+            final QueryFieldBinding bare = MaskMarking.bareComposite(expr, effective.bindings());
+            if (bare != null) {
+                final Field<?> absent = DSL.field("(NOT {0})", Integer.class, bare.mask().reference());
+                bareFlags.add(mode == QueryMode.AGGREGATE ? DSL.field("max({0})", Integer.class, absent) : absent);
             }
+        });
+        if (marks) {
+            final List<Field<?>> partition = new ArrayList<>(outputFields.values());
+            partition.addAll(bareFlags);
             flags = MaskMarking.flags(exprTranslator, effective.bindings(), mode, outputs,
                     !query.distinct() ? MaskMarking.Collapse.NONE : grouped ? MaskMarking.Collapse.GROUPED : MaskMarking.Collapse.WINDOWED,
-                    List.copyOf(outputFields.values()));
+                    partition);
+            if (query.distinct() && !flags.isEmpty() && outputs.values().stream().anyMatch(StructuredQueryBuilder::containsWindow)) {
+                // shortcut: a distinct block with a window output cannot collapse its marked rows in the block that computes the
+                // window; it is refused until it is planned as an inner window block under an outer grouped one. Such a query
+                // reads a masked field, which it could not name before masking.
+                throw new QueryValidationException("a distinct projection with a window output is not supported yet beside a"
+                        + " masked field; drop 'distinct' or the window");
+            }
             select.addSelect(flags);
         }
         final boolean collapsed = grouped && !flags.isEmpty();
         if (collapsed) {
             // A distinct whose rows carry marks is grouped by every output, by its expression and never its name, so the
-            // collapsed rows' flags combine instead of splitting the row; a bare masked composite output also groups by its
-            // row flag, so an absent cell never merges with a stored empty value.
-            final List<Field<?>> keys = new ArrayList<>(outputFields.values());
-            outputs.values().forEach(expr -> {
-                final QueryFieldBinding bare = MaskMarking.bareComposite(expr, effective.bindings());
-                if (bare != null) {
-                    keys.add(DSL.field("(NOT {0})", Integer.class, bare.mask().reference()));
-                }
-            });
-            select.addGroupBy(keys);
+            // collapsed rows' flags combine instead of splitting the row.
+            final List<Field<?>> groupKeys = new ArrayList<>(outputFields.values());
+            groupKeys.addAll(bareFlags);
+            select.addGroupBy(groupKeys);
         } else if (query.distinct()) {
             select.setDistinct(true);
         }
-        select.addOrderBy(sortFields(query.sort(), sortBindings, selectAliases, maskedFieldOutputs(outputs, sortBindings), collapsed));
+        select.addOrderBy(sortFields(query.sort(), sortBindings, selectAliases, maskedFieldOutputs(outputs, effective.bindings()),
+                collapsed));
         applyPage(select, query.page(), maxLimit, policy);
         return select;
+    }
+
+    /** Whether {@code expr} holds a window expression anywhere. */
+    private static boolean containsWindow(Expr expr) {
+        final boolean[] found = {false};
+        WindowExpressions.visit(expr, node -> found[0] |= node instanceof WindowExpr);
+        return found[0];
     }
 
     /** Whether {@code expr} reads a masked field of {@code model}. */
