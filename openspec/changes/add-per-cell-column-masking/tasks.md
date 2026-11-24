@@ -62,16 +62,18 @@
   statement declares (outputs at every level, lambda parameters, CTE and derived-table aliases); refuse a query that
   references a masked field and carries a lambda parameter or any resolved output name (explicit, derived or generated,
   at every level) that equals a table it reads or begins with `<table>.`, except an output named after the field it
-  projects bare (an enrichment field without `as`); render every sort, grouping, `having` or distinct key that refers to
-  such an exempt output in its own block as the output's masked expression, not `DSL.name(key)`
-  (`StructuredQueryBuilder.sortFields`, the group keys, the distinct collapse of 3.5). ClickHouse tests on 26.3 and 26.8:
+  projects bare (an enrichment field without `as`); render every reference to such an exempt output inside its own
+  block, in any clause, as the output's masked expression, never `DSL.name(key)`: `StructuredQueryBuilder.sortFields`
+  (the one place that names an output today) and the 3.5 shapes that would (the row-mode distinct `GROUP BY`, the
+  aggregate-mode distinct `PARTITION BY`, the scalar-subquery `tuple`). ClickHouse tests on 26.3 and 26.8:
   - a lambda parameter named like an internal alias reads the absent value;
   - an output aliased as the table is refused;
   - an output `dial_usage_log.project_id` used as a `group_by` key with a `having` over a masked field, and as a sort
     key, is refused, while an enrichment field projected without `as` beside a masked field runs;
   - an exempt enrichment output sorted with a one-row page returns a present row where an absent row stores a value
     that sorts first; grouped alone, and with a visible key, it runs and puts the absent rows in one null group; a
-    distinct projection of it collapses the absent rows into one;
+    `having` keeping its null group runs; a distinct projection of it, in row mode and in aggregate mode, runs and
+    collapses the absent rows into one;
   - a wildcard over many masked columns under one large policy renders the policy text once per scope, including a
     filter copied into a key subquery and a first mask reference in a lambda capture;
   - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only

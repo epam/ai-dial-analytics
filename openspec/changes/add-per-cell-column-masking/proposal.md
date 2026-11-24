@@ -30,7 +30,8 @@ admits a given row.
   - a query that carries a lambda parameter or an output name (explicit, derived or generated) that equals a table it
     reads or begins with `<table>.`, since such a name could capture the table-qualified column names the mask is
     evaluated over. An output named after the field it projects bare, such as an enrichment field without `as`, is
-    exempt; a sort or grouping that refers to it is rendered as its masked expression, not its name.
+    exempt; every reference to it inside the query block that defines it is rendered as its masked expression, not
+    its name.
 - A rows-only entry (one carrying `rows` on a role with no read path) now narrows the columns shown on the rows it
   adds: a column its `columns` list leaves out is absent there. Today that list is ignored, and the reading role's
   columns show on those rows. An entry whose `columns` is `null` behaves as today, while one with a list can hide more

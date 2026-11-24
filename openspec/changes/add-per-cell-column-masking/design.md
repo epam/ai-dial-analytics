@@ -109,13 +109,22 @@ exempt: one whose name is the qualified flat name of the field it projects bare,
 without `as` is (`deployment_ref.display_name`). Refusing it would refuse nearly every query over a masked enrichment.
 Its own value is correct: probed on 26.8, `if(m, t.c, NULL) AS "t.c"` returns the masked value. A reference to it by
 name in the same block is not. On 26.8 the dotted-name cache resolves `"t.c"` there to the stored column, because
-the alias body resolves `"t"."c"` first. So `ORDER BY "t.c"` orders absent rows by their stored values. A page of
-one row then returns an absent row that sorts first, which lets a caller binary-search a stored value through page
-cuts. A `GROUP BY "t.c"` splits absent rows by stored value, or fails `NOT_AN_AGGREGATE` when the sort key reads the
-stored column. On 26.3 both read the alias. The builder therefore renders every sort, grouping, `having` or distinct
-key that refers to an exempt output in its own block as the output's masked expression. `StructuredQueryBuilder.sortFields`
-and the group-key rendering stop using `DSL.name(key)` for it. Probed on 26.8 and 26.3: sorting, grouping (alone and
-with another key) and `HAVING` over the rendered expression give the masked order and one null group. A block that
+the alias body resolves `"t"."c"` first. That holds in every clause, probed on 26.8 (26.3 reads the alias in each):
+- `ORDER BY "t.c"` orders absent rows by their stored values. A page of one row then returns an absent row that sorts
+  first, which lets a caller binary-search a stored value through page cuts. When the group key is the expression, a
+  sort by name fails `NOT_AN_AGGREGATE`.
+- A window `PARTITION BY "t.c"` splits absent rows by stored value, and `row_number() OVER (ORDER BY "t.c")` numbers
+  them in stored order.
+- `tuple("t.c", …)` in the projection returns the stored value itself, and `WHERE "t.c" IS NULL` misses absent rows.
+- `HAVING "t.c" IS NULL` over an expression group key fails `NOT_AN_AGGREGATE`.
+
+The builder therefore renders every reference to an exempt output inside its own block, in any clause, as the output's
+masked expression. Today only `StructuredQueryBuilder.sortFields` names an output (`DSL.name(key)`): group keys,
+window keys and `having` already resolve a bound field to its expression first. This change adds three more shapes
+that must not name it: the row-mode distinct collapse (`GROUP BY <every output>`), the aggregate-mode distinct window
+(`PARTITION BY <every output>`, which fails `NOT_AN_AGGREGATE` on 26.8 by name), and the scalar-subquery
+`tuple(<value>, <flag>)`. Probed on 26.8 and 26.3: sorting, grouping (alone and with another key), `HAVING`, window
+keys and the distinct collapse over the rendered expression give the masked order and one null group. A block that
 reads the output from a derived table reads the masked value under its name, even when it also joins the enrichment
 table (probed on both). The table-name rule covers a lambda parameter, and every resolved output name
 at every level: an explicit alias, a name `OutputColumnNaming` derives from a field or function, and a name
