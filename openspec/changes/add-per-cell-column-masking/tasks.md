@@ -62,11 +62,16 @@
   statement declares (outputs at every level, lambda parameters, CTE and derived-table aliases); refuse a query that
   references a masked field and carries a lambda parameter or any resolved output name (explicit, derived or generated,
   at every level) that equals a table it reads or begins with `<table>.`, except an output named after the field it
-  projects bare (an enrichment field without `as`). ClickHouse tests on 26.3 and 26.8:
+  projects bare (an enrichment field without `as`); render every sort, grouping, `having` or distinct key that refers to
+  such an exempt output in its own block as the output's masked expression, not `DSL.name(key)`
+  (`StructuredQueryBuilder.sortFields`, the group keys, the distinct collapse of 3.5). ClickHouse tests on 26.3 and 26.8:
   - a lambda parameter named like an internal alias reads the absent value;
   - an output aliased as the table is refused;
   - an output `dial_usage_log.project_id` used as a `group_by` key with a `having` over a masked field, and as a sort
     key, is refused, while an enrichment field projected without `as` beside a masked field runs;
+  - an exempt enrichment output sorted with a one-row page returns a present row where an absent row stores a value
+    that sorts first; grouped alone, and with a visible key, it runs and puts the absent rows in one null group; a
+    distinct projection of it collapses the absent rows into one;
   - a wildcard over many masked columns under one large policy renders the policy text once per scope, including a
     filter copied into a key subquery and a first mask reference in a lambda capture;
   - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only
@@ -186,9 +191,11 @@
 - [ ] 7.1 `docs/row-level-security.md`: rewrite "Column policies" for visible, masked and hidden columns, `$masked`, partial
   aggregates, expanding an absent array (no element, no mark), CSV and Flight nulls, the pipeline refusal, the
   discovery `masked` flag, `columns_restricted` set by a masked column too, the `intersect`/`except` and table-named
-  name refusals (equal to a table, or beginning with `<table>.`), the hiding fallback on a table with a column named
+  name refusals (equal to a table, or beginning with `<table>.`, with the exemption for an enrichment field projected
+  without `as`), the hiding fallback on a table with a column named
   after it, the `403` for a TTL over a masked column, the per-row disclosure of a policy over a sensitive column, the
-  accepted cost channel of a pruned filter or copied conjunct on a masked column (and that repeated probes can recover a
+  accepted cost channel of a pruned filter, a copied conjunct or an aligned lookup's partition pre-selection on a masked
+  column (and that repeated probes can recover a
   single row's value a caller's filter isolates in a granule), the cost of a sort on a masked leading ordering-key
   column (no read in key order on a raw read), rows-only entries' `columns` narrowing the rows they add, the accepted
   row-order disclosure of masked ordering-key and partition columns
@@ -198,7 +205,8 @@
   clients that render every row member, wildcard `intersect`/`except` and wildcard-beside-a-table-named-alias
   statements now refused for masked callers, rows-only entries with a `columns` list now narrowing the rows they add,
   rollback
-- [ ] 7.3 `docs/sql-reference.md`: the `$masked` alias refusal and the table-named alias refusal in the alias rules, the
+- [ ] 7.3 `docs/sql-reference.md`: the `$masked` alias refusal and the table-named alias refusal (with its exemption for
+  an alias naming the enrichment field it projects) in the alias rules, the
   `intersect`/`except` refusal over a masked output in the set-operation section, including the wildcard case
 - [ ] 7.4 Check the Infinity panels in `grafana/dashboards/` for a stray `$masked` column (declare explicit columns
   where a panel renders every row member) and note `$masked` in `docs/grafana-dashboards.md`

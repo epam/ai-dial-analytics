@@ -106,8 +106,18 @@ captured by a caller-declared name:
 The statement therefore refuses, with `400 bad_request`, a query that references a masked field and carries a name
 that equals a table it reads (its source or an enrichment), or begins with that name followed by `.`. One output is
 exempt: one whose name is the qualified flat name of the field it projects bare, as every enrichment field projected
-without `as` is (`deployment_ref.display_name`). Its value is that field's own masked value, so a reference it captures
-reads what the statement reads anyway. Probed on 26.8: `if(m, t.c, NULL) AS "t.c"` returns the masked value. That covers a lambda parameter, and every resolved output name
+without `as` is (`deployment_ref.display_name`). Refusing it would refuse nearly every query over a masked enrichment.
+Its own value is correct: probed on 26.8, `if(m, t.c, NULL) AS "t.c"` returns the masked value. A reference to it by
+name in the same block is not. On 26.8 the dotted-name cache resolves `"t.c"` there to the stored column, because
+the alias body resolves `"t"."c"` first. So `ORDER BY "t.c"` orders absent rows by their stored values. A page of
+one row then returns an absent row that sorts first, which lets a caller binary-search a stored value through page
+cuts. A `GROUP BY "t.c"` splits absent rows by stored value, or fails `NOT_AN_AGGREGATE` when the sort key reads the
+stored column. On 26.3 both read the alias. The builder therefore renders every sort, grouping, `having` or distinct
+key that refers to an exempt output in its own block as the output's masked expression. `StructuredQueryBuilder.sortFields`
+and the group-key rendering stop using `DSL.name(key)` for it. Probed on 26.8 and 26.3: sorting, grouping (alone and
+with another key) and `HAVING` over the rendered expression give the masked order and one null group. A block that
+reads the output from a derived table reads the masked value under its name, even when it also joins the enrichment
+table (probed on both). The table-name rule covers a lambda parameter, and every resolved output name
 at every level: an explicit alias, a name `OutputColumnNaming` derives from a field or function, and a name
 `CompositeQueryBuilder.operand` generates for a leaf output. All of them are rendered as aliases in the scope where the
 mask is evaluated. A query that names the masked field fails today with `unknown field`. One that reaches it only
@@ -445,8 +455,7 @@ refuses it explicitly as a column the path reads.
   even on `LIMIT` queries and still leave `groupArray`/`any` order open. Hiding key columns would give up masking on
   exactly the columns most queries filter by. → The spec states it as an accepted disclosure and tells an
   administrator how to avoid it: list the key column on every governing and row-contributing role, or keep it off
-  roles whose rows
-  interleave in storage order. `docs/row-level-security.md` repeats that.
+  roles whose rows interleave in storage order. `docs/row-level-security.md` repeats that.
 - **An enrichment value can disclose its absent key.** The grain join runs on stored keys, so a visible enrichment
   column keyed by a masked source column still shows the value the absent key selects, and the caller can learn the
   mapping from present rows. → `docs/row-level-security.md` tells administrators to allow the key wherever its

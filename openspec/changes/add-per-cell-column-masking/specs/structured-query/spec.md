@@ -51,8 +51,7 @@ disclosures SHALL be accepted, and are the only ways a stored value of an absent
   ordering-key or partition column's absent cells can often be read from the present values around them. This is
   kept so that masking does not impose a sort on every query. An administrator who needs such a column's absent
   values kept SHALL list it on every governing role and every row-contributing role, which makes it visible, or keep
-  it off every role whose rows
-  interleave with another role's in storage order. Which rows and values a query with a total order returns never
+  it off every role whose rows interleave with another role's in storage order. Which rows and values a query with a total order returns never
   depends on it; where the query leaves the choice open (an unordered page cut, `any`), the choice can.
 
 "SQL translation" states the corresponding exceptions for a masked field: it expands to its masked value, and a
@@ -61,8 +60,11 @@ rewritten conjunct takes the form the next requirement gives it.
 A query that references a masked field SHALL be refused `400 bad_request`, on every surface that resolves it, when it
 carries a name that equals, case-sensitively, the name of a table it reads (its source or an enrichment), or begins
 with that name followed by `.`. An output whose name is the qualified flat name of the field it projects, referenced
-bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt: its value is that
-field's own masked value, so the name captures nothing the statement did not already read. That covers a
+bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt. Within the block
+that defines such an output, the data store can resolve its name to the stored column instead of the output, so a
+sort, grouping, `having` or distinct key there that refers to the output SHALL be rendered as the output's masked
+expression, never as its name. A block that reads it from a derived table reads the output's masked value. The rule
+on table names covers a
 lambda parameter, and every resolved output name at every level of the statement: an explicit `as` or SQL alias, a
 name derived from a field or function, and a name the service generates for an operand's output. The mask is evaluated over the stored row's columns, which
 the statement names by table, and a declared name equal to a table could capture those names. A query that names a
@@ -129,6 +131,15 @@ SHALL be refused `400 bad_request`.
 - **AND WHEN** it projects the enrichment field `dial_usage_log_payload.request_body` without `as`, beside a masked
   field
 - **THEN** the query runs, the output keyed `dial_usage_log_payload.request_body`
+
+#### Scenario: Sorting and grouping by an enrichment field's own name read its masked value
+
+- **GIVEN** a caller for whom the enrichment field `e.c` is masked, present on the rows of `P1` only, where a row of
+  `P2` stores a value that sorts before every value of `P1`
+- **WHEN** it projects `e.c` without `as` and sorts by it ascending, with a page of one row
+- **THEN** the row returned is a row of `P1`, since the rows of `P2` sort as nulls, after every value
+- **AND WHEN** it groups by `e.c`, alone or with `project_id`, and sorts by it
+- **THEN** the query runs, and the rows of `P2` form one group whose key is null
 
 #### Scenario: A lambda cannot read an absent cell through a parameter name
 
