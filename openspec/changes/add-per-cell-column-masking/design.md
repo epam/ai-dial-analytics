@@ -391,8 +391,7 @@ refuses it explicitly as a column the path reads.
   probed. The data store resolves a table-qualified name to such a source column's subcolumns. It resolves `"t"."p"`
   through a column `t` of `t`, and an enrichment's `"e"."size"` through a source column `e`, which was probed
   on 26.3 and 26.8. An enrichment column named after the source does not capture. → The spec states the fallback, so no mask is evaluated there. The same resolution
-  already affects the row filter on such a table today. That predates this change and is tracked separately, not
-  fixed here.
+  already affects the row filter on such a table today. That predates this change and is out of its scope.
 - **TTL treats a masked column as hidden.** Which rows a TTL removes would reveal stored values of absent cells. →
   `ttl.column` cannot name one, and a stored TTL on one refuses every `ttl` member.
 - **An absent array expands to no element**, so a count over an expansion silently covers the present rows only. →
