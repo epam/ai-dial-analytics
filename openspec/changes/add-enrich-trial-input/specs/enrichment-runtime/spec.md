@@ -69,6 +69,14 @@ a stalled runner look alive.
 - **AND** `preview.rows` carries the same row by its grain key, with the value capped and a
   `values_truncated` note
 
+#### Scenario: A row-grain input row carries what a scan row carries
+
+- **GIVEN** a row-grain `llm` pipeline with the filter `event_kind = 'chat'` that binds `deployment` only
+- **WHEN** `POST /v1/pipelines/{name}/trial-input` is called
+- **THEN** each entry of `input_rows` has the members a `POST /v1/pipelines/{name}/scan` row of that source row
+  has, `event_kind` and the version and identity columns included, so a JSONata input reads the same row a worker reads
+- **AND** `preview.rows` carries only the grain key and `deployment`, as `/preview` does
+
 #### Scenario: A row-grain limit returns that many newest rows
 
 - **WHEN** a row-grain `llm` pipeline with at least three matching rows is called with `{"limit": 3}`

@@ -71,10 +71,16 @@ projection, so the runner deserializes it into the `PipelineDto` it already has.
 
 ### Row-grain: the preview's own newest-first read, cut to `limit`
 
-`ScanService.previewRows` already reads the newest matching rows with the scan's plan. Trial input calls it
-with `limit` rows instead of five and keys each row as the scan keys it, so `InputMapper` accepts it
-unchanged. `limit` defaults to 1 and is capped at 5: each row costs a model call in the runner, and five is
-the preview's own sample size.
+`ScanService.previewRows` already reads the newest matching rows with the scan's plan. Trial input runs that
+same five-row read and returns its first `limit` rows, so the preview beside them is the preview's own sample.
+The preview's read selects only the grain key and the bound columns, though, while a runner scan row also
+carries the filter's columns, the version and identity columns and an aligned target's partition echo. A JSONata input is
+evaluated over the whole row, so it may read one of those that no binding names. Trial input
+therefore reads the sample *scan-shaped*: the same statement also selects the scan page's columns, the input
+rows keep them, and the preview's rows are cut back to the sampled columns. `InputMapper` then sees what it sees
+in a worker. The extra columns are the scan's own, so the plan's authorization and sensitive-column check
+already cover them, and the plain `/preview` read is unchanged. `limit` defaults to 1 and is capped at 5: each
+row costs a model call in the runner, and five is the preview's own sample size.
 
 ### Group: the runner's own fetch over the gated declaration
 

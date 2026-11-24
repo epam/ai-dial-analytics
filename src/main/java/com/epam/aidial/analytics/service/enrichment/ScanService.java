@@ -54,6 +54,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -500,15 +501,25 @@ public class ScanService {
      * A row-grain pipeline's dry-run sample: the newest rows the runner's scan would read, carrying only the grain
      * key and the bound inputs.
      *
-     * @param rows         the sampled rows, newest first
+     * @param rows         the sampled rows, newest first, carrying only {@code columns}
      * @param columns      the grain key and the bound inputs, typed by the source's bindings
      * @param heldBy       the enrichment that withholds every row (it has no usable bound), or null
      * @param bound        the freshness bound the read was clamped to, or null when it read no enrichment
      * @param aboveBound   the newest matching version above {@code bound}, as epoch milliseconds, when the clamp
      *                     left matching rows out; null when it left none or no probe was needed
+     * @param scanRows     the same rows keyed as a {@code /scan} page keys them — every column the scan projects
+     *                     (the filter's, the cursor's, an aligned target's partition echo) beside the sampled ones —
+     *                     when the sample was read scan-shaped; otherwise {@code rows} itself
      */
     public record RowSample(List<Map<String, Object>> rows, List<PreviewColumn> columns,
-            String heldBy, EnrichmentFreshness.Bound bound, Long aboveBound) {}
+            String heldBy, EnrichmentFreshness.Bound bound, Long aboveBound, List<Map<String, Object>> scanRows) {
+
+        /** A sample read with the preview's own narrow select list, whose rows are their own scan rows. */
+        public RowSample(List<Map<String, Object>> rows, List<PreviewColumn> columns,
+                String heldBy, EnrichmentFreshness.Bound bound, Long aboveBound) {
+            this(rows, columns, heldBy, bound, aboveBound, rows);
+        }
+    }
 
     /**
      * Samples a row-grain pipeline for the dry-run preview: the runner scan's own plan — the same joins, the same
@@ -519,8 +530,15 @@ public class ScanService {
      * <p>Where the clamp is partial, one more probe asks whether it left any matching row out, projecting only
      * the version and reading at most one row: re-running the sample with the clamp lifted would read its heavy
      * columns again, and with no {@code from} would have no lower bound.
+     *
+     * <p>With {@code scanShaped} — the runner's trial input — the same statement also selects every column the
+     * rows of a runner's scan page carry (its version and identity columns among them), so {@link RowSample#scanRows()} is what the runner's input mapping would see for
+     * those rows: a JSONata input may read a filter or cursor column that no binding names. {@link RowSample#rows()}
+     * is cut back to the sampled columns either way, so the preview built from it is the one the narrow read gives.
+     * The extra columns are the scan's own, so the authorization and sensitive-column check made over the plan
+     * already cover them.
      */
-    public RowSample previewRows(ResolvedEnrichPipeline resolved, int limit, Instant from, Instant to) {
+    public RowSample previewRows(ResolvedEnrichPipeline resolved, int limit, Instant from, Instant to, boolean scanShaped) {
         Source source = source(resolved);
         CursorPredicates.requireOrderedWindow(from, to);
         ScanPlan plan = plan(resolved, source);
@@ -543,20 +561,42 @@ public class ScanService {
         List<Condition> sourcePredicates = sourcePredicates(plan, from, to, null, plan.bound());
         Base base = base(plan, plan.statement(), sourcePredicates);
         SelectQuery<Record> select = base.select();
-        for (String name : sampled) {
+        Set<String> projected = new LinkedHashSet<>(sampled);
+        if (scanShaped) {
+            projected.addAll(plan.projection());
+        }
+        for (String name : projected) {
             select.addSelect(ScanSourceMetadata.projected(model, bindings, name).as(name));
         }
+        Field<Long> versionExpr = CursorPredicates.versionExpr(plan.cursorColumns());
+        Field<String> identityExpr = CursorPredicates.identityExpr(plan.cursorColumns());
+        if (scanShaped && plan.partitionEcho() != null) {
+            // The rest of a row-grain scan row as the page returns it: a row-grain plan has no group key alias and no
+            // readiness signal, and the cursor aliases buildScan selects are folded into next_cursor and removed.
+            select.addSelect(ScanSourceMetadata.projected(model, bindings, plan.partitionEcho()).as(PartitionEcho.MEMBER));
+        }
         base.addPredicates(sourcePredicates);
-        select.addOrderBy(CursorPredicates.versionExpr(plan.cursorColumns()).desc(),
-                CursorPredicates.identityExpr(plan.cursorColumns()).desc());
+        select.addOrderBy(versionExpr.desc(), identityExpr.desc());
         select.addLimit(limit);
         try (ReplicaRouter.PipelineRun run = replicas.openRun(plan.pipelineName(), syncPlan(plan))) {
-            List<Map<String, Object>> rows = PipelineReadBudget.run(executor, select, model, "preview sample",
+            List<Map<String, Object>> read = PipelineReadBudget.run(executor, select, model, "preview sample",
                     readBudget, new StatementTag(plan.pipelineName(), "preview"));
+            List<Map<String, Object>> rows = scanShaped ? read.stream().map(row -> only(row, sampled)).toList() : read;
 
             Long aboveBound = plan.bound() == null ? null : newestAbove(plan, from, to);
-            return new RowSample(rows, columns, null, plan.bound(), aboveBound);
+            return new RowSample(rows, columns, null, plan.bound(), aboveBound, read);
         }
+    }
+
+    /** {@code row} cut back to {@code names}, in their order; a null value is kept. */
+    private static Map<String, Object> only(Map<String, Object> row, Set<String> names) {
+        Map<String, Object> cut = new LinkedHashMap<>();
+        for (String name : names) {
+            if (row.containsKey(name)) {
+                cut.put(name, row.get(name));
+            }
+        }
+        return cut;
     }
 
     /**

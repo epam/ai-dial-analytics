@@ -50,6 +50,7 @@ import org.springframework.util.unit.DataSize;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -214,7 +215,7 @@ class ScanServiceTest {
 
     @Test
     void previewSampleCarriesOnlyTheGrainKeyAndTheInputsNewestFirst() {
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, false);
 
         final String sql = executed(1).getFirst();
         // The filter's enrichment column still draws its join and still filters; it is not returned.
@@ -229,11 +230,36 @@ class ScanServiceTest {
                 tuple("deployment", PreviewColumnRole.INPUT));
     }
 
+    /**
+     * Trial input's read: the same statement, also selecting what a scan row carries, so a JSONata input reading a
+     * filter or cursor column sees it as on the runner's page; the preview's rows are cut back to the sampled columns.
+     */
+    @Test
+    void scanShapedSampleKeysItsRowsAsTheScanAndCutsThePreviewRowsBack() {
+        final Map<String, Object> read = new LinkedHashMap<>();
+        read.put("event_id", "e1");
+        read.put("deployment", "gpt-4");
+        read.put(SESSION, "s1");
+        read.put("_ingested_at", "2026-01-01T00:00:00Z");
+        given(executor.executeScan(any(), any(), any(), any())).willReturn(new ArrayList<>(List.of(read)));
+
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, true);
+
+        final String sql = executed(1).getFirst();
+        assertThat(sql).startsWith("select \"dial_usage_log\".\"event_id\" \"event_id\", "
+                + "\"dial_usage_log\".\"deployment\" \"deployment\", ");
+        assertThat(sql).contains("\"" + SESSION + "\"").contains("\"_ingested_at\" \"_ingested_at\"")
+                .doesNotContain("__cursor_v");
+        assertThat(sql).endsWith("order by toUnixTimestamp64Milli(\"_ingested_at\") desc, toString(\"event_id\") desc limit 5");
+        assertThat(sample.scanRows()).containsExactly(read);
+        assertThat(sample.rows()).singleElement().satisfies(row -> assertThat(row).containsOnlyKeys("event_id", "deployment"));
+    }
+
     @Test
     void enrichmentWithNoBoundWithholdsThePreviewWithoutStatement() {
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, null, null)));
 
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, false);
 
         assertThat(sample.heldBy()).isEqualTo(ENRICHMENT);
         assertThat(sample.rows()).isEmpty();
@@ -248,7 +274,7 @@ class ScanServiceTest {
                 .willReturn(new ArrayList<>())
                 .willReturn(new ArrayList<>(List.of(Map.of("__cursor_v", 9_000L))));
 
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, false);
 
         final List<String> statements = executed(2);
         assertThat(statements.getFirst()).contains("<= (1000, 'e1')");
@@ -267,7 +293,7 @@ class ScanServiceTest {
         given(scanSources.cursorColumns(SOURCE)).willReturn(new CursorColumns("_ingested_at", "event_id", SOURCE, "request_time"));
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 9_000L, "e9")));
 
-        service.previewRows(rowGrain("deployment"), 5, Instant.ofEpochMilli(1_000L), null);
+        service.previewRows(rowGrain("deployment"), 5, Instant.ofEpochMilli(1_000L), null, false);
 
         final String probe = executed(2).get(1);
         assertThat(probe).contains("> (9000, 'e9')").contains("\"_ingested_at\" > fromUnixTimestamp64Milli(1000)");

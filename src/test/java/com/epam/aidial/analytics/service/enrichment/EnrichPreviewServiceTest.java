@@ -35,6 +35,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -84,7 +85,7 @@ class EnrichPreviewServiceTest {
     @Test
     void rowGrainReadOverItsBudgetIsTheAuthorsRefusal() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any())).willThrow(refusedByTheRunnerBudget());
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willThrow(refusedByTheRunnerBudget());
 
         assertThatThrownBy(() -> service.preview(NAME, null, null, null))
                 .isInstanceOf(PipelinePreviewBudgetExceededException.class)
@@ -133,7 +134,7 @@ class EnrichPreviewServiceTest {
     @Test
     void trialInputRowReadOverItsBudgetIsTheAuthorsRefusal() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any())).willThrow(refusedByTheRunnerBudget());
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willThrow(refusedByTheRunnerBudget());
 
         assertThatThrownBy(() -> service.trialInput(NAME, null, null, null, 2))
                 .isInstanceOf(PipelinePreviewBudgetExceededException.class)
@@ -178,7 +179,7 @@ class EnrichPreviewServiceTest {
     @Test
     void rowGrainSampleWhollyPastAnEnrichmentsPositionIsHeldWithTheGap() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any())).willReturn(new ScanService.RowSample(List.of(),
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willReturn(new ScanService.RowSample(List.of(),
                 List.of(), null, new EnrichmentFreshness.Bound("usage_sentiment", 1_000L, "a"), 61_000L));
 
         final PipelinePreview preview = service.preview(NAME, null, null, null);
@@ -218,18 +219,18 @@ class EnrichPreviewServiceTest {
         assertThatThrownBy(() -> service.preview(NAME, "  ", null, null))
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("`group_key`");
-        verify(scans, never()).previewRows(any(), anyInt(), any(), any());
+        verify(scans, never()).previewRows(any(), anyInt(), any(), any(), anyBoolean());
     }
 
     @Test
     void emptyGroupKeyOnRowGrainIsAbsent() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any()))
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean()))
                 .willReturn(new ScanService.RowSample(List.of(), List.of(), null, null, null));
 
         service.preview(NAME, "", null, null);
 
-        verify(scans).previewRows(any(), anyInt(), any(), any());
+        verify(scans).previewRows(any(), anyInt(), any(), any(), anyBoolean());
     }
 
     /** What the shared read path raises: the runner's code, with the ceiling held apart from its message. */

@@ -7,7 +7,7 @@
 ## 2. Sampling path
 
 - [x] 2.1 Split `EnrichPreviewService` so the `llm` arm returns the uncapped sample and the resolved (gated) declaration; `preview()` keeps capping exactly as today
-- [x] 2.2 Take the row-grain input rows as the first `limit` (1–5) of the preview's own newest-first `ScanService.previewRows` sample, uncapped and keyed as `/scan` keys them (no new read)
+- [x] 2.2 Take the row-grain input rows as the first `limit` (1–5) of the preview's own newest-first `ScanService.previewRows` sample, uncapped and keyed as `/scan` keys them: the read also selects the scan page's columns, and the preview's rows are cut back to the sampled ones (no second read)
 - [x] 2.3 Add a `GroupFetchService` fetch over a `ResolvedEnrichPipeline` (no reload by name) that applies the configured fetch cap, `member_select`, ordering and byte cap of `/group-rows`, and returns `truncated`
 - [x] 2.4 Keep the group preview's own member sample beside the full fetch (the sample ranks by `member_select`, so it is not the head of the fetch); `trial-input.preview` stays identical to `/preview`
 - [x] 2.5 Add a `PipelineMapper` compiled projection of a resolved, in-memory declaration, in the existing compiled shape

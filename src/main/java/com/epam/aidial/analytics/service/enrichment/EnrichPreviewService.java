@@ -112,9 +112,17 @@ public class EnrichPreviewService {
     /** The most rows a trial input returns for a row-grain pipeline: the preview's own sample size. */
     public static final int TRIAL_MAX_ROWS = SAMPLE_ROWS;
 
-    /** A sample before its values are capped: its columns, rows, the group it describes, and its notes. */
+    /**
+     * A sample before its values are capped: its columns, rows, the group it describes, and its notes — and, for a
+     * row-grain trial input, the same rows keyed as the runner's scan keys them ({@code rows} itself otherwise).
+     */
     private record Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey,
-            List<PreviewNote> notes) {}
+            List<PreviewNote> notes, List<Map<String, Object>> scanRows) {
+
+        Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey, List<PreviewNote> notes) {
+            this(columns, rows, groupKey, notes, rows);
+        }
+    }
 
     /** An {@code llm} sample together with the response schema the model would be held to, null when none. */
     private record LlmSample(Sample sample, Map<String, Object> schema) {}
@@ -179,7 +187,7 @@ public class EnrichPreviewService {
         final int rows = trialRows(gated, limit);
         final ResolvedEnrichPipeline resolved = gated.resolved();
         return underPreviewBudget(gated.group(), () -> {
-            final LlmSample llm = llmSample(resolved, gated.declaration(), gated.transform(), groupKey, from, to);
+            final LlmSample llm = llmSample(resolved, gated.declaration(), gated.transform(), groupKey, from, to, true);
             final Sample sample = llm.sample();
             final PipelinePreview preview = finish(PortableQueryRenderer.Portable.NONE, sample);
             // The declaration the sample was read through, carrying the schema the preview composed from it: for a
@@ -187,7 +195,8 @@ public class EnrichPreviewService {
             final ResolvedEnrichPipeline compiled = new ResolvedEnrichPipeline(resolved.pipeline(), resolved.spec(),
                     resolved.source(), resolved.grainKey(), resolved.versionColumn(), llm.schema());
             if (!gated.group()) {
-                return new TrialInput(preview, compiled, sample.rows().subList(0, Math.min(rows, sample.rows().size())), null);
+                final List<Map<String, Object>> scanRows = sample.scanRows();
+                return new TrialInput(preview, compiled, scanRows.subList(0, Math.min(rows, scanRows.size())), null);
             }
             if (sample.groupKey() == null || sample.rows().isEmpty()) {
                 return new TrialInput(preview, compiled, List.of(), false);
@@ -310,13 +319,17 @@ public class EnrichPreviewService {
             EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
             String groupKey, Instant from, Instant to) {
         return finish(PortableQueryRenderer.Portable.NONE,
-                llmSample(resolved, declaration, transform, groupKey, from, to).sample());
+                llmSample(resolved, declaration, transform, groupKey, from, to, false).sample());
     }
 
-    /** The {@code llm} sample before its values are capped, and the response schema it was composed against. */
+    /**
+     * The {@code llm} sample before its values are capped, and the response schema it was composed against.
+     *
+     * @param scanShaped whether a row-grain sample also reads its rows as the runner's scan keys them, for trial input
+     */
     private LlmSample llmSample(ResolvedEnrichPipeline resolved,
             EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
-            String groupKey, Instant from, Instant to) {
+            String groupKey, Instant from, Instant to, boolean scanShaped) {
         final Map<String, Object> stored = transform.getResponseSchema();
         // Composed through the throwing entry point, not the resolver's swallowing one, although the schema is
         // no longer returned: a target whose columns no longer fit the transform's outputs is the single most
@@ -328,7 +341,7 @@ public class EnrichPreviewService {
 
         final Sample sample = declaration.triggerKind() == TriggerKind.GROUP
                 ? groupSample(resolved, declaration, groupKey, from, to)
-                : rowSample(resolved, declaration, groupKey, from, to);
+                : rowSample(resolved, declaration, groupKey, from, to, scanShaped);
         final List<PreviewNote> notes = new ArrayList<>(sample.notes());
         if (schema == null) {
             notes.add(PreviewNote.of(PreviewNoteCode.UNCONSTRAINED_RESPONSE, "this declaration stores no "
@@ -340,7 +353,7 @@ public class EnrichPreviewService {
                         + "`description`: neither its `prose` nor the target column's `description` carries one, so "
                         + "the model is told nothing about what the field means. Declare prose on the output, or a "
                         + "description on the column")));
-        return new LlmSample(new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes), schema);
+        return new LlmSample(new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes, sample.scanRows()), schema);
     }
 
     /**
@@ -348,9 +361,9 @@ public class EnrichPreviewService {
      * left matching rows out, the clamp is named rather than the filter blamed.
      */
     private Sample rowSample(ResolvedEnrichPipeline resolved, EnrichDeclaration declaration, String groupKey,
-            Instant from, Instant to) {
+            Instant from, Instant to, boolean scanShaped) {
         requireNoGroupKey(groupKey, declaration);
-        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to);
+        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to, scanShaped);
         final List<PreviewNote> notes = new ArrayList<>();
         if (sample.heldBy() != null) {
             notes.add(PreviewNotes.heldByEnrichment(sample.heldBy()));
@@ -362,7 +375,7 @@ public class EnrichPreviewService {
         } else if (sample.rows().isEmpty()) {
             notes.add(noMatchingRows());
         }
-        return new Sample(sample.columns(), sample.rows(), null, notes);
+        return new Sample(sample.columns(), sample.rows(), null, notes, sample.scanRows());
     }
 
     /**

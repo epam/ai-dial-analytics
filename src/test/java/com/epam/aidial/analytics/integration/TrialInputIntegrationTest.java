@@ -83,6 +83,10 @@ class TrialInputIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     private void createLlmPipeline(boolean enabled) throws Exception {
+        createLlmPipeline(enabled, null);
+    }
+
+    private void createLlmPipeline(boolean enabled, String filter) throws Exception {
         final String transform = Transforms.llm()
                 .model("test-model")
                 .preset(null)
@@ -92,7 +96,9 @@ class TrialInputIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .member();
         mockMvc.perform(post("/v1/pipelines").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"" + LLM + "\"," + transform + ",\"kind\":\"enrich\",\"target\":\"" + LLM_TARGET
-                                + "\",\"trigger\":{\"kind\":\"schedule\"},\"enabled\":" + enabled + "}"))
+                                + "\",\"trigger\":{\"kind\":\"schedule\"},"
+                                + (filter == null ? "" : "\"filter\":\"" + filter + "\",")
+                                + "\"enabled\":" + enabled + "}"))
                 .andExpect(status().isCreated());
     }
 
@@ -139,6 +145,28 @@ class TrialInputIntegrationTest extends AbstractClickHouseIntegrationTest {
         assertThat((Object) JsonPath.read(body, "$.pipeline.response_schema.properties.title")).isNotNull();
         assertThat((String) JsonPath.read(body, "$.pipeline.grain_key")).isEqualTo("event_id");
         assertThat(body).doesNotContain("\"truncated\"");
+    }
+
+    /**
+     * A row-grain input row is keyed exactly as a scan row of the same pipeline, filter, version and identity columns included,
+     * so a JSONata input reading one sees it as the runner's worker does; the preview still shows only the sampled
+     * columns.
+     */
+    @Test
+    void rowGrainInputRowIsKeyedAsTheScanRow() throws Exception {
+        createLlmPipeline(true, "event_kind = 'chat'");
+        seedRow(eventId(1), "c1", "alpha", "2026-01-01 00:00:00.000");
+
+        final String body = trialInput(LLM, "{}");
+        final String page = mockMvc.perform(runnerPost("/v1/pipelines/" + LLM + "/scan")
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        final Map<String, Object> inputRow = JsonPath.read(body, "$.input_rows[0]");
+        final Map<String, Object> scanRow = JsonPath.read(page, "$.rows[0]");
+        assertThat(inputRow).containsEntry("event_kind", "chat").isEqualTo(scanRow);
+        assertThat((Map<String, Object>) JsonPath.read(body, "$.preview.rows[0]")).containsOnlyKeys("event_id", "deployment");
     }
 
     @Test
