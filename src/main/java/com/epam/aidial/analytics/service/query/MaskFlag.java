@@ -77,7 +77,7 @@ public final class MaskFlag extends CustomField<Integer> {
             final List<String> outputs = new ArrayList<>(select.size());
             final Map<String, MaskFlag> flags = new LinkedHashMap<>();
             for (final Field<?> field : select) {
-                final MaskFlag flag = of(field);
+                final MaskFlag flag = MaskFlag.of(field);
                 if (flag == null) {
                     outputs.add(field.getName());
                 } else {

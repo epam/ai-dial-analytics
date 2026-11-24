@@ -287,7 +287,7 @@ public class SqlQueryFrontEnd {
             final RelRoot root = planner.rel(validated);
             // `$masked` is the row member a JSON response lists absent cells under, reserved on every surface for the
             // statement's own outputs; a nested block's column may carry the name.
-            if (root.fields.stream().anyMatch(field -> MaskFlag.MEMBER.equals(field.right))) {
+            if (root.fields.rightList().contains(MaskFlag.MEMBER)) {
                 throw new SqlTranslationException("output name '" + MaskFlag.MEMBER + "' is reserved: a JSON row lists its"
                         + " absent and partial cells under it. Alias the output to another name");
             }
