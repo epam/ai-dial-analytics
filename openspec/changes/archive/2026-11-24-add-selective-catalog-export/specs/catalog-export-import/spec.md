@@ -564,12 +564,12 @@ is true:
 - **Names.** Role keys SHALL be trimmed as a `PUT` trims its role, and table keys SHALL match a bundle table name or a target table
   name exactly.
 - **Tables named only by access.** An `access` key MAY name a table that is neither under `tables` nor under
-  `required_system_tables` when that table exists on the target, as a bundle exported with `access_only` on a user table does (see
+  `required_system_tables` when that table exists on the target as a user table, as a bundle exported with `access_only` on a user table does (see
   "Selective export"). Such a table has no object entry of its own: its access entries are planned, checked, applied and reported as
   any other's, and the rule that refuses an entry with its table's refused object entry does not apply to them. A validation pass
   or an apply that stops early still affects them as it affects every access entry.
 - **Bundle-level problems.** A bundle with no `access` member, an `access` key naming a table that is neither under `tables` nor under
-  `required_system_tables` and does not exist on the target, a role key that is blank once trimmed, and two role keys of one table
+  `required_system_tables` and is not a user table on the target (it does not exist there, or is a system table there), a role key that is blank once trimmed, and two role keys of one table
   that trim to the same role SHALL
   each be reported under `validation_errors`, and `/import` SHALL answer `422` with `error` `catalog_import_invalid`. Every access
   entry under such a problem SHALL be `FAIL` with a problem naming it, so none of them is checked or applied.
@@ -656,6 +656,9 @@ is true:
   target, and the entry for `u` is valid
 - **THEN** `/import/preview` still reports the `u`/`analytics-viewers` access entry as `REPLACE`, and `/import` is `422` with `error`
   `catalog_import_invalid`
+- **AND WHEN** the target's `u` is a system table instead
+- **THEN** `/import/preview` reports it under `validation_errors`, every access entry on `u` is `FAIL`, and `/import` is `422`
+  with `error` `catalog_import_invalid`
 
 #### Scenario: A null access value is refused at binding
 

@@ -143,9 +143,12 @@ public class CatalogImportPlanner {
             table.getValue().forEach((key, entry) -> roles.add(new PlannedAccess(name, key, entry,
                     stored.get(StringUtils.trimToEmpty(key)))));
             final PlannedObject owner = carried.get(name);
-            if (owner == null && existing == null) {
+            // A table named only by access must be a user table here: a system table the bundle never named as one is
+            // a different table that happens to share the name.
+            if (owner == null && (existing == null || existing.system())) {
                 final String problem = "access names table '" + name + "', which the bundle carries neither under tables nor "
-                        + "under required_system_tables, and which does not exist on this environment";
+                        + "under required_system_tables, and which " + (existing == null ? "does not exist on this environment"
+                        : "is a system table on this environment");
                 validationErrors.add(problem);
                 roles.forEach(role -> role.fail(problem));
             }

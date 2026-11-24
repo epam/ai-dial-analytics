@@ -1351,6 +1351,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"dependencies\":true}",
                 "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[]}",
                 "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\" \"]}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\"\\u0001\"]}",
                 "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[1]}",
                 "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[[\"a\"]]}")) {
             exportCall("/v1/catalog/export", "{\"components\":[" + component + "],\"include_access\":true}")
@@ -1404,7 +1405,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         exportCall("/v1/catalog/export", accessOnlyOf(ROLL))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("catalog_export_empty"))
-                .andExpect(jsonPath("$.message").value(containsString("left_behind")));
+                .andExpect(jsonPath("$.message").value(containsString("role 'READ_ONLY_ANALYTIC' (validation_error)")));
 
         putAccess(BASE, "cx-a", "get");
         putAccess(BASE, "cx-b", "get");

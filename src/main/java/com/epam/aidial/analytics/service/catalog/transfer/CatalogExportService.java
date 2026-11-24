@@ -686,7 +686,10 @@ public class CatalogExportService {
                 if (accessOnly.containsKey(name) && portable.entries().isEmpty()) {
                     throw new CatalogExportEmptyException("table '" + name + "' is selected for its access alone, but has "
                             + "no access entry an export can carry" + (portable.leftBehind().isEmpty() ? ""
-                            : "; export it without access_only and read the preview's left_behind for what stays behind"));
+                            : "; staying behind: " + portable.leftBehind().stream()
+                                    .map(part -> "role '" + part.role() + "' (" + part.error() + ")")
+                                    .distinct()
+                                    .collect(Collectors.joining(", "))));
                 }
             }
             return new Resolution(resolution.tables(), new LinkedHashMap<>(required), resolution.pipelines(),

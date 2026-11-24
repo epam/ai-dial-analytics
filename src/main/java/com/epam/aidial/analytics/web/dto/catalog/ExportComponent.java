@@ -8,7 +8,6 @@ import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import org.apache.commons.lang3.StringUtils;
 import tools.jackson.databind.annotation.JsonDeserialize;
 
 import java.util.List;
@@ -29,11 +28,13 @@ public record ExportComponent(
         @NotBlank String name,
 
         @Schema(description = "Pipeline only. False exports the pipeline alone, without its inputs, target or the "
-                + "enrichments it reads; import then needs each on the target. Default true")
+                + "enrichments it reads, unless another selected component's closure reaches it; import then needs each "
+                + "on the target. Default true")
         Boolean dependencies,
 
         @Schema(description = "Table only, with include_access. True carries only the table's access entries: no "
-                + "definition, and nothing it depends on or that depends on it. Default false")
+                + "definition, and nothing it depends on or that depends on it, unless another selected component's "
+                + "closure reaches it. Default false")
         @JsonProperty("access_only") Boolean accessOnly,
 
         @ArraySchema(arraySchema = @Schema(description = "Table only, with include_access. Carries only these roles' entries "
@@ -49,7 +50,8 @@ public record ExportComponent(
             throw new InvalidRequestParameterException("access_only and roles apply to a table component only; a "
                     + "pipeline component takes dependencies");
         }
-        if (roles != null && (roles.isEmpty() || roles.stream().anyMatch(StringUtils::isBlank))) {
+        // String.trim, as the access API trims a role, so "blank" here and the trimmed lookup agree.
+        if (roles != null && (roles.isEmpty() || roles.stream().anyMatch(role -> role.trim().isEmpty()))) {
             throw new InvalidRequestParameterException("roles must list at least one role, none of them blank; omit it "
                     + "to carry every role's entry");
         }

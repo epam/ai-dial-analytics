@@ -417,6 +417,14 @@ class CatalogImportPlannerTest {
         assertThat(missing.validationErrors()).anyMatch(error -> error.contains("'usage_base'")
                 && error.contains("does not exist on this environment"));
         assertThat(missing.access()).allMatch(PlannedAccess::failed);
+
+        // A same-named system table here is not the table the bundle's access was exported from.
+        final ImportTarget.Table system = new ImportTarget.Table("usage_base", TableType.SOURCE, true, TableStatus.ACTIVE, null,
+                null, Map.of());
+        final ImportPlan clash = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS,
+                target(Map.of("usage_base", system)), true);
+        assertThat(clash.validationErrors()).anyMatch(error -> error.contains("is a system table on this environment"));
+        assertThat(clash.access()).allMatch(PlannedAccess::failed);
     }
 
     @Test

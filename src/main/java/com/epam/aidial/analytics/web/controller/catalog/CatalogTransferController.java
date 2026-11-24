@@ -87,7 +87,8 @@ public class CatalogTransferController {
                     + "which requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, "
                     + "and an enrichment a column policy names joins the export. Selectors narrow a component: "
                     + "`dependencies: false` exports a pipeline alone; `access_only: true` carries only a table's access, "
-                    + "with no definition and nothing connected; `roles` carries only the listed roles' entries.")
+                    + "with no definition and nothing connected; `roles` carries only the listed roles' entries. A component "
+                    + "another selected component's closure reaches travels as that closure decides.")
     public ResponseEntity<CatalogBundle> export(@Valid @RequestBody(required = false) ExportRequest request) {
         final CatalogBundle bundle = exportService.export(request);
         final String filename = "adas-catalog-" + FILE_TIMESTAMP.format(bundle.exportedAt()) + ".json";
