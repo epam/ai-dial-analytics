@@ -398,6 +398,28 @@ class CatalogImportPlannerTest {
     }
 
     @Test
+    void accessMayNameTableOnlyTheTargetHas() {
+        final BundleTable base = source("usage_base");
+        final ImportTarget.Table stored = new ImportTarget.Table("usage_base", TableType.SOURCE, false, TableStatus.ACTIVE, base,
+                base, Map.of("viewers", new AccessEntry(List.of(), null, List.of("id"))));
+        final CatalogBundle policiesOnly = new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(),
+                List.of(), List.of(), List.of(), Map.of("usage_base", Map.of("viewers", entry("read"))));
+
+        final ImportPlan plan = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS, target(Map.of("usage_base", stored)),
+                true);
+
+        assertThat(plan.validationErrors()).isEmpty();
+        assertThat(plan.access()).noneMatch(PlannedAccess::failed);
+        assertThat(plan.accessEntries().getFirst().prev().columns()).containsExactly("id");
+        assertThat(plan.hasProblems()).isFalse();
+
+        final ImportPlan missing = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS, target(Map.of()), true);
+        assertThat(missing.validationErrors()).anyMatch(error -> error.contains("'usage_base'")
+                && error.contains("does not exist on this environment"));
+        assertThat(missing.access()).allMatch(PlannedAccess::failed);
+    }
+
+    @Test
     void accessOnRefusedTableFailsButNotOnConflictingOne() {
         final CatalogBundle missingSystem = withAccess(Map.of(SYSTEM, Map.of("viewers", entry("read"))));
         assertThat(planner.plan(missingSystem, false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of()), true).access())

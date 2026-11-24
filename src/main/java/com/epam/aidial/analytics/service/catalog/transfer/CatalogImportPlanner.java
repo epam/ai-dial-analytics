@@ -117,10 +117,12 @@ public class CatalogImportPlanner {
 
     /**
      * One entry per table and role key of the bundle's {@code access}, sorted by table, trimmed role and key as written,
-     * each with the target's stored entry for the role. A bundle-level problem (no {@code access} member, a table the
-     * bundle does not carry, a blank role key, two keys trimming to one role) is a validation error and fails every entry
-     * under it; an entry on a refused table fails too, a {@code FAIL_IF_EXISTS} conflict excepted. The body itself is
-     * checked by the validation pass.
+     * each with the target's stored entry for the role. A key may name a table the bundle does not carry when this
+     * environment has it, as a bundle exported {@code access_only} does; such a table has no planned object to refuse its
+     * entries. A bundle-level problem (no {@code access} member, a table in neither the bundle nor this environment, a
+     * blank role key, two keys trimming to one role) is a validation error and fails every entry under it; an entry on a
+     * refused table fails too, a {@code FAIL_IF_EXISTS} conflict excepted. The body itself is checked by the validation
+     * pass.
      */
     private static List<PlannedAccess> planAccess(CatalogBundle bundle, List<PlannedObject> systemTables,
             List<PlannedObject> tables, ImportTarget target, List<String> validationErrors) {
@@ -141,9 +143,9 @@ public class CatalogImportPlanner {
             table.getValue().forEach((key, entry) -> roles.add(new PlannedAccess(name, key, entry,
                     stored.get(StringUtils.trimToEmpty(key)))));
             final PlannedObject owner = carried.get(name);
-            if (owner == null) {
+            if (owner == null && existing == null) {
                 final String problem = "access names table '" + name + "', which the bundle carries neither under tables nor "
-                        + "under required_system_tables";
+                        + "under required_system_tables, and which does not exist on this environment";
                 validationErrors.add(problem);
                 roles.forEach(role -> role.fail(problem));
             }

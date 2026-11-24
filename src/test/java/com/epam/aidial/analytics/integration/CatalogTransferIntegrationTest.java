@@ -1108,6 +1108,312 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 .andExpect(status().isUnprocessableContent());
     }
 
+    // --- selective export -----------------------------------------------------------------------------
+
+    @Test
+    void pipelineExportedAloneCarriesNothingElseAndImportsWhereItsTablesExist() throws Exception {
+        final String alone = "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + DUL_LIVE + "\",\"dependencies\":false}]}";
+        final String bundle = export(alone);
+        final JsonNode exported = json.readTree(bundle);
+        assertThat(names(exported.get("pipelines"), "pipeline")).containsExactly(DUL_LIVE);
+        assertThat(exported.get("tables")).isEmpty();
+        assertThat(exported.get("required_system_tables")).isEmpty();
+        exportCall("/v1/catalog/export/preview", alone)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[*].name").value(contains(DUL_LIVE)))
+                .andExpect(jsonPath("$.objects[0].reason").value("selected"))
+                .andExpect(jsonPath("$.required_system_tables").isEmpty());
+        final JsonNode withAccess = json.readTree(export(alone.replace("]}", "],\"include_access\":true}")));
+        assertThat(withAccess.get("required_system_tables")).isEmpty();
+        assertThat(withAccess.get("access")).isEqualTo(json.readTree("{}"));
+
+        // DUL_LIVE never ran, so deleting it leaves its name free for the import.
+        deletePipeline(DUL_LIVE);
+        importCall("/v1/catalog/import", bundle, null, "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.pipelines[0].import_action").value("CREATE"))
+                .andExpect(jsonPath("$.pipelines[0].status").value("created"));
+        mockMvc.perform(get("/v1/pipelines/" + DUL_LIVE)).andExpect(status().isOk()).andExpect(jsonPath("$.enabled").value(false));
+
+        deletePipeline(DUL_LIVE);
+        mockMvc.perform(delete("/v1/tables/" + DUL)).andExpect(status().isNoContent());
+        importCall("/v1/catalog/import/preview", bundle, null, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].import_action").value("FAIL"))
+                .andExpect(jsonPath("$.pipelines[0].problems[*]").value(hasItem(containsString("'" + DUL + "'"))));
+        importCall("/v1/catalog/import", bundle, null, "SKIP_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    @Test
+    void pipelineAloneSkipsTheClosureChecksUnlessAnotherComponentReachesIt() throws Exception {
+        jdbc.update("UPDATE table_definition SET status = 'PENDING' WHERE name = ?", SENT);
+        try {
+            exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + SENT_LIVE + "\",\"dependencies\":false}]}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.pipelines[*].pipeline.name").value(contains(SENT_LIVE)));
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", SENT);
+        }
+
+        // A declaration that no longer resolves: DUL_LIVE's target stops being an enrichment, so it has no read source.
+        final Map<String, Object> dul = jdbc.queryForMap("SELECT type, source_table, grain_key FROM table_definition WHERE name = ?", DUL);
+        jdbc.update("UPDATE table_definition SET type = 'SOURCE', source_table = NULL, grain_key = NULL WHERE name = ?", DUL);
+        try {
+            exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + DUL_LIVE + "\"}]}")
+                    .andExpect(status().isUnprocessableContent());
+            exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + DUL_LIVE + "\",\"dependencies\":false}]}")
+                    .andExpect(status().isOk());
+        } finally {
+            jdbc.update("UPDATE table_definition SET type = ?, source_table = ?, grain_key = ? WHERE name = ?",
+                    dul.get("type"), dul.get("source_table"), dul.get("grain_key"), DUL);
+        }
+
+        // Reached by another component's closure, the pipeline is expanded and meets that closure's rules.
+        final String reached = "{\"components\":[{\"type\":\"table\",\"name\":\"" + ROLL + "\"},"
+                + "{\"type\":\"pipeline\",\"name\":\"" + ROLLUP + "\",\"dependencies\":false}]}";
+        exportCall("/v1/catalog/export/preview", reached)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[?(@.name == '" + BASE + "')].reason").value(hasItem("input of " + ROLLUP)))
+                .andExpect(jsonPath("$.objects[?(@.name == '" + ROLLUP + "')].reason").value(hasItem("selected")));
+        jdbc.update("UPDATE table_definition SET status = 'PENDING' WHERE name = ?", BASE);
+        try {
+            exportCall("/v1/catalog/export", reached)
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("catalog_export_invalid"));
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", BASE);
+        }
+    }
+
+    @Test
+    void oneRolesPolicyExportsAloneAndImportsOntoTheExistingTable() throws Exception {
+        putAccess(BASE, "cx-finance", "read");
+        final String body = "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\",\"access_only\":true,\"roles\":[\""
+                + READERS + "\"]}],\"include_access\":true}";
+        exportCall("/v1/catalog/export/preview", body)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects").isEmpty())
+                .andExpect(jsonPath("$.required_system_tables").isEmpty())
+                .andExpect(jsonPath("$.access[0].table").value(BASE))
+                .andExpect(jsonPath("$.access[0].roles[*]").value(contains(READERS)))
+                .andExpect(jsonPath("$.access[0].left_behind").isEmpty());
+        final ObjectNode bundle = (ObjectNode) json.readTree(export(body));
+        assertThat(bundle.get("tables")).isEmpty();
+        assertThat(bundle.get("pipelines")).isEmpty();
+        assertThat(bundle.get("required_system_tables")).isEmpty();
+        assertThat(bundle.get("access").get(BASE).size()).isEqualTo(1);
+        assertThat(bundle.get("access").get(BASE).has(READERS)).isTrue();
+
+        // The target's entry for the role differs; the role the bundle does not name keeps its entry.
+        putAccess(BASE, READERS, "get");
+        final String financeBefore = json.readTree(access(BASE)).get("cx-finance").toString();
+        final JsonNode tableBefore = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse().getContentAsString());
+        final long generation = generation(BASE);
+        final String importId = importId(importAccess("/v1/catalog/import", bundle.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.access[0].import_action").value("REPLACE"))
+                .andExpect(jsonPath("$.access[0].status").value("replaced")));
+        final JsonNode roles = json.readTree(access(BASE));
+        assertThat(roles.get(READERS).get("privileges").toString()).isEqualTo("[\"read\"]");
+        assertThat(roles.get("cx-finance").toString()).isEqualTo(financeBefore);
+        final JsonNode tableAfter = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse().getContentAsString());
+        assertThat(tableAfter.get("columns")).isEqualTo(tableBefore.get("columns"));
+        assertThat(generation(BASE)).isEqualTo(generation + 1);
+        assertThat(types(filtered(importActivities(importId), "Table", BASE))).containsExactly("Update");
+
+        final ObjectNode lacking = bundle.deepCopy();
+        ((ObjectNode) lacking.get("access").get(BASE)).set(READERS, json.readTree("{\"privileges\":[\"read\"],\"columns\":[\"cx_nope\"]}"));
+        importAccess("/v1/catalog/import/preview", lacking.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[0].import_action").value("FAIL"))
+                .andExpect(jsonPath("$.access[0].problems[*]").value(hasItem(containsString("cx_nope"))));
+        importAccess("/v1/catalog/import", lacking.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+
+        // Beside a pipeline refused at planning, the entry is still checked and reported.
+        final ObjectNode rollup = (ObjectNode) json.readTree(export("{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + ROLLUP
+                + "\",\"dependencies\":false}]}")).get("pipelines").get(0);
+        ((ObjectNode) rollup.get("pipeline")).putArray("inputs").add("cx_missing");
+        deletePipeline(ROLLUP);
+        final ObjectNode mixed = bundle.deepCopy();
+        ((ArrayNode) mixed.get("pipelines")).add(rollup);
+        putAccess(BASE, READERS, "get");
+        importAccess("/v1/catalog/import/preview", mixed.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].import_action").value("FAIL"))
+                .andExpect(jsonPath("$.pipelines[0].problems[*]").value(hasItem(containsString("cx_missing"))))
+                .andExpect(jsonPath("$.access[0].import_action").value("REPLACE"));
+        importAccess("/v1/catalog/import", mixed.toString(), "FAIL_IF_EXISTS")
+                .andExpect(status().isUnprocessableContent());
+
+        forget();
+        assertBundleProblem(bundle, "'" + BASE + "'");
+    }
+
+    @Test
+    void accessOnlyTablesCarryNoDefinitionAndPullNothingIn() throws Exception {
+        putEntryJson(BASE, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"event_id\",\"" + SENT + ".sentiment\"]}");
+        final JsonNode base = json.readTree(export(accessOnlyOf(BASE)));
+        assertThat(base.get("tables")).isEmpty();
+        assertThat(base.get("required_system_tables")).isEmpty();
+        assertThat(base.get("access").get(BASE).get("cx-analysts").get("columns").toString()).contains(SENT + ".sentiment");
+
+        final String payload = "dial_usage_log_payload";
+        putEntryJson(SYSTEM, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"" + firstColumn(SYSTEM) + "\",\"" + DUL
+                + ".note\",\"" + payload + "." + firstColumn(payload) + "\"]}");
+        exportCall("/v1/catalog/export/preview", accessOnlyOf(SYSTEM))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects").isEmpty())
+                .andExpect(jsonPath("$.required_system_tables[*].name").value(contains(SYSTEM)))
+                .andExpect(jsonPath("$.required_system_tables[0].reason").value("selected"));
+        final String systemOnly = export(accessOnlyOf(SYSTEM));
+        assertThat(json.readTree(systemOnly).get("access").get(SYSTEM).has("cx-analysts")).isTrue();
+
+        // Reached by another component's closure, the system table follows its column policies after all.
+        exportCall("/v1/catalog/export/preview", "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + DUL_LIVE + "\"},"
+                        + "{\"type\":\"table\",\"name\":\"" + SYSTEM + "\",\"access_only\":true}],\"include_access\":true}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.required_system_tables[*].name").value(hasItem(SYSTEM)))
+                .andExpect(jsonPath("$.required_system_tables[?(@.name == '" + payload + "')].reason")
+                        .value(hasItem("column policy of " + SYSTEM)));
+
+        // On a target without the enrichment the policy names, that entry is refused, naming the column.
+        forget();
+        importAccess("/v1/catalog/import/preview", systemOnly, "SKIP_IF_EXISTS")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-analysts')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.access[?(@.role == 'cx-analysts')].problems[*]").value(hasItem(containsString(DUL + ".note"))));
+    }
+
+    @Test
+    void accessOnlyTableIsExportedWhateverItsState() throws Exception {
+        jdbc.update("UPDATE table_definition SET status = 'PENDING' WHERE name = ?", BASE);
+        try {
+            exportCall("/v1/catalog/export", accessOnlyOf(BASE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.access." + BASE + "['" + READERS + "'].privileges[*]").value(contains("read")));
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", BASE);
+        }
+        mockMvc.perform(post("/v1/otel/sinks").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"cxapp\",\"signals\":[\"logs\"]}"))
+                .andExpect(status().isCreated());
+        try {
+            putAccess("otel_cxapp_logs", READERS, "read");
+            exportCall("/v1/catalog/export", accessOnlyOf("otel_cxapp_logs"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.tables").isEmpty())
+                    .andExpect(jsonPath("$.access.otel_cxapp_logs['" + READERS + "'].privileges[*]").value(contains("read")));
+        } finally {
+            mockMvc.perform(delete("/v1/otel/sinks/cxapp"));
+        }
+    }
+
+    @Test
+    void rolesNarrowWhatTheTableCarriesAndPullsIn() throws Exception {
+        putAccess(BASE, "cx-finance", "read");
+        final JsonNode whole = json.readTree(export("{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE
+                + "\",\"roles\":[\"cx-finance\"]}],\"include_access\":true}"));
+        assertThat(names(whole.get("tables"), "table")).contains(BASE);
+        assertThat(whole.get("access").get(BASE).size()).isEqualTo(1);
+        assertThat(whole.get("access").get(BASE).has("cx-finance")).isTrue();
+
+        // An unlisted role's column policy pulls nothing in, and nothing of it is reported as left behind.
+        putEntryJson(SYSTEM, "cx-analysts", "{\"privileges\":[\"read\"],\"columns\":[\"" + firstColumn(SYSTEM) + "\",\"" + DUL
+                + ".note\"]}");
+        exportCall("/v1/catalog/export/preview", "{\"components\":[{\"type\":\"table\",\"name\":\"" + SYSTEM + "\",\"roles\":[\""
+                        + READERS + "\"]}],\"include_access\":true}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[*].name").value(not(hasItem(DUL))))
+                .andExpect(jsonPath("$.access[0].roles[*]").value(contains(READERS)))
+                .andExpect(jsonPath("$.access[0].left_behind[*].role").value(not(hasItem("cx-analysts"))));
+
+        // An access-only table another component reaches travels whole, its roles still limited.
+        putAccess(ROLL, READERS, "read");
+        putAccess(ROLL, "cx-finance", "read");
+        exportCall("/v1/catalog/export/preview", "{\"components\":[{\"type\":\"pipeline\",\"name\":\"" + ROLLUP + "\"},"
+                        + "{\"type\":\"table\",\"name\":\"" + ROLL + "\",\"access_only\":true,\"roles\":[\"" + READERS + "\"]}],"
+                        + "\"include_access\":true}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.objects[?(@.name == '" + ROLL + "')].reason").value(hasItem("target of " + ROLLUP)))
+                .andExpect(jsonPath("$.access[?(@.table == '" + ROLL + "')].roles[*]").value(contains(READERS)));
+    }
+
+    @Test
+    void selectorsAreRefusedInTheirOrder() throws Exception {
+        for (final String component : List.of(
+                "{\"type\":\"pipeline\",\"name\":\"" + ROLLUP + "\",\"roles\":[\"" + READERS + "\"]}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"dependencies\":true}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[]}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\" \"]}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[1]}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[[\"a\"]]}")) {
+            exportCall("/v1/catalog/export", "{\"components\":[" + component + "],\"include_access\":true}")
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value("bad_request"));
+        }
+        exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\",\"dependencies\":false}]}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(containsString("access_only and roles")));
+
+        for (final String component : List.of(
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"access_only\":true}",
+                "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\"" + READERS + "\"]}",
+                "{\"type\":\"table\",\"name\":\"does_not_exist\",\"access_only\":true}")) {
+            exportCall("/v1/catalog/export", "{\"components\":[" + component + "]}")
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("catalog_export_invalid"));
+        }
+
+        exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\",\"access_only\":true,"
+                        + "\"roles\":[\"" + READERS + "\",\"does-not-exist\"]}],\"include_access\":true}")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("not_found"))
+                .andExpect(jsonPath("$.message").value(containsString(BASE)))
+                .andExpect(jsonPath("$.message").value(containsString("does-not-exist")));
+        // The role is checked before the closure is walked: SENT's source being PENDING would otherwise be a 422.
+        jdbc.update("UPDATE table_definition SET status = 'PENDING' WHERE name = ?", BASE);
+        try {
+            exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"table\",\"name\":\"" + SENT
+                            + "\",\"roles\":[\"does-not-exist\"]}],\"include_access\":true}")
+                    .andExpect(status().isNotFound());
+        } finally {
+            jdbc.update("UPDATE table_definition SET status = 'ACTIVE' WHERE name = ?", BASE);
+        }
+
+        final String twoWays = "{\"components\":[{\"type\":\"table\",\"name\":\"%s\"},"
+                + "{\"type\":\"table\",\"name\":\"%s\",\"access_only\":true}],\"include_access\":true}";
+        for (final String table : List.of(BASE, "does_not_exist")) {
+            exportCall("/v1/catalog/export", twoWays.formatted(table, table))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.error").value("catalog_export_invalid"));
+        }
+
+        putAccess(BASE, "cx-a", "get");
+        putAccess(BASE, "cx-b", "get");
+        exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\"},"
+                        + "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"access_only\":false}],\"include_access\":true}")
+                .andExpect(status().isOk());
+        exportCall("/v1/catalog/export", "{\"components\":[{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\"cx-a\",\"cx-b\"]},"
+                        + "{\"type\":\"table\",\"name\":\"" + BASE + "\",\"roles\":[\" cx-b\",\"cx-a\"]}],\"include_access\":true}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access." + BASE + ".*", org.hamcrest.Matchers.hasSize(2)));
+    }
+
+    /** An export body selecting only {@code table}'s access. */
+    private static String accessOnlyOf(String table) {
+        return "{\"components\":[{\"type\":\"table\",\"name\":\"" + table + "\",\"access_only\":true}],\"include_access\":true}";
+    }
+
+    private ResultActions exportCall(String path, String body) throws Exception {
+        return mockMvc.perform(post(path).contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
     private String firstColumn(String table) throws Exception {
         return json.readTree(mockMvc.perform(get("/v1/tables/" + table)).andExpect(status().isOk()).andReturn().getResponse()
                 .getContentAsString()).get("columns").get(0).get("name").asString();

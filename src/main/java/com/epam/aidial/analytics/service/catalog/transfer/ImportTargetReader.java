@@ -33,7 +33,8 @@ import java.util.Set;
 
 /**
  * Reads the {@link ImportTarget} snapshot the planner works from: the tables and pipelines on this environment
- * that the bundle names or depends on, in bundle shape, and the bundle pipeline names that were in use before.
+ * that the bundle names or depends on (its {@code access} keys included, with {@code include_access}), in bundle shape,
+ * and the bundle pipeline names that were in use before.
  *
  * <p>The import endpoints need only {@code TABLE_CREATE}, so what an entry reports as {@code prev} follows the
  * export's visibility rules, never the full objects the planner compares: sensitive columns only with the clearance on
@@ -62,7 +63,7 @@ class ImportTargetReader {
     @Transactional(readOnly = true)
     public ImportTarget read(CatalogBundle bundle, boolean includeAccess) {
         final Map<String, ImportTarget.Table> tables = new LinkedHashMap<>();
-        for (final TableDefinitionEntity definition : definitions.findAllById(tableNames(bundle))) {
+        for (final TableDefinitionEntity definition : definitions.findAllById(tableNames(bundle, includeAccess))) {
             final String name = definition.getName();
             final boolean visible = sensitiveAccess.mayGet(name);
             final boolean sensitiveVisible = sensitiveAccess.maySeeSensitive(name);
@@ -101,10 +102,16 @@ class ImportTargetReader {
                 (int) definitions.count(), limits.maxTables(), limits.maxColumnsPerTable());
     }
 
-    /** Every table name the bundle names or that one of its objects depends on. */
-    private static Set<String> tableNames(CatalogBundle bundle) {
+    /**
+     * Every table name the bundle names or that one of its objects depends on and, with {@code includeAccess}, every table
+     * its {@code access} keys name, which may be a table only this environment has.
+     */
+    private static Set<String> tableNames(CatalogBundle bundle, boolean includeAccess) {
         final Set<String> names = new LinkedHashSet<>();
         names.addAll(nullSafe(bundle.requiredSystemTables()));
+        if (includeAccess && bundle.access() != null) {
+            names.addAll(bundle.access().keySet());
+        }
         for (final BundleTable table : nullSafe(bundle.tables())) {
             names.add(table.table().name());
             if (table.table().sourceTable() != null) {

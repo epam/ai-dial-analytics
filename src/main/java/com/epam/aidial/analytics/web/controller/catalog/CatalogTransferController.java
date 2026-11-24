@@ -79,12 +79,15 @@ public class CatalogTransferController {
             description = "Returns a bundle file of the listed tables and pipelines with their dependency closure, "
                     + "computed in both directions; an empty or absent list exports every exportable object. System "
                     + "tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left "
-                    + "out. Each table needs TABLE_GET, and one with sensitive columns the caller may not see is "
-                    + "refused (403 `sensitive_column_not_entitled`), and one with a column a column policy hides from the "
-                    + "caller is refused 403 `column_not_entitled`, checked across every bundle table first. Access "
-                    + "(privileges, row policies and column policies) travels only with `include_access: true`, which "
-                    + "requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, and "
-                    + "an enrichment a column policy names joins the export.")
+                    + "out. Each selected table, and each table a selection's closure reaches, needs TABLE_GET (a pipeline "
+                    + "exported with `dependencies: false` checks none of its tables), and a table the bundle carries with sensitive columns the "
+                    + "caller may not see is refused (403 `sensitive_column_not_entitled`), and one with a column a column "
+                    + "policy hides from the caller is refused 403 `column_not_entitled`, checked across every bundle table "
+                    + "first. Access (privileges, row policies and column policies) travels only with `include_access: true`, "
+                    + "which requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, "
+                    + "and an enrichment a column policy names joins the export. Selectors narrow a component: "
+                    + "`dependencies: false` exports a pipeline alone; `access_only: true` carries only a table's access, "
+                    + "with no definition and nothing connected; `roles` carries only the listed roles' entries.")
     public ResponseEntity<CatalogBundle> export(@Valid @RequestBody(required = false) ExportRequest request) {
         final CatalogBundle bundle = exportService.export(request);
         final String filename = "adas-catalog-" + FILE_TIMESTAMP.format(bundle.exportedAt()) + ".json";
