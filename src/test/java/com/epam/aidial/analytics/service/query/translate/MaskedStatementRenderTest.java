@@ -69,7 +69,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void aRowProjectionDefinesTheMaskOncePerScopeAndProjectsItsFlag() {
+    void rowProjectionDefinesTheMaskOncePerScopeAndProjectsItsFlag() {
         final SelectQuery<Record> select = build(row(List.of(column(new FieldExpr("secret")), column(new FieldExpr("p"))),
                 new ComparisonNode(ComparisonOp.GT, List.of(new FieldExpr("n"), new ValueExpr(ValueType.INTEGER, "0")))));
         final String sql = render(select);
@@ -83,7 +83,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void anAggregateOutputIsFlaggedOverItsGroup() {
+    void aggregateOutputIsFlaggedOverItsGroup() {
         final StructuredQuery query = new StructuredQuery("t", null, QueryMode.AGGREGATE, false,
                 List.of(column(new FieldExpr("p")), new OutputColumn(new FnExpr("sum", false, List.of(new FieldExpr("n"))), "total")),
                 List.of("p"), null, null, null);
@@ -94,7 +94,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void aScopeReadingTheMaskOnlyInsideALambdaDefinesItInTheBody() {
+    void scopeReadingTheMaskOnlyInsideLambdaDefinesItInTheBody() {
         final Expr exists = new FnExpr("arrayExists", false, List.of(
                 new LambdaExpr(List.of("x"), new FnExpr("equals", false, List.of(new LambdaParamExpr("x"), new FieldExpr("secret")))),
                 new FieldExpr("labels")));
@@ -106,7 +106,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void aMaskedFieldProjectedUnderItsOwnNameIsSortedByItsMaskedExpression() {
+    void maskedFieldProjectedUnderItsOwnNameIsSortedByItsMaskedExpression() {
         final StructuredQuery query = new StructuredQuery("t", null, QueryMode.ROW, false, List.of(column(new FieldExpr("secret"))),
                 null, null, List.of(new SortItem("secret", SortDir.ASC, null)), null);
         final String sql = render(build(query));
@@ -116,7 +116,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void aDistinctWithMarksGroupsByEveryOutputAndItsBareCompositeFlags() {
+    void distinctWithMarksGroupsByEveryOutputAndItsBareCompositeFlags() {
         final StructuredQuery query = new StructuredQuery("t", null, QueryMode.ROW, true,
                 List.of(column(new FieldExpr("tags")), column(new FieldExpr("p"))), null, null, null, null);
         final SelectQuery<Record> select = build(query);
@@ -127,7 +127,7 @@ class MaskedStatementRenderTest {
     }
 
     @Test
-    void aMaskedFieldBringsItsRefusals() {
+    void maskedFieldBringsItsRefusals() {
         assertThatThrownBy(() -> build(row(List.of(new OutputColumn(new FieldExpr("secret"), "t")), null)))
                 .isInstanceOf(QueryValidationException.class).hasMessageContaining("'t'");
         assertThatThrownBy(() -> build(row(List.of(new OutputColumn(new FieldExpr("secret"), "t.x")), null)))

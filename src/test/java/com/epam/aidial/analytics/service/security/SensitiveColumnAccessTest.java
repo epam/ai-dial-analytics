@@ -246,7 +246,7 @@ class SensitiveColumnAccessTest {
 
     @Test
     @DisplayName("gaining a column-restricted role masks a confined role's columns to its rows")
-    void gainingARestrictedRoleMasks() {
+    void gainingRestrictedRoleMasks() {
         final TableDefinitionEntity t = table(SOURCE);
         entry(t, "A", List.of(Privilege.TABLE_READ), "P1", null);
         entry(t, "B", List.of(Privilege.TABLE_READ), null, List.of("x"));
