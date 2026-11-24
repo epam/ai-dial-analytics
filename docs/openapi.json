@@ -1861,9 +1861,6 @@
           },
           "roles": {
             "description": "Table only, with include_access. Carries only these roles' entries of the table; absent carries every role's",
-            "example": [
-              "analytics-viewers"
-            ],
             "items": {
               "type": "string"
             },

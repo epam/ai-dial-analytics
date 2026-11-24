@@ -4,10 +4,10 @@ import com.epam.aidial.analytics.exception.InvalidRequestParameterException;
 import com.epam.aidial.analytics.web.dto.StrictStringListDeserializer;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonValue;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
 import org.apache.commons.lang3.StringUtils;
 import tools.jackson.databind.annotation.JsonDeserialize;
 
@@ -36,10 +36,8 @@ public record ExportComponent(
                 + "definition, and nothing it depends on or that depends on it. Default false")
         @JsonProperty("access_only") Boolean accessOnly,
 
-        @Schema(description = "Table only, with include_access. Carries only these roles' entries of the table; absent "
-                + "carries every role's", example = "[\"analytics-viewers\"]")
-        // Publishes minItems; the constructor below refuses an empty list first, with its own message.
-        @Size(min = 1)
+        @ArraySchema(arraySchema = @Schema(description = "Table only, with include_access. Carries only these roles' entries "
+                + "of the table; absent carries every role's"), minItems = 1)
         @JsonDeserialize(using = StrictStringListDeserializer.class) List<String> roles) {
 
     public ExportComponent {
