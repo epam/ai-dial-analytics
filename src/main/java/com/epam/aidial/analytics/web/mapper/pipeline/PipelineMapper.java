@@ -340,8 +340,13 @@ public abstract class PipelineMapper {
     public PipelineDto toDto(PipelineEntity pipeline, ResolvedEnrichPipeline resolved,
             PipelineFreshnessDiagnostics.Report freshness, PipelineView view, List<String> notes) {
         final boolean enrich = pipeline.getKind() == PipelineKind.ENRICH;
+        return toDto(pipeline, resolved, enrich ? specOf(pipeline, EnrichSpec.class) : null, freshness, view, notes);
+    }
+
+    private PipelineDto toDto(PipelineEntity pipeline, ResolvedEnrichPipeline resolved, EnrichSpec enrichSpec,
+            PipelineFreshnessDiagnostics.Report freshness, PipelineView view, List<String> notes) {
+        final boolean enrich = pipeline.getKind() == PipelineKind.ENRICH;
         final AggregateSpec aggregate = enrich ? null : specOf(pipeline, AggregateSpec.class);
-        final EnrichSpec enrichSpec = enrich ? specOf(pipeline, EnrichSpec.class) : null;
         final boolean compiled = view == PipelineView.COMPILED;
         final EnrichSpec compiledSpec = compiled ? enrichSpec : null;
         return new PipelineDto(
@@ -366,6 +371,17 @@ public abstract class PipelineMapper {
                 enrichSpec == null ? null : toAdvancedDto(enrichSpec),
                 toStateDto(pipeline, freshness),
                 notes == null || notes.isEmpty() ? null : List.copyOf(notes));
+    }
+
+    /**
+     * The compiled projection of a declaration <b>as it was resolved</b>, rather than as it is stored: the
+     * declaration a disabled pipeline's dry run was gated with, whose output mapping the gate derived in memory.
+     * A reload would read the mapping stored when the draft was saved — empty if its target's columns were defined
+     * only afterwards — and hand the Enrichment Runner outputs that arming would not store.
+     */
+    public PipelineDto toCompiledDto(ResolvedEnrichPipeline resolved) {
+        return toDto(resolved.pipeline(), resolved, resolved.spec(), PipelineFreshnessDiagnostics.Report.NONE,
+                PipelineView.COMPILED, List.of());
     }
 
     /**

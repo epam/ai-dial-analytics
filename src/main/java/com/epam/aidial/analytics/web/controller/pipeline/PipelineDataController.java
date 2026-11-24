@@ -24,6 +24,8 @@ import com.epam.aidial.analytics.web.dto.enrichment.MaterializeRequest;
 import com.epam.aidial.analytics.web.dto.enrichment.MaterializeResponse;
 import com.epam.aidial.analytics.web.dto.enrichment.ScanRequest;
 import com.epam.aidial.analytics.web.dto.enrichment.ScanResponse;
+import com.epam.aidial.analytics.web.dto.enrichment.TrialInputRequest;
+import com.epam.aidial.analytics.web.dto.enrichment.TrialInputResponse;
 import com.epam.aidial.analytics.web.dto.pipeline.PipelineRequests.PreviewRequest;
 import com.epam.aidial.analytics.web.dto.pipeline.PipelineResponses.PreviewDto;
 import com.epam.aidial.analytics.web.dto.pipeline.PipelineResponses.RefreshDto;
@@ -68,13 +70,15 @@ import java.util.function.Supplier;
  *       service layer, which also holds in {@code none} mode where method security is inert.
  * </ul>
  *
- * <p><b>The four runner endpoints additionally require the {@code Adas-Contract-Version} header</b>, and
+ * <p><b>The five runner endpoints additionally require the {@code Adas-Contract-Version} header</b>, and
  * are refused 409 without a matching one — see {@code RunnerContractInterceptor}, which is deny-by-default
  * over every {@code POST} on this class except the two marked {@link RunnerContractExempt}. So the split
  * above is enforced by three independent mechanisms that must agree: {@code @RequiresPrivilege(REGISTRY_ADMIN)} here, the
- * four {@code authenticated()} matchers in {@code OidcSecurityConfiguration}, and that interceptor.
+ * {@code /v1/**} {@code authenticated()} matcher in {@code OidcSecurityConfiguration}, and that interceptor.
+ * {@code trial-input} is the exception to the split: the runner forwards an author's credential on it, so it
+ * requires {@code REGISTRY_ADMIN} as the preview does rather than the data-plane grants.
  *
- * <p>The four runner endpoints resolve everything from the stored declaration (its already-validated
+ * <p>The four scan, group, materialize and write endpoints resolve everything from the stored declaration (its already-validated
  * input, filter and grain, and its target enrichment), so the runner never names a table, a filter, or a
  * column set. A declaration that reads a {@code sensitive} column additionally requires the calling
  * identity to be entitled to see sensitive columns, re-checked at each read or derive. The two read
@@ -98,8 +102,8 @@ public class PipelineDataController {
     private static final PreviewRequest NO_PREVIEW_BODY = new PreviewRequest(null, null, null);
 
     /**
-     * The {@code Adas-Contract-Version} request header, described once for the four runner-only surfaces
-     * that carry it. A constant rather than four copies of the same paragraph: they document one rule, and
+     * The {@code Adas-Contract-Version} request header, described once for the five runner-only surfaces
+     * that carry it. A constant rather than five copies of the same paragraph: they document one rule, and
      * four spellings of it would drift the way the published OpenAPI document is least likely to be
      * re-read. See {@code RunnerContractInterceptor}, which enforces it.
      */
@@ -110,7 +114,7 @@ public class PipelineDataController {
                     + "build serves in the same header, so a caller that sees no echo is talking to an "
                     + "ADAS older than the contract and must not act on what it read.";
 
-    /** The 409 those two codes render as, described once for the same four surfaces. */
+    /** The 409 those two codes render as, described once for the same five surfaces. */
     private static final String CONTRACT_REFUSAL_DOC =
             "Contract version missing (`runner_contract_required`) or not the one this build serves "
                     + "(`runner_contract_mismatch`); nothing was read, computed or written";
@@ -265,6 +269,51 @@ public class PipelineDataController {
             @Valid @RequestBody GroupFetchRequest request) {
         final GroupPage page = served(name, () -> groupFetchService.fetch(name, request.groupKey(), request.limit()));
         return new GroupFetchResponse(page.rows(), page.truncated());
+    }
+
+    @PostMapping("/trial-input")
+    @ApiInternal
+    @RequiresPrivilege(Privilege.REGISTRY_ADMIN)
+    @Parameter(in = ParameterIn.HEADER, name = RunnerContract.HEADER, required = true,
+            description = CONTRACT_HEADER_DOC, example = RunnerContract.VERSION_VALUE, schema = @Schema(type = "string"))
+    @ApiResponse(responseCode = "200", description = "The preview, the declaration it sampled through, and the rows "
+            + "the runner would receive, uncapped")
+    @ApiResponse(responseCode = "400", description = "A malformed body, or one carrying an unknown member (`bad_request`)")
+    @ApiResponse(responseCode = "403", description = "As the preview: a column the caller may not read "
+            + "(`column_not_entitled`, `sensitive_column_not_entitled`), a row-confined caller (`row_policy_confined`), "
+            + "no grant on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` (`forbidden`)")
+    @ApiResponse(responseCode = "404", description = "No such pipeline (`unknown_pipeline`)")
+    @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC + "; or a conflict arming would also report "
+            + "(`pipeline_conflict`, `table_is_system`)")
+    @ApiResponse(responseCode = "422", description = "The declaration would not arm; the pipeline calls no model "
+            + "(`aggregate`, or a `sql` transform); the body does not fit the pipeline (`limit` outside 1-5 or on a "
+            + "`group` pipeline, and the preview's own refusals) (`pipeline_validation_failed`); or a read exceeded "
+            + "the preview's budget (`pipeline_preview_budget_exceeded`)")
+    @Operation(operationId = "fetchPipelineTrialInput",
+            summary = "Read the input of the Enrichment Runner's dry run of an llm pipeline",
+            description = "Runs every check and the sample `POST /v1/pipelines/{name}/preview` runs for the same body, "
+                    + "under the caller's identity — the runner forwards the credential of the person who asked for "
+                    + "the dry run — and returns, in one snapshot, that `preview`, the compiled `pipeline` it sampled "
+                    + "through (for a disabled pipeline, as the gate derived it) and the `input_rows` the runner would "
+                    + "receive with no value cap: the newest `limit` sampled rows of a row-grain pipeline, or the "
+                    + "whole group of a `group` one as `/group-rows` assembles it, with `truncated`. Writes nothing, "
+                    + "advances no cursor, and is served for a disabled pipeline.")
+    public TrialInputResponse trialInput(
+            @Parameter(description = "Pipeline name") @PathVariable String name,
+            @RequestBody(required = false) TrialInputRequest request) {
+        // Not through served(...): a trial input is asked for by an author, and recording it on the runner's
+        // contact series would make a runner whose scheduled work has stalled look alive.
+        final TrialInputRequest body = request == null ? new TrialInputRequest(null, null, null, null) : request;
+        final PipelineEntity pipeline = pipelines.get(name);        // 404 unknown_pipeline
+        if (pipeline.getKind() != PipelineKind.ENRICH) {
+            throw new PipelineValidationException("pipeline '" + name + "' is of kind '" + pipeline.getKind().code()
+                    + "', which calls no model and has nothing to try; trial input serves the '"
+                    + PipelineKind.ENRICH.code() + "' kind");
+        }
+        final EnrichPreviewService.TrialInput trial = enrichPreviewService.trialInput(
+                name, body.groupKey(), body.from(), body.to(), body.limit());
+        return new TrialInputResponse(mapper.toPreviewDto(trial.preview()), mapper.toCompiledDto(trial.compiled()),
+                trial.inputRows(), trial.truncated());
     }
 
     @PostMapping("/materialize")

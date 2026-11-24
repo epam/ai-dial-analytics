@@ -117,6 +117,30 @@ class EnrichPreviewServiceTest {
     }
 
     @Test
+    void trialInputGroupFetchOverItsBudgetIsTheAuthorsRefusal() {
+        // The fetch is trial input's own read beyond the preview's: refused under the preview's code all the same.
+        given(pipelines.getEnrich(NAME)).willReturn(enabledLlm("chat_id"));
+        given(groups.previewMembers(any(), anyString(), anyInt())).willReturn(new GroupFetchService.MemberSample(
+                List.of(Map.of("deployment", "gpt-4")), List.of(), 1, 200, true, 1));
+        given(groups.fetchForTrial(any(), anyString())).willThrow(refusedByTheRunnerBudget());
+
+        assertThatThrownBy(() -> service.trialInput(NAME, "chat-42", null, null, null))
+                .isInstanceOf(PipelinePreviewBudgetExceededException.class)
+                .hasMessageContaining(CEILING)
+                .hasMessageContaining("member_select");
+    }
+
+    @Test
+    void trialInputRowReadOverItsBudgetIsTheAuthorsRefusal() {
+        given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
+        given(scans.previewRows(any(), anyInt(), any(), any())).willThrow(refusedByTheRunnerBudget());
+
+        assertThatThrownBy(() -> service.trialInput(NAME, null, null, null, 2))
+                .isInstanceOf(PipelinePreviewBudgetExceededException.class)
+                .hasMessageContaining("narrower `from`/`to` window");
+    }
+
+    @Test
     void namedGroupKeyIsUsedExactlyAsGiven() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm("chat_id"));
         given(groups.previewMembers(any(), anyString(), anyInt()))

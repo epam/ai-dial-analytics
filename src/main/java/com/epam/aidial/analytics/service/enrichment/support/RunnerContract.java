@@ -17,8 +17,9 @@ package com.epam.aidial.analytics.service.enrichment.support;
  *
  * <p><b>When it must be raised.</b> On any breaking change to the compiled projection
  * ({@code GET /v1/pipelines?kind=enrich&view=compiled}, and the single read of an {@code enrich} pipeline)
- * or to the request or response shape of any of the four runner-only data-plane endpoints —
- * {@code POST /v1/pipelines/{name}/scan}, {@code /group-rows}, {@code /materialize} and {@code /rows}.
+ * or to the request or response shape of any of the runner-only data-plane endpoints —
+ * {@code POST /v1/pipelines/{name}/scan}, {@code /group-rows}, {@code /materialize}, {@code /rows} and
+ * {@code /trial-input}.
  * Renaming {@code next_cursor} is exactly as breaking to the runner as dropping {@code grain_key}, so both
  * halves count. {@code RunnerContractShapeTest} pins those shapes against a golden list and fails the
  * build naming this constant when either moves, so the bump is not left to be remembered.
@@ -32,8 +33,11 @@ public final class RunnerContract {
      * constant.
      *
      * <p>{@code 6}: the compiled projection's {@code advanced} block gains {@code input_token_budget}.
+     *
+     * <p>{@code 7}: {@code POST /v1/pipelines/{name}/trial-input}, the read the runner's dry run is built on,
+     * joins the guarded endpoints.
      */
-    public static final String VERSION_VALUE = "6";
+    public static final String VERSION_VALUE = "7";
 
     /**
      * The same version as a number, for comparisons and messages. Compared for equality and nothing else;
@@ -43,7 +47,7 @@ public final class RunnerContract {
 
     /**
      * The header that carries it, on the response for every {@code /v1/pipelines} call and on the request
-     * for the four runner-only data-plane endpoints.
+     * for the runner-only data-plane endpoints.
      *
      * <p>Its <b>absence</b> from a response is the signal that matters: an unknown request header is
      * silently ignored by any Spring service, so a client cannot detect an older ADAS by sending
