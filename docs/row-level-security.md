@@ -70,7 +70,7 @@ role that reads the table with **no** policy sees every row, so give that role a
 
 | State | When | What the caller gets |
 |---|---|---|
-| visible | a role with no row policy allows it, or every role the caller reads through allows it | its value on every row |
+| visible | a role with no row policy allows it, or every role the caller reads through and every rows-only entry it carries allows it | its value on every row |
 | masked | not visible, but some role the caller reads through allows it | its value on the rows an allowing role's `rows` admit, absent (null) on the others |
 | hidden | no role the caller reads through allows it | nothing: it is absent everywhere, revision snapshots included, and referencing it fails as an unknown field |
 
@@ -97,9 +97,11 @@ A **rows-only entry**, one carrying `rows` on a role with no read path, adds its
   is `true` whenever a column policy confines the caller (see
   [`audit-trail`](../openspec/specs/audit-trail/spec.md), "Historical table snapshots").
 - Two query shapes are refused `400` beside a masked field: `INTERSECT` or `EXCEPT` over an output that reads it, and
-  an output name or lambda parameter that equals a table the query reads or begins with `<table>.`. An enrichment field
-  projected without `as`, whose output carries its own qualified name, is allowed. A wildcard query that ran before can
-  meet either refusal once a masked column joins the wildcard.
+  an output name or lambda parameter that equals a table the query reads or begins with `<table>.`. An output named
+  after the enrichment field it projects, as one projected without `as` is, is allowed. A wildcard query can meet either
+  refusal once a masked column joins the wildcard.
+- A DSL `distinct` projection with a window output is refused `400` when an output reads a masked field, until it is
+  supported; the SQL surface runs it.
 - `$masked` is refused as an output name on every surface, for every caller.
 
 **Hiding instead of masking.** On a table where the source, or one of its enrichments, stores a column whose physical
@@ -186,5 +188,4 @@ every other role's row policies.
   `columns_restricted` and the listed columns show what applies. In ClickHouse, row policies appear as the
   `additional_table_filters` setting in `system.query_log`.
 - **Rollback.** An older build ignores column policies, so a rollback reveals the columns they hide. Delete them
-  first if that must not happen. A build that predates masking hides masked columns again, so queries over them fail
-  with `unknown field` for those callers.
+  first if that must not happen.

@@ -541,7 +541,7 @@ public class StructuredQueryBuilder {
             flags = MaskMarking.flags(exprTranslator, effective.bindings(), mode, outputs,
                     !query.distinct() ? MaskMarking.Collapse.NONE : grouped ? MaskMarking.Collapse.GROUPED : MaskMarking.Collapse.WINDOWED,
                     partition);
-            if (query.distinct() && !flags.isEmpty() && outputs.values().stream().anyMatch(StructuredQueryBuilder::containsWindow)) {
+            if (query.distinct() && !flags.isEmpty() && outputs.values().stream().anyMatch(WindowExpressions::containsWindow)) {
                 // shortcut: a distinct block with a window output cannot collapse its marked rows in the block that computes the
                 // window; it is refused until it is planned as an inner window block under an outer grouped one. Such a query
                 // reads a masked field, which it could not name before masking.
@@ -564,13 +564,6 @@ public class StructuredQueryBuilder {
                 collapsed));
         applyPage(select, query.page(), maxLimit, policy);
         return select;
-    }
-
-    /** Whether {@code expr} holds a window expression anywhere. */
-    private static boolean containsWindow(Expr expr) {
-        final boolean[] found = {false};
-        WindowExpressions.visit(expr, node -> found[0] |= node instanceof WindowExpr);
-        return found[0];
     }
 
     /** Whether {@code expr} reads a masked field of {@code model}. */

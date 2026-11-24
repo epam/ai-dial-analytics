@@ -37,7 +37,7 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§19).
 - **With Keeper down, row writes, pipeline runs and the data-sync requeue answer `503` in about ten seconds**, and the writer user must be
   allowed two `insert_keeper_*` settings (§20).
-- **A column one of a caller's roles allows but another does not is masked, not hidden**: JSON rows carry a reserved
+- **A column that only row-confined roles allow, and another of the caller's roles does not, is masked**, shown on those roles' rows: JSON rows carry a reserved
   `$masked` member, and `$masked` is refused as an output name for everyone (§21).
 
 ---
@@ -307,9 +307,9 @@ policies carry over as entries; `V57` adds the new columns.
 
 **Column policies** are new. A hidden column is absent from every read surface, and pipeline, runner and export paths
 refuse it with `403 column_not_entitled`. A restricted runner's list must also name `event_id`, `_ingested_at` and, for
-an aligned target, `request_time` on `dial_usage_log`. Gaining a column-restricted role can hide columns (see
-[`row-level-security.md`](row-level-security.md#column-policies)). Revisions hide what the table's policies hide now,
-or, for a deleted table, what they hid when it was deleted.
+an aligned target, `request_time` on `dial_usage_log`. A column that only row-confined roles allow, and another of the
+caller's roles does not, is masked to those roles' rows, except on a table where masking falls back to hiding (§21).
+Revisions hide what the table's policies hide now, or, for a deleted table, what they hid when it was deleted.
 
 **Runners and pipeline authors.** A runner needs the source's clearance when the source's partition, version or
 identity column is `sensitive`, or it gets `403 sensitive_column_not_entitled`. A malformed `enrich` fragment over a
@@ -514,26 +514,27 @@ ingest and enrichment relayout copies keep ClickHouse's defaults and pause throu
 A caller whose roles each carry their own row and column policies sees each role's columns on that role's rows. A
 column some role it reads through allows, but that is not visible on every row it reads, is **masked**: listed and
 queryable, its value present on the rows an allowing role admits and absent elsewhere
-([`row-level-security.md`](row-level-security.md#column-policies)). Gaining a role no longer removes a column.
+([`row-level-security.md`](row-level-security.md#column-policies)). Gaining a role never removes a column from the
+rows the caller's other roles admit, except on a table where masking falls back to hiding: one whose source or
+enrichments store a column named after a table of the entity (`row-level-security.md`, "Hiding instead of masking").
 
 - **JSON rows.** `POST /v1/queries/execute` and `/execute-sql`, and so the saved queries and dashboard widgets run
   through them, add a reserved `$masked` member to each row holding an absent cell or a partial aggregate or window
   cell, listing those output columns. A client that renders every row member as a column, such as a generic JSON
   panel, shows one more column on those rows: declare its columns. A consumer that sums a masked column reads
   `$masked`, or it reads a partial total as complete. CSV export and Flight SQL return nulls with no flag.
-- **A reserved name, for every caller.** An output column named `$masked` is refused `400 bad_request` on every query
-  surface, and a saved query or widget that projects one is refused on save. Rename such outputs before upgrading.
-- **New refusals beside a masked column.** `INTERSECT` and `EXCEPT` over an output that reads one, and an output name
-  or lambda parameter equal to a table the statement reads or beginning with `<table>.`, are refused `400`. A query
-  that names the column failed before with `unknown field`; one that reaches it through `SELECT *` ran before and is
-  refused now.
-- **Rows-only entries narrow.** An entry carrying `rows` on a role with no read path now narrows, through its
-  `columns`, what the rows it adds show; with `columns: null` it narrows nothing.
+- **A reserved name, for every caller (breaking).** An output column named `$masked` is refused `400 bad_request`
+  (Flight SQL `INVALID_ARGUMENT`) on every query surface, and a saved query or widget that projects one is refused on
+  save. Rename such outputs before upgrading.
+- **Refusals beside a masked column.** `INTERSECT` and `EXCEPT` over an output that reads one, and an output name or
+  lambda parameter equal to a table the statement reads or beginning with `<table>.`, are refused `400`.
+- **Rows-only entries.** An entry carrying `rows` on a role with no read path narrows, through its `columns`, what the
+  rows it adds show; with `columns: null` it narrows nothing.
 - **Paths without a row filter.** Pipeline authoring and the runner refuse a masked column as a hidden one
   (`403 column_not_entitled`), and so does a TTL over one.
-- **Discovery** marks a masked field `"masked": true`, and `permissions.columns_restricted` counts masked columns.
-- **Rollback.** An earlier build hides masked columns again: queries, saved queries and widgets over them fail with
-  `unknown field` for those callers. No data is at risk.
+- **Discovery** marks a masked field `"masked": true`, and `permissions.columns_restricted` is `true` when a column is
+  masked as well as when one is hidden.
+- **Rollback** is §11's: a 0.23 build ignores column policies, so every column they hide or mask becomes visible.
 
 ## Summary
 

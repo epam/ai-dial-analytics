@@ -198,6 +198,12 @@ which it is the only row whose value the caller does not know, repeated equality
 row's stored value. No response carries the value. An administrator who needs such a column's absent values kept
 SHALL list it on every governing role and every row-contributing role, which makes it visible.
 
+A sort reads a masked field's masked value, never the stored ordering key, so it cannot read in key order: on a read
+without `FINAL` of a table whose ordering key leads with the masked column, or whose earlier key columns the filter
+fixes by equality, the data store reads every row the filter selects before it keeps the page, where a caller allowed
+the column could stop at the page limit. The rows returned are those of the masked order; only the query's time and
+budget are at stake.
+
 A comparison with the null literal, or an `in` list that holds one, is not rewritten. `NULL IN (…, NULL, …)` is true
 under ClickHouse's `transform_null_in = 1`, which query statements do not pin, so such a list stays unrewritten; a list
 without a null item is not true on `NULL` under either setting. A comparison with the null literal is a null test, not

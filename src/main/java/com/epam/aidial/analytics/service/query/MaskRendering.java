@@ -25,8 +25,9 @@ import java.util.function.Supplier;
  * renders {@code (ifNull(<or>, 0) AS __adas_mcond_<i>)} and every other reference in the scope, lambda bodies
  * included, the bare alias. ClickHouse resolves an alias anywhere in its SELECT scope — before its definition, from
  * {@code WHERE}, {@code GROUP BY}, {@code HAVING}, {@code ORDER BY}, from an aggregate's argument and from a lambda body —
- * while an alias defined inside a lambda body is visible only there. A scope whose every reference sits in lambda bodies
- * therefore defines the alias once per outermost body.
+ * while an alias defined inside a lambda body is visible only there and in the bodies nested in it. A scope whose every
+ * reference sits in lambda bodies therefore defines the alias at its first reference in each body entered before any
+ * enclosing body defined it.
  *
  * <p>Which reference defines is decided while each scope renders, not when a condition is built, because one translated
  * condition can render in more than one scope (the key subquery receives the outer filter). {@link #render} therefore
@@ -158,7 +159,7 @@ public final class MaskRendering {
         /** Every alias and lambda parameter the statement declares (first pass). */
         private final Set<String> declared = new HashSet<>();
         private final Map<ColumnMask, String> aliases = new HashMap<>();
-        /** The render context of the statement in the current pass: the one that visits a SELECT first. */
+        /** The render context of the statement in the current pass: the first one seen, which renders its outer SELECT. */
         private Context<?> statement;
 
         /** Whether {@code ctx} renders the statement, rather than a part of it on its own; claims the first context seen. */
