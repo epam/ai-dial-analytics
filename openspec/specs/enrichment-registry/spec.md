@@ -3551,7 +3551,7 @@ contract version SHALL therefore be raised to `5` (see [pipeline-registry](../pi
 - **GIVEN** an enabled `dial_app_route` pipeline with `route: "insights"`
 - **WHEN** the runner reads `GET /v1/pipelines?kind=enrich&view=compiled`
 - **THEN** that entry's `transform` carries `preset` `"dial_app_route"`, `model` and `route`
-  `"insights"`, and the response carries `Adas-Contract-Version: 6`, the version this build serves (see
+  `"insights"`, and the response carries `Adas-Contract-Version: 7`, the version this build serves (see
   [enrichment-runtime](../enrichment-runtime/spec.md))
 
 #### Scenario: A chat-completion transform carries no route member

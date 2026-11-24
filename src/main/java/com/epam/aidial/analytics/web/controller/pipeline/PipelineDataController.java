@@ -64,10 +64,10 @@ import java.util.function.Supplier;
  *       declaration over real rows rather than reporting registered state: {@code preview} (the dry-run
  *       gate, for either kind) and {@code refresh} (run one window now, {@code aggregate} only).
  *   <li><b>Runner surfaces</b>, reachable by any authenticated identity holding the target enrichment's
- *       WRITE grant: {@code scan}, {@code group-rows}, {@code materialize} and {@code rows}. The security
- *       chain pins these four paths as {@code authenticated()} <em>before</em> the admin rule, so the
- *       Enrichment Runner does not need global admin; the per-call authorization is the grant check in the
- *       service layer, which also holds in {@code none} mode where method security is inert.
+ *       WRITE grant: {@code scan}, {@code group-rows}, {@code materialize} and {@code rows}. They carry no
+ *       {@code @RequiresPrivilege}, so the Enrichment Runner does not need global admin; the per-call
+ *       authorization is the grant check in the service layer, which also holds in {@code none} mode where
+ *       method security is inert.
  * </ul>
  *
  * <p><b>The five runner endpoints additionally require the {@code Adas-Contract-Version} header</b>, and
@@ -76,7 +76,8 @@ import java.util.function.Supplier;
  * above is enforced by three independent mechanisms that must agree: {@code @RequiresPrivilege(REGISTRY_ADMIN)} here, the
  * {@code /v1/**} {@code authenticated()} matcher in {@code OidcSecurityConfiguration}, and that interceptor.
  * {@code trial-input} is the exception to the split: the runner forwards an author's credential on it, so it
- * requires {@code REGISTRY_ADMIN} as the preview does rather than the data-plane grants.
+ * requires {@code REGISTRY_ADMIN}, as the preview does, in addition to {@code read} on the source and {@code write}
+ * on the target.
  *
  * <p>The four scan, group, materialize and write endpoints resolve everything from the stored declaration (its already-validated
  * input, filter and grain, and its target enrichment), so the runner never names a table, a filter, or a
@@ -104,7 +105,7 @@ public class PipelineDataController {
     /**
      * The {@code Adas-Contract-Version} request header, described once for the five runner-only surfaces
      * that carry it. A constant rather than five copies of the same paragraph: they document one rule, and
-     * four spellings of it would drift the way the published OpenAPI document is least likely to be
+     * five spellings of it would drift the way the published OpenAPI document is least likely to be
      * re-read. See {@code RunnerContractInterceptor}, which enforces it.
      */
     private static final String CONTRACT_HEADER_DOC =
@@ -281,7 +282,8 @@ public class PipelineDataController {
     @ApiResponse(responseCode = "400", description = "A malformed body, or one carrying an unknown member (`bad_request`)")
     @ApiResponse(responseCode = "403", description = "As the preview: a column the caller may not read "
             + "(`column_not_entitled`, `sensitive_column_not_entitled`), a row-confined caller (`row_policy_confined`), "
-            + "no grant on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` (`forbidden`)")
+            + "no `read` on the source or `write` on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` "
+            + "(`forbidden`)")
     @ApiResponse(responseCode = "404", description = "No such pipeline (`unknown_pipeline`)")
     @ApiResponse(responseCode = "409", description = CONTRACT_REFUSAL_DOC + "; or a conflict arming would also report "
             + "(`pipeline_conflict`, `table_is_system`)")
@@ -293,10 +295,11 @@ public class PipelineDataController {
             summary = "Read the input of the Enrichment Runner's dry run of an llm pipeline",
             description = "Runs every check and the sample `POST /v1/pipelines/{name}/preview` runs for the same body, "
                     + "under the caller's identity — the runner forwards the credential of the person who asked for "
-                    + "the dry run — and returns, in one snapshot, that `preview`, the compiled `pipeline` it sampled "
+                    + "the dry run — and returns that `preview`, the compiled `pipeline` it sampled "
                     + "through (for a disabled pipeline, as the gate derived it) and the `input_rows` the runner would "
                     + "receive with no value cap: the newest `limit` sampled rows of a row-grain pipeline, or the "
-                    + "whole group of a `group` one as `/group-rows` assembles it, with `truncated`. Writes nothing, "
+                    + "whole group of a `group` one as `/group-rows` assembles it, with `truncated`, read after the "
+                    + "preview's member sample and so able to hold members ingested since. Writes nothing, "
                     + "advances no cursor, and is served for a disabled pipeline.")
     public TrialInputResponse trialInput(
             @Parameter(description = "Pipeline name") @PathVariable String name,

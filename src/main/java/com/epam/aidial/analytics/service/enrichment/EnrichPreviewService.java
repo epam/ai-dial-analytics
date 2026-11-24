@@ -51,9 +51,9 @@ import java.util.function.Supplier;
  * <p><b>It writes nothing, calls no model, and renders no prompt.</b> The first two are what make it
  * free to run; the third is a boundary rather than an omission. The template renderer and the
  * group-input assembler live in the runner, and their escaping decides what the model actually receives;
- * a second implementation here would be the last place anyone would notice drift. No rendered-request dry
- * run exists on either service — the runner exposes runtime introspection and operator actions, not a
- * rendering surface — and one belongs to the runner, which owns the renderer.
+ * a second implementation here would be the last place anyone would notice drift. The rendered-request dry
+ * run belongs to the runner, which owns the renderer; {@link #trialInput} is the read it is built on, and
+ * renders nothing either.
  *
  * <p>It answers in the shared preview shape and echoes nothing the pipeline read serves: no schema, no
  * mapping, no inputs. What it adds is what only a read can tell — the sampled values, their types, and the
@@ -62,7 +62,8 @@ import java.util.function.Supplier;
  * <p><b>Every read rides an already-bounded governed path</b> — {@link ScanService},
  * {@link GroupFetchService}, or {@link MaterializeService#preview} — under an explicit row cap, rather than the
  * aggregate preview's compiled-statement path. Every read that returns row values is capped at
- * {@link #SAMPLE_ROWS}; the others project no bound column and carry caps of their own — the group choice and
+ * {@link #SAMPLE_ROWS}, except trial input's group fetch, which returns what the runner's own fetch would, under
+ * that fetch's row and byte caps; the others project no bound column and carry caps of their own — the group choice and
  * the clamp probe read one row, and a group's member count reads up to one past the runner's fetch cap. That is not a
  * preference for reuse: the aggregate preview's budget bounds memory and time but <em>not rows read</em>,
  * and an {@code llm} pipeline's bindings routinely name the request and response bodies, which are
@@ -98,6 +99,9 @@ public class EnrichPreviewService {
     private static final String GROUP_REMEDY = "Bind fewer heavy columns, narrow the group with a "
             + "`member_select`, or have pipeline.budget.* raised.";
 
+    private static final String TRIAL_ROWS_REMEDY = "Pass a smaller `limit`, reference fewer heavy columns in the "
+            + "`filter` or the bindings, or have pipeline.budget.* raised.";
+
     private final PipelineService pipelines;
     private final PipelineAuthorizer authorizer;
     private final EnrichResolver resolver;
@@ -114,7 +118,7 @@ public class EnrichPreviewService {
 
     /**
      * A sample before its values are capped: its columns, rows, the group it describes, and its notes — and, for a
-     * row-grain trial input, the same rows keyed as the runner's scan keys them ({@code rows} itself otherwise).
+     * row-grain trial input, its first `limit` rows keyed as the runner's scan keys them ({@code rows} itself otherwise).
      */
     private record Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey,
             List<PreviewNote> notes, List<Map<String, Object>> scanRows) {
@@ -187,7 +191,7 @@ public class EnrichPreviewService {
         final int rows = trialRows(gated, limit);
         final ResolvedEnrichPipeline resolved = gated.resolved();
         return underPreviewBudget(gated.group(), () -> {
-            final LlmSample llm = llmSample(resolved, gated.declaration(), gated.transform(), groupKey, from, to, true);
+            final LlmSample llm = llmSample(resolved, gated.declaration(), gated.transform(), groupKey, from, to, rows);
             final Sample sample = llm.sample();
             final PipelinePreview preview = finish(PortableQueryRenderer.Portable.NONE, sample);
             // The declaration the sample was read through, carrying the schema the preview composed from it: for a
@@ -195,10 +199,10 @@ public class EnrichPreviewService {
             final ResolvedEnrichPipeline compiled = new ResolvedEnrichPipeline(resolved.pipeline(), resolved.spec(),
                     resolved.source(), resolved.grainKey(), resolved.versionColumn(), llm.schema());
             if (!gated.group()) {
-                final List<Map<String, Object>> scanRows = sample.scanRows();
-                return new TrialInput(preview, compiled, scanRows.subList(0, Math.min(rows, scanRows.size())), null);
+                return new TrialInput(preview, compiled, sample.scanRows(), null);
             }
-            if (sample.groupKey() == null || sample.rows().isEmpty()) {
+            // Gated on the group alone: a group whose sampled members could not be read back may still be fetched.
+            if (sample.groupKey() == null) {
                 return new TrialInput(preview, compiled, List.of(), false);
             }
             final GroupPage page = groups.fetchForTrial(resolved, sample.groupKey());
@@ -281,8 +285,10 @@ public class EnrichPreviewService {
             // refused member read is the bound columns, a refused member count is the filter.
             final String exceeded = ex.exceeded() == null ? "its resource budget" : ex.exceeded();
             final String read = ex.what() == null ? "" : " (" + ex.what() + ")";
+            final String remedy = ScanService.TRIAL_ROWS_READ.equals(ex.what()) ? TRIAL_ROWS_REMEDY
+                    : group ? GROUP_REMEDY : WINDOWED_REMEDY;
             throw new PipelinePreviewBudgetExceededException("this pipeline's preview" + read + " exceeded " + exceeded
-                    + " (pipeline.budget.*). " + (group ? GROUP_REMEDY : WINDOWED_REMEDY), ex);
+                    + " (pipeline.budget.*). " + remedy, ex);
         }
     }
 
@@ -319,17 +325,17 @@ public class EnrichPreviewService {
             EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
             String groupKey, Instant from, Instant to) {
         return finish(PortableQueryRenderer.Portable.NONE,
-                llmSample(resolved, declaration, transform, groupKey, from, to, false).sample());
+                llmSample(resolved, declaration, transform, groupKey, from, to, 0).sample());
     }
 
     /**
      * The {@code llm} sample before its values are capped, and the response schema it was composed against.
      *
-     * @param scanShaped whether a row-grain sample also reads its rows as the runner's scan keys them, for trial input
+     * @param trialRows how many row-grain rows trial input also reads as the runner's scan keys them; 0 for the preview
      */
     private LlmSample llmSample(ResolvedEnrichPipeline resolved,
             EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
-            String groupKey, Instant from, Instant to, boolean scanShaped) {
+            String groupKey, Instant from, Instant to, int trialRows) {
         final Map<String, Object> stored = transform.getResponseSchema();
         // Composed through the throwing entry point, not the resolver's swallowing one, although the schema is
         // no longer returned: a target whose columns no longer fit the transform's outputs is the single most
@@ -341,7 +347,7 @@ public class EnrichPreviewService {
 
         final Sample sample = declaration.triggerKind() == TriggerKind.GROUP
                 ? groupSample(resolved, declaration, groupKey, from, to)
-                : rowSample(resolved, declaration, groupKey, from, to, scanShaped);
+                : rowSample(resolved, declaration, groupKey, from, to, trialRows);
         final List<PreviewNote> notes = new ArrayList<>(sample.notes());
         if (schema == null) {
             notes.add(PreviewNote.of(PreviewNoteCode.UNCONSTRAINED_RESPONSE, "this declaration stores no "
@@ -361,9 +367,9 @@ public class EnrichPreviewService {
      * left matching rows out, the clamp is named rather than the filter blamed.
      */
     private Sample rowSample(ResolvedEnrichPipeline resolved, EnrichDeclaration declaration, String groupKey,
-            Instant from, Instant to, boolean scanShaped) {
+            Instant from, Instant to, int trialRows) {
         requireNoGroupKey(groupKey, declaration);
-        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to, scanShaped);
+        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to, trialRows);
         final List<PreviewNote> notes = new ArrayList<>();
         if (sample.heldBy() != null) {
             notes.add(PreviewNotes.heldByEnrichment(sample.heldBy()));

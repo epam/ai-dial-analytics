@@ -117,6 +117,9 @@ public class ScanService {
     private static final String CURSOR_VERSION = "__cursor_v";
     private static final String CURSOR_IDENTITY = "__cursor_id";
 
+    /** The name trial input's wide read of its rows is refused under when it exceeds the pipeline read budget. */
+    public static final String TRIAL_ROWS_READ = "trial input rows";
+
     /** The group key a preview's group choice projects, as text. */
     private static final String GROUP_KEY = "__group_key";
 
@@ -507,9 +510,9 @@ public class ScanService {
      * @param bound        the freshness bound the read was clamped to, or null when it read no enrichment
      * @param aboveBound   the newest matching version above {@code bound}, as epoch milliseconds, when the clamp
      *                     left matching rows out; null when it left none or no probe was needed
-     * @param scanRows     the same rows keyed as a {@code /scan} page keys them — every column the scan projects
-     *                     (the filter's, the cursor's, an aligned target's partition echo) beside the sampled ones —
-     *                     when the sample was read scan-shaped; otherwise {@code rows} itself
+     * @param scanRows     the first sampled rows keyed as a {@code /scan} page keys them — every column the scan
+     *                     projects (the filter's, the cursor's, an aligned target's partition echo) beside the sampled
+     *                     ones — when trial rows were asked for; otherwise {@code rows} itself
      */
     public record RowSample(List<Map<String, Object>> rows, List<PreviewColumn> columns,
             String heldBy, EnrichmentFreshness.Bound bound, Long aboveBound, List<Map<String, Object>> scanRows) {
@@ -531,14 +534,16 @@ public class ScanService {
      * the version and reading at most one row: re-running the sample with the clamp lifted would read its heavy
      * columns again, and with no {@code from} would have no lower bound.
      *
-     * <p>With {@code scanShaped} — the runner's trial input — the same statement also selects every column the
-     * rows of a runner's scan page carry (its version and identity columns among them), so {@link RowSample#scanRows()} is what the runner's input mapping would see for
-     * those rows: a JSONata input may read a filter or cursor column that no binding names. {@link RowSample#rows()}
-     * is cut back to the sampled columns either way, so the preview built from it is the one the narrow read gives.
-     * The extra columns are the scan's own, so the authorization and sensitive-column check made over the plan
-     * already cover them.
+     * <p>With {@code trialRows} above zero — the runner's trial input — the sample also projects its cursor tuple,
+     * and a second read over the same predicates, bounded above by the newest sampled row's tuple, reads the first
+     * {@code trialRows} of those rows with every column a runner's scan page carries (its version and identity
+     * columns among them). {@link RowSample#scanRows()} is then what the runner's input mapping would see for those
+     * rows: a JSONata input may read a filter or cursor column that no binding names. The wide read is kept to the
+     * rows returned, so the sample itself costs what the preview's costs; a filter on a heavy column is carried for
+     * {@code trialRows} rows, not for the whole sample. The extra columns are the scan's own, so the authorization
+     * and sensitive-column check made over the plan already cover them.
      */
-    public RowSample previewRows(ResolvedEnrichPipeline resolved, int limit, Instant from, Instant to, boolean scanShaped) {
+    public RowSample previewRows(ResolvedEnrichPipeline resolved, int limit, Instant from, Instant to, int trialRows) {
         Source source = source(resolved);
         CursorPredicates.requireOrderedWindow(from, to);
         ScanPlan plan = plan(resolved, source);
@@ -559,33 +564,69 @@ public class ScanService {
         }
 
         List<Condition> sourcePredicates = sourcePredicates(plan, from, to, null, plan.bound());
+        boolean trial = trialRows > 0;
+        SelectQuery<Record> select = newestFirst(plan, sourcePredicates, sampled, false, trial, limit);
+        try (ReplicaRouter.PipelineRun run = replicas.openRun(plan.pipelineName(), syncPlan(plan))) {
+            List<Map<String, Object>> read = PipelineReadBudget.run(executor, select, model, "preview sample",
+                    readBudget, new StatementTag(plan.pipelineName(), "preview"));
+            List<Map<String, Object>> rows = trial ? read.stream().map(row -> only(row, sampled)).toList() : read;
+            List<Map<String, Object>> scanRows = trial ? trialScanRows(plan, sourcePredicates, sampled, read, trialRows) : rows;
+
+            Long aboveBound = plan.bound() == null ? null : newestAbove(plan, from, to);
+            return new RowSample(rows, columns, null, plan.bound(), aboveBound, scanRows);
+        }
+    }
+
+    /**
+     * The first {@code trialRows} of {@code sample} read again as a runner's scan page keys them: the same predicates,
+     * seeked to at most the newest sampled row's cursor tuple so rows landing between the two reads are not taken,
+     * newest first, with the scan's projection and partition echo beside the sampled columns. Empty when the
+     * sample is.
+     */
+    private List<Map<String, Object>> trialScanRows(ScanPlan plan, List<Condition> sourcePredicates, Set<String> sampled,
+            List<Map<String, Object>> sample, int trialRows) {
+        if (sample.isEmpty()) {
+            return List.of();
+        }
+        Map<String, Object> newest = sample.getFirst();
+        List<Condition> predicates = new ArrayList<>(sourcePredicates);
+        predicates.add(CursorPredicates.atMost(plan.cursorColumns(), ((Number) newest.get(CURSOR_VERSION)).longValue(),
+                String.valueOf(newest.get(CURSOR_IDENTITY))));
+        Set<String> projected = new LinkedHashSet<>(sampled);
+        projected.addAll(plan.projection());
+        SelectQuery<Record> select = newestFirst(plan, predicates, projected, true, false, Math.min(trialRows, sample.size()));
+        return PipelineReadBudget.run(executor, select, plan.model(), TRIAL_ROWS_READ, readBudget,
+                new StatementTag(plan.pipelineName(), "trial-input"));
+    }
+
+    /**
+     * A newest-first read of {@code plan} under {@code sourcePredicates}, projecting {@code projected} — with the
+     * partition echo a row-grain scan row carries when {@code partitionEcho}, and the cursor tuple under its aliases
+     * when {@code cursor} — and reading at most {@code limit} rows.
+     */
+    private SelectQuery<Record> newestFirst(ScanPlan plan, List<Condition> sourcePredicates, Set<String> projected,
+            boolean partitionEcho, boolean cursor, int limit) {
+        QueryEntityModel model = plan.model();
+        Map<String, QueryFieldBinding> bindings = model.bindings();
         Base base = base(plan, plan.statement(), sourcePredicates);
         SelectQuery<Record> select = base.select();
-        Set<String> projected = new LinkedHashSet<>(sampled);
-        if (scanShaped) {
-            projected.addAll(plan.projection());
-        }
         for (String name : projected) {
             select.addSelect(ScanSourceMetadata.projected(model, bindings, name).as(name));
         }
         Field<Long> versionExpr = CursorPredicates.versionExpr(plan.cursorColumns());
         Field<String> identityExpr = CursorPredicates.identityExpr(plan.cursorColumns());
-        if (scanShaped && plan.partitionEcho() != null) {
+        if (partitionEcho && plan.partitionEcho() != null) {
             // The rest of a row-grain scan row as the page returns it: a row-grain plan has no group key alias and no
             // readiness signal, and the cursor aliases buildScan selects are folded into next_cursor and removed.
             select.addSelect(ScanSourceMetadata.projected(model, bindings, plan.partitionEcho()).as(PartitionEcho.MEMBER));
         }
+        if (cursor) {
+            select.addSelect(versionExpr.as(CURSOR_VERSION), identityExpr.as(CURSOR_IDENTITY));
+        }
         base.addPredicates(sourcePredicates);
         select.addOrderBy(versionExpr.desc(), identityExpr.desc());
         select.addLimit(limit);
-        try (ReplicaRouter.PipelineRun run = replicas.openRun(plan.pipelineName(), syncPlan(plan))) {
-            List<Map<String, Object>> read = PipelineReadBudget.run(executor, select, model, "preview sample",
-                    readBudget, new StatementTag(plan.pipelineName(), "preview"));
-            List<Map<String, Object>> rows = scanShaped ? read.stream().map(row -> only(row, sampled)).toList() : read;
-
-            Long aboveBound = plan.bound() == null ? null : newestAbove(plan, from, to);
-            return new RowSample(rows, columns, null, plan.bound(), aboveBound, read);
-        }
+        return select;
     }
 
     /** {@code row} cut back to {@code names}, in their order; a null value is kept. */

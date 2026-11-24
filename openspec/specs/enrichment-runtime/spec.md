@@ -2461,7 +2461,7 @@ column across every partition per batch, which is the cost the aligned layout re
 carries it from the scanned row to the write row unchanged; a wrong value only leaves that row unmatched under
 the tuple join, and attaches it to no other source row.
 
-The runner contract version this build serves SHALL be `6`. A runner that does not echo the value, cannot
+The runner contract version this build serves SHALL be `7`. A runner that does not echo the value, cannot
 decode the `dial_app_route` transform preset (see [enrichment-registry](../enrichment-registry/spec.md), "Both
 projections carry the transform's route"), or does not read `advanced.input_token_budget` (see
 [enrichment-registry](../enrichment-registry/spec.md), "A group pipeline may declare its own input token budget")
@@ -2647,7 +2647,7 @@ every `sensitive` column it reads (see `enrichment-registry`, "Sensitive-column 
 
 The system SHALL expose `POST /v1/pipelines/{name}/trial-input` for `enrich` pipelines whose transform is
 `llm`, whatever its preset. It is the read the Enrichment Runner's model-calling dry run is built on, and it
-SHALL answer with everything that dry run needs in one consistent snapshot:
+SHALL answer with everything that dry run needs in one response:
 
 - `preview`: the response `POST /v1/pipelines/{name}/preview` would give for the same body, in the shared
   preview shape, values capped as there;
@@ -2671,19 +2671,28 @@ that range or on a `group` pipeline.
 
 - For a **row-grain** pipeline, `input_rows` SHALL be the first `limit` rows of the preview's newest-first
   sample, in that order, each keyed as a `POST /v1/pipelines/{name}/scan` row of the same pipeline is keyed,
-  and `preview.rows` SHALL describe the same rows by their grain key.
+  and `preview.rows` SHALL describe the same rows by their grain key. The sample SHALL be read with the
+  preview's own select list, so it costs what the preview's costs; the scan's further columns (the filter's,
+  the version and identity columns, an aligned target's partition echo) SHALL be read in a second read of only
+  those `limit` rows, under the same predicates and bounded above by the newest sampled row's cursor tuple, so
+  a row ingested between the two reads is not taken.
 - For a **group** pipeline, `input_rows` SHALL be what `POST /v1/pipelines/{name}/group-rows` returns for the
   group the preview chose or was named, under the same membership filter, member selection, ordering, row cap
   and byte cap. `preview.rows` SHALL be the preview's own member sample of that group. It is not required to
   be the head of `input_rows`: the sample takes the members the declaration's `member_select` ranks highest,
-  while the fetch returns its members in the source's order.
+  while the fetch returns its members in the source's order. The fetch SHALL be issued whenever a group was
+  chosen or named, even when the preview's sample of it came back empty. It is a read separate from the
+  sample, so a group still growing MAY hold members in `input_rows` that the preview's member count and its
+  `group_cut_by_fetch_limit` note did not see.
 
 **Checks and refusals SHALL be the preview's, in the preview's order.** A disabled pipeline SHALL be refused
 exactly as arming it would be refused, which includes the `app-routes` allowlist check of a
 `dial_app_route` transform; an enabled pipeline SHALL run only the checks the preview runs on one. A
 pipeline of kind `aggregate`, and an `enrich` pipeline whose transform is `sql`, SHALL be refused with HTTP
 422 `pipeline_validation_failed`, because no model is called for either. An unknown pipeline SHALL be HTTP
-404 `unknown_pipeline`.
+404 `unknown_pipeline`. The reads trial input issues beyond the preview's (the row-grain rows read
+scan-shaped, and a group's fetch) carry columns or rows the preview's do not, so they MAY be refused over
+budget where the preview is not.
 
 **It SHALL be authorized as the preview is, against the calling identity:** the `REGISTRY_ADMIN`
 privilege, the target's grant, column-policy and sensitive-column entitlement over every column the
@@ -2694,7 +2703,8 @@ the source and `TABLE_WRITE` on the target alone: that rule is what the runner's
 admitting it here would let a dry run read what its author may not.
 
 Every read it issues SHALL run under the pipeline read budget, and a read it refuses SHALL be HTTP 422
-`pipeline_preview_budget_exceeded`, as the preview's reads are. A sample that is empty (a
+`pipeline_preview_budget_exceeded`, as the preview's reads are. A refused scan-shaped read of the row-grain rows
+SHALL name a smaller `limit` and fewer heavy columns in the `filter` or the bindings as its remedy. A sample that is empty (a
 `no_group_found`, `held_by_enrichment` or `no_matching_rows` note) SHALL be answered HTTP 200 with an empty
 `input_rows` and the preview's notes, not refused.
 
@@ -2720,6 +2730,13 @@ a stalled runner look alive.
   has, `event_kind` and the version and identity columns included, so a JSONata input reads the same row a worker reads
 - **AND** `preview.rows` carries only the grain key and `deployment`, as `/preview` does
 
+#### Scenario: A heavy filter column is read only for the rows returned
+
+- **GIVEN** a row-grain `llm` pipeline whose `filter` reads a heavy body column no binding names
+- **WHEN** `trial-input` is called with no `limit`
+- **THEN** the sample of up to five rows projects only the grain key and the bound inputs, as `/preview`'s
+  does, and the body column is read for the one row returned in `input_rows`
+
 #### Scenario: A row-grain limit returns that many newest rows
 
 - **WHEN** a row-grain `llm` pipeline with at least three matching rows is called with `{"limit": 3}`
@@ -2736,6 +2753,12 @@ a stalled runner look alive.
 - **WHEN** `trial-input` is called with no `group_key`
 - **THEN** `preview.group_key` names that group, `input_rows` holds all twelve members in the order
   `/group-rows` returns them, `truncated` is `false`, and `preview.rows` holds five of them
+
+#### Scenario: A group whose sampled members were not read back is still fetched
+
+- **GIVEN** a `group` pipeline and a named group whose members the preview selected but could not read back
+- **WHEN** `trial-input` is called with that `group_key`
+- **THEN** `preview.rows` is empty and `input_rows` is what `/group-rows` returns for that group
 
 #### Scenario: A named group is used as named
 
@@ -2781,10 +2804,27 @@ a stalled runner look alive.
 - **THEN** the response is HTTP 200 with an empty `input_rows`, no `truncated` claim of a cut, and a
   `no_group_found` note in `preview.notes`
 
+#### Scenario: A body member trial input does not know is refused
+
+- **WHEN** `trial-input` is called with a body carrying a member other than `group_key`, `from`, `to` and `limit`
+- **THEN** the response is HTTP 400 `bad_request` and nothing is read
+
+#### Scenario: An unknown pipeline is not found
+
+- **WHEN** `trial-input` is called for a name no pipeline carries
+- **THEN** the response is HTTP 404 `unknown_pipeline`
+
+#### Scenario: A trial input without the contract header is refused before any lookup
+
+- **WHEN** `trial-input` is called with no `Adas-Contract-Version` header, for a name no pipeline carries
+- **THEN** the response is HTTP 409 `runner_contract_required`, not 404, and nothing is read
+
 #### Scenario: A trial-input read over its budget refuses under the preview code
 
 - **WHEN** a read `trial-input` issues exceeds a `pipeline.budget.*` ceiling
 - **THEN** the response is HTTP 422 `pipeline_preview_budget_exceeded` naming the read and the ceiling
+- **AND** when the refused read is the scan-shaped read of the row-grain rows, its remedy names a smaller
+  `limit` and the `filter`'s columns
 
 #### Scenario: A trial input writes nothing and is not runner contact
 

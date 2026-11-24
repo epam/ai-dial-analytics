@@ -286,8 +286,8 @@ calls no model.
 
 - **Contract `7`.** The endpoint is part of the runner contract, so the runner must be the 0.24 release that calls
   it (§7).
-- **Who may use it.** `REGISTRY_ADMIN` and the preview's own column and row checks, against the caller. The runner's
-  service grants (`read` on the source, `write` on the target) alone do not admit it.
+- **Who may use it.** `REGISTRY_ADMIN` in addition to `read` on the source and `write` on the target, with the
+  preview's own column and row checks, all against the caller. The runner's service grants alone do not admit it.
 - **Rollback.** Roll ADAS and the runner back together. Nothing is stored, so there is nothing to undo.
 
 ## Summary

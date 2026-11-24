@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.exception.PipelinePreviewBudgetExceededException;
 import com.epam.aidial.analytics.exception.PipelineReadBudgetExceededException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
+import com.epam.aidial.analytics.service.enrichment.model.GroupPage;
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
@@ -35,7 +36,6 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -85,7 +85,7 @@ class EnrichPreviewServiceTest {
     @Test
     void rowGrainReadOverItsBudgetIsTheAuthorsRefusal() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willThrow(refusedByTheRunnerBudget());
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyInt())).willThrow(refusedByTheRunnerBudget());
 
         assertThatThrownBy(() -> service.preview(NAME, null, null, null))
                 .isInstanceOf(PipelinePreviewBudgetExceededException.class)
@@ -134,11 +134,55 @@ class EnrichPreviewServiceTest {
     @Test
     void trialInputRowReadOverItsBudgetIsTheAuthorsRefusal() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willThrow(refusedByTheRunnerBudget());
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyInt())).willThrow(refusedByTheRunnerBudget());
 
         assertThatThrownBy(() -> service.trialInput(NAME, null, null, null, 2))
                 .isInstanceOf(PipelinePreviewBudgetExceededException.class)
                 .hasMessageContaining("narrower `from`/`to` window");
+    }
+
+    /** The wide read of the rows returned names its own levers: the `limit` and the filter's columns. */
+    @Test
+    void trialInputWideRowReadOverItsBudgetNamesTheLimitAndTheFilter() {
+        given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyInt())).willThrow(new PipelineReadBudgetExceededException(
+                "refused", CEILING, ScanService.TRIAL_ROWS_READ, null));
+
+        assertThatThrownBy(() -> service.trialInput(NAME, null, null, null, 2))
+                .isInstanceOf(PipelinePreviewBudgetExceededException.class)
+                .hasMessageContaining("(" + ScanService.TRIAL_ROWS_READ + ")")
+                .hasMessageContaining("smaller `limit`")
+                .hasMessageContaining("`filter`");
+    }
+
+    /** The row-grain row count reaches the scan read, which returns exactly the rows trial input answers with. */
+    @Test
+    void trialInputAsksTheScanForItsLimitAndReturnsItsScanRows() {
+        given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
+        final List<Map<String, Object>> scanRows = List.of(Map.of("event_id", "e2", "deployment", "gpt-4o", "_ingested_at", 2L));
+        given(scans.previewRows(any(), eq(EnrichPreviewService.SAMPLE_ROWS), any(), any(), eq(2))).willReturn(new ScanService.RowSample(
+                List.of(Map.of("event_id", "e2", "deployment", "gpt-4o")), List.of(), null, null, null, scanRows));
+
+        assertThat(service.trialInput(NAME, null, null, null, 2).inputRows()).isEqualTo(scanRows);
+    }
+
+    /**
+     * Members selected but not read back leave the preview's sample empty, yet the group is still fetched, so
+     * {@code input_rows} is what {@code /group-rows} returns for it.
+     */
+    @Test
+    void trialInputFetchesGroupWhoseSampledMembersWereNotReadBack() {
+        given(pipelines.getEnrich(NAME)).willReturn(enabledLlm("chat_id"));
+        given(groups.previewMembers(any(), anyString(), anyInt()))
+                .willReturn(new GroupFetchService.MemberSample(List.of(), List.of(), 3, 200, true, 3));
+        final List<Map<String, Object>> members = List.of(Map.of("deployment", "gpt-4o"));
+        given(groups.fetchForTrial(any(), eq("chat-42"))).willReturn(new GroupPage(members, false));
+
+        final EnrichPreviewService.TrialInput trial = service.trialInput(NAME, "chat-42", null, null, null);
+
+        assertThat(trial.preview().rows()).isEmpty();
+        assertThat(trial.inputRows()).isEqualTo(members);
+        assertThat(trial.truncated()).isFalse();
     }
 
     @Test
@@ -179,7 +223,7 @@ class EnrichPreviewServiceTest {
     @Test
     void rowGrainSampleWhollyPastAnEnrichmentsPositionIsHeldWithTheGap() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean())).willReturn(new ScanService.RowSample(List.of(),
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyInt())).willReturn(new ScanService.RowSample(List.of(),
                 List.of(), null, new EnrichmentFreshness.Bound("usage_sentiment", 1_000L, "a"), 61_000L));
 
         final PipelinePreview preview = service.preview(NAME, null, null, null);
@@ -219,18 +263,18 @@ class EnrichPreviewServiceTest {
         assertThatThrownBy(() -> service.preview(NAME, "  ", null, null))
                 .isInstanceOf(PipelineValidationException.class)
                 .hasMessageContaining("`group_key`");
-        verify(scans, never()).previewRows(any(), anyInt(), any(), any(), anyBoolean());
+        verify(scans, never()).previewRows(any(), anyInt(), any(), any(), anyInt());
     }
 
     @Test
     void emptyGroupKeyOnRowGrainIsAbsent() {
         given(pipelines.getEnrich(NAME)).willReturn(enabledLlm(null));
-        given(scans.previewRows(any(), anyInt(), any(), any(), anyBoolean()))
+        given(scans.previewRows(any(), anyInt(), any(), any(), anyInt()))
                 .willReturn(new ScanService.RowSample(List.of(), List.of(), null, null, null));
 
         service.preview(NAME, "", null, null);
 
-        verify(scans).previewRows(any(), anyInt(), any(), any(), anyBoolean());
+        verify(scans).previewRows(any(), anyInt(), any(), any(), anyInt());
     }
 
     /** What the shared read path raises: the runner's code, with the ceiling held apart from its message. */

@@ -10196,7 +10196,7 @@
     },
     "/v1/pipelines/{name}/trial-input": {
       "post": {
-        "description": "Runs every check and the sample `POST /v1/pipelines/{name}/preview` runs for the same body, under the caller's identity — the runner forwards the credential of the person who asked for the dry run — and returns, in one snapshot, that `preview`, the compiled `pipeline` it sampled through (for a disabled pipeline, as the gate derived it) and the `input_rows` the runner would receive with no value cap: the newest `limit` sampled rows of a row-grain pipeline, or the whole group of a `group` one as `/group-rows` assembles it, with `truncated`. Writes nothing, advances no cursor, and is served for a disabled pipeline.",
+        "description": "Runs every check and the sample `POST /v1/pipelines/{name}/preview` runs for the same body, under the caller's identity — the runner forwards the credential of the person who asked for the dry run — and returns that `preview`, the compiled `pipeline` it sampled through (for a disabled pipeline, as the gate derived it) and the `input_rows` the runner would receive with no value cap: the newest `limit` sampled rows of a row-grain pipeline, or the whole group of a `group` one as `/group-rows` assembles it, with `truncated`, read after the preview's member sample and so able to hold members ingested since. Writes nothing, advances no cursor, and is served for a disabled pipeline.",
         "operationId": "fetchPipelineTrialInput",
         "parameters": [
           {
@@ -10257,7 +10257,7 @@
                 }
               }
             },
-            "description": "As the preview: a column the caller may not read (`column_not_entitled`, `sensitive_column_not_entitled`), a row-confined caller (`row_policy_confined`), no grant on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` (`forbidden`)"
+            "description": "As the preview: a column the caller may not read (`column_not_entitled`, `sensitive_column_not_entitled`), a row-confined caller (`row_policy_confined`), no `read` on the source or `write` on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` (`forbidden`)"
           },
           "404": {
             "content": {
