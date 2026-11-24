@@ -107,4 +107,4 @@
 
 - [x] 6.1 `openspec validate add-selective-catalog-export --strict`
 - [x] 6.2 `.claude/skills/pr-ready/hygiene-sweep.pl` on the branch
-- [ ] 6.3 `./gradlew clean build` passes
+- [x] 6.3 `./gradlew clean build` passes

@@ -11,6 +11,7 @@ import com.epam.aidial.analytics.exception.BackfillNotFoundException;
 import com.epam.aidial.analytics.exception.BackfillRangeException;
 import com.epam.aidial.analytics.exception.CatalogBundleMalformedException;
 import com.epam.aidial.analytics.exception.CatalogBundleVersionUnsupportedException;
+import com.epam.aidial.analytics.exception.CatalogExportEmptyException;
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
 import com.epam.aidial.analytics.exception.CatalogImportConflictException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
@@ -693,6 +694,12 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(CatalogExportInvalidException.class)
     public ErrorView handleCatalogExportInvalid(HttpServletRequest req, CatalogExportInvalidException ex) {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_export_invalid", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    @ExceptionHandler(CatalogExportEmptyException.class)
+    public ErrorView handleCatalogExportEmpty(HttpServletRequest req, CatalogExportEmptyException ex) {
+        return new ErrorView(req, HttpStatus.BAD_REQUEST, "catalog_export_empty", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)

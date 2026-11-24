@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
+import com.epam.aidial.analytics.exception.CatalogExportEmptyException;
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
 import com.epam.aidial.analytics.exception.CatalogTransferForbiddenException;
 import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
@@ -657,8 +658,9 @@ public class CatalogExportService {
 
         /**
          * {@code resolution} with each candidate's portable access: every bundle table, every required system table, every
-         * access-only table (a system one required for the reason {@code selected}) and, exporting everything, every
-         * system table the caller may get, required for the reason {@code access} only when it keeps an entry.
+         * access-only table (a system one required for the reason {@code selected}, and refused when it carries no entry)
+         * and, exporting everything, every system table the caller may get, required for the reason {@code access} only
+         * when it keeps an entry.
          */
         private Resolution withAccess(Resolution resolution) {
             final Set<String> skippedTables = new HashSet<>();
@@ -680,6 +682,11 @@ public class CatalogExportService {
                 access.put(name, portable);
                 if (systemCandidates.contains(name) && !portable.entries().isEmpty()) {
                     required.putIfAbsent(name, "access");
+                }
+                if (accessOnly.containsKey(name) && portable.entries().isEmpty()) {
+                    throw new CatalogExportEmptyException("table '" + name + "' is selected for its access alone, but has "
+                            + "no access entry an export can carry" + (portable.leftBehind().isEmpty() ? ""
+                            : "; export it without access_only and read the preview's left_behind for what stays behind"));
                 }
             }
             return new Resolution(resolution.tables(), new LinkedHashMap<>(required), resolution.pipelines(),

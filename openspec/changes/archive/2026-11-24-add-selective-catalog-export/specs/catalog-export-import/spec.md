@@ -49,6 +49,10 @@ The refusals, in this order:
   as each component is resolved, before the closure is walked, so before every refusal of "Excluded and system tables on export" for
   a PENDING, FAILED or OTLP landing table or an unresolvable pipeline, whether the selection names it or a closure reaches it, and
   before the column checks of "Export authorization".
+- An access-only table none of whose candidate entries survives the reduction of "Access export" (one that stores no entry, or
+  whose entries all stay behind) SHALL be `400` `catalog_export_empty`, on `/export` and `/export/preview` alike, since the
+  selection would carry nothing for it. It is checked once the closure is resolved, so after the refusals of "Excluded and
+  system tables on export" and the column checks of "Export authorization".
 
 A selection that walks no closure checks nothing only a closure needs: an access-only table and an unexpanded pipeline SHALL NOT make
 a selection `422` on account of a PENDING, FAILED or OTLP landing table, and an unexpanded pipeline SHALL NOT on account of a
@@ -227,6 +231,14 @@ as the other requirements define, and the bundle's `format_version` SHALL NOT ch
 - **WHEN** a caller holding `REGISTRY_READ` and `TABLE_GRANT`, but no `get` on `t`, selects `t` with `access_only: true`,
   `roles` `["does-not-exist"]` and `include_access: true`
 - **THEN** the response is `404` with `error` `not_found`, and the message does not name `does-not-exist`
+
+#### Scenario: An access-only table with nothing to carry
+
+- **GIVEN** a user table `t` that stores no access entry
+- **WHEN** `t` is selected with `access_only: true` and `include_access: true`, to `/export` or to `/export/preview`
+- **THEN** the response is `400` with `error` `catalog_export_empty`
+- **AND WHEN** `t`'s only stored entry is one for `READ_ONLY_ANALYTIC`, a bundle name an earlier build stored
+- **THEN** the response is still `400` with `error` `catalog_export_empty`
 
 ## MODIFIED Requirements
 

@@ -59,7 +59,8 @@ curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/j
   with no definition and nothing connected. The import writes them onto the table this environment has, under either
   resolution policy, since no object travels. A table missing here is a `validation_errors` problem rather than a
   table the import creates, and an entry whose column policy names an enrichment or column this environment lacks is
-  `FAIL`: the export does not bring that enrichment along.
+  `FAIL`: the export does not bring that enrichment along. A table with no entry the export can carry is refused
+  (`400 catalog_export_empty`) rather than exported empty.
 - **`roles`** (table, with `include_access`): only the listed roles' entries travel, whether or not the table does.
   The other roles' entries are neither carried nor reported under `left_behind`, and their column policies bring
   nothing in.
