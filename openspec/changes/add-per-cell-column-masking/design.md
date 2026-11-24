@@ -119,11 +119,12 @@ the alias body resolves `"t"."c"` first. That holds in every clause, probed on 2
 - `HAVING "t.c" IS NULL` over an expression group key fails `NOT_AN_AGGREGATE`.
 
 The builder therefore renders every reference to an exempt output inside its own block, in any clause, as the output's
-masked expression. Today only `StructuredQueryBuilder.sortFields` names an output (`DSL.name(key)`): group keys,
-window keys and `having` already resolve a bound field to its expression first. This change adds three more shapes
-that must not name it: the row-mode distinct collapse (`GROUP BY <every output>`), the aggregate-mode distinct window
-(`PARTITION BY <every output>`, which fails `NOT_AN_AGGREGATE` on 26.8 by name), and the scalar-subquery
-`tuple(<value>, <flag>)`. Probed on 26.8 and 26.3: sorting, grouping (alone and with another key), `HAVING`, window
+masked expression. Today only `StructuredQueryBuilder.sortFields` can name an exempt output (`DSL.name(key)`):
+`resolveGroupKey` falls back to the name only for an output that is not a bound field, and window keys and `having`
+resolve a bound field to its expression first. This change adds three more shapes that must not name it: the
+row-mode distinct collapse (`GROUP BY <every output>`) and the aggregate-mode distinct window (`PARTITION BY <every
+output>`), each of which fails `NOT_AN_AGGREGATE` on 26.8 by name, and the scalar-subquery `tuple(<value>, <flag>)`,
+which by name returns the stored value itself. Probed on 26.8 and 26.3: sorting, grouping (alone and with another key), `HAVING`, window
 keys and the distinct collapse over the rendered expression give the masked order and one null group. A block that
 reads the output from a derived table reads the masked value under its name, even when it also joins the enrichment
 table (probed on both). The table-name rule covers a lambda parameter, and every resolved output name

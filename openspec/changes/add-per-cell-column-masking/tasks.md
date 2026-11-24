@@ -64,7 +64,7 @@
   at every level) that equals a table it reads or begins with `<table>.`, except an output named after the field it
   projects bare (an enrichment field without `as`); render every reference to such an exempt output inside its own
   block, in any clause, as the output's masked expression, never `DSL.name(key)`: `StructuredQueryBuilder.sortFields`
-  (the one place that names an output today) and the 3.5 shapes that would (the row-mode distinct `GROUP BY`, the
+  (the one place that can name an exempt output today) and the 3.5 shapes that would (the row-mode distinct `GROUP BY`, the
   aggregate-mode distinct `PARTITION BY`, the scalar-subquery `tuple`). ClickHouse tests on 26.3 and 26.8:
   - a lambda parameter named like an internal alias reads the absent value;
   - an output aliased as the table is refused;
@@ -72,8 +72,10 @@
     key, is refused, while an enrichment field projected without `as` beside a masked field runs;
   - an exempt enrichment output sorted with a one-row page returns a present row where an absent row stores a value
     that sorts first; grouped alone, and with a visible key, it runs and puts the absent rows in one null group; a
-    `having` keeping its null group runs; a distinct projection of it, in row mode and in aggregate mode, runs and
-    collapses the absent rows into one;
+    `having` keeping its null group runs; a distinct projection of it, in row mode and in aggregate mode (with a present
+    row storing null, so the aggregate-mode window merges two groups), runs and collapses the absent rows into one
+    marked row; a scalar subquery projecting it over an absent row returns null, marked (26.8 returns the stored value
+    by name); fixtures hold two absent rows with different stored values;
   - a wildcard over many masked columns under one large policy renders the policy text once per scope, including a
     filter copied into a key subquery and a first mask reference in a lambda capture;
   - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only

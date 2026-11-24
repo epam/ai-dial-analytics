@@ -132,19 +132,23 @@ SHALL be refused `400 bad_request`.
   field
 - **THEN** the query runs, the output keyed `dial_usage_log_payload.request_body`
 
-#### Scenario: Sorting and grouping by an enrichment field's own name read its masked value
+#### Scenario: References to an enrichment field's own name read its masked value
 
-- **GIVEN** a caller for whom the enrichment field `e.c` is masked, present on the rows of `P1` only, where a row of
-  `P2` stores a value that sorts before every value of `P1`
+- **GIVEN** a caller for whom the enrichment field `e.c` is masked, present on the rows of `P1` only, where two rows of
+  `P2` store different values that each sort before every value of `P1`, and one row of `P1` stores null
 - **WHEN** it projects `e.c` without `as` and sorts by it ascending, with a page of one row
-- **THEN** the row returned is a row of `P1`, since the rows of `P2` sort as nulls, after every value
-- **AND WHEN** it groups by `e.c`, alone or with `project_id`, and sorts by it
-- **THEN** the query runs, and the rows of `P2` form one group whose key is null
-- **AND WHEN** it groups by `e.c` and keeps only groups whose `e.c` is null
-- **THEN** the query runs and returns that one group
+- **THEN** the row returned is a row of `P1` that stores a value, since the rows of `P2` sort as nulls, after every
+  value
+- **AND WHEN** it groups by `e.c` and `project_id`, and sorts by `e.c`
+- **THEN** the query runs, and the rows of `P2` form one group whose `e.c` is null
+- **AND WHEN** it groups by `e.c` alone and keeps only groups whose `e.c` is null
+- **THEN** the query runs and returns one group, of the rows of `P2` and the null row of `P1`
 - **AND WHEN** it projects `e.c` with `distinct` in row mode, and separately in aggregate mode grouped by `e.c` and
   `project_id`
-- **THEN** each query runs, and the rows of `P2` collapse into one row whose `e.c` is null, marked absent
+- **THEN** each query runs and returns one row whose `e.c` is null, covering the rows of `P2` and the null row of
+  `P1`, marked absent
+- **AND WHEN** another query's output is a scalar subquery that projects `e.c` without `as` over one row of `P2`
+- **THEN** that output is null and marked absent
 
 #### Scenario: A lambda cannot read an absent cell through a parameter name
 
