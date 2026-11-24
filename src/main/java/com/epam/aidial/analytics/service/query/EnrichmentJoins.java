@@ -471,16 +471,16 @@ public final class EnrichmentJoins {
             if (paths.isEmpty()) {
                 // An adopted alignment column is exposed as well as compared, and a computed field may have read a
                 // column already; each is projected once.
-                if (projected.add(binding.field().getUnqualifiedName().last())) {
-                    projection.add(binding.field());
+                if (projected.add(binding.physicalField().getUnqualifiedName().last())) {
+                    projection.add(binding.physicalField());
                 }
                 continue;
             }
             // One field per addressed path, each aliased to the dotted path as a single identifier, so the
             // outer statement's reference stays two-part. See ObjectPathUsage#alias.
-            final String column = binding.field().getUnqualifiedName().last();
+            final String column = binding.physicalField().getUnqualifiedName().last();
             for (final List<String> path : paths) {
-                projection.add(ObjectPathUsage.subcolumn(binding.field(), path).as(ObjectPathUsage.alias(column, path)));
+                projection.add(ObjectPathUsage.subcolumn(binding.physicalField(), path).as(ObjectPathUsage.alias(column, path)));
             }
             pruned.put(name, paths);
         }

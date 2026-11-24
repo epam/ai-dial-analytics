@@ -115,7 +115,7 @@ final class LambdaScope {
             throw new QueryValidationException("unknown lambda parameter '" + param.name() + "'; "
                     + inScope(bindings));
         }
-        return binding.field();
+        return binding.physicalField();
     }
 
     /** The DSL type of a parameter reference, or {@code null} when it is bound by no enclosing lambda. */

@@ -13,6 +13,8 @@ import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.observability.SqlLog;
 import com.epam.aidial.analytics.observability.trace.LogExecution;
 import com.epam.aidial.analytics.service.query.ComputedField;
+import com.epam.aidial.analytics.service.query.MaskFlag;
+import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
@@ -144,9 +146,11 @@ public class StructuredQueryExecutor {
             final Long totalCount = totalCount(model, query, settings, startedAt);
             // After the total, not before: the count is part of the read the caller asked for and fails it when it times
             // out, while a rebuild short of time only degrades its rows to partial — so the count gets the budget first.
-            complete(select, rows, settings, startedAt, ComputedFieldCompleter.Surface.QUERY, null);
+            final MaskFlag.Marks marks = MaskFlag.Marks.of(select.getSelect());
+            complete(select, rows, settings, startedAt, ComputedFieldCompleter.Surface.QUERY, null, marks);
+            marks.apply(rows);
             log.debug("Structured {} query returned {} row(s), totalCount={}", model.entity(), rows.size(), totalCount);
-            return new QueryResultPage(outputColumns(select), rows, totalCount);
+            return new QueryResultPage(marks.outputs(), rows, totalCount);
         });
     }
 
@@ -260,7 +264,7 @@ public class StructuredQueryExecutor {
         // Translation refuses a computed field anywhere in a composite plan, since an enclosing block would read its
         // stand-in; the render guard in run() asserts it, rather than let a raw tuple reach the caller.
         final QuerySettings settings = rowPolicies.apply(FinalSettings.mergedOver(FinalSettings.userRead(partitionLocal), extra));
-        return replicas.queryWithin(spent -> new QueryResultPage(outputColumns(select),
+        return replicas.queryWithin(spent -> new QueryResultPage(MaskFlag.Marks.of(select.getSelect()).outputs(),
                 run(select, forAttempt(settings, spent), "composite", ComputedFieldCompleter.Surface.QUERY, null), null));
     }
 
@@ -332,7 +336,9 @@ public class StructuredQueryExecutor {
         SqlLog.LOG.debug("Executing {} query: {}", kind, sql);
         final long startedAt = System.nanoTime();
         final List<Map<String, Object>> rows = materialize(sql, select, settings);
-        complete(select, rows, settings, startedAt, surface, rebuild);
+        final MaskFlag.Marks marks = MaskFlag.Marks.of(select.getSelect());
+        complete(select, rows, settings, startedAt, surface, rebuild, marks);
+        marks.apply(rows);
         log.debug("{} query returned {} row(s)", kind, rows.size());
         return rows;
     }
@@ -369,14 +375,27 @@ public class StructuredQueryExecutor {
      * floor per statement. The settings never carry the triggering statement's query id: each statement carries a fresh
      * id of its own, minted from {@code rebuild} for a tagged pipeline read and otherwise from {@link #QUERY_REBUILD} or
      * {@link #PIPELINE_REBUILD}, so every rebuild statement can be found in {@code system.query_log}.
+     *
+     * <p>A row on which a computed field is marked ({@code marks}: one of the columns it is completed from is absent there)
+     * is not completed: its computed cells are nulled and no rebuild statement reads it.
      */
     private void complete(SelectQuery<Record> select, List<Map<String, Object>> rows, QuerySettings settings, long startedAt,
-            ComputedFieldCompleter.Surface surface, StatementTag rebuild) {
+            ComputedFieldCompleter.Surface surface, StatementTag rebuild, MaskFlag.Marks marks) {
         final List<ComputedFieldCompleter.Slot> slots = ComputedFieldCompleter.slots(select.getSelect());
         if (!slots.isEmpty()) {
             final StatementTag tag = rebuild != null ? rebuild
                     : surface == ComputedFieldCompleter.Surface.QUERY ? QUERY_REBUILD : PIPELINE_REBUILD;
-            completer.complete(slots, rows, () -> {
+            final List<Map<String, Object>> completed = new ArrayList<>(rows.size());
+            for (final Map<String, Object> row : rows) {
+                // shortcut: a row marked on one computed field is left uncompleted on every one, since the computed fields
+                // of one table are completed from the same columns and so share their mask; revisit if that ever changes.
+                if (slots.stream().anyMatch(slot -> marks.marked(row, slot.column()))) {
+                    slots.forEach(slot -> row.put(slot.column(), null));
+                } else {
+                    completed.add(row);
+                }
+            }
+            completer.complete(slots, completed, () -> {
                 final QuerySettings left = ClickHouseBudget.remainingTimeIfAny(settings, Duration.ofNanos(System.nanoTime() - startedAt));
                 if (left == null) {
                     return null;
@@ -395,7 +414,9 @@ public class StructuredQueryExecutor {
      * that slipped past translation fails the read here instead of computing over the stand-in.
      */
     private static String render(SelectQuery<Record> select) {
-        return ComputedField.render(() -> select.getSQL(ParamType.INLINED), ComputedFieldCompleter.slots(select.getSelect()).size());
+        // Each pass of the mask rendering runs the stand-in guard on its own.
+        return MaskRendering.render(() -> ComputedField.render(() -> select.getSQL(ParamType.INLINED),
+                ComputedFieldCompleter.slots(select.getSelect()).size()));
     }
 
     /** The statement's projected column names, in order — the key set {@link #materialize} gives every row. */

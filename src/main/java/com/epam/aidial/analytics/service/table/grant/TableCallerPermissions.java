@@ -113,12 +113,12 @@ public class TableCallerPermissions {
     }
 
     /**
-     * Whether the column-visibility decision hides one of {@code ownColumns} from the caller — the one decision every
-     * read surface applies, never a separate union. False when nothing restricts the caller; true when anything does and
-     * {@code ownColumns} is {@code null}, not tracked.
+     * Whether the column-visibility decision hides or masks one of {@code ownColumns} from the caller — the one decision
+     * every read surface applies, never a separate union. False when nothing restricts the caller; true when anything
+     * does and {@code ownColumns} is {@code null}, not tracked.
      */
     private static boolean hides(ColumnVisibility visibility, List<ColumnMappingEntity> ownColumns) {
-        return !visibility.isAll() && (ownColumns == null || ownColumns.stream().anyMatch(column -> !visibility.allows(column.getName())));
+        return !visibility.isAll() && (ownColumns == null || ownColumns.stream().anyMatch(column -> !visibility.visible(column.getName())));
     }
 
     /**

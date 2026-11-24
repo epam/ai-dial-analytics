@@ -407,10 +407,12 @@ final class ReadShaping {
         final Set<String> partitionNames = new HashSet<>();
         for (final Map.Entry<String, QueryFieldBinding> entry : model.bindings().entrySet()) {
             final QueryFieldBinding binding = entry.getValue();
-            if (binding.field().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
+            // A masked partition field transfers nothing: a bound over its masked value can admit absent rows whose stored
+            // partition the image would exclude (`request_time is null`), and the image reads the stored column.
+            if (!binding.isMasked() && binding.physicalField().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
                 partitionNames.add(entry.getKey());
                 rebound.put(entry.getKey(), new QueryFieldBinding(binding.name(),
-                        DSL.field(join.enrichmentPartition().getQualifiedName(), binding.field().getDataType()),
+                        DSL.field(join.enrichmentPartition().getQualifiedName(), binding.physicalField().getDataType()),
                         binding.type(), binding.elementType(), binding.heavy()));
             }
         }
@@ -472,13 +474,16 @@ final class ReadShaping {
         return null;
     }
 
-    /** The type of {@code name} when it is an enrichment field, else {@code null}. */
+    /**
+     * The type of {@code name} when it is an enrichment field a conjunct over it may be pushed for, else {@code null}. A
+     * masked field is never pushed: the derived table has no source row to evaluate its mask on.
+     */
     private static QueryFieldType fieldType(QueryEntityModel model, String name) {
         if (model.ownerOf(name) == null) {
             return null;
         }
         final QueryFieldBinding binding = model.bindings().get(name);
-        return binding == null ? null : binding.type();
+        return binding == null || binding.isMasked() ? null : binding.type();
     }
 
     /**
@@ -652,7 +657,8 @@ final class ReadShaping {
         final QueryFieldBinding binding = model.bindings().get(field);
         // A computed field is a stand-in, not a column a derived table could compute a call over; no call over one is
         // accepted anyway (StructuredQueryBuilder refuses it as projection-only).
-        if (binding == null || !binding.heavy() || binding.isComputed() || binding.type() != QueryFieldType.STRING
+        // Nor is a masked field's: the derived table has no source row to evaluate its mask on.
+        if (binding == null || !binding.heavy() || binding.isComputed() || binding.isMasked() || binding.type() != QueryFieldType.STRING
                 || model.ownerOf(field) == null) {
             return null;
         }

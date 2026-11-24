@@ -3344,7 +3344,7 @@
       "PermissionsDto": {
         "properties": {
           "columns_restricted": {
-            "description": "Whether column policies hide at least one of this table's columns from the caller; false for a caller no column policy narrows. On a system table's revision snapshot, which carries no columns, true whenever a column policy confines the caller. The policies are readable only through GET /v1/tables/{name}/access",
+            "description": "Whether column policies hide or mask at least one of this table's columns for the caller (a masked column is listed, its value absent on the rows no role allowing it admits); false for a caller no column policy narrows. On a system table's revision snapshot, which carries no columns, true whenever a column policy confines the caller. The policies are readable only through GET /v1/tables/{name}/access",
             "type": "boolean"
           },
           "get": {
@@ -4070,6 +4070,11 @@
           },
           "heavy": {
             "description": "Whether the column is heavy: omitted from wildcard projections (a SQL SELECT *, or a row-mode query with no select) because it is expensive to transfer. Still returned when named explicitly, and visible to every caller — a cost hint, not access control",
+            "example": false,
+            "type": "boolean"
+          },
+          "masked": {
+            "description": "Whether a column policy masks the field for this caller: its value is present on the rows a role allowing it admits and absent (null) on the others, and a JSON row lists the output columns it made absent or partial under `$masked`",
             "example": false,
             "type": "boolean"
           },
@@ -5180,7 +5185,7 @@
         "description": "Rows produced by a structured query, plus an optional total row count.",
         "properties": {
           "rows": {
-            "description": "Projected rows as field-name → value maps, in field order.",
+            "description": "Projected rows as field-name → value maps, in field order. A row on which a column policy made a cell absent, or an aggregate or window cell partial, also carries the reserved member `$masked`: the names of those output columns, in projection order.",
             "example": [
               {
                 "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
@@ -8828,7 +8833,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
           },
           "404": {
             "content": {
@@ -9181,7 +9186,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
           },
           "404": {
             "content": {
@@ -9314,7 +9319,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; group assembly reads the group key and the read source's version and identity columns"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; group assembly reads the group key and the read source's version and identity columns"
           },
           "404": {
             "content": {
@@ -9447,7 +9452,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; materialize reads the read source's version and identity columns, which its next_cursor carries"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; materialize reads the read source's version and identity columns, which its next_cursor carries"
           },
           "404": {
             "content": {
@@ -9570,7 +9575,7 @@
                 }
               }
             },
-            "description": "The caller may not read a column the declaration reads — one a column policy hides from it (`column_not_entitled`, checked first) or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`) —, is row-confined (`row_policy_confined`), lacks the target's grant (`pipeline_access_denied`), or lacks `REGISTRY_ADMIN` (`forbidden`)"
+            "description": "The caller may not read a column the declaration reads — one a column policy hides from it or masks for it (`column_not_entitled`, checked first) or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`) —, is row-confined (`row_policy_confined`), lacks the target's grant (`pipeline_access_denied`), or lacks `REGISTRY_ADMIN` (`forbidden`)"
           },
           "404": {
             "content": {
@@ -9683,7 +9688,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant"
           },
           "404": {
             "content": {
@@ -10071,7 +10076,7 @@
                 }
               }
             },
-            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; the scan reads the read source's identity and version columns, the grain key, a group key and an aligned target's partition column"
+            "description": "The calling identity may not read a column the declaration reads: one a column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant; the scan reads the read source's identity and version columns, the grain key, a group key and an aligned target's partition column"
           },
           "404": {
             "content": {
@@ -13646,7 +13651,7 @@
     },
     "/v1/tables/{name}/schema": {
       "patch": {
-        "description": "Applies add/drop/rename column operations and the optional ttl merge-patch (set/replace with a full object, remove with {}) as ONE multi-command ClickHouse ALTER statement — validated by ClickHouse as a whole, so it is rejected or applied in its entirety — plus catalog-only column metadata updates, on an ACTIVE table. Rejected (409) before materialization — define and materialize the schema first via POST /{name}/schema. Type changes and drops/renames of system, grain, or ordering-key columns are rejected (422), as is a drop of the TTL-referenced column. On an enrichment, dropping or renaming a column another pipeline reads, or one that receives a transform output of the pipeline targeting it, is rejected (409) naming those pipelines — checked before any ALTER is issued, so a refused patch leaves ClickHouse untouched. For an enrichment, this is where you add a provenance column an already-materialized target is missing — `pipeline_generation` (long), `model` (string), `enriched_at` (timestamp), `group_version` (long), `truncated` (boolean); one that is absent is silently skipped on write. This endpoint does **not** inject them: it applies exactly the operations you list, because widening an explicit operation list into a five-column DDL on a populated table is not something to do on a caller's behalf. `pipeline_generation` is the exception you do not have to add by hand: a startup reconciler adds it to every enrichment an `enrich` pipeline targets. On an `llm` target, a patch that edits a column's `description` bumps the targeting pipeline's `generation`, because an output's prose defaults to that description and it is therefore a live input to the composed prompt. A column a column policy hides from the caller is unknown to it (422), and while the stored TTL is on such a column any `ttl` member is refused 403 `column_not_entitled`. A rename rewrites the column policies naming the column and a drop prunes them (each bumping the access generation of the table whose lists change, the source's for an enrichment column); a drop that would empty a list is refused 409 `column_in_column_policy` before any ALTER, after the row-policy guard (409 `column_in_row_policy`). 409 `table_busy` when another change to the table holds it past the lock timeout (retry).",
+        "description": "Applies add/drop/rename column operations and the optional ttl merge-patch (set/replace with a full object, remove with {}) as ONE multi-command ClickHouse ALTER statement — validated by ClickHouse as a whole, so it is rejected or applied in its entirety — plus catalog-only column metadata updates, on an ACTIVE table. Rejected (409) before materialization — define and materialize the schema first via POST /{name}/schema. Type changes and drops/renames of system, grain, or ordering-key columns are rejected (422), as is a drop of the TTL-referenced column. On an enrichment, dropping or renaming a column another pipeline reads, or one that receives a transform output of the pipeline targeting it, is rejected (409) naming those pipelines — checked before any ALTER is issued, so a refused patch leaves ClickHouse untouched. For an enrichment, this is where you add a provenance column an already-materialized target is missing — `pipeline_generation` (long), `model` (string), `enriched_at` (timestamp), `group_version` (long), `truncated` (boolean); one that is absent is silently skipped on write. This endpoint does **not** inject them: it applies exactly the operations you list, because widening an explicit operation list into a five-column DDL on a populated table is not something to do on a caller's behalf. `pipeline_generation` is the exception you do not have to add by hand: a startup reconciler adds it to every enrichment an `enrich` pipeline targets. On an `llm` target, a patch that edits a column's `description` bumps the targeting pipeline's `generation`, because an output's prose defaults to that description and it is therefore a live input to the composed prompt. A column a column policy hides from the caller is unknown to it (422), and while the stored TTL is on such a column any `ttl` member is refused 403 `column_not_entitled`. Nor may a TTL be on a column a column policy masks for the caller: a `ttl.column` naming one, and any `ttl` member while the stored TTL is on one, is refused 403 `column_not_entitled`. A rename rewrites the column policies naming the column and a drop prunes them (each bumping the access generation of the table whose lists change, the source's for an enrichment column); a drop that would empty a list is refused 409 `column_in_column_policy` before any ALTER, after the row-policy guard (409 `column_in_row_policy`). 409 `table_busy` when another change to the table holds it past the lock timeout (retry).",
         "operationId": "patchTableSchema",
         "parameters": [
           {

@@ -59,7 +59,7 @@ class TableCallerPermissionsTest {
         final JsonMapper jsonMapper = new JsonMapperConfiguration().jsonMapper();
         final SensitiveColumnAccess columnAccess = new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims),
                 resolver, definitions, governing, claims, mock(ProviderRolePrivileges.class), new RowPolicyCodec(jsonMapper),
-                new ColumnPolicyCodec(jsonMapper));
+                new ColumnPolicyCodec(jsonMapper), columns);
         return new TableCallerPermissions(claims, resolver, rowPolicies, governing, columnAccess, columns);
     }
 

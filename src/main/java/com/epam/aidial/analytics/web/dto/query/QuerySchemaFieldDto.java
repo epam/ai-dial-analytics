@@ -55,11 +55,23 @@ public record QuerySchemaFieldDto(
         @Schema(description = "Whether the field is computed by the service after the query runs rather than stored: "
                 + "it may only be selected as a plain row-mode projection, never filtered, sorted, grouped or "
                 + "passed to a function", example = "false")
-        @JsonProperty("projection_only") boolean projectionOnly) {
+        @JsonProperty("projection_only") boolean projectionOnly,
 
-    /** A field backed by a catalog column — every field but a computed one. */
+        @Schema(description = "Whether a column policy masks the field for this caller: its value is present on the rows a "
+                + "role allowing it admits and absent (null) on the others, and a JSON row lists the output columns it made "
+                + "absent or partial under `$masked`", example = "false")
+        boolean masked) {
+
+    /** A field backed by a catalog column — every field but a computed one — that no column policy masks. */
     public QuerySchemaFieldDto(String name, QueryFieldType type, QueryFieldType elementType, List<String> enumValues,
             String source, String description, String displayName, String tag, boolean sensitive, boolean heavy) {
-        this(name, type, elementType, enumValues, source, description, displayName, tag, sensitive, heavy, false);
+        this(name, type, elementType, enumValues, source, description, displayName, tag, sensitive, heavy, false, false);
+    }
+
+    /** A field no column policy masks. */
+    public QuerySchemaFieldDto(String name, QueryFieldType type, QueryFieldType elementType, List<String> enumValues,
+            String source, String description, String displayName, String tag, boolean sensitive, boolean heavy,
+            boolean projectionOnly) {
+        this(name, type, elementType, enumValues, source, description, displayName, tag, sensitive, heavy, projectionOnly, false);
     }
 }

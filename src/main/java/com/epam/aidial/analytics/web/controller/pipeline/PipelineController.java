@@ -99,7 +99,7 @@ public class PipelineController {
 
     /** The 403 an authoring or data-plane path answers for a column the calling identity may not read. */
     static final String COLUMN_REFUSAL_DOC = "The calling identity may not read a column the declaration reads: one a "
-            + "column policy hides from it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the "
+            + "column policy hides from it or masks for it (`column_not_entitled`, checked first), or a `sensitive` one it lacks the "
             + "clearance for (`sensitive_column_not_entitled`); or it lacks the endpoint's privilege or the pipeline's grant";
 
     private final PipelineService service;

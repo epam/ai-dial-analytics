@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.JooqTypes;
 import com.epam.aidial.analytics.service.query.JsonExtractFunctions;
+import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.QueryFunctionCatalog;
@@ -227,11 +228,13 @@ public class ExprTranslator {
 
     /**
      * Like {@link #resolveField(String, Map)} but returns {@code null} for an unknown name instead of
-     * throwing, so callers (e.g. group-key resolution) can fall back to other sources before failing.
+     * throwing, so callers (e.g. group-key resolution) can fall back to other sources before failing. A masked
+     * field resolves to its masked value ({@link QueryFieldBinding#value()}), so every clause reads it as absent where
+     * its mask is false.
      */
     public Field<?> resolveFieldOrNull(String name, Map<String, QueryFieldBinding> bindings) {
         final QueryFieldBinding binding = bindings.get(name);
-        return binding != null ? binding.field() : null;
+        return binding != null ? binding.value() : null;
     }
 
     /** Translates any non-array expression into a jOOQ {@link Field}. */
@@ -883,8 +886,9 @@ public class ExprTranslator {
         // identifier there, so binding it is not an option. Everything else is a bound operand.
         final String call = fn + "({0} -> {1}, {2})";
         final String template = HigherOrderFunctions.returnsBoolean(fn) ? "toBool(" + call + ")" : call;
+        // The body is marked as one, so a masked field it captures reads its scope's mask alias (MaskRendering).
         return DSL.field(template, HigherOrderFunctions.resultClass(fn),
-                DSL.field(param), toField(body, scoped), array);
+                DSL.field(param), MaskRendering.lambdaBody(param, toField(body, scoped)), array);
     }
 
     /**
@@ -1629,7 +1633,7 @@ public class ExprTranslator {
             throw new IllegalStateException("json_extract function '" + fn + "' reads an object column"
                     + " through subcolumn access and must not reach the text rendering");
         }
-        return DSL.function("toJSONString", String.class, object.field());
+        return DSL.function("toJSONString", String.class, object.value());
     }
 
     /**
@@ -1925,18 +1929,21 @@ public class ExprTranslator {
                 Boolean.class, value);
     }
 
-    /** {@code "table"."column"."key1"."key2"} — the JSON subcolumn addressed by the literal path. */
+    /**
+     * {@code "table"."column"."key1"."key2"} — the JSON subcolumn addressed by the literal path, read by path from the
+     * stored column and, for a masked field, kept to the rows its mask admits ({@link QueryFieldBinding#valueOf}).
+     */
     private Field<?> subcolumn(QueryFieldBinding binding, List<String> path) {
         // A pruned column is not a column of the derived table any more — only the paths it projected are,
         // each under the single dotted identifier ObjectPathUsage.alias spells. Addressing it as nested
         // segments would name something nothing projects.
         if (binding.prunedPaths().contains(path)) {
-            final String[] parts = binding.field().getQualifiedName().getName().clone();
+            final String[] parts = binding.physicalField().getQualifiedName().getName().clone();
             final int last = parts.length - 1;
             parts[last] = ObjectPathUsage.alias(parts[last], path);
-            return DSL.field(DSL.name(parts));
+            return binding.valueOf(DSL.field(DSL.name(parts)));
         }
-        return ObjectPathUsage.subcolumn(binding.field(), path);
+        return binding.valueOf(ObjectPathUsage.subcolumn(binding.physicalField(), path));
     }
 
     /**
@@ -2365,6 +2372,16 @@ public class ExprTranslator {
             throw new QueryValidationException("function '" + fn.name() + "' cannot be used as a window function;"
                     + " supported: row_number, rank, dense_rank, count, sum, avg, min, max");
         }
+        return over(function, window, window.frame(), bindings);
+    }
+
+    /**
+     * {@code function OVER (…)} with {@code window}'s partition and order and {@code frame} in place of its own frame
+     * ({@code null}: none) — how the builder computes a masked input's flag over the rows a window output reads. A
+     * ranking function reads every row from its partition's start, whatever frame the window declares, so its flag takes
+     * {@code ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW}.
+     */
+    Field<?> over(Field<?> function, WindowExpr window, WindowFrame frame, Map<String, QueryFieldBinding> bindings) {
         final StringBuilder template = new StringBuilder("{0} OVER (");
         final List<QueryPart> parts = new ArrayList<>();
         parts.add(function);
@@ -2402,11 +2419,11 @@ public class ExprTranslator {
             template.append("ORDER BY {").append(parts.size()).append('}');
             parts.add(DSL.list(keys));
         }
-        if (window.frame() != null) {
+        if (frame != null) {
             if (!partitionBy.isEmpty() || !orderBy.isEmpty()) {
                 template.append(' ');
             }
-            appendFrame(template, parts, window.frame());
+            appendFrame(template, parts, frame);
         }
         template.append(')');
         return DSL.field(template.toString(), function.getType(), parts.toArray());

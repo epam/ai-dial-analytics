@@ -71,11 +71,17 @@ public class SensitiveProjectionGuard {
 
     /**
      * Refuses {@code 403 column_not_entitled} when {@code projection} names a column of {@code table} that a column
-     * policy hides from the calling identity — under either spelling, each mapped to its catalog column and judged by
-     * that column's exposed name, and a computed field by the columns it returns. Checked before the clearance, and by a
+     * policy hides from the calling identity or masks for it — under either spelling, each mapped to its catalog column
+     * and judged by that column's exposed name, and a computed field by the columns it returns. A pipeline reads without
+     * a row filter or a mask, so a masked column is refused as a hidden one. Checked before the clearance, and by a
      * caller judging several tables across all of them first, so the code never depends on the order tables are visited.
      */
     public void enforceVisible(String table, Collection<String> projection, String operation, String kind) {
+        enforceVisible(table, projection, operation, kind, true);
+    }
+
+    /** As {@link #enforceVisible(String, Collection, String, String)}, refusing a masked column too only when {@code maskedToo}. */
+    private void enforceVisible(String table, Collection<String> projection, String operation, String kind, boolean maskedToo) {
         final ColumnVisibility visibility = sensitiveAccess.visibleColumns(table);
         if (visibility.isAll()) {
             return;
@@ -88,15 +94,23 @@ public class SensitiveProjectionGuard {
         }
         for (String name : projection) {
             final ColumnMappingEntity column = bySpelling.get(name);
-            if (column != null && !visibility.allows(column, catalogColumns)) {
-                throw hidden(operation, kind, table, column.getName());
+            if (column != null) {
+                refuseUnlessVisible(visibility, column, catalogColumns, maskedToo, operation, kind, table, column.getName());
             }
         }
     }
 
-    private static ColumnNotEntitledException hidden(String operation, String kind, String table, String column) {
-        return new ColumnNotEntitledException(operation + " of " + kind + " '" + table + "' reads column '" + column
-                + "', which a column policy hides from the caller");
+    /** Refuses {@code column}, named {@code reported} in the message, when {@code visibility} hides it, or masks it and {@code maskedToo}. */
+    private static void refuseUnlessVisible(ColumnVisibility visibility, ColumnMappingEntity column, List<ColumnMappingEntity> catalogColumns,
+            boolean maskedToo, String operation, String kind, String table, String reported) {
+        if (!visibility.allows(column, catalogColumns)) {
+            throw new ColumnNotEntitledException(operation + " of " + kind + " '" + table + "' reads column '" + reported
+                    + "', which a column policy hides from the caller");
+        }
+        if (maskedToo && !visibility.visible(column, catalogColumns)) {
+            throw new ColumnNotEntitledException(operation + " of " + kind + " '" + table + "' reads column '" + reported
+                    + "', which a column policy masks for the caller on some rows, and a pipeline reads without a row filter or a mask");
+        }
     }
 
     /** The clearance half of {@link #enforce(String, Collection, String, String)}, without the column-policy check. */
@@ -248,7 +262,16 @@ public class SensitiveProjectionGuard {
      */
     public void enforceEntity(String source, Collection<String> projection, String operation) {
         // Column policies across the whole entity before any clearance check (see enforceVisible).
-        final List<TableDefinitionEntity> enrichments = enforceVisibleEntity(source, projection, operation);
+        enforceSensitiveEntity(source, projection, operation, enforceVisibleEntity(source, projection, operation));
+    }
+
+    /**
+     * The clearance half of {@link #enforceEntity}, over the source and {@code enrichments}, its active enrichments: for a
+     * caller that has already judged column policies its own way ({@link #enforceVisibleEntity(String, Collection, String,
+     * boolean)}).
+     */
+    public void enforceSensitiveEntity(String source, Collection<String> projection, String operation,
+            List<TableDefinitionEntity> enrichments) {
         enforceSensitive(source, projection, operation, "source");
         for (TableDefinitionEntity enrichment : enrichments) {
             String owner = enrichment.getName();
@@ -277,11 +300,21 @@ public class SensitiveProjectionGuard {
     /**
      * The column-policy half of {@link #enforceEntity}: refuses {@code 403 column_not_entitled} for a name of
      * {@code projection} — a source column under either spelling, or an active enrichment's under its qualified flat
-     * name — that a column policy hides from the caller. Returns the active enrichments it judged.
+     * name — that a column policy hides from the caller or masks for it. Returns the active enrichments it judged.
      */
     public List<TableDefinitionEntity> enforceVisibleEntity(String source, Collection<String> projection, String operation) {
+        return enforceVisibleEntity(source, projection, operation, true);
+    }
+
+    /**
+     * As {@link #enforceVisibleEntity(String, Collection, String)}, refusing a masked column too only when
+     * {@code maskedToo}. A caller re-attributing a statement that failed to plan passes false: a masked column is in the
+     * caller's schema, so it is not what made the statement fail.
+     */
+    public List<TableDefinitionEntity> enforceVisibleEntity(String source, Collection<String> projection, String operation,
+            boolean maskedToo) {
         final List<TableDefinitionEntity> enrichments = catalog.activeEnrichmentsOf(source);
-        enforceVisible(source, projection, operation, "source");
+        enforceVisible(source, projection, operation, "source", maskedToo);
         for (TableDefinitionEntity enrichment : enrichments) {
             final String owner = enrichment.getName();
             final String prefix = owner + ".";
@@ -293,8 +326,9 @@ public class SensitiveProjectionGuard {
                 final ColumnVisibility visibility = sensitiveAccess.visibleColumns(enrichment);
                 final List<ColumnMappingEntity> catalogColumns = columns.findByTableNameOrderByOrdinal(owner);
                 for (ColumnMappingEntity column : fieldsOf(owner)) {
-                    if (bare.contains(column.getName()) && !visibility.allows(column, catalogColumns)) {
-                        throw hidden(operation, "enrichment", owner, prefix + column.getName());
+                    if (bare.contains(column.getName())) {
+                        refuseUnlessVisible(visibility, column, catalogColumns, maskedToo, operation, "enrichment", owner,
+                                prefix + column.getName());
                     }
                 }
             }

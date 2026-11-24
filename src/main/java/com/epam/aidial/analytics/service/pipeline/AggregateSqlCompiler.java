@@ -301,7 +301,7 @@ public class AggregateSqlCompiler {
         for (final String name : enrichmentFields) {
             final QueryFieldBinding binding = nulls.get(name);
             if (binding != null) {
-                nulls.put(name, new QueryFieldBinding(binding.name(), DSL.field("NULL", binding.field().getDataType()),
+                nulls.put(name, new QueryFieldBinding(binding.name(), DSL.field("NULL", binding.physicalField().getDataType()),
                         binding.type(), binding.elementType(), binding.heavy()));
             }
         }

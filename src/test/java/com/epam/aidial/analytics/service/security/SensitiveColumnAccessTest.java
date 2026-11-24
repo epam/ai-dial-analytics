@@ -9,6 +9,7 @@ import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
@@ -58,6 +59,7 @@ class SensitiveColumnAccessTest {
 
     private final SecurityClaimsExtractor claims = new SecurityClaimsExtractor();
     private final TableDefinitionRepository definitions = mock(TableDefinitionRepository.class);
+    private final ColumnMappingRepository columns = mock(ColumnMappingRepository.class);
 
     @AfterEach
     void clearContext() {
@@ -72,7 +74,7 @@ class SensitiveColumnAccessTest {
     private SensitiveColumnAccess access(SecurityMode mode) {
         final GoverningAccess governing = new GoverningAccess(definitions);
         return new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims), resolver(mode), definitions,
-                governing, claims, rolePrivileges, rowPolicyCodec, columnPolicyCodec);
+                governing, claims, rolePrivileges, rowPolicyCodec, columnPolicyCodec, columns);
     }
 
     private static SecurityModeResolver resolver(SecurityMode mode) {
@@ -200,14 +202,19 @@ class SensitiveColumnAccessTest {
     }
 
     @Test
-    @DisplayName("one role's columns are not shown on another role's rows")
+    @DisplayName("one role's columns are not shown on another role's rows: they are masked to that role's rows")
     void confiningRolesIntersect() {
         final TableDefinitionEntity t = table(SOURCE);
         entry(t, "R", List.of(Privilege.TABLE_READ), "P1", List.of("a", "project"));
         entry(t, "U", List.of(Privilege.TABLE_READ), "P2", null);
         authenticateWith(EnumSet.noneOf(Privilege.class), "R", "U");
 
-        assertThat(access(SecurityMode.OIDC).visibleColumns(t).visible()).containsExactlyInAnyOrder("a", "project");
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible()).containsExactlyInAnyOrder("a", "project");
+        assertThat(visibility.visible("c")).isFalse();
+        assertThat(visibility.allows("c")).as("listed and referenced like a visible column").isTrue();
+        assertThat(visibility.masks("c")).containsExactly(projectIs("P2"));
+        assertThat(visibility.masks("a")).as("a visible column carries no mask").isNull();
     }
 
     @Test
@@ -222,25 +229,108 @@ class SensitiveColumnAccessTest {
     }
 
     @Test
-    @DisplayName("a column every confining role lists is visible")
+    @DisplayName("a column every confining role lists is visible, one some of them list is masked, one none lists is hidden")
     void intersectionOfConfiningRoles() {
         final TableDefinitionEntity t = table(SOURCE);
         entry(t, "R", List.of(Privilege.TABLE_READ), "P1", List.of("a", "c"));
         entry(t, "U", List.of(Privilege.TABLE_READ), "P2", List.of("b", "c"));
         authenticateWith(EnumSet.noneOf(Privilege.class), "R", "U");
 
-        assertThat(access(SecurityMode.OIDC).visibleColumns(t).visible()).containsExactly("c");
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible()).containsExactly("c");
+        assertThat(visibility.masks("a")).containsExactly(projectIs("P1"));
+        assertThat(visibility.masks("b")).containsExactly(projectIs("P2"));
+        assertThat(visibility.allows("project")).isFalse();
+        assertThat(visibility.allows("d")).isFalse();
     }
 
     @Test
-    @DisplayName("a rows-only entry without a read path adds rows but no columns")
-    void rowsOnlyEntryTakesNoPart() {
+    @DisplayName("gaining a column-restricted role masks a confined role's columns to its rows")
+    void gainingARestrictedRoleMasks() {
+        final TableDefinitionEntity t = table(SOURCE);
+        entry(t, "A", List.of(Privilege.TABLE_READ), "P1", null);
+        entry(t, "B", List.of(Privilege.TABLE_READ), null, List.of("x"));
+        authenticateWith(EnumSet.noneOf(Privilege.class), "A", "B");
+
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible("x")).isTrue();
+        assertThat(visibility.masks("y")).containsExactly(projectIs("P1"));
+        assertThat(visibility.masks("project")).containsExactly(projectIs("P1"));
+    }
+
+    @Test
+    @DisplayName("a column that would be masked is hidden on a table storing a column named after a table of its entity")
+    void hidingFallback() {
+        final TableDefinitionEntity t = table(SOURCE);
+        entry(t, "A", List.of(Privilege.TABLE_READ), "P1", null);
+        entry(t, "B", List.of(Privilege.TABLE_READ), "P2", List.of("p"));
+        authenticateWith(EnumSet.noneOf(Privilege.class), "A", "B");
+
+        when(columns.findByTableNameOrderByOrdinal(SOURCE)).thenReturn(List.of(column(SOURCE, "p"), column(SOURCE, SOURCE)));
+        ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible()).containsExactly("p");
+        assertThat(visibility.allows(SOURCE)).isFalse();
+        assertThat(visibility.allows("x")).isFalse();
+
+        final TableDefinitionEntity enrichment = enrichment();
+        when(definitions.findBySourceTable(SOURCE)).thenReturn(List.of(enrichment));
+        when(columns.findByTableNameOrderByOrdinal(SOURCE)).thenReturn(List.of(column(SOURCE, "p"), column(SOURCE, ENRICHMENT)));
+        visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.allows("x")).as("a source column named after its enrichment").isFalse();
+
+        when(columns.findByTableNameOrderByOrdinal(SOURCE)).thenReturn(List.of(column(SOURCE, "p")));
+        when(columns.findByTableNameOrderByOrdinal(ENRICHMENT)).thenReturn(List.of(column(ENRICHMENT, ENRICHMENT)));
+        assertThat(access(SecurityMode.OIDC).visibleColumns(enrichment).allows("label"))
+                .as("an enrichment storing a column named after itself").isFalse();
+
+        when(columns.findByTableNameOrderByOrdinal(ENRICHMENT)).thenReturn(List.of(column(ENRICHMENT, "label")));
+        assertThat(access(SecurityMode.OIDC).visibleColumns(enrichment).masks("label")).containsExactly(projectIs("P1"));
+    }
+
+    @Test
+    @DisplayName("a rows-only entry without a read path adds rows; its columns narrow what those rows show")
+    void rowsOnlyEntryNarrows() {
         final TableDefinitionEntity t = table(SOURCE);
         entry(t, "X", List.of(Privilege.TABLE_READ), "P1", List.of("a", "project"));
         entry(t, "N", List.of(), "P2", null);
         authenticateWith(EnumSet.noneOf(Privilege.class), "X", "N");
 
         assertThat(access(SecurityMode.OIDC).visibleColumns(t).visible()).containsExactlyInAnyOrder("a", "project");
+
+        final Map<String, List<String>> narrowed = new TreeMap<>(columnPolicyCodec.read(t.getColumnPolicies()));
+        narrowed.put("N", List.of("project"));
+        t.setColumnPolicies(columnPolicyCodec.write(narrowed));
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible()).containsExactly("project");
+        assertThat(visibility.masks("a")).as("absent on the rows only N adds").containsExactly(projectIs("P1"));
+        assertThat(visibility.allows("c")).isFalse();
+    }
+
+    @Test
+    @DisplayName("a masked column follows the * entry's own-rows policy that allows it")
+    void everyoneOwnRowsPolicyMasks() {
+        final TableDefinitionEntity t = table(SOURCE);
+        entry(t, "*", List.of(Privilege.TABLE_READ), "own", null);
+        entry(t, "V", List.of(Privilege.TABLE_READ), "P2", List.of("project"));
+        authenticateWith(EnumSet.noneOf(Privilege.class), "V");
+
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.visible("project")).isTrue();
+        assertThat(visibility.masks("user_hash")).containsExactly(projectIs("own"));
+    }
+
+    @Test
+    @DisplayName("a caller that only gets the table lists a masked column")
+    void getOnlyCallerListsMaskedColumn() {
+        final TableDefinitionEntity t = table(SOURCE);
+        entry(t, "G1", List.of(Privilege.TABLE_GET), "P1", List.of("a"));
+        entry(t, "G2", List.of(Privilege.TABLE_GET), "P2", List.of("b"));
+        authenticateWith(EnumSet.noneOf(Privilege.class), "G1", "G2");
+
+        final ColumnVisibility visibility = access(SecurityMode.OIDC).visibleColumns(t);
+        assertThat(visibility.allows("a")).isTrue();
+        assertThat(visibility.allows("b")).isTrue();
+        assertThat(visibility.isAll()).isFalse();
     }
 
     @Test
@@ -348,6 +438,17 @@ class SensitiveColumnAccessTest {
         assertThat(new ColumnVisibility(Set.of("request_body")).allows(computed, columns)).isFalse();
         assertThat(new ColumnVisibility(Set.of("request_body", "request_cache_control")).allows(computed, columns)).isTrue();
         assertThat(ColumnVisibility.ALL.allows(computed, columns)).isTrue();
+
+        final ColumnVisibility masked = new ColumnVisibility(Set.of("request_body"),
+                Map.of("request_cache_control", List.of(projectIs("P1"))), Set.of("request_body", "request_cache_control"), null);
+        assertThat(masked.allows(computed, columns)).as("no input hidden: masked").isTrue();
+        assertThat(masked.visible(computed, columns)).isFalse();
+        assertThat(ColumnVisibility.inputs(computed, columns)).containsExactlyInAnyOrder("request_body", "request_cache_control");
+    }
+
+    /** The filter of the row policy {@link #entry} stores for {@code project}. */
+    private static ComparisonNode projectIs(String project) {
+        return new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("project"), new ValueExpr(ValueType.STRING, project)));
     }
 
     private TableDefinitionEntity table(String name) {
@@ -388,8 +489,12 @@ class SensitiveColumnAccessTest {
     }
 
     private static ColumnMappingEntity column(String name) {
+        return column(ComputedFields.TABLE, name);
+    }
+
+    private static ColumnMappingEntity column(String table, String name) {
         final ColumnMappingEntity column = new ColumnMappingEntity();
-        column.setTableName(ComputedFields.TABLE);
+        column.setTableName(table);
         column.setName(name);
         column.setSourceName(name);
         return column;

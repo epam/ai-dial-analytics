@@ -103,24 +103,31 @@ public class RowPolicyPredicates {
         return rendered;
     }
 
-    /**
-     * Translates the tree, handing every subtree without a caller value to the translator untouched, so a
-     * policy that uses none renders exactly as it always did.
-     */
     private Condition toCondition(
             FilterNode node, Map<String, QueryFieldBinding> bindings, UnaryOperator<String> callerValues) {
+        return toCondition(filterTranslator, node, bindings, callerValues);
+    }
+
+    /**
+     * A stored policy filter translated over {@code bindings} with the caller values bound from {@code callerValues}:
+     * every subtree without a caller value goes to the translator untouched, so a policy that uses none renders exactly
+     * as it always did. Shared with the mask conditions of masked columns ({@link CatalogQueryService}), so a mask binds
+     * a caller value exactly as the row filter does; static because that service is this one's dependency.
+     */
+    public static Condition toCondition(FilterTranslator translator, FilterNode node, Map<String, QueryFieldBinding> bindings,
+            UnaryOperator<String> callerValues) {
         return switch (node) {
             case LogicalNode logical when usesCallerValue(logical) -> {
                 final List<Condition> args = logical.args().stream()
-                        .map(arg -> toCondition(arg, bindings, callerValues))
+                        .map(arg -> toCondition(translator, arg, bindings, callerValues))
                         .toList();
                 yield combine(logical.op(), args);
             }
             case ComparisonNode comparison when usesCallerValue(comparison) -> {
                 final ComparisonNode bound = CallerValues.bind(comparison, callerValues);
-                yield bound == null ? CallerValues.UNKNOWN : filterTranslator.toCondition(bound, bindings);
+                yield bound == null ? CallerValues.UNKNOWN : translator.toCondition(bound, bindings);
             }
-            case null, default -> filterTranslator.toCondition(node, bindings);
+            case null, default -> translator.toCondition(node, bindings);
         };
     }
 

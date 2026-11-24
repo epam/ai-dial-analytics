@@ -19,7 +19,7 @@ import java.util.function.Supplier;
  *
  * <p>In a statement the field is a {@link StandIn}: a {@code tuple(...)} over the physical columns the completion
  * needs, projected under the field's output name like any other binding. One cell per field and no helper columns, so
- * every projection site that already renders {@code binding.field()} carries what the completer needs without knowing
+ * every projection site that already renders {@code binding.value()} carries what the completer needs without knowing
  * the field is special, and the output names, order and count stay those the caller asked for.
  *
  * @param name        the bare name, published qualified by its enrichment ({@code "<enrichment>.<name>"})

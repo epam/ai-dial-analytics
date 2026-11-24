@@ -43,11 +43,12 @@ public record QueryEntityModel(
         boolean finalCapable) {
 
     /**
-     * Whether the entity's own column with physical name {@code physical} is in this caller's model — absent when a
-     * column policy hides it or it is sensitive and the caller lacks the clearance.
+     * Whether the entity's own column with physical name {@code physical} is visible in this caller's model — absent when
+     * a column policy hides it or it is sensitive and the caller lacks the clearance, and not visible when a column
+     * policy masks it, so its values may not be disclosed outside a masked read.
      */
     public boolean exposesSourceColumn(String physical) {
-        return baseSchema.stream().anyMatch(field -> !field.name().contains(".") && field.source().equals(physical));
+        return baseSchema.stream().anyMatch(field -> !field.name().contains(".") && field.source().equals(physical) && !field.masked());
     }
 
     public QueryEntityModel {

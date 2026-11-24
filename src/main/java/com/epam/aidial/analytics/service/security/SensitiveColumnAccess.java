@@ -1,7 +1,9 @@
 package com.epam.aidial.analytics.service.security;
 
 import com.epam.aidial.analytics.service.query.ComputedFields;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
+import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableAccess;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
@@ -19,10 +21,13 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Decides, <b>per owning table</b>, whether the current caller may read that table's values at all and
@@ -72,6 +77,7 @@ public class SensitiveColumnAccess {
     private final ProviderRolePrivileges rolePrivileges;
     private final RowPolicyCodec rowPolicyCodec;
     private final ColumnPolicyCodec columnPolicyCodec;
+    private final ColumnMappingRepository columns;
 
     /** Whether the caller may see that {@code table} exists. */
     public boolean mayList(String table) {
@@ -114,17 +120,22 @@ public class SensitiveColumnAccess {
     }
 
     /**
-     * Which of {@code definition}'s own columns the caller sees as far as column policies go (the clearance is
-     * separate and stacks on top), from the column policies of its <b>governing roles</b> on the table — for an
-     * enrichment, on its source, naming the enrichment's columns {@code <enrichment>.<column>}:
+     * How the caller sees each of {@code definition}'s own columns as far as column policies go — visible, masked or
+     * hidden (the clearance is separate and stacks on top) — from the column policies of its <b>governing roles</b> on
+     * the table, for an enrichment on its source, naming the enrichment's columns {@code <enrichment>.<column>}:
      *
      * <ul>
      *   <li>when the caller may read the table, the roles that by themselves confer the read ({@link
      *       RowPolicyFilter#readsTable}, {@code *} included); otherwise the roles through which it holds
      *       {@code TABLE_GET};</li>
-     *   <li>a column is visible when some governing role with no row policy allows it, or every governing role allows
-     *       it ("allows": no column policy, or one listing it) — so one role's columns are never shown on rows only
-     *       another role admits;</li>
+     *   <li>a column is visible when some governing role with no row policy allows it, or every governing role and every
+     *       row-contributing role allows it ("allows": no column policy, or one listing it); masked when it is not
+     *       visible but some governing role allows it, absent on the rows the allowing roles' row policies do not admit;
+     *       hidden otherwise. A row-contributing role (one whose policy enters the row filter, {@link
+     *       RowPolicyFilter#confiningRoles}, but which does not govern) allows a column only when every governing role
+     *       does too, so it only narrows;</li>
+     *   <li>a column that would be masked is hidden when a table of the entity stores a column named after a table of
+     *       the entity, which would capture the qualified names a mask is evaluated over;</li>
      *   <li>a caller with no governing role is not narrowed, nor is one in {@code none} mode or the system identity
      *       (which carries no provider role); an enrichment maintainer that may not read the source sees every column
      *       of the enrichment.</li>
@@ -158,46 +169,120 @@ public class SensitiveColumnAccess {
         final boolean globalGet = held.contains(Privilege.TABLE_GET);
         final Map<String, RowPolicy> rowPolicies = rowPolicyCodec.read(governed.getRowPolicies());
         final Map<String, List<String>> columnPolicies = columnPolicyCodec.read(governed.getColumnPolicies());
-        final Set<String> union = new HashSet<>();
-        Set<String> intersection = null;
-        boolean anyGoverning = false;
-        for (final String role : roles) {
+        final List<Grant> governingGrants = new ArrayList<>();
+        final Set<String> governingRoles = new HashSet<>();
+        // Sorted, so the mask conditions built from these grants are the same text on every request.
+        for (final String role : new TreeSet<>(roles)) {
             final boolean governs = mayRead
                     ? RowPolicyFilter.readsTable(role, access, globalRead, rolePrivileges)
                     : TableCallerPermissions.isGranted(access, Privilege.TABLE_GET, Set.of(role))
                             || globalGet && rolePrivileges.holdsGlobally(role, Privilege.TABLE_GET);
-            if (!governs) {
-                continue;
-            }
-            anyGoverning = true;
-            final List<String> allowed = columnPolicies.get(role);
-            final boolean rowUnrestricted = !rowPolicies.containsKey(role);
-            if (allowed == null) {
-                if (rowUnrestricted) {
-                    return ColumnVisibility.ALL;
-                }
-                continue;
-            }
-            if (rowUnrestricted) {
-                union.addAll(allowed);
-            }
-            if (intersection == null) {
-                intersection = new HashSet<>(allowed);
-            } else {
-                intersection.retainAll(allowed);
+            if (governs) {
+                governingRoles.add(role);
+                governingGrants.add(Grant.of(columnPolicies.get(role), rowPolicies.get(role)));
             }
         }
-        if (!anyGoverning || intersection == null) {
+        if (governingGrants.isEmpty() || governingGrants.stream().anyMatch(grant -> grant.filter() == null && grant.columns() == null)) {
             return ColumnVisibility.ALL;
         }
-        union.addAll(intersection);
-        if (!enrichment) {
-            return new ColumnVisibility(Set.copyOf(union));
+        final List<Grant> contributing = new ArrayList<>();
+        for (final String role : RowPolicyFilter.confiningRoles(rowPolicies, access, roles, globalRead, rolePrivileges)) {
+            if (!governingRoles.contains(role)) {
+                contributing.add(Grant.of(columnPolicies.get(role), rowPolicies.get(role)));
+            }
         }
-        final String prefix = definition.getName() + ".";
-        final Set<String> own = new HashSet<>();
-        union.stream().filter(name -> name.startsWith(prefix)).forEach(name -> own.add(name.substring(prefix.length())));
-        return new ColumnVisibility(Set.copyOf(own));
+        if (governingGrants.stream().allMatch(grant -> grant.columns() == null)
+                && contributing.stream().allMatch(grant -> grant.columns() == null)) {
+            return ColumnVisibility.ALL;
+        }
+        final String prefix = enrichment ? definition.getName() + "." : "";
+        final Set<String> named = new HashSet<>();
+        for (final Grant grant : governingGrants) {
+            named.addAll(own(grant.columns(), prefix));
+        }
+        for (final Grant grant : contributing) {
+            named.addAll(own(grant.columns(), prefix));
+        }
+        final boolean[] fallback = new boolean[2];
+        final Set<String> visible = new HashSet<>();
+        final Map<String, List<FilterNode>> masked = new HashMap<>();
+        for (final String name : named) {
+            final List<FilterNode> mask = decide(prefix + name, governingGrants, contributing);
+            if (mask == null) {
+                visible.add(name);
+            } else if (!mask.isEmpty() && !hidesMasks(governed, fallback)) {
+                masked.put(name, mask);
+            }
+        }
+        // A column no list names: the same decision for all of them, made on a name no list holds.
+        final List<FilterNode> otherwise = decide(null, governingGrants, contributing);
+        final boolean otherwiseMasked = otherwise != null && !otherwise.isEmpty() && !hidesMasks(governed, fallback);
+        return new ColumnVisibility(visible, masked, named, otherwiseMasked ? otherwise : null);
+    }
+
+    /**
+     * One governing or row-contributing role's say on a table: the columns its policy allows ({@code null} for every
+     * column) and its row policy's filter ({@code null} when it has none).
+     */
+    private record Grant(List<String> columns, FilterNode filter) {
+
+        static Grant of(List<String> columns, RowPolicy policy) {
+            return new Grant(columns, policy == null ? null : policy.filter());
+        }
+
+        /** Whether this role allows the column a policy names {@code key}; {@code null} for a name no list holds. */
+        boolean allows(String key) {
+            return columns == null || key != null && columns.contains(key);
+        }
+    }
+
+    /** The exposed names in {@code columns} that belong to the table a policy names with {@code prefix}. */
+    private static List<String> own(List<String> columns, String prefix) {
+        if (columns == null) {
+            return List.of();
+        }
+        if (prefix.isEmpty()) {
+            // A source's own column name holds no dot; a dotted name is one of its enrichments'.
+            return columns.stream().filter(name -> name.indexOf('.') < 0).toList();
+        }
+        return columns.stream().filter(name -> name.startsWith(prefix)).map(name -> name.substring(prefix.length())).toList();
+    }
+
+    /**
+     * The decision on the column a policy names {@code key}: {@code null} when it is visible, the filters of its mask
+     * condition when it is masked, and an empty list when it is hidden.
+     */
+    private static List<FilterNode> decide(String key, List<Grant> governing, List<Grant> contributing) {
+        final boolean everyGoverning = governing.stream().allMatch(grant -> grant.allows(key));
+        if (governing.stream().anyMatch(grant -> grant.filter() == null && grant.allows(key))
+                || everyGoverning && contributing.stream().allMatch(grant -> grant.allows(key))) {
+            return null;
+        }
+        // Every governing role that allows it carries a row policy, or the column would be visible.
+        final List<FilterNode> filters = new ArrayList<>();
+        governing.stream().filter(grant -> grant.allows(key)).forEach(grant -> filters.add(grant.filter()));
+        if (!filters.isEmpty() && everyGoverning) {
+            contributing.stream().filter(grant -> grant.allows(key)).forEach(grant -> filters.add(grant.filter()));
+        }
+        return filters;
+    }
+
+    /**
+     * Whether masking falls back to hiding on {@code governed}'s entity: a table of it stores a column whose physical name
+     * is the name of a table of it, every enrichment counted whatever its status. The store resolves a table-qualified
+     * name to such a column's subcolumns, so a mask over {@code "<table>"."<column>"} could read the wrong value. Asked
+     * at most once per decision ({@code memo}: asked, answer), and only once a column would be masked.
+     */
+    private boolean hidesMasks(TableDefinitionEntity governed, boolean[] memo) {
+        if (!memo[0]) {
+            memo[0] = true;
+            final Set<String> tables = new HashSet<>();
+            tables.add(governed.getName());
+            definitions.findBySourceTable(governed.getName()).forEach(enrichment -> tables.add(enrichment.getName()));
+            memo[1] = tables.stream().anyMatch(table -> columns.findByTableNameOrderByOrdinal(table).stream()
+                    .anyMatch(column -> tables.contains(column.getSourceName())));
+        }
+        return memo[1];
     }
 
     /**
@@ -225,40 +310,83 @@ public class SensitiveColumnAccess {
     }
 
     /**
-     * One caller's visible columns of one table, by exposed name (an enrichment's bare, not qualified); {@link #ALL}
-     * places no restriction.
+     * One caller's view of one table's columns, by exposed name (an enrichment's bare, not qualified): each column is
+     * visible, masked or hidden. {@link #ALL} places no restriction.
      *
-     * @param visible the visible names, or {@code null} for every column
+     * @param visible   the visible names, or {@code null} for every column
+     * @param masked    the masked names among {@code named}, each with the filters whose disjunction is its mask condition
+     * @param named     the names some policy lists; a name outside it is decided by {@code otherwise}
+     * @param otherwise the mask filters of a column no policy names, or {@code null} when such a column is hidden
      */
-    public record ColumnVisibility(Set<String> visible) {
+    public record ColumnVisibility(Set<String> visible, Map<String, List<FilterNode>> masked, Set<String> named,
+            List<FilterNode> otherwise) {
 
-        /** No column hidden by a column policy. */
-        public static final ColumnVisibility ALL = new ColumnVisibility(null);
+        /** No column hidden or masked by a column policy. */
+        public static final ColumnVisibility ALL = new ColumnVisibility(null, Map.of(), Set.of(), null);
 
-        /** Whether the column exposed as {@code column} is visible. */
+        public ColumnVisibility {
+            visible = visible == null ? null : Set.copyOf(visible);
+            masked = masked == null ? Map.of() : Map.copyOf(masked);
+            named = named == null ? Set.of() : Set.copyOf(named);
+            otherwise = otherwise == null ? null : List.copyOf(otherwise);
+        }
+
+        /** Exactly {@code visible} visible, every other column hidden. */
+        public ColumnVisibility(Set<String> visible) {
+            this(visible, Map.of(), visible, null);
+        }
+
+        /** Whether the column exposed as {@code column} is visible or masked: listed and referenced like a visible one. */
         public boolean allows(String column) {
+            return visible(column) || masks(column) != null;
+        }
+
+        /** Whether the column exposed as {@code column} is visible: its stored value on every row the caller reads. */
+        public boolean visible(String column) {
             return visible == null || visible.contains(column);
+        }
+
+        /** The filters whose disjunction is {@code column}'s mask condition when it is masked, else {@code null}. */
+        public List<FilterNode> masks(String column) {
+            if (visible(column)) {
+                return null;
+            }
+            return named.contains(column) ? masked.get(column) : otherwise;
         }
 
         /**
          * Whether {@code column} — a catalog column or a computed field's transient descriptor ({@link ComputedFields})
-         * among {@code columns} — is visible. A computed field is visible exactly when every catalog column whose values
-         * it returns is.
+         * among {@code columns} — is visible or masked. A computed field is so exactly when no catalog column whose
+         * values it returns is hidden.
          */
         public boolean allows(ColumnMappingEntity column, List<ColumnMappingEntity> columns) {
-            if (visible == null) {
-                return true;
-            }
+            return inputs(column, columns).stream().allMatch(this::allows);
+        }
+
+        /** As {@link #allows(ColumnMappingEntity, List)}, for visible: every column whose values it returns is visible. */
+        public boolean visible(ColumnMappingEntity column, List<ColumnMappingEntity> columns) {
+            return inputs(column, columns).stream().allMatch(this::visible);
+        }
+
+        /**
+         * The exposed names of the catalog columns whose values {@code column} returns: its own name for a catalog column,
+         * the columns a computed field is completed from for one.
+         */
+        public static List<String> inputs(ColumnMappingEntity column, List<ColumnMappingEntity> columns) {
             if (!ComputedFields.isComputed(column.getTableName() + "." + column.getName())) {
-                return allows(column.getName());
+                return List.of(column.getName());
             }
             return columns.stream()
                     .filter(candidate -> ComputedFields.ANCHOR.equals(candidate.getSourceName())
                             || ComputedFields.MARKERS.equals(candidate.getSourceName()))
-                    .allMatch(candidate -> allows(candidate.getName()));
+                    .map(ColumnMappingEntity::getName)
+                    .toList();
         }
 
-        /** The columns both this and {@code other} allow. */
+        /**
+         * The columns both this and {@code other} allow: hidden when either hides, else masked when either masks. Read for
+         * the listing alone (revision snapshots), so a column both mask carries this side's filters.
+         */
         public ColumnVisibility and(ColumnVisibility other) {
             if (other.visible == null) {
                 return this;
@@ -266,12 +394,25 @@ public class SensitiveColumnAccess {
             if (visible == null) {
                 return other;
             }
-            final Set<String> both = new HashSet<>(visible);
-            both.retainAll(other.visible);
-            return new ColumnVisibility(Set.copyOf(both));
+            final Set<String> names = new HashSet<>(named);
+            names.addAll(other.named);
+            final Set<String> both = new HashSet<>();
+            final Map<String, List<FilterNode>> masks = new HashMap<>();
+            for (final String name : names) {
+                if (!allows(name) || !other.allows(name)) {
+                    continue;
+                }
+                final List<FilterNode> mask = masks(name) != null ? masks(name) : other.masks(name);
+                if (mask == null) {
+                    both.add(name);
+                } else {
+                    masks.put(name, mask);
+                }
+            }
+            return new ColumnVisibility(both, masks, names, otherwise == null || other.otherwise == null ? null : otherwise);
         }
 
-        /** Whether no column policy restricts the caller here. */
+        /** Whether no column policy restricts the caller here: nothing hidden and nothing masked. */
         public boolean isAll() {
             return visible == null;
         }

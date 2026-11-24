@@ -300,8 +300,8 @@ public class CompositeQueryBuilder {
             for (final FilterNode conjunct : sourceOnly) {
                 where.add(builder.filterTranslator().toCondition(conjunct, restricted.bindings()));
             }
-            into.add(DSL.condition("{0} IN ({1})", reducedBinding.field(),
-                    DSL.select(restrictedBinding.field()).from(restricted.table()).where(where)));
+            into.add(DSL.condition("{0} IN ({1})", reducedBinding.physicalField(),
+                    DSL.select(restrictedBinding.physicalField()).from(restricted.table()).where(where)));
         }
 
         /**
@@ -357,7 +357,7 @@ public class CompositeQueryBuilder {
                     // right-side join into a derived block before it gets here.
                     final QueryEntityModel joined = joinModel(nested, needed, OperandPushdown.none(null));
                     final Map<String, Field<?>> fields = new LinkedHashMap<>();
-                    joined.bindings().forEach((name, binding) -> fields.put(name, binding.field()));
+                    joined.bindings().forEach((name, binding) -> fields.put(name, binding.physicalField()));
                     yield new Operand(joined.table(), fields);
                 }
             };

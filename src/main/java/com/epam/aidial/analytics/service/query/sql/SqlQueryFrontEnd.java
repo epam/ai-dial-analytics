@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.sql;
 
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.observability.SqlLog;
+import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.model.SetOpKind;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
@@ -284,6 +285,12 @@ public class SqlQueryFrontEnd {
             parsed = SqlLambdaRewriter.rewrite(parsed);
             final SqlNode validated = planner.validate(parsed);
             final RelRoot root = planner.rel(validated);
+            // `$masked` is the row member a JSON response lists absent cells under, reserved on every surface for the
+            // statement's own outputs; a nested block's column may carry the name.
+            if (root.fields.stream().anyMatch(field -> MaskFlag.MEMBER.equals(field.right))) {
+                throw new SqlTranslationException("output name '" + MaskFlag.MEMBER + "' is reserved: a JSON row lists its"
+                        + " absent and partial cells under it. Alias the output to another name");
+            }
             // The catalog relations live in ADAS, not ClickHouse, so a statement over them is evaluated
             // here instead of being translated into a query against an entity that does not exist.
             if (InformationSchemaExecutor.isMetadataStatement(root)) {
