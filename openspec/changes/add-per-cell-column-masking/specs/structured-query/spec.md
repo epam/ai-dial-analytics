@@ -40,8 +40,8 @@ Besides the grain join, which attaches enrichment values by the stored keys as p
 disclosures SHALL be accepted, and are the only ways a stored value of an absent cell may affect a response:
 - **The mask outcome.** Whether a cell is absent is itself the outcome of the mask condition (see "Column visibility
   by caller role").
-- **Filter cost.** A pruned filter, or a conjunct copied into an enrichment's derived table, costs more or less
-  depending on stored values, at the granularity of the data store's indexes. Repeated probes can recover an absent
+- **Filter cost.** A pruned filter, a conjunct copied into an enrichment's derived table, or an aligned lookup's
+  partition pre-selection over a masked enrichment field, costs more or less depending on stored values, at the granularity of the data store's indexes. Repeated probes can recover an absent
   value that the caller's own filter isolates in a granule (see "A comparison on a masked field keeps the table's
   pruning" and "Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table").
 - **Row order.** Where a query states no total order — no `sort`, ties under one, a page cut without a total order —
@@ -50,7 +50,8 @@ disclosures SHALL be accepted, and are the only ways a stored value of an absent
   ordering. That order is decided by the stored ordering-key and partition values, absent cells included, so a masked
   ordering-key or partition column's absent cells can often be read from the present values around them. This is
   kept so that masking does not impose a sort on every query. An administrator who needs such a column's absent
-  values kept SHALL list it on every governing role, which makes it visible, or keep it off every role whose rows
+  values kept SHALL list it on every governing role and every row-contributing role, which makes it visible, or keep
+  it off every role whose rows
   interleave with another role's in storage order. Which rows and values a query with a total order returns never
   depends on it; where the query leaves the choice open (an unordered page cut, `any`), the choice can.
 
@@ -59,7 +60,9 @@ rewritten conjunct takes the form the next requirement gives it.
 
 A query that references a masked field SHALL be refused `400 bad_request`, on every surface that resolves it, when it
 carries a name that equals, case-sensitively, the name of a table it reads (its source or an enrichment), or begins
-with that name followed by `.`. That covers a
+with that name followed by `.`. An output whose name is the qualified flat name of the field it projects, referenced
+bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt: its value is that
+field's own masked value, so the name captures nothing the statement did not already read. That covers a
 lambda parameter, and every resolved output name at every level of the statement: an explicit `as` or SQL alias, a
 name derived from a field or function, and a name the service generates for an operand's output. The mask is evaluated over the stored row's columns, which
 the statement names by table, and a declared name equal to a table could capture those names. A query that names a
@@ -123,6 +126,9 @@ SHALL be refused `400 bad_request`.
 - **WHEN** it projects the literal `'P1'` as `dial_usage_log.project_id`, groups by that name, and keeps groups whose
   `max(deployment)` equals `'d2'`; or sorts by that name and then by `deployment`
 - **THEN** each query is refused `400 bad_request`
+- **AND WHEN** it projects the enrichment field `dial_usage_log_payload.request_body` without `as`, beside a masked
+  field
+- **THEN** the query runs, the output keyed `dial_usage_log_payload.request_body`
 
 #### Scenario: A lambda cannot read an absent cell through a parameter name
 
@@ -171,7 +177,7 @@ filter reaches: the ordering-key value where each granule starts, a skip index's
 partition-key range. Where the caller's visible conjuncts narrow the read to a granule that an absent row starts, or in
 which it is the only row whose value the caller does not know, repeated equality or range probes can recover that
 row's stored value. No response carries the value. An administrator who needs such a column's absent values kept
-SHALL list it on every governing role.
+SHALL list it on every governing role and every row-contributing role, which makes it visible.
 
 A comparison with the null literal, or an `in` list that holds one, is not rewritten. `NULL IN (…, NULL, …)` is true
 under ClickHouse's `transform_null_in = 1`, which query statements do not pin, so such a list stays unrewritten; a list
@@ -1058,8 +1064,8 @@ readings group by the same column. The offset pagination strategy SHALL be appli
 
 A select entry's `as` key SHALL be optional for every expression kind and in both query modes; no
 query SHALL be rejected for omitting it, except that a query referencing a masked field is refused when a resolved
-name, given or derived, equals a table it reads or begins with that name followed by `.` (see "A masked field reads as
-absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
+name, given or derived, equals a table it reads or begins with that name followed by `.`, other than an output named
+after the field it projects bare (see "A masked field reads as absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
 output column name the way PostgreSQL derives an unnamed target-list name, restricted to the
 expressions this DSL can express:
 

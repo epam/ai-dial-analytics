@@ -126,7 +126,8 @@ stored value on every row the caller reads. A masked column's **mask condition**
 policies of the governing roles and the row-contributing roles that allow it, every one of which carries a row
 policy, since a row-unrestricted governing role allowing the column would make it visible. On each row the caller reads, a masked column SHALL read its stored value
 when the mask condition is true on the row and SHALL be **absent** otherwise — where it is false and where it is
-unknown alike — so a masked column is never shown on a row that no governing role allowing it admits. The mask condition SHALL be
+unknown alike — so a masked column is never shown on a row that no governing or row-contributing role allowing it
+admits. The mask condition SHALL be
 evaluated with the caller values the row filter is evaluated with on the same request (see "Caller values resolve per
 read and an absent one is unknown"), so a policy whose caller value is unknown, or whose comparison is unknown on a
 row because a column it reads is null there, admits that row to the mask no more than it admits it to the row filter. How each surface returns an absent cell, and how a query
@@ -176,7 +177,8 @@ exceptions are reporting, where it
 counts as restricted (see "Caller-effective privilege reporting"), and the paths that read without a row filter, which
 refuse it (see "Pipeline paths refuse a masked column").
 
-Masking discloses, row by row, whether a governing role that allows the column admits the row: a cell is present
+Masking discloses, row by row, whether a governing or row-contributing role that allows the column admits the row: a
+cell is present
 exactly where its mask condition is true. On the rows that role itself admits, this is what its row reach already
 discloses. On rows only another of the caller's roles admits, it is new, and it holds even when the policy reads a
 column the caller cannot see, such as a sensitive one. That disclosure is accepted as the cost of showing each role's
@@ -745,7 +747,7 @@ A row policy SHALL **narrow** a read and SHALL NOT **grant** one. Whether a call
 decided by its global privileges and the table's grant lists, unchanged. A policy on a role with no read path to the
 table SHALL grant no read: a caller carrying only that role reads nothing, while a caller confined by another of its
 roles also reads that policy's rows (see "Row-policy evaluation by caller role"). Such an entry's `columns` narrow what
-the rows it adds show and widen nothing: a column the list leaves out is absent on those rows (see "Column visibility
+the rows it adds show and widen nothing: a column the list leaves out is absent on the rows only it adds (see "Column visibility
 by caller role", row-contributing roles).
 
 A policy's role SHALL follow the grantee rules: a raw provider role name, trimmed, non-blank, and not a bundle or

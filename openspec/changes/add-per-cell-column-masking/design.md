@@ -54,8 +54,8 @@ See proposal.md for the motivation. The facts that shape the approach:
 
 ### The column decision returns masks, not SQL
 
-`ColumnVisibility` gains a third state. For a masked column it carries the list of the governing roles' `RowPolicy`
-filters that allow it, as stored, never rendered SQL. `allows(column)` keeps answering "visible or masked" for the
+`ColumnVisibility` gains a third state. For a masked column it carries the list of the governing and row-contributing
+roles' `RowPolicy` filters that allow it, as stored, never rendered SQL. `allows(column)` keeps answering "visible or masked" for the
 schema surfaces. A new `masks(column)` returns the filters, and the pipeline guard asks a strict `visible(column)`.
 `CatalogQueryService.buildModel` translates the filters against the **governed table's** physical bindings, the
 ones it already builds for `tableBindings`. It binds the caller values itself, from the request's claims, as
@@ -104,7 +104,10 @@ captured by a caller-declared name:
   stored value.
 
 The statement therefore refuses, with `400 bad_request`, a query that references a masked field and carries a name
-that equals a table it reads (its source or an enrichment), or begins with that name followed by `.`. That covers a lambda parameter, and every resolved output name
+that equals a table it reads (its source or an enrichment), or begins with that name followed by `.`. One output is
+exempt: one whose name is the qualified flat name of the field it projects bare, as every enrichment field projected
+without `as` is (`deployment_ref.display_name`). Its value is that field's own masked value, so a reference it captures
+reads what the statement reads anyway. Probed on 26.8: `if(m, t.c, NULL) AS "t.c"` returns the masked value. That covers a lambda parameter, and every resolved output name
 at every level: an explicit alias, a name `OutputColumnNaming` derives from a field or function, and a name
 `CompositeQueryBuilder.operand` generates for a leaf output. All of them are rendered as aliases in the scope where the
 mask is evaluated. A query that names the masked field fails today with `unknown field`. One that reaches it only
@@ -272,8 +275,10 @@ Where rows collapse, the flags do not take part in the comparison:
     block sorts by `min((ordinal, row))`.
   - The stateful row number keeps a branch's own `ORDER BY` in the plan, which ClickHouse otherwise removes under a
     `GROUP BY`.
-  - The rows, and which of them the default limit keeps, are then those `UNION DISTINCT` returns for the same text
-    (probed on 26.3 and 26.8).
+  - The rows are then those `UNION DISTINCT` returns for the same text (probed on 26.3 and 26.8). So is which of them
+    the default limit keeps where the cut falls in an ordered last branch. A cut through an unordered branch is no
+    more determined than in ClickHouse's own `UNION DISTINCT`, which returned different rows across runs at 8
+    threads.
   - A windowed `DISTINCT` over the union was rejected: it re-sorts by the partition, and returned other rows that
     changed with the thread count.
 
@@ -395,8 +400,8 @@ refuses it explicitly as a column the path reads.
     hold other reading roles.
 - **Clients that ignore `$masked` read partial aggregates as complete.**
   - Discovery's `masked` flag, the per-row marks and the upgrade notes make the change visible.
-  - A caller with one governing role, or none of whose governing roles carries a row policy, has no masked column, so
-    it never reads a partial value.
+  - A caller with one governing role, or none of whose governing roles carries a row policy, and with no rows-only
+    entry whose `columns` list narrows it, has no masked column, so it never reads a partial value.
 - **Clients that render every row member as a column, such as a generic JSON panel, show a `$masked` column** on rows
   where masking applies. → An explicit column selection in the client drops it, and the upgrade notes say so.
 - **Cost.** It is proportional to rows × masked columns read, and measured at a small fraction of query time, more on
@@ -410,12 +415,13 @@ refuses it explicitly as a column the path reads.
     that starts a granule, and an absent row whose granule's other rows the caller can read.
   - **Each probe is noisy.** The caller sees latency, memory and the budget refusal, not a row count, so every probe
     needs repetition.
-  - **A copied enrichment conjunct does the same.** It narrows the join build by stored values.
+  - **A copied enrichment conjunct, and an aligned lookup's pre-selection over a masked enrichment field, do the
+    same.** They narrow the join build, and the source partitions read, by stored values.
 
   The maintainers accept this over full scans on masked key and partition columns, which the benchmark showed to
   read more than an order of magnitude more rows. No form can prune by a value without the read volume depending on
   it. → It is stated as an accepted disclosure in the spec and in `docs/row-level-security.md`, with how to avoid it:
-  list the column on every governing role.
+  list the column on every governing role and every row-contributing role.
 - **A sort on a masked field cannot read in key order.**
   - The sort reads the masked value, not the ordering key. So ClickHouse reads every row the filter selects and keeps
     the page, where an unmasked caller could read in key order and stop at the limit.
@@ -438,7 +444,8 @@ refuses it explicitly as a column the path reads.
   maintainers accept it rather than impose a sort on every query. A mask-independent tie-breaker would cost a sort
   even on `LIMIT` queries and still leave `groupArray`/`any` order open. Hiding key columns would give up masking on
   exactly the columns most queries filter by. → The spec states it as an accepted disclosure and tells an
-  administrator how to avoid it: list the key column on every governing role, or keep it off roles whose rows
+  administrator how to avoid it: list the key column on every governing and row-contributing role, or keep it off
+  roles whose rows
   interleave in storage order. `docs/row-level-security.md` repeats that.
 - **An enrichment value can disclose its absent key.** The grain join runs on stored keys, so a visible enrichment
   column keyed by a masked source column still shows the value the absent key selects, and the caller can learn the

@@ -22,5 +22,6 @@ absent.
 
 #### Scenario: A single-role caller sees no masked field
 
-- **WHEN** a caller with one governing role on the table calls the schema endpoint
+- **WHEN** a caller with one governing role on the table, and no rows-only entry whose `columns` list narrows it, calls
+  the schema endpoint
 - **THEN** every field it lists carries `masked: false`

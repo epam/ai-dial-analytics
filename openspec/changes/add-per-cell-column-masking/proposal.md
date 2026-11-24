@@ -27,8 +27,10 @@ admits a given row.
   (`SELECT * … INTERSECT SELECT * …`, or `SELECT *` beside a table-named alias): that ran today over the visible
   columns, and is refused once a masked field joins the wildcard. The two queries are:
   - an `intersect` or `except` whose operand outputs the field, since that shape has no row to take a mark from;
-  - a query that carries a lambda parameter or an output name (explicit, derived or generated) equal to a table it
-    reads, since such a name could capture the table-qualified column names the mask is evaluated over.
+  - a query that carries a lambda parameter or an output name (explicit, derived or generated) that equals a table it
+    reads or begins with `<table>.`, since such a name could capture the table-qualified column names the mask is
+    evaluated over. An output named after the field it projects bare, such as an enrichment field without `as`, is
+    exempt.
 - A rows-only entry (one carrying `rows` on a role with no read path) now narrows the columns shown on the rows it
   adds: a column its `columns` list leaves out is absent there. Today that list is ignored, and the reading role's
   columns show on those rows. An entry whose `columns` is `null` behaves as today, while one with a list can hide more

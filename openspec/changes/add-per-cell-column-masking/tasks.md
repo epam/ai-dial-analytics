@@ -61,11 +61,12 @@
   names, and the composite operand aliases `CompositeQueryBuilder.nextAlias` generates, apart from every name the
   statement declares (outputs at every level, lambda parameters, CTE and derived-table aliases); refuse a query that
   references a masked field and carries a lambda parameter or any resolved output name (explicit, derived or generated,
-  at every level) that equals a table it reads or begins with `<table>.`. ClickHouse tests on 26.3 and 26.8:
+  at every level) that equals a table it reads or begins with `<table>.`, except an output named after the field it
+  projects bare (an enrichment field without `as`). ClickHouse tests on 26.3 and 26.8:
   - a lambda parameter named like an internal alias reads the absent value;
   - an output aliased as the table is refused;
   - an output `dial_usage_log.project_id` used as a `group_by` key with a `having` over a masked field, and as a sort
-    key, is refused;
+    key, is refused, while an enrichment field projected without `as` beside a masked field runs;
   - a wildcard over many masked columns under one large policy renders the policy text once per scope, including a
     filter copied into a key subquery and a first mask reference in a lambda capture;
   - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only
@@ -195,7 +196,8 @@
   enrichment's columns are allowed)
 - [ ] 7.2 Upgrade notes of the release that ships the change: the behaviour switch, `$masked` and the reserved name,
   clients that render every row member, wildcard `intersect`/`except` and wildcard-beside-a-table-named-alias
-  statements now refused for masked callers, rollback
+  statements now refused for masked callers, rows-only entries with a `columns` list now narrowing the rows they add,
+  rollback
 - [ ] 7.3 `docs/sql-reference.md`: the `$masked` alias refusal and the table-named alias refusal in the alias rules, the
   `intersect`/`except` refusal over a masked output in the set-operation section, including the wildcard case
 - [ ] 7.4 Check the Infinity panels in `grafana/dashboards/` for a stray `$masked` column (declare explicit columns
