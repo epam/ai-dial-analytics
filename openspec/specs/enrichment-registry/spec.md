@@ -2651,12 +2651,13 @@ Preview SHALL report `unconstrained_response` for an `llm` declaration that comp
 
 Preview SHALL NOT return a rendered prompt. The template renderer and the group-input assembler live
 in the runner, and their escaping is what determines what the model actually receives; a second
-implementation in ADAS would be the last place to accept drift. No rendered-request dry run exists on
-either service: the Enrichment Runner exposes runtime introspection and operator actions (runtime, DLQ,
-pause and resume, backfill, group listing and requeue) and no rendering or test-call surface. (An earlier
-revision of this requirement pointed at a runner dry-run surface; none was ever built.) A dry run
-that renders the request, or calls the model on one sampled row or group, belongs to the runner, which
-owns the renderer, and is a separate change.
+implementation in ADAS would be the last place to accept drift. The dry run that renders the request
+and calls the model or application on one sampled row or group belongs to the Enrichment Runner, which owns
+the renderer, the DIAL client and the response validator. The runner obtains its sample through
+`POST /v1/pipelines/{name}/trial-input` (see [enrichment-runtime](../enrichment-runtime/spec.md), "A
+runner-only trial-input read serves the runner's dry run"), which runs every check this preview runs, in the
+same order, so the runner's dry run refuses exactly what this preview refuses. This endpoint SHALL remain the
+one that calls no model: a client that wants a free, fast look at the sample keeps calling it.
 
 Preview SHALL read through the **already-bounded** governed read paths, with an explicit row cap of five
 rows and the optional `from`/`to` version window, rather than through the aggregate preview's
@@ -2898,6 +2899,15 @@ remedies it offers SHALL be ones the arm accepts: a narrower `from`/`to` window 
 - **THEN** the preview succeeds, running only the checks an enabled preview runs and not the gate,
   because an armed pipeline's declaration was gated when it was written and a preview is not a
   re-validation
+
+#### Scenario: The preview stays model-free beside the runner's dry run
+
+- **GIVEN** a disabled row-grain `llm` pipeline
+- **WHEN** `POST /v1/pipelines/{name}/preview` is called
+- **THEN** no model or application is called and the response carries no rendered request
+- **AND WHEN** the same pipeline's declaration would be refused by arming
+- **THEN** both the preview and `POST /v1/pipelines/{name}/trial-input` refuse it with the same HTTP 422
+  `pipeline_validation_failed` and the same message
 
 ### Requirement: Every governed SQL fragment is deterministic
 
