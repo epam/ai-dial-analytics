@@ -1253,8 +1253,8 @@ when `include_access` is false.
 
 ### Requirement: Selective export
 
-An `ExportRequest` component MAY carry selectors that narrow what it brings into the bundle, so that one pipeline, or some roles'
-access entries of one table, can be promoted into an environment that already has the tables they need:
+An `ExportRequest` component SHALL accept optional selectors that narrow what it brings into the bundle, so that one pipeline,
+or some roles' access entries of one table, can be promoted into an environment that already has the tables they need:
 
 - `dependencies` (boolean, pipeline components only, default `true`). `false` SHALL export the pipeline alone: on its own account the
   export SHALL NOT pull in its inputs, its target or the enrichments it reads, SHALL NOT list any of them under
