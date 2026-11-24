@@ -71,7 +71,7 @@
   - an output `dial_usage_log.project_id` used as a `group_by` key with a `having` over a masked field, and as a sort
     key, is refused, while an enrichment field projected without `as` beside a masked field runs;
   - an exempt enrichment output sorted with a one-row page returns a present row where an absent row stores a value
-    that sorts first; grouped alone, and with a visible key, it runs and puts the absent rows in one null group; a
+    that sorts first; grouped alone, and with a visible key, and sorted by it, it runs and puts the absent rows in one null group; a
     `having` keeping its null group runs; a distinct projection of it, in row mode and in aggregate mode (with a present
     row storing null, so the aggregate-mode window merges two groups), runs and collapses the absent rows into one
     marked row; a scalar subquery projecting it over an absent row returns null, marked (26.8 returns the stored value
