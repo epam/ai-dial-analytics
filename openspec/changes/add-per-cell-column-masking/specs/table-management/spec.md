@@ -109,8 +109,9 @@ collides on the exposed name or on the physical one, and before any `ALTER` is i
 the name is taken, and it is the accepted limit of hiding (see `authentication`). The per-table column
 limit SHALL count hidden columns too. A column masked for the caller (see
 [table-access-control](../table-access-control/spec.md), "Column visibility by caller role") is among the visible
-columns here, except for the TTL. A `ttl.column` SHALL resolve against the visible columns other than masked ones, so
-naming a hidden column fails as naming an undeclared one (422), and so does naming a masked one. While the stored TTL
+columns here, except that a TTL cannot be over it. A `ttl.column` SHALL resolve against the visible columns, so naming
+a hidden column fails as naming an undeclared one (422); naming a masked one SHALL be refused `403 column_not_entitled`
+naming it, before the TTL's type and nullability are validated. While the stored TTL
 is on a column hidden from the caller or masked for it, any `ttl` member (set, replace or remove) SHALL be refused and
 the TTL left unchanged: with `403 column_not_entitled` naming that column when a column policy hides or masks it for
 the caller, whether or not it is also sensitive, and otherwise, where it is sensitive and the caller lacks the
@@ -522,11 +523,11 @@ materialization what declaration enforces.
   same policy hides `c`, sends `{"ttl":{}}`
 - **THEN** the response is still `403 column_not_entitled`, not `403 forbidden`
 
-#### Scenario: A TTL treats a masked column as hidden
+#### Scenario: A TTL cannot be set on or kept changing a masked column
 
-- **GIVEN** an `ACTIVE` table on which a caller holding `TABLE_MODIFY` has `timestamp` column `c` masked and no
-  column hidden
-- **WHEN** the caller sends a full `ttl` object naming `c`
-- **THEN** the response is `422`, as for an undeclared column, and no `ALTER` is issued
+- **GIVEN** an `ACTIVE` table on which a caller holding `TABLE_MODIFY` has `timestamp` column `c` and `string` column
+  `s` masked and no column hidden
+- **WHEN** the caller sends a full `ttl` object naming `c`, and separately one naming `s`
+- **THEN** each response is `403 column_not_entitled` naming that column, and no `ALTER` is issued
 - **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
 - **THEN** the response is `403 column_not_entitled` naming `c`, and the TTL is unchanged

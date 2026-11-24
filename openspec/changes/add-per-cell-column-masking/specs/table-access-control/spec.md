@@ -109,18 +109,22 @@ approximation: a role name some configured provider maps to the privilege counts
 privilege globally on the request, whichever of its roles conferred it.
 
 A governing role **allows** a column when it has no column policy on the table, or has one that lists the column; it
-is **row-unrestricted** when it has no row policy on the table. Each of the table's columns SHALL be, for the caller,
-exactly one of:
+is **row-unrestricted** when it has no row policy on the table. A **row-contributing** role is one the caller carries
+whose row policy enters the caller's row filter (see "Row-policy evaluation by caller role") but which does not
+govern, such as an entry carrying `rows` on a role with no read path. It allows a column when its own column policy
+allows it **and** every governing role allows it, so it only narrows and never widens. Each of the table's columns
+SHALL be, for the caller, exactly one of:
 
-- **visible**, when some row-unrestricted governing role allows it, or when every governing role allows it;
+- **visible**, when some row-unrestricted governing role allows it, or when every governing role and every
+  row-contributing role allows it;
 - **masked**, when it is not visible and at least one governing role allows it;
 - **hidden**, when no governing role allows it.
 
 Each entry is one unit — a role's readers see that role's columns on that role's rows — and the rows a caller reads
 are the union of its roles' row reach (see "Row-policy evaluation by caller role"). A visible column SHALL read its
 stored value on every row the caller reads. A masked column's **mask condition** SHALL be the disjunction of the row
-policies of the governing roles that allow it, every one of which carries a row policy, since a row-unrestricted role
-allowing the column would make it visible. On each row the caller reads, a masked column SHALL read its stored value
+policies of the governing roles and the row-contributing roles that allow it, every one of which carries a row
+policy, since a row-unrestricted governing role allowing the column would make it visible. On each row the caller reads, a masked column SHALL read its stored value
 when the mask condition is true on the row and SHALL be **absent** otherwise — where it is false and where it is
 unknown alike — so a masked column is never shown on a row that no governing role allowing it admits. The mask condition SHALL be
 evaluated with the caller values the row filter is evaluated with on the same request (see "Caller values resolve per
@@ -152,11 +156,12 @@ rows, so for it a masked column differs from a visible one in being reported mas
 [structured-query](../structured-query/spec.md)), in the TTL refusal below, which a caller holding `modify` without
 `read` meets too, and in the pipeline refusal (see "Pipeline paths refuse a masked column"). A role that does not
 govern — an IdP group, a role conferring only `write`, a role conferring only `get` to a caller that may read — SHALL
-take no part, so it SHALL NOT lift a restriction and its row policy SHALL NOT enter a mask condition. That includes a
-role whose entry carries `rows` but which has no read path: its row policy adds its rows to a confined caller carrying
-it, by row-policy evaluation, but its `columns` are not consulted, so on those rows a visible column reads its value and
-a masked one is absent unless a governing role that allows it admits the row too. A caller with no governing role is
-covered below.
+take no part, so it SHALL NOT lift a restriction and its row policy SHALL NOT enter a mask condition, unless it is a
+row-contributing role. A role whose entry carries `rows` but which has no read path adds its rows to a confined caller
+carrying it, by row-policy evaluation, and its `columns` then narrow what those rows show: a column its list leaves out
+is masked, and absent on the rows only it adds. A rows-only entry whose `columns` is `null` narrows nothing, so it shows
+the governing roles' columns on the rows it adds, as before this change. A caller with no governing role is covered
+below.
 
 A masked column SHALL be listed, named and referenced wherever a visible column is: schema discovery (which marks it,
 see [query-schema-discovery](../query-schema-discovery/spec.md), "A masked field is marked"), the catalog read and
@@ -164,9 +169,9 @@ revision snapshots, `column_count`, the schema the query, translation, CSV-expor
 against, a schema change other than as a TTL column, catalog export and an import entry's `prev`. Where a
 requirement elsewhere speaks of the columns "visible" to a caller — on those schema surfaces, or as the columns the
 verbs `get`, `read` and `modify` act on (see "Per-table privilege grants") — a masked column is among them, its values
-readable on the rows its mask admits. A TTL treats a masked column as hidden: a `ttl.column` cannot name it, and a
-stored TTL on it refuses every `ttl` member, as "Hidden columns are absent from every read surface" states for a hidden
-column, because watching which rows a TTL removes would disclose stored values of absent cells. The remaining
+readable on the rows its mask admits. A TTL SHALL NOT be over a masked column: a `ttl.column` naming it is refused
+`403 column_not_entitled`, and a stored TTL on it refuses every `ttl` member, because watching which rows a TTL removes
+would disclose stored values of absent cells. The remaining
 exceptions are reporting, where it
 counts as restricted (see "Caller-effective privilege reporting"), and the paths that read without a row filter, which
 refuse it (see "Pipeline paths refuse a masked column").
@@ -253,7 +258,7 @@ SHALL NOT be evaluated and every column SHALL be visible.
 - **THEN** it reads the rows of `P1` and of `P2`; `c` carries its stored value on every row, `a` only on the rows of
   `P1` and `b` only on the rows of `P2`, each absent on the other project's rows
 
-#### Scenario: Gaining a column-restricted role can hide a confined role's columns
+#### Scenario: Gaining a column-restricted role masks a confined role's columns to its rows
 
 - **GIVEN** a table with columns `project`, `x` and `y`; an entry for `A` with `read`, `rows` admitting
   `project = 'P1'` and `columns` `null`; and an entry for `B` with `read`, no `rows` and `columns` `["x"]`
@@ -265,6 +270,15 @@ SHALL NOT be evaluated and every column SHALL be visible.
   rows of `P1` only
 - **AND WHEN** instead `B`'s `columns` list `x`, `y` and `project`
 - **THEN** it reads every row with all three columns, none absent
+
+#### Scenario: Gaining a column-restricted role can hide a confined role's columns
+
+- **GIVEN** a table `t` with columns `project`, `t`, `x` and `y`, so the hiding fallback applies; an entry for `A`
+  with `read`, `rows` admitting `project = 'P1'` and `columns` `null`; and an entry for `B` with `read`, no `rows`
+  and `columns` `["x"]`
+- **WHEN** a caller carrying both runs `SELECT * FROM t`
+- **THEN** it reads every row with column `x` only, and nothing is marked masked, because masking would show `A`'s
+  other columns on the rows only `B` admits and the fallback keeps the rule without masking
 
 #### Scenario: A masked column follows the caller value of the policy that allows it
 
@@ -314,6 +328,9 @@ SHALL NOT be evaluated and every column SHALL be visible.
   gives `N` a read
 - **WHEN** a caller carrying both runs `SELECT * FROM t`
 - **THEN** it reads the rows of `P1` and of `P2`, with columns `a` and `project` only
+- **AND WHEN** `N`'s `columns` are `["project"]` instead
+- **THEN** it reads the rows of `P1` and of `P2`; `project` carries its stored value on every row, and `a` carries its
+  stored value on the rows of `P1` and is absent on the rows of `P2`, which only `N` adds
 
 #### Scenario: An unrestricted reading role lifts the restriction
 
@@ -584,8 +601,9 @@ a saved query or dashboard widget referencing it SHALL fail the same way when th
 naming it SHALL be refused as naming an unknown column (`422`), while an `add` or `rename.to` colliding with it is
 still refused `422` as a name that already exists, as for a hidden sensitive column (see
 [table-management](../table-management/spec.md), "Modify table schema via PATCH"). A `ttl.column` SHALL resolve
-against the columns visible to the caller only — a masked column excluded — so naming a hidden column fails as naming an undeclared one (`422`)
-and TTL validation never reveals its type or nullability; and while the stored TTL is on a column hidden from the
+against the columns visible to the caller only, so naming a hidden column fails as naming an undeclared one (`422`)
+and TTL validation never reveals its type or nullability; a `ttl.column` naming a column masked for the caller SHALL be
+refused `403 column_not_entitled` naming it, before that validation; and while the stored TTL is on a column hidden from the
 caller by a column policy, or masked for it, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled`
 naming that column, and the TTL left unchanged — where the column is also sensitive and the caller lacks the
 clearance, the response is `403 column_not_entitled` too. The list item's `column_count` SHALL not
@@ -707,3 +725,433 @@ exactly when a column policy, the revision's or the current one, hides or masks 
   life with a revision `R2`, which ends with `X`'s `columns` `["m"]`; and a third, live life with no entry
 - **WHEN** a caller carrying only `X` and holding `TABLE_GET` globally requests `t`'s snapshots at `R1` and at `R2`
 - **THEN** the snapshot at `R1` is judged by `["k"]` and the one at `R2` by `["m"]`
+
+### Requirement: Per-role row policies
+
+The system SHALL accept and store, for each catalog table other than an enrichment, at most one **row policy** per
+raw provider role, as the `rows` member of the role's entry (see "Role-keyed access API"). A stored policy SHALL be
+`{"filter": <filter node>}` — a predicate in the structured query's filter grammar (see
+[structured-query](../structured-query/spec.md), "Filter sub-grammar (CQL2-JSON)" and "Expression grammar") over that
+table's own columns. An enrichment SHALL accept none: the rows a caller reads through it are its source's (see "An
+enrichment's read-side access is its source's").
+
+There SHALL be no unrestricted policy shape: a role that may read the table and has no policy there already reads
+every row (see "Row-policy evaluation by caller role"), so `rows: null` means no policy. A `rows` object carrying
+neither `filter` nor `where` SHALL be refused `422 validation_error`; a `rows` member other than `filter` and `where`,
+like any body that does not bind to the request type, SHALL be refused by the strict request mapper as
+`400 bad_request` (see "Role-keyed access API").
+
+A row policy SHALL **narrow** a read and SHALL NOT **grant** one. Whether a caller may read a table at all SHALL remain
+decided by its global privileges and the table's grant lists, unchanged. A policy on a role with no read path to the
+table SHALL grant no read: a caller carrying only that role reads nothing, while a caller confined by another of its
+roles also reads that policy's rows (see "Row-policy evaluation by caller role"). Such an entry's `columns` narrow what
+the rows it adds show and widen nothing: a column the list leaves out is absent on those rows (see "Column visibility
+by caller role", row-contributing roles).
+
+A policy's role SHALL follow the grantee rules: a raw provider role name, trimmed, non-blank, and not a bundle or
+privilege name. `*` SHALL be a valid policy subject, with the meaning it has in a grant: its policy is one every
+authenticated caller carries. Row policies SHALL be storable on `system` tables other than enrichments, which carry
+the shared data a policy most often narrows. Deleting a table SHALL remove its row policies.
+
+The filter SHALL be validated against the table's **own** stored columns — every one of them, sensitive columns and
+columns a column policy hides included, independent of what the writing caller may see — and SHALL be refused when
+it:
+
+- references a column the table does not store, including a dotted enrichment field (a policy narrows the table it is
+  stored on);
+- uses a `param` expression other than a caller value (see "Caller values in row policies");
+- calls a function outside the function catalog's scalar group, or one the catalog declares as calling a service
+  outside the data store;
+- fails any validation the structured query surface would apply to the same filter; or
+- renders to a predicate longer than 16 KiB.
+
+A filter MAY call the relative time functions (`now`, `date_add`, `date_sub`): a policy is evaluated on a read, where
+a moving window is meaningful, never on a derivation path.
+
+A stored filter SHALL be returned in the structured query's stable wire serialization, so a policy read back is a
+filter the query surface accepts.
+
+#### Scenario: A policy narrows a role to one project
+
+- **WHEN** a caller holding `TABLE_GRANT` stores for role `X` on `dial_usage_log` an entry whose `rows` is
+  `{"filter": {"op": "in", "args": [{"type": "field", "name": "project_id"}, {"type": "array", "items": [{"type": "value", "value_type": "string", "value": "X-PRJ-1"}]}]}}`
+- **THEN** the entry is stored and reading `X`'s entry returns that policy under `rows`
+
+#### Scenario: A policy names a column the table does not store
+
+- **WHEN** a policy's filter references a field the table does not store, or a dotted enrichment field
+- **THEN** the request is refused `422 validation_error` naming the field, and nothing is stored
+
+#### Scenario: A policy filter may not take a parameter or aggregate
+
+- **WHEN** a policy's filter contains a `param` expression that is not a caller value, an aggregate function, or a
+  window expression
+- **THEN** the request is refused `422 validation_error`, and nothing is stored
+
+#### Scenario: A policy without a filter is refused
+
+- **WHEN** an entry's `rows` is `{}`
+- **THEN** the request is refused `422 validation_error`
+
+#### Scenario: An unknown member does not bind
+
+- **WHEN** an entry's `rows` carries a member other than `filter` and `where`, e.g. `{"all_rows": true}`
+- **THEN** the request is refused `400 bad_request`, and nothing is stored
+
+#### Scenario: A sensitive column may constrain a policy
+
+- **WHEN** a caller holding `TABLE_GRANT` but no clearance stores a policy filtering on a sensitive column of the table
+- **THEN** the policy is accepted, because it is validated against the table's stored columns rather than the caller's
+  view
+
+#### Scenario: A relative time window is a valid policy
+
+- **WHEN** a policy's filter is `request_time >= date_sub('day', 90, now())`
+- **THEN** the policy is accepted
+
+### Requirement: Role-keyed access API
+
+The system SHALL expose a table's whole access configuration as one resource per raw provider role, under
+`/v1/tables/{name}/access`. Every method SHALL require `TABLE_GRANT`, because an entry discloses which provider roles
+exist and what each may do; a caller without it SHALL receive `403 forbidden`.
+
+An **entry** SHALL be `{"privileges": [...], "rows": ..., "columns": ...}`: `privileges` a subset of `get`, `read`,
+`sensitive`, `write` and `modify` (see "Per-table privilege grants"), `rows` either `null` or the role's row policy
+(see "Per-role row policies"), and `columns` either `null` or the role's column policy (see "Per-role column
+policies"). A stored entry SHALL be returned with `privileges` de-duplicated in the order `get`, `read`, `sensitive`,
+`write`, `modify`, `rows` as `{"filter": <filter node>}` or `null`, and `columns` as a sorted list or `null`.
+
+- `GET /v1/tables/{name}/access`, with no `role` parameter, SHALL return `{"generation": <integer>, "roles":
+  {"<role>": <entry>, ...}, "ineffective_grants": [...]}`, the members of `roles` sorted by role, with an empty
+  `roles` object when the table has no entry, and the report described below covering every stored entry (see
+  "Ineffective grants are reported on read").
+- `GET /v1/tables/{name}/access?role=<role>` SHALL return `{"generation": <integer>, "role": "<role>", ...entry,
+  "ineffective_grants": [...]}`, the report covering that entry only, and `404 not_found` when the role has no entry
+  on the table.
+- `PUT /v1/tables/{name}/access?role=<role>` SHALL take `{"generation": <integer>, "privileges": [...], "rows": ...,
+  "columns": ...}` and SHALL **replace the role's whole entry**: an absent or `null` `privileges` SHALL mean `[]`, and
+  an absent `rows` or `columns` SHALL mean `null`. Nothing about another role's entry SHALL change. The response SHALL be `200`
+  with `{"generation", "role", "privileges", "rows", "columns", "ineffective_grants"}`: the entry as stored, the
+  table's generation after the request, and the report described below. It SHALL NOT carry a `permissions` member; the caller's own permissions
+  are reported by `GET /v1/tables/{name}`.
+- `DELETE /v1/tables/{name}/access?role=<role>` SHALL remove the role's entry and answer `204`, or `404 not_found` when
+  the role has no entry on the table. It SHALL carry no body; it MAY carry a `generation` query parameter, which makes
+  the removal conditional (see "Access configuration generation").
+
+An entry whose `privileges` is empty and whose `rows` and `columns` are both `null` SHALL NOT be stored: a `PUT` of one
+SHALL remove the role's entry if it has one, and SHALL answer `200` with that empty entry, after which a
+`GET .../access?role=<role>` answers `404`. An entry MAY carry `rows`, `columns` or both with an empty `privileges`: it then
+grants nothing. Its `columns` narrow a caller where the role governs the caller's access to the table (see
+"Column visibility by caller role"), a global read privilege included, and where its `rows` add rows to a confined
+caller as a row-contributing role, narrowing what those rows show; they are ignored otherwise. Its `rows` take part
+in "Row-policy evaluation by caller role", which combines the policy of every role a confined caller carries whether
+or not that role may read the table: on a role with no read path to the table, `rows` therefore **adds** its rows to a
+confined caller that also carries the role, rather than narrowing anything, and gives a caller carrying only that
+role no read.
+
+The role SHALL be carried as the `role` query parameter: the raw provider role as an ordinary URL-encoded query value,
+decoded once. Any character SHALL be allowed, so every role is addressable: role `/analytics/viewers` is addressed as
+`.../access?role=%2Fanalytics%2Fviewers`, `team%ops` as `?role=team%25ops` and `a;b` as `?role=a%3Bb`, and each is
+listed under its decoded name. The decoded value SHALL be trimmed on every method, so `?role=%20X` names `X`. A `PUT`,
+a `DELETE` or a one-role `GET` whose `role` is missing, or blank once trimmed, SHALL be refused `400 bad_request`
+before any other check, and so SHALL one carrying `role` more than once, rather than joining the values into one role.
+On a `PUT` the role SHALL follow the grantee rules: a bundle or privilege name SHALL be refused
+`422 validation_error`. `*` SHALL be an ordinary key with the meaning given in "Per-table privilege grants". `GET`
+and `DELETE` naming a role that has no entry, however spelled, SHALL answer `404`. The role SHALL NOT be accepted as a
+path segment: `/v1/tables/{name}/access/<anything>` is an unknown path (`404 not_found`).
+
+A `rows` member in a request SHALL be `{"filter": <filter node>}` or `{"where": "<condition>"}` (see "A row policy may
+be written as a SQL condition"); it is stored and returned as `{"filter": ...}`.
+
+`ineffective_grants` SHALL report, without failing the request, each privilege in the entry that changes nothing, and
+each standing warning below, as an object carrying `role`, `key` (the privilege), a stable `reason` and a
+human-readable `message`. It SHALL be an array, empty when nothing is reported. Items SHALL follow the entry's
+`privileges` order, and for one privilege the order `lifts_row_policies`, `lifts_column_policies`,
+`everyone_reads_all_rows`, `already_global`, `sensitive_without_verb`. The reasons are:
+
+- `already_global` — the role already holds that privilege globally;
+- `sensitive_without_verb` — `sensitive` for a role that holds none of `TABLE_GET`, `TABLE_READ` or `TABLE_MODIFY` on
+  the table, globally or by any entry, nor `modify` on any enrichment of it (a source's clearance does change
+  something for a role holding an enrichment's `modify`, because it extends that `modify` to the enrichment's
+  sensitive columns);
+- `lifts_row_policies` — `read` in the entry of `*` with `rows` `null`, on a table where another role's entry carries
+  `rows`: every caller then carries a role that reads with no policy, so by "Row-policy evaluation by caller role"
+  those policies confine no one;
+- `lifts_column_policies` — `read` in the entry of `*` with `rows` and `columns` both `null`, on a table where another
+  role's entry carries `columns`: every caller then carries a reading role with neither a row nor a column
+  restriction, so by "Column visibility by caller role" those restrictions hide nothing;
+- `everyone_reads_all_rows` — `read` in the entry of `*` with `rows` `null`, on a table that is not an enrichment,
+  whatever the entry's `columns`: every authenticated caller then reads every row of the table. This is a standing
+  warning, not an ineffective grant: it is reported for as long as the configuration stays, a table meant to be
+  readable by everyone keeps carrying it, and it is reported beside `lifts_row_policies` and
+  `lifts_column_policies` when those apply, so this one reason identifies a table open to everyone with no row
+  restriction. It SHALL NOT suppress any other reason.
+
+Stored state no `PUT` can produce any more — a `*` entry carrying `write` or `modify`, or an enrichment's leftover
+`get`, `read` or `sensitive` — SHALL be judged by these same rules only; no reason reports that such a privilege
+confers nothing. The report SHALL be built the same way in `none` security mode.
+
+A `PUT` against a `system` table SHALL be refused `409 table_is_system` when the entry carries `write` or `modify`; its
+other privileges, `rows` and `columns` SHALL be accepted (an enrichment, `system` or not, is governed by the
+enrichment refusal below).
+
+A `PUT` against an enrichment SHALL be refused `409 enrichment_follows_source`, naming the enrichment's source as the
+table to configure instead, when the entry **as sent** carries `get`, `read` or `sensitive`, or a `rows` or `columns`
+that is not `null` — so `"columns": []` and `"rows": {}` are `409`, not `422`. Nothing SHALL change. `GET` and `DELETE`
+naming an enrichment SHALL behave as on any table, so state an earlier build stored there can be read and removed.
+
+A `PUT`'s checks SHALL run in this order, the first failing one deciding the response:
+
+1. a missing, blank or repeated `role` (see above), or a body that does not bind — malformed JSON, a member other than
+   `generation`, `privileges`, `rows` and `columns`, a `rows` member other than `filter` and `where`, or a member of the
+   wrong JSON type, including an item of `privileges` or `columns` that is not a JSON string (a number, `null` or a
+   nested array) (`400 bad_request`). `generation` binds any JSON value and is judged by step 5;
+2. a caller without `TABLE_GRANT` (`403 forbidden`);
+3. an unknown table (`404 not_found`);
+4. the enrichment refusal (`409 enrichment_follows_source`);
+5. a `generation` that is absent, `null`, not a JSON integer, or outside the range of a signed 64-bit integer
+   (`422 validation_error`);
+6. an entry that passes every check below and equals, as it would be stored, the role's stored entry (an absent
+   entry being the empty one): the request SHALL answer `200` with that entry and the table's current generation and
+   SHALL change nothing, whatever `generation` it carries (see "Access configuration generation");
+7. a conflicting `generation` (`409 access_conflict`, see "Access configuration generation");
+8. the role (`422 validation_error`);
+9. `write` or `modify` on a `system` table (`409 table_is_system`);
+10. the remaining checks, each `422 validation_error` and in no specified order among themselves: an unknown privilege
+   value, `*` with `write` or `modify`, a `rows` carrying both or neither of `filter` and `where`, the translation of a
+   `where`, the row policy's own validation, and the column policy's validation.
+
+A `DELETE`'s checks SHALL run in the order: a missing, blank or repeated `role` (`400 bad_request`), `403 forbidden`, unknown
+table (`404 not_found`), a `generation` parameter that is not an integer within the signed 64-bit range
+(`422 validation_error`), no entry for the role (`404 not_found`), and a conflicting `generation`
+(`409 access_conflict`); a `DELETE` without a `generation` SHALL NOT answer `409 access_conflict`. A `GET` of one
+role's entry SHALL check a blank or repeated `role` (`400`), `403`, then the table (`404`), then the entry (`404`);
+`GET .../access` SHALL check `403`, then the table (`404`).
+
+These rules constrain what may be stored, so they SHALL apply in `none` security mode too. Every `PUT` or `DELETE`
+that changes the stored entry SHALL be recorded in the audit trail as one change to the table definition (see
+[audit-trail](../audit-trail/spec.md)); a `PUT` that leaves the entry as it was SHALL record none.
+
+#### Scenario: Create, read and remove an entry
+
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access` at `generation` 4, `PUT`s
+  `{"generation": 4, "privileges": ["read"], "rows": {"where": "project_id = 'P-1'"}}` for role `X`, reads
+  `GET /v1/tables/t/access?role=X`, then `DELETE`s `X`'s entry
+- **THEN** the `PUT` answers `200` with `generation` 5, `privileges` `["read"]`, `rows` carrying the equivalent
+  `filter` and `columns` `null`; the `GET` returns the same entry with `"role": "X"`; the `DELETE` answers `204`; and a
+  further `GET /v1/tables/t/access` returns `"roles": {}` at `generation` 6
+
+#### Scenario: A PUT replaces the whole entry
+
+- **GIVEN** role `X`'s entry carries `read`, a `rows` policy and `columns` `["a", "b"]`
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["read"]}` for `X`
+- **THEN** the stored entry is `{"privileges": ["read"], "rows": null, "columns": null}`, and no other role's entry
+  changed
+
+#### Scenario: Privileges are de-duplicated and ordered
+
+- **WHEN** a caller `PUT`s `"privileges": ["modify", "get", "modify"]` for a role
+- **THEN** the response and every later read carry `["get", "modify"]`
+
+#### Scenario: An empty entry removes the role
+
+- **GIVEN** role `X` has an entry carrying `write`
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": []}` for `X`
+- **THEN** the response is `200` with an empty entry, `GET .../access?role=X` answers `404 not_found`, and `X` is
+  absent from `GET .../access`
+- **AND WHEN** a caller `PUT`s `{"generation": <current>, "privileges": []}` for role `Z`, which has no entry
+- **THEN** the response is `200` with an empty entry and the generation unchanged, and no revision or activity is
+  recorded for the table
+
+#### Scenario: Reading one role that has no entry
+
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access?role=nobody`
+- **THEN** the response is `404 not_found`
+
+#### Scenario: Removing an absent entry is not found
+
+- **WHEN** a caller holding `TABLE_GRANT` `DELETE`s the entry of a role that has none on the table
+- **THEN** the response is `404 not_found`
+
+#### Scenario: An unknown table is not found on reading or removing entries
+
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/nope/access` or `GET /v1/tables/nope/access?role=X`,
+  or `DELETE`s `/v1/tables/nope/access?role=X`, for a table that does not exist
+- **THEN** each response is `404 not_found`
+
+#### Scenario: A role containing a slash, percent sign or semicolon is an ordinary query value
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["read"]}` to
+  `/v1/tables/t/access?role=%2Fanalytics%2Fviewers`, then to `?role=team%25ops`, then to `?role=a%3Bb`, in either
+  security mode
+- **THEN** each answers `200` with `role` `"/analytics/viewers"`, `"team%ops"` and `"a;b"` respectively,
+  `GET /v1/tables/t/access` lists all three under those names, `GET` with each `role` value returns its entry, and a
+  `DELETE` with each answers `204`
+
+#### Scenario: A missing or blank role is a bad request
+
+- **WHEN** a caller `PUT`s an entry to, or `DELETE`s, `/v1/tables/t/access` with no `role` parameter, or with
+  `?role=%20`
+- **THEN** the response is `400 bad_request`, before the privilege check, and nothing is stored
+- **AND WHEN** a caller `PUT`s an entry to, `DELETE`s, or reads `/v1/tables/t/access?role=a&role=b`
+- **THEN** each response is `400 bad_request`, and no entry for a role `a,b` or any other is stored
+
+#### Scenario: The role is not a path segment
+
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access/X`
+- **THEN** the response is `404 not_found`, as for any unknown path
+
+#### Scenario: A role sent as a path segment meets the request firewall
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry for role `a;b` as a path segment,
+  `/v1/tables/t/access/a%3Bb`, instead of as `?role=a%3Bb`
+- **THEN** the response is `400 bad_request` as an `ErrorView`, because the request firewall refuses an encoded `;` in
+  any path, and nothing is stored
+
+#### Scenario: The role is trimmed on read and removal
+
+- **GIVEN** role `X` has an entry on `t`
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET /v1/tables/t/access?role=%20X%20`
+- **THEN** the response is `X`'s entry with `"role": "X"`
+
+#### Scenario: A stale generation is reported before an invalid role
+
+- **GIVEN** an entry an earlier build stored for role `READ_ONLY_ANALYTIC`, removed after a client read the access
+- **WHEN** that client `PUT`s an entry for `READ_ONLY_ANALYTIC` carrying the generation it read
+- **THEN** the response is `409 access_conflict`, not `422`
+
+#### Scenario: Two concurrent deletes of one entry
+
+- **WHEN** two callers holding `TABLE_GRANT` `DELETE` the same role's entry concurrently
+- **THEN** one receives `204` and the other `404 not_found`
+
+#### Scenario: A DELETE does not conflict with a write to another role
+
+- **GIVEN** entries for roles `X` and `Y`
+- **WHEN** a caller's `PUT` for `Y`, carrying the current generation, locks the table's row first and a `DELETE` of
+  `X`'s entry waits for it
+- **THEN** the `PUT` answers `200`, the `DELETE` then answers `204`, and the generation has moved by two
+- **AND WHEN** instead the `DELETE` commits first and the `PUT` carries the generation read before it
+- **THEN** the `DELETE` answers `204`, the `PUT` answers `200`, because `Y`'s entry did not change after that read,
+  and the generation has moved by two
+
+#### Scenario: A caller without TABLE_GRANT is refused
+
+- **WHEN** a caller holding `TABLE_READ` but not `TABLE_GRANT` reads `GET .../access`, reads `GET .../access?role=X`,
+  `PUT`s or `DELETE`s an entry
+- **THEN** each response is `403 forbidden`
+
+#### Scenario: The privilege check precedes the table lookup
+
+- **WHEN** a caller without `TABLE_GRANT` `PUT`s an entry for a table that does not exist
+- **THEN** the response is `403 forbidden`
+
+#### Scenario: An unknown table is reported before the generation and the body
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s, for a table that does not exist, a body with no `generation` whose
+  `rows` carries both `filter` and `where`
+- **THEN** the response is `404 not_found`
+
+#### Scenario: A body that does not bind is refused first
+
+- **WHEN** a caller `PUT`s `{"generation": 1, "list": ["x"]}`, or `{"generation": 1, "rows": {"all_rows": true}}`, or
+  `{"generation": 1, "privileges": "read"}`, or `privileges` or `columns` given as `[["read"]]`, `[null]` or `[1]`
+- **THEN** each response is `400 bad_request` naming the offending member where it is unknown, and nothing is stored
+
+#### Scenario: A null privileges list means none
+
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": null, "columns": ["a"]}` for a role
+- **THEN** the response is `200` and the entry carries `privileges` `[]` and `columns` `["a"]`
+
+#### Scenario: A bundle name is not a role
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s an entry with the current generation for role `READ_ONLY_ANALYTIC`
+- **THEN** the response is `422 validation_error`
+
+#### Scenario: The role is checked before a system table's write refusal
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["write"]}` for role
+  `READ_ONLY_ADMIN` on `dial_usage_log`
+- **THEN** the response is `422 validation_error`
+
+#### Scenario: Read grants on a system table are accepted
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["read"], "columns":
+  ["project_id", "model"]}` for `analytics-viewers` on `dial_usage_log`
+- **THEN** the response is `200` and the entry is stored
+
+#### Scenario: A write grant on a system table is refused
+
+- **WHEN** a caller `PUT`s an entry carrying `write` for any role on a `system` table
+- **THEN** the response is `409 table_is_system` and nothing is stored
+
+#### Scenario: The system refusal precedes the other body checks
+
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": ["write"]}` for `*` on `dial_usage_log`
+- **THEN** the response is `409 table_is_system`, not `422`
+
+#### Scenario: A read-side entry on an enrichment is refused
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s, for an enrichment, an entry carrying `get`, `read` or `sensitive`, a
+  non-`null` `rows`, or a non-`null` `columns`, including `"columns": []`
+- **THEN** each response is `409 enrichment_follows_source`, the message names the enrichment's source, and nothing is
+  stored
+
+#### Scenario: The enrichment refusal precedes the generation and the body
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s for an enrichment `{"privileges": ["read"]}` with no `generation`, or
+  a body with a stale `generation` and `rows` carrying both `filter` and `where`, or an entry for role
+  `READ_ONLY_ANALYTIC` carrying `rows`
+- **THEN** each response is `409 enrichment_follows_source`
+
+#### Scenario: An enrichment's write and modify are still granted
+
+- **WHEN** a caller holding `TABLE_GRANT` `PUT`s `{"generation": <current>, "privileges": ["write"]}` for `labeler` on
+  an enrichment
+- **THEN** the response is `200` and the entry carries `["write"]`
+
+#### Scenario: State left on an enrichment is read and removed
+
+- **GIVEN** an enrichment on which an earlier build stored, for role `R`, a `read` grant and a row policy
+- **WHEN** a caller holding `TABLE_GRANT` reads `GET .../access?role=R` on it and then `DELETE`s that entry
+- **THEN** the read returns the entry as stored, and the `DELETE` answers `204`
+
+#### Scenario: The response carries no permissions member
+
+- **WHEN** a `PUT` succeeds
+- **THEN** its body carries `generation`, `role`, `privileges`, `rows`, `columns` and `ineffective_grants`, and no
+  `permissions`
+
+#### Scenario: An ineffective grant is reported
+
+- **WHEN** a caller `PUT`s `read` for a role that already holds `TABLE_READ` globally
+- **THEN** the response is `200` and `ineffective_grants` carries `{"role": <that role>, "key": "read", "reason":
+  "already_global", ...}`
+
+#### Scenario: A clearance without a verb is reported
+
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": ["sensitive"]}` for `pii-analysts` on a table on
+  which that role holds no `get`, `read` or `modify`, globally or by any entry
+- **THEN** the response is `200`, the entry is stored, and `ineffective_grants` carries an entry with `key:
+  "sensitive"` and `reason: "sensitive_without_verb"`
+
+#### Scenario: A source clearance used by an enrichment maintainer is not reported
+
+- **GIVEN** a role holding nothing on a source and `modify` on one of its enrichments
+- **WHEN** a caller `PUT`s `sensitive` for that role on the source
+- **THEN** `ineffective_grants` carries no `sensitive_without_verb` entry for it
+
+#### Scenario: A read for everyone that lifts column policies is reported
+
+- **GIVEN** a table on which role `X`'s entry carries `columns` and `*` has no entry
+- **WHEN** a caller `PUT`s `{"generation": <current>, "privileges": ["read"]}` for `*`
+- **THEN** the entry is stored and `ineffective_grants` carries an entry for `*` with `key: "read"` and `reason:
+  "lifts_column_policies"`
+- **AND WHEN** the same `PUT` also carries `columns`, or `rows`
+- **THEN** no such entry is reported
+
+#### Scenario: Repeating a PUT records no revision
+
+- **WHEN** a caller `PUT`s for a role exactly the entry it already has, with the current generation or an older one
+- **THEN** the response is `200` with the entry and the generation unchanged, and no revision or activity is recorded
+  for the table

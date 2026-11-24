@@ -143,8 +143,14 @@ A set-operation statement is a **composite** statement: it executes on every SQL
 - **WHEN** a client submits `SELECT model FROM dial_usage_log UNION DISTINCT SELECT model FROM rate_analytics`
 - **THEN** each distinct `model` appears once, and the executed statement spells `UNION DISTINCT` so the
   server's default mode cannot change the result — or, for a caller with an output that depends on a masked field,
-  spells `UNION ALL` under a grouping that collapses the same rows (see [structured-query](../structured-query/spec.md),
-  "Masked inputs are reported per output cell"); either way it carries an explicit keyword
+  spells `UNION ALL` under a grouping that collapses the same rows and keeps them in the order of their first
+  occurrence (see [structured-query](../structured-query/spec.md), "Masked inputs are reported per output cell");
+  either way it carries an explicit keyword
+
+#### Scenario: A masked UNION DISTINCT keeps the last branch's order under the row limit
+- **GIVEN** a caller for whom `route_name` is masked
+- **WHEN** it submits `SELECT route_name FROM t WHERE project_id = 'P1' UNION DISTINCT SELECT route_name FROM t ORDER BY route_name` over REST, and the distinct values exceed the default limit of 100
+- **THEN** the rows are the first branch's distinct values followed by the last branch's new values in `route_name` order, as ClickHouse returns `UNION DISTINCT` over the same masked values, each marked when any row it collapses had the cell absent
 
 #### Scenario: Bare INTERSECT means ALL, not DISTINCT
 - **WHEN** a client submits a set operation whose two branches each yield the same value twice, combined with a bare `INTERSECT`

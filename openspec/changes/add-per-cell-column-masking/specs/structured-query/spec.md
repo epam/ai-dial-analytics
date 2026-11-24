@@ -40,8 +40,10 @@ Besides the grain join, which attaches enrichment values by the stored keys as p
 disclosures SHALL be accepted, and are the only ways a stored value of an absent cell may affect a response:
 - **The mask outcome.** Whether a cell is absent is itself the outcome of the mask condition (see "Column visibility
   by caller role").
-- **Filter cost.** A pruned filter costs more or less depending on stored values (see "A comparison on a masked field
-  keeps the table's pruning").
+- **Filter cost.** A pruned filter, or a conjunct copied into an enrichment's derived table, costs more or less
+  depending on stored values, at the granularity of the data store's indexes. Repeated probes can recover an absent
+  value that the caller's own filter isolates in a granule (see "A comparison on a masked field keeps the table's
+  pruning" and "Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table").
 - **Row order.** Where a query states no total order — no `sort`, ties under one, a page cut without a total order —
   rows come back in the order the data store produces, which tracks the table's storage order. So do the values
   inside an order-sensitive aggregate (such as an array of the group's values) and a ranking window without an
@@ -52,20 +54,19 @@ disclosures SHALL be accepted, and are the only ways a stored value of an absent
   interleave with another role's in storage order. Which rows and values a query with a total order returns never
   depends on it; where the query leaves the choice open (an unordered page cut, `any`), the choice can.
 
-For a masked field, this requirement and the next take precedence over "SQL translation"'s statement that allowlisted
-fields expand to their physical columns and that the filter is applied unchanged. The results are the same, but the
-rendered form differs.
+"SQL translation" states the corresponding exceptions for a masked field: it expands to its masked value, and a
+rewritten conjunct takes the form the next requirement gives it.
 
 A query that references a masked field SHALL be refused `400 bad_request`, on every surface that resolves it, when it
-carries a name equal, case-sensitively, to the name of a table it reads, its source or an enrichment. That covers a
+carries a name that equals, case-sensitively, the name of a table it reads (its source or an enrichment), or begins
+with that name followed by `.`. That covers a
 lambda parameter, and every resolved output name at every level of the statement: an explicit `as` or SQL alias, a
 name derived from a field or function, and a name the service generates for an operand's output. The mask is evaluated over the stored row's columns, which
 the statement names by table, and a declared name equal to a table could capture those names. A query that names a
 masked field fails today with `unknown field`, because the field is hidden. A query whose only reference to a masked
 field is a wildcard ran today over the visible columns, and is refused once the wildcard includes the masked field:
-that is a breaking change for such a query. A query that references no masked field SHALL be unaffected. The refusal takes precedence over "Output column naming when `as` is
-omitted", which rejects no query for omitting a name: a derived name that equals a table name is refused here only
-while a masked field is referenced. `POST /v1/queries/validate-sql` SHALL report such a statement `valid: false` with
+that is a breaking change for such a query. A query that references no masked field SHALL be unaffected. "Output column naming when `as` is
+omitted" states the exception for a derived name. `POST /v1/queries/validate-sql` SHALL report such a statement `valid: false` with
 the refusal as `issues[0]` (code `invalid_sql`), and saving a saved query or dashboard widget whose body carries one
 SHALL be refused `400 bad_request`.
 
@@ -116,6 +117,13 @@ SHALL be refused `400 bad_request`.
 - **THEN** execution answers `400 bad_request`, validation `200` with `valid: false`, and the save `400 bad_request`
   with nothing stored
 
+#### Scenario: A dotted output name led by a table name is refused
+
+- **GIVEN** a caller for whom `deployment` is masked on `dial_usage_log`
+- **WHEN** it projects the literal `'P1'` as `dial_usage_log.project_id`, groups by that name, and keeps groups whose
+  `max(deployment)` equals `'d2'`; or sorts by that name and then by `deployment`
+- **THEN** each query is refused `400 bad_request`
+
 #### Scenario: A lambda cannot read an absent cell through a parameter name
 
 - **GIVEN** a caller for whom `deployment` is masked, absent on the rows of `P2`
@@ -146,7 +154,7 @@ SHALL be refused `400 bad_request`.
 ### Requirement: A comparison on a masked field keeps the table's pruning
 
 A top-level conjunct of a query's filter that compares a masked scalar field, referenced directly, with an operand
-that contains no subquery and is not the null literal — by `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, or a string-match
+that contains no subquery and is not the null literal, nor an `in` list holding one — by `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, or a string-match
 operator — or tests it `is not null`, SHALL be evaluated as the field's mask condition conjoined with the same comparison on the stored
 column, the other operand reading masked values as it otherwise would. The operand may be a literal, a relative-time
 expression or a caller value. An absent cell never satisfies such a comparison, so the two forms select the same rows;
@@ -156,9 +164,19 @@ for a caller allowed the column on every row.
 The pruning reads the stored column, so the amount of data the statement reads, and with it the query's latency and
 whether it exceeds the query budget (`422 query_budget_exceeded`), can depend on values stored in cells that are absent
 for the caller: a block of rows whose absent cells store a matching value is read and then discarded by the mask. The
-rows and values returned never depend on them. This coarse, block-level cost channel SHALL be an accepted disclosure,
-in exchange for keeping a filter on a masked key or partition column as cheap as for a caller allowed the column. It
-is open only to a caller that already reads those rows, and it never yields a value of a single row. A comparison with the null literal is a null test, not a comparison: an
+rows and values returned never depend on them. This cost channel SHALL be an accepted disclosure, in exchange for
+keeping a filter on a masked key or partition column as cheap as for a caller allowed the column. It is open only to
+a caller that already reads those rows. It discloses what the data store's indexes hold for the granules the caller's
+filter reaches: the ordering-key value where each granule starts, a skip index's summary of a granule, and a part's
+partition-key range. Where the caller's visible conjuncts narrow the read to a granule that an absent row starts, or in
+which it is the only row whose value the caller does not know, repeated equality or range probes can recover that
+row's stored value. No response carries the value. An administrator who needs such a column's absent values kept
+SHALL list it on every governing role.
+
+A comparison with the null literal, or an `in` list that holds one, is not rewritten. `NULL IN (…, NULL, …)` is true
+under ClickHouse's `transform_null_in = 1`, which query statements do not pin, so such a list stays unrewritten; a list
+without a null item is not true on `NULL` under either setting. A comparison with the null literal is a null test, not
+a comparison: an
 `is null` test, which an absent cell satisfies, SHALL NOT take this form. Every other reference to a masked field,
 including such a comparison under `or` or `not`, or against a subquery, SHALL read the masked value as "A masked field reads as absent at every
 reference" states. The form SHALL
@@ -397,7 +415,8 @@ separate count of the same filter; otherwise it SHALL be null.
 A row with at least one marked cell (see "Masked inputs are reported per output cell") SHALL carry one more member,
 `$masked`: a JSON array of the marked output columns' names, in projection order, each named as its key in the row. A
 row with no marked cell SHALL NOT carry `$masked`, so a caller none of whose columns is masked receives exactly the
-rows it received before masking existed. `$masked` is never an output column (see "`$masked` is a reserved output
+rows it received before masking existed, for any query that does not name an output `$masked`. `$masked` is never an
+output column (see "`$masked` is a reserved output
 column name"), so it cannot collide with one. A marked cell SHALL keep its key in the row, carrying its value: null for
 an absent field, or what the expression computed from the absent value.
 
@@ -465,9 +484,11 @@ conjunct is one of:
 - `in` whose every literal is non-null and not the field type's default;
 - `eq` of `starts_with(field, literal)` or `contains(field, literal)` against `true`, with a non-empty literal.
 
-A conjunct whose field is masked for the caller (see "A masked field reads as absent at every reference") SHALL NOT be
-copied: the enrichment's derived table has no source row in scope to evaluate the mask on, and a copy over the stored
-value would narrow the join by values the caller may not see.
+A conjunct whose field is masked for the caller (see "A masked field reads as absent at every reference") SHALL still
+be copied, over the stored value, while the statement's own `WHERE` keeps the masked or rewritten form. Every listed
+conjunct is `NULL` or false on an absent cell, so that form implies the copy and the rows returned are unchanged.
+Where the derived table computes the conjunct as `__adas_c<n>`, the outer `WHERE` SHALL read `<mask> AND
+"__adas_c<n>"`, the mask being the field's mask condition over the source row.
 
 The conjunct SHALL also stay in the statement's own `WHERE`. An enrichment that receives a copied conjunct but has
 no source-only conjunct to key it SHALL be joined as a derived table restricted by its copied conjuncts alone.
@@ -549,8 +570,11 @@ argument after the first SHALL be a literal. A field referenced anywhere else �
 a lambda, or in a call outside the list — SHALL be projected whole, and its calls SHALL be rendered over it as
 today. An enrichment carrying a pushed call but no key or copied conjunct SHALL be joined as a derived table with
 no `WHERE`. A heavy field a late-materialized block fetches for its page is not pushed. A heavy field masked for the
-caller SHALL NOT be pushed either: it is projected whole and every call is rendered over its masked value in the outer
-statement, where the source row its mask reads is in scope.
+caller SHALL be pushed as well. The outer statement SHALL read each pushed column through the field's mask, where the
+source row the mask reads is in scope, taking as the absent value the call's value on an absent cell: the scalar masked
+form for the calls that return `NULL` over `NULL`, and `''` for `json_extract_string_ci` and `[]` for
+`json_extract_array`, whose input is read as `''` when absent. Its references SHALL carry the mask into the row's
+flags.
 
 The calls are allow-listed because their value on an unmatched row is already the default of their result type,
 which is what a column computed inside the derived table reads on an unmatched row: over a `Nullable` column each
@@ -588,7 +612,8 @@ top-level source-only comparison conjunct that reads the source's partition colu
 subquery — `request_time >= now() - INTERVAL 1 DAY`, say. When the source's partition column is masked for the caller,
 a bound SHALL be only such a conjunct that "A comparison on a masked field keeps the table's pruning" rewrites, so
 every row it admits satisfies the comparison on the stored value; a null test is not a bound there. A qualifying
-conjunct `C` SHALL NOT be over a masked enrichment field, as for a copied conjunct. `B` exists so that a statement which already bounds its time
+conjunct `C` MAY be over a masked enrichment field: `C` is `NULL` or false on an absent cell, so the source rows the
+statement's own masked `WHERE` admits are among those whose partitions `PS` names. `B` exists so that a statement which already bounds its time
 does not pay a read of `C`'s column over all of `E`'s history to name the days it named itself; without a bound `PS`
 reads `C`'s column across every partition of `E`.
 
@@ -789,3 +814,315 @@ exceeded. Full-window aggregates run several times faster, with peak memory unch
 - **WHEN** the same window-only query, sorted on the enrichment column so it is not late-materialized, runs rendered
   with the transfer and with both key sets
 - **THEN** both return identical rows
+
+### Requirement: SQL translation
+
+The system SHALL translate a validated structured query into ClickHouse SQL by building a jOOQ query
+model on the connection-less `SQLDialect.CLICKHOUSE` render context and rendering it to a SQL string
+with literals inlined (the ClickHouse HTTP client executes a raw SQL string). Every inlined string
+literal SHALL escape the backslash as well as the quote, because ClickHouse reads a backslash inside a
+literal as an escape: a value matches exactly the characters the caller sent, and no value can close its
+literal early and run the rest of itself as SQL. Field bindings SHALL be
+sourced from the table-management catalog; allowlisted fields SHALL expand to their physical columns,
+qualified by their owning table. A field masked for the caller (see "A masked field reads as absent at every
+reference") SHALL instead expand to its masked value. Source columns SHALL be referenced by their bare flat name; enrichment
+columns SHALL be referenced by their table-qualified flat name `<enrichment_table>.<column>` (the same
+name discovery publishes). When a query references columns contributed by one or more enrichments of
+the source, the translator SHALL emit a `LEFT JOIN` of each referenced enrichment table on the shared grain key
+`source.grain_key = enrichment.grain_key` (the same column name on both sides), joining only
+the enrichments actually referenced across the
+query's `select`/`filter`/`sort`/`group_by`; enrichment joins are single-key with 0..1 cardinality and
+SHALL NOT change the source row multiplicity **when the query is read final**. That 0..1 cardinality
+holds regardless of pending background merges because a final read deduplicates the enrichment too (see
+the read deduplication requirement), so an enrichment grain key with unmerged versions resolves to a
+single latest row and never fans out the source. A query that is **not** read final joins the
+enrichment's raw parts, so a grain key with unmerged versions MAY fan out the source row once per
+version — exactly what the same join returns in ClickHouse without `FINAL`. For a user-facing read the
+deduplication SHALL be rendered into this SQL: a final-read query SHALL carry ClickHouse's `FINAL`
+modifier on its source table reference when the source is `upsert_by_key` (never on an `append` source's
+plain `MergeTree`, which refuses it) and on every enrichment table it joins — inside the keyed join's
+derived table when the join is keyed — and a query that is not read final SHALL carry it on none of
+them. The key sub-query of a keyed join (`SELECT source.grain_key FROM source WHERE <key predicates>`)
+SHALL NOT carry `FINAL`: the latest version of a key is one of its raw versions, so the raw key set is
+a superset of the final one and keying still never changes which rows the statement returns, while
+the sub-query does not pay a second merge. The internal pipeline reads that render through this
+translator (enrichment scans, group fetch, Class-1 materialize, aggregate refresh and preview) SHALL
+render no `FINAL` and keep deduplicating through the query-level `final = 1` execution setting, as the
+read deduplication requirement states. Whether deduplication merges across partitions or stays inside
+each one is decided by the read-deduplication requirement ("Deduplication SHALL stay inside a partition
+wherever the catalog can vouch for it"); the 0..1 guarantee of a final read holds either way, because
+an enrichment's partition column is immutable for a grain key, so no key ever has versions in two
+partitions.
+**The join SHALL be keyed by the source-only top-level conjuncts of the query's `filter`.** The filter's
+top-level `and` SHALL be flattened, recursing into nested `and`s only; an `or`, a `not`, a comparison
+and a subquery predicate are each one conjunct, never split further. A conjunct is **source-only** when
+every field it references (the operands of a subquery predicate included, its body not) is a source
+column. When at least one conjunct is source-only, the enrichment side of every referenced join SHALL
+be emitted as a derived table — the grain key plus the enrichment columns the query references —
+restricted to `enrichment.grain_key IN (SELECT source.grain_key FROM source WHERE <key predicates>)`
+and aliased to the enrichment's own name, where `<key predicates>` are those source-only conjuncts
+alone, so ClickHouse's right-side hash build covers the grain keys they select rather than the whole
+enrichment table — except where "A partition-only key on an aligned enrichment is transferred, not keyed"
+replaces the key sets with the transferred partition bounds, for a join to a partition-aligned enrichment
+whose every key predicate is a bound on the source's partition column. The keying SHALL be statement-wide: a conjunct naming one enrichment's column SHALL
+NOT prevent the source-only conjuncts beside it from keying that enrichment's join or any other. The
+query's **whole** `filter` SHALL still be applied, unchanged, in the statement's own `WHERE` — except that a reference
+to a masked field reads its masked value, and a conjunct that "A comparison on a masked field keeps the table's
+pruning" rewrites takes that form, which selects the same rows; an
+enrichment conjunct SHALL NOT be moved out of it, and SHALL be copied into a derived table only as
+"Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table" allows. A query with no
+`filter`, or whose `filter` has no source-only top-level conjunct (an enrichment-only filter, or an `or`
+mixing source and enrichment columns), SHALL join the enrichment table unkeyed, unless that requirement
+or "Scalar calls over a heavy text column are computed inside the enrichment's derived table" emits it as
+a derived table. On the single-entity read path a late-materialized row-mode page SHALL instead join its
+late enrichments for the page's keys, as "Projection-only enrichment columns are fetched for the returned page
+only" defines them and states. The same rule SHALL apply to
+the `include_total` count statement. Keying changes which rows the join build reads, never which rows
+the statement returns, whatever shape the enrichment conjuncts take — including `IS NULL` and
+`coalesce` over an enrichment column: the key predicates are a subset of the outer `WHERE`'s
+conjuncts, so every source row the outer `WHERE` keeps passes them, its enrichment row (if it has one)
+is in the derived table, and its `LEFT JOIN` result is the one the unkeyed join gives it. A projected enrichment column SHALL be returned under its
+qualified flat name as the result-row key. Comparison operators SHALL map to SQL per the wire
+contract: `eq`/`ne`/`lt`/`gt`/`le`/`ge` to direct comparisons, `co`/`nc` to **case-sensitive**
+`LIKE`/`NOT LIKE` contains patterns, `ico`/`inc` to **case-insensitive** `LIKE`/`NOT LIKE`
+contains patterns, `in` to `IN`, and `eq`/`ne` against a null literal to `IS NULL`/`IS
+NOT NULL`. Aggregate functions SHALL translate to their SQL aggregates. Every entry of a non-empty
+`select` SHALL be rendered with an explicit SQL alias carrying its resolved output name (see the
+output-column-naming requirement) in both modes, so the executed statement itself declares the
+result-row keys instead of relying on the database's own naming of an unaliased expression; an
+omitted/empty row-mode `select` SHALL keep projecting the source's own **non-heavy** columns under
+their own names (see "Wildcard projection excludes heavy columns").
+Aggregate mode SHALL NOT require caller-supplied aliases and SHALL build `group_by`/`having`/`sort`
+against the base fields together with the resolved select output names. Where a name matches both an
+entity column and a select output, resolution SHALL follow PostgreSQL clause by clause: `sort` SHALL
+resolve to the **select output**; `group_by` SHALL resolve to the **entity column**, falling back to the
+select output for a name that is not a bound field (so a computed group key such as a `width_bucket`
+output stays groupable); and `having` SHALL resolve to the entity column unless the caller supplied that
+name as an explicit `as` alias. A `group_by` key that is both a bound entity column **and** the explicit
+`as` alias of a select entry projecting a different expression SHALL be rejected as ambiguous
+(`400 bad_request` naming the key): the two readings group differently and neither the DSL document nor
+its SQL rendering — a bare `GROUP BY "<name>"`, which names the column on re-parse — can distinguish
+them. An alias that repeats the name of the field it projects is not such a collision, since both
+readings group by the same column. The offset pagination strategy SHALL be applied with a default limit of
+100 and a maximum of 1000.
+
+#### Scenario: Row projection renders against the entity table
+
+- **WHEN** a validated row-mode query projects two fields from the source with a filter, sort, and
+  offset page
+- **THEN** the rendered SQL selects those columns from the entity table with the filter, `ORDER BY`,
+  and `LIMIT` present, and no enrichment is joined because none is referenced
+
+#### Scenario: Query referencing an enrichment column joins that enrichment
+
+- **WHEN** a validated query references an enrichment column by its qualified flat name
+  `<enrichment_table>.<column>`
+- **THEN** the rendered SQL `LEFT JOIN`s that enrichment on `source.grain_key = enrichment.grain_key`
+  and selects/filters the enrichment column through the join, rendering the qualified flat name as a
+  single quoted alias
+
+#### Scenario: Two enrichments exposing the same column name are queryable via their qualified names
+
+- **WHEN** a validated query references two columns that share a bare name but belong to different
+  enrichments, each named by its qualified flat name (`<enrichment_a>.<col>` and `<enrichment_b>.<col>`)
+- **THEN** both enrichments are `LEFT JOIN`ed and both columns are projected as distinct result fields
+
+#### Scenario: A source-only filter keys the enrichment join
+
+- **WHEN** a validated query projects an enrichment column and its `filter` names source columns only
+  (for example `trace_id = 'x'`), and the block is not late-materialized (see "Projection-only enrichment columns
+  are fetched for the returned page only")
+- **THEN** the rendered SQL `LEFT JOIN`s a derived table over the enrichment — its grain key and the
+  referenced enrichment columns, restricted to `enrichment.grain_key IN (SELECT source.grain_key FROM
+  source WHERE <filter>)` — aliased to the enrichment's name and joined on the same grain-key
+  equality, and the statement's own `WHERE` still carries the filter
+
+#### Scenario: A mixed and is keyed by its source-only conjuncts
+
+- **WHEN** a validated query's `filter` is `request_time >= T AND trace_id = 'x' AND
+  <enrichment>.<column> = 'v'` and the source and enrichment are partition-aligned on `request_time`
+- **THEN** the enrichment is joined as a derived table restricted to `enrichment.grain_key IN (SELECT
+  source.grain_key FROM source WHERE request_time >= T AND trace_id = 'x')` and to
+  `enrichment.request_time IN (SELECT source.request_time FROM source WHERE request_time >= T AND
+  trace_id = 'x')`
+- **AND** neither key sub-query names the enrichment column
+- **AND** the statement's own `WHERE` carries the whole filter, the enrichment conjunct included
+- **AND** the `include_total` count statement is keyed by the same two conjuncts
+
+#### Scenario: A filter on one enrichment keys another enrichment's join
+
+- **WHEN** a validated query's `filter` is `request_time >= T AND <enrichment_a>.<column> = 'v'` and it
+  projects a column of `<enrichment_b>`, and neither enrichment is partition-aligned with the source on
+  `request_time`
+- **THEN** both enrichments are joined as derived tables keyed by `request_time >= T` alone
+
+#### Scenario: A filter naming an enrichment column joins the enrichment unkeyed
+
+- **WHEN** a validated query's `filter` references enrichment columns only (it has no source-only
+  top-level conjunct), or the query has no `filter`, and the block is not late-materialized
+- **THEN** the rendered SQL `LEFT JOIN`s the enrichment table itself, with no key sub-query
+
+#### Scenario: A mixed or is left unkeyed
+
+- **WHEN** a validated query's `filter` is `trace_id = 'x' OR <enrichment>.<column> = 'v'`
+- **THEN** the filter has no source-only top-level conjunct, and the rendered SQL `LEFT JOIN`s the
+  enrichment table itself, with no key sub-query
+
+#### Scenario: An enrichment IS NULL conjunct beside a time window is keyed and returns the same rows
+
+- **GIVEN** source rows inside and outside a time window, some inside it with an enrichment row and some
+  without one
+- **WHEN** a validated query's `filter` is `request_time >= T AND <enrichment>.<column> IS NULL`
+- **THEN** the enrichment join is keyed by `request_time >= T` (or, when the enrichment is partition-aligned
+  with the source on `request_time`, bounded by that transferred window instead)
+- **AND** the query returns exactly the rows the same statement returns with the enrichment joined
+  unkeyed: every in-window source row whose enrichment row is missing or holds a null in that column,
+  and no out-of-window row
+
+#### Scenario: Contains operator maps to case-sensitive LIKE
+
+- **WHEN** a query uses the `co` operator on a string field
+- **THEN** the translator emits a case-sensitive `LIKE '%value%'` predicate that matches only
+  exact-case occurrences
+
+#### Scenario: Case-insensitive contains maps to case-insensitive LIKE
+
+- **WHEN** a query uses the `ico` operator on a string field
+- **THEN** the translator emits a case-insensitive `LIKE '%value%'` predicate
+
+#### Scenario: Aggregate query groups by base field and select alias
+
+- **WHEN** an aggregate-mode query groups by a field and selects an aliased aggregate
+- **THEN** the translator builds GROUP BY against the field and resolves `having`/`sort` references
+  against the base fields plus the select alias
+
+#### Scenario: Unaliased aggregate select renders an explicit derived alias
+
+- **WHEN** an aggregate-mode query selects `count()` with no `as`
+- **THEN** the rendered SQL aliases the aggregate as `"count"`, and `group_by`/`having`/`sort` may
+  reference `count`
+
+#### Scenario: Derived output name does not shadow an entity column in having or group_by
+
+- **WHEN** an entity owns a column named `count`, and an aggregate-mode query groups by that column,
+  selects an unaliased `count()` aggregate, and filters `having` on `count`
+- **THEN** both `group_by` and `having` resolve to the entity column, and the aggregate is still
+  returned under its derived output name
+
+#### Scenario: Computed select output stays groupable by name
+
+- **WHEN** an aggregate-mode query selects a `width_bucket` expression aliased `bucket` and groups by
+  `bucket`, which is not an entity column
+- **THEN** `group_by` falls back to the select output and groups by that output column
+
+#### Scenario: group_by key that is both a column and the alias of another expression is rejected
+
+- **WHEN** an aggregate-mode query selects `date_bin(1, 'hour', request_time)` under the explicit alias
+  `request_time` (the name of an entity column) and groups by `request_time`
+- **THEN** the request is rejected with `400 bad_request` naming the ambiguous key, no query is
+  executed, and the message points at renaming the alias to a name that is not a column of the entity
+
+#### Scenario: Alias repeating its own field name stays groupable
+
+- **WHEN** an aggregate-mode query selects `{field: event_kind, as: "event_kind"}` plus an aggregate and
+  groups by `event_kind`
+- **THEN** the query is accepted and groups by the entity column, because the alias and the column name
+  the same grouping
+
+#### Scenario: A final-read query renders FINAL on the source and every joined enrichment
+
+- **WHEN** a validated query that is read final references columns of two enrichments, one joined keyed
+  and one unkeyed
+- **THEN** the rendered SQL carries `FINAL` after the source table reference, after the unkeyed
+  enrichment table, and after the enrichment table inside the keyed join's derived table, and the key
+  sub-query `SELECT source.grain_key FROM source WHERE <key predicates>` carries none
+
+#### Scenario: A query not read final renders no FINAL
+
+- **WHEN** a validated query that is not read final references an enrichment column
+- **THEN** the rendered SQL carries `FINAL` on no table reference, and a grain key of the enrichment
+  with two unmerged versions returns its source row twice
+
+#### Scenario: A backslash in a string value cannot escape its literal
+
+- **WHEN** a filter compares a string field with the value `x\' OR 1=1 --`, over the DSL or ad-hoc SQL
+- **THEN** the value renders as one escaped literal and the query returns only rows whose field equals
+  those exact characters, here none
+
+#### Scenario: A backslash in a string value matches literally
+
+- **WHEN** a filter compares a string field with the four-character value `a\nb`
+- **THEN** it matches a row holding a backslash followed by `n`, never a row holding a newline
+
+### Requirement: Output column naming when `as` is omitted
+
+A select entry's `as` key SHALL be optional for every expression kind and in both query modes; no
+query SHALL be rejected for omitting it, except that a query referencing a masked field is refused when a resolved
+name, given or derived, equals a table it reads or begins with that name followed by `.` (see "A masked field reads as
+absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
+output column name the way PostgreSQL derives an unnamed target-list name, restricted to the
+expressions this DSL can express:
+
+- a field expression SHALL yield the field's own name **verbatim**, including the dots of an
+  enrichment column's qualified flat name (`deployment_ref.display_name` stays whole — the dot is part
+  of the name, not a table qualifier);
+- a function expression (scalar, aggregate, or ordered-set aggregate, with or without `distinct`)
+  SHALL yield the lowercase catalog function name (`count`, `sum`, `date_bin`, `percentile_cont`);
+- a value literal SHALL yield `?column?`, PostgreSQL's placeholder for a name it cannot derive;
+- an array expression SHALL yield `array` (unreachable in a projection today, since array literals are
+  only valid as an `in` right operand).
+
+Because rows are name-keyed maps and result schemas are flat field lists, output names SHALL be unique
+— unlike PostgreSQL, which tolerates duplicates. Uniqueness SHALL be established deterministically from
+the select list's order in two passes: explicit `as` values SHALL be reserved first, in list order, an
+exact repeat of an earlier explicit alias taking the first free `<name>_<n>` (n from 1); derived names
+SHALL then be assigned in list order, each taking the first free candidate from `<base>`, `<base>_1`,
+`<base>_2`, … An explicit alias SHALL therefore always appear under exactly the name the caller asked
+for, and derived names SHALL move out of its way regardless of position in the list.
+
+The resolved names SHALL be the response-row keys, the rendered SQL aliases, and the reference names
+available to `group_by`, `sort`, and `having` — one resolution shared by execution, DSL→SQL rendering,
+and SQL translation, so those three can never disagree.
+
+#### Scenario: Unaliased aggregate takes the function name
+
+- **WHEN** an aggregate-mode query groups by `model` and selects `{ "expr": { "type": "fn", "name": "count", "args": [] } }` with no `as`
+- **THEN** the request succeeds and each row carries the keys `model` and `count`
+
+#### Scenario: Unaliased scalar function takes the function name
+
+- **WHEN** a row-mode query selects `{ "expr": { "type": "fn", "name": "lower", "args": [{ "type": "field", "name": "deployment" }] } }` with no `as`
+- **THEN** the request succeeds and each row carries the key `lower`
+
+#### Scenario: Colliding derived names are suffixed by position
+
+- **WHEN** an aggregate-mode query selects two unaliased `count` entries (e.g. `count()` and `count(distinct model)`)
+- **THEN** the request succeeds and the rows carry the keys `count` and `count_1`, in select-list order
+
+#### Scenario: An explicit alias keeps its exact name against a colliding derived name
+
+- **WHEN** a query selects an unaliased `count()` entry followed by an entry aliased `count`
+- **THEN** the entry aliased `count` is returned under `count`, and the unaliased aggregate is returned
+  under `count_1`
+
+#### Scenario: Repeated explicit aliases are disambiguated
+
+- **WHEN** a query selects two entries both aliased `total`
+- **THEN** the first is returned under `total` and the second under `total_1`, rather than one silently
+  overwriting the other in the row map
+
+#### Scenario: Projected literal takes PostgreSQL's placeholder name
+
+- **WHEN** a row-mode query projects a value literal with no `as`
+- **THEN** the request succeeds and the row key is `?column?`
+
+#### Scenario: Enrichment column keeps its qualified flat name
+
+- **WHEN** a row-mode query selects the enrichment field `deployment_ref.display_name` with no `as`
+- **THEN** the row key is the full qualified flat name `deployment_ref.display_name`
+
+#### Scenario: Derived name is referenceable from group_by, sort, and having
+
+- **WHEN** an aggregate-mode query selects an unaliased `count()` and orders by `count` descending, or
+  filters `having` on `count`
+- **THEN** the reference resolves to that select output and the request succeeds without any `as`

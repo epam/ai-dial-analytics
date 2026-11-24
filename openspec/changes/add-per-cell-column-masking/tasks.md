@@ -3,7 +3,10 @@
 - [ ] 1.1 Give `SensitiveColumnAccess.ColumnVisibility` three states per column — visible, masked with the allowing
   governing roles' `RowPolicy` filters, hidden — keeping `allows(column)` as "visible or masked", adding `masks(column)`
   and a strict `visible(column)`; computed fields follow "Column visibility by caller role" (masked when no input is
-  hidden and one is masked); `ColumnVisibility.and` and `visibleColumnsAtRevision` combine three states (hidden when
+  hidden and one is masked); row-contributing roles (the rows-only roles whose policy enters the row filter, the set
+  `RowPolicyFilter.confining` computes, shared as `readsTable` is) narrow the decision: a column such a role's list
+  leaves out is masked, and its policy enters the mask condition of the columns it allows (tests: the rows-only
+  scenario with `N`'s `columns` `null` and `["project"]`); `ColumnVisibility.and` and `visibleColumnsAtRevision` combine three states (hidden when
   either side hides, else masked when either masks); a column that would be masked is hidden when the governed table
   stores a column whose physical name equals its own name or an enrichment's name, or an enrichment stores a column
   named after any table of the entity (tests: a table `t` storing a column `t`, a source storing a column named after
@@ -40,11 +43,10 @@
 - [ ] 3.1 Resolve every reference through `value()`: `ExprTranslator.resolveFieldOrNull`, the wildcard projection
   (aliased to `physicalField().getName()`, the key it emits today), object-path access (mask around the extracted subcolumn), `toJSONString` over an object,
   array expansion, windows, `having`, the count query
-- [ ] 3.2 Keep the mask out of the enrichment derived table and apply it in the outer select; exclude masked fields
-  from read-shaping pushdown; keep composite key reduction on stored keys (the join's `ON` compares masked outputs);
-  keep the grain join on stored keys,
-  translate its key sets through the same masked or rewritten conjunct forms as the outer filter, and transfer
-  partition bounds from a masked partition field only for rewritten null-rejecting conjuncts
+- [ ] 3.2 Keep the mask out of the enrichment derived table and apply it in the outer select; keep composite key
+  reduction on stored keys (the join's `ON` compares masked outputs); keep the grain join on stored keys, translate its
+  key sets through the same masked or rewritten conjunct forms as the outer filter, and transfer partition bounds from
+  a masked partition field only for rewritten null-rejecting conjuncts
 - [ ] 3.3 Project one flag per (condition, context) pair the outputs need — `NOT mask` per row, `max(NOT mask)` per
   group, `max(NOT mask) OVER W` for a row-mode window output and `max(max(NOT mask)) OVER W` for an aggregate-mode one,
   and for `row_number`/`rank`/`dense_rank` the same over `W`'s partition and order with `ROWS BETWEEN UNBOUNDED
@@ -53,35 +55,59 @@
 - [ ] 3.4 Name the flag columns per statement so they differ from every output name of the query (`__adas_mask_<i>`,
   suffix advanced past a caller's output of that name); leave the shipped `__adas_` reservation unchanged; render each
   condition once per SELECT scope as `(ifNull(<or>, 0) AS __adas_mcond_<i>)` and reference the alias elsewhere,
-  deciding definition versus reference while each scope renders (one `Condition` can render in two scopes), rendering
-  the full condition inside every lambda body (never the alias, never its definition), and choosing alias and flag
+  inside lambda bodies too, deciding definition versus reference while each scope renders (one `Condition` can render
+  in two scopes): the definition at a reference outside every lambda body (its place in the text does not matter), or,
+  in a scope that references the condition only inside lambdas, once per outermost lambda body; choose alias and flag
   names, and the composite operand aliases `CompositeQueryBuilder.nextAlias` generates, apart from every name the
-  statement declares (outputs at every level, lambda parameters, CTE and derived-table aliases), and refusing a query that references a masked field and carries a lambda parameter or any resolved output
-  name (explicit, derived or generated, at every level) equal to a table it reads; with ClickHouse tests that a lambda parameter named like an internal alias reads the absent
-  value and that an output aliased as the table is refused when a masked field is referenced, and a
-  test that a wildcard over many masked columns under one large policy renders the policy text once per scope,
-  including a query whose filter is copied into a key subquery and one whose first mask reference is a lambda capture
-- [ ] 3.5 Collapsing shapes: under a distinct projection compute each flag as `max(<flag>) OVER (PARTITION BY <every
-  output, and the row flag of each output that is a bare masked composite field>)` in the same SELECT, leaving `sort`,
-  `page` and `having`
-  in place; plan a DSL distinct projection with a window output as an inner window block under an outer distinct
-  block, as the SQL front end does (test both surfaces agree); for an output that is a bare masked composite field, add
-  `NOT mask` to the grouping key and keep the row flag in a distinct or union-distinct comparison, so an absent cell
-  never collapses with a stored empty value; carry a mark flag and a bare-absent flag per output position through
-  `union all` branches, derived tables and CTEs, so `materialize` nulls a composite cell only where its branch output is
-  a bare absent field (test: `execution_path` in one branch, `arrayConcat(execution_path, ['x'])` in the other); align
-  `union all` branches with one flag per output position (constant `0` where none); render `union` as that grouped;
-  make a scalar subquery in an output expression return `tuple(value, flag)` with the flag under the subquery's own
-  mode; wrap a flag propagated from a composite operand `ifNull(flag, 0)`; refuse `intersect`/`except` whose operand
-  output depends on a masked field (`400 bad_request` naming the field)
+  statement declares (outputs at every level, lambda parameters, CTE and derived-table aliases); refuse a query that
+  references a masked field and carries a lambda parameter or any resolved output name (explicit, derived or generated,
+  at every level) that equals a table it reads or begins with `<table>.`. ClickHouse tests on 26.3 and 26.8:
+  - a lambda parameter named like an internal alias reads the absent value;
+  - an output aliased as the table is refused;
+  - an output `dial_usage_log.project_id` used as a `group_by` key with a `having` over a masked field, and as a sort
+    key, is refused;
+  - a wildcard over many masked columns under one large policy renders the policy text once per scope, including a
+    filter copied into a key subquery and a first mask reference in a lambda capture;
+  - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only
+    lambda in a key subquery all run under the default `max_query_size` and `max_ast_elements`
+- [ ] 3.5 Collapsing shapes:
+  - a row-mode distinct projection with marks renders as `GROUP BY <every output>` in place of `DISTINCT`, each flag as
+    `max(<flag>)`, a sort key that is not an output as `any(<key>)`, and the row flag (`NOT mask`) of each output that is
+    a bare masked composite field as a further key;
+  - an aggregate-mode distinct keeps `max(max(NOT mask)) OVER (PARTITION BY <every output>)`;
+  - a DSL distinct projection with a window output is planned as an inner window block under an outer grouped block,
+    as the SQL front end plans it (test that both surfaces agree);
+  - a grouping key over a bare masked composite field also adds `NOT mask`, so an absent cell never collapses with a
+    stored empty value;
+  - a mark flag and a bare-absent flag per output position travel through `union all` branches, derived tables and
+    CTEs, so `materialize` nulls a composite cell only where its branch output is a bare absent field (test:
+    `execution_path` in one branch, `arrayConcat(execution_path, ['x'])` in the other); `union all` branches align with
+    one flag per output position (constant `0` where none);
+  - `union` (distinct) renders as that `union all` grouped by the outputs, with `max` of each flag, ordered by
+    `min((branch ordinal, rowNumberInAllBlocks()))` over each branch as rendered (test the "A masked UNION DISTINCT keeps
+    the last branch's order under the row limit" scenario);
+  - benchmark the distinct shapes: low and high cardinality, with and without a sort, a JSON output;
+  - a scalar subquery in an output expression returns `tuple(value, flag)`, with the flag under the subquery's own
+    mode;
+  - a flag propagated from a composite operand is wrapped `ifNull(flag, 0)`;
+  - `intersect`/`except` whose operand output depends on a masked field is refused (`400 bad_request` naming the
+    field)
 - [ ] 3.6 Rewrite top-level conjuncts of a masked scalar field compared with any operand containing no subquery and
-  not the null literal (`eq`/`ne`/`lt`/`le`/`gt`/`ge`/`in`/string match), or tested `is not null` (`ne null`), to
+  not the null literal, nor an `in` list holding one (`eq`/`ne`/`lt`/`le`/`gt`/`ge`/`in`/string match), or tested
+  `is not null` (`ne null`), to
   `mask AND <comparison on physicalField()>` with the operand reading masked values, in `FilterTranslator` for a
   block's `WHERE` filter only, so the main filter, the count, the key subqueries, composite key reduction and each
   composite leaf get it and `having`, `case` conditions, join `ON` and flag-only bindings do not; never rewrite `eq null`; the 3.9 equivalence test covers literal, relative-time and
   caller-value operands and `eq null`
-- [ ] 3.7 Exempt masked fields from read-shaping: no copied conjunct, no pushed heavy call, no qualifying aligned
-  lookup conjunct over one, and partition bounds from a masked partition column only for rewritten comparisons
+- [ ] 3.7 Keep read-shaping for masked fields: copy a qualifying conjunct over the stored value into the enrichment's
+  derived table while the outer `WHERE` keeps the masked or rewritten form (`<mask> AND "__adas_c<n>"` where the
+  derived table computes it); push an allow-listed call over a masked heavy field and read the pushed column in the
+  outer statement through the field's mask, with the call's value on an absent cell as the absent value (the scalar
+  masked form for calls that return `NULL` over `NULL`, `''` for `json_extract_string_ci`, `[]` for
+  `json_extract_array`), its references carrying the mask into the row's flags; allow a qualifying aligned-lookup
+  conjunct over a masked enrichment field on the same grounds; transfer partition bounds from a masked partition
+  column only for rewritten comparisons. Test that a masked `request_body ico 'error'` count projects `__adas_c0`, not
+  `request_body`, and equals the unshaped statement's count
 - [ ] 3.8 Rendered-SQL test: for each clause shape (projection, wildcard, filter rewritten and not, group, order,
   having, join, window, distinct, union, scalar subquery, array expansion, object path, count, composite leaf,
   enrichment column, the late-materialized page block and outer statement), every occurrence of a masked column's
@@ -89,10 +115,11 @@
   that read stored values on purpose (the enrichment derived table's projection, the grain join's keys and partition,
   the page keys and partition, the key subqueries' and composite key reduction's selected key and partition columns,
   but not their conjuncts, the reduced operand's own key in `reducedBinding IN (…)`, the aligned lookup's partition
-  pre-selection `partitionExpr(source.p) IN PS`, and a masked computed field's unwrapped stand-in, whose value the
-  completer nulls from the row's flag)
+  pre-selection `partitionExpr(source.p) IN PS`, copied conjuncts and pushed calls inside an enrichment's derived
+  table, and a masked computed field's unwrapped stand-in, whose value the completer nulls from the row's flag)
 - [ ] 3.9 Rewrite-equivalence test on ClickHouse: for every rewritten operator, the rewritten and unrewritten forms
-  return the same rows, including stored `NULL`s and absent cells
+  return the same rows, including stored `NULL`s and absent cells, under `transform_null_in = 0` and `1`, with an `in`
+  list holding a null item among the cases (left unrewritten)
 
 ## 4. Results
 
@@ -121,8 +148,9 @@
 - [ ] 5.1 `TableCallerPermissions`: `columns_restricted` is true when a column is hidden or masked
   (`TableCallerPermissionsTest`)
 - [ ] 5.2 `TableMapper`, `TableCatalogService`, `TableSchemaService`, `CatalogExportService`, `ImportTargetReader`
-  treat a masked column as visible, except that `TableSchemaService`'s TTL checks treat it as hidden (`ttl.column`
-  cannot name it; a stored TTL on it refuses every `ttl` member with `403 column_not_entitled`); update `TableMapperColumnVisibilityTest`, `TableCatalogServiceTest`,
+  treat a masked column as visible, except that `TableSchemaService` refuses `403 column_not_entitled` a `ttl.column`
+  naming a masked column (before `TableTtlRules.requireValid`, keyed on the physical name) and any `ttl` member while
+  the stored TTL is on one; update `TableMapperColumnVisibilityTest`, `TableCatalogServiceTest`,
   `TableSchemaServiceTest`, `CatalogTransferAuthIntegrationTest` (an export with a masked column succeeds; a
   hidden one is still refused) and `TableGrantRevisionIntegrationTest` (an older revision lists a masked column; a
   system table's snapshot reports `columns_restricted` for a masked-only caller)
@@ -157,9 +185,12 @@
 - [ ] 7.1 `docs/row-level-security.md`: rewrite "Column policies" for visible, masked and hidden columns, `$masked`, partial
   aggregates, expanding an absent array (no element, no mark), CSV and Flight nulls, the pipeline refusal, the
   discovery `masked` flag, `columns_restricted` set by a masked column too, the `intersect`/`except` and table-named
-  name refusals, the hiding fallback on a table with a column named after it, TTL treating a masked column as hidden,
-  the per-row disclosure of a policy over a sensitive column, the accepted cost channel of a pruned filter on a
-  masked key or partition column, the accepted row-order disclosure of masked ordering-key and partition columns
+  name refusals (equal to a table, or beginning with `<table>.`), the hiding fallback on a table with a column named
+  after it, the `403` for a TTL over a masked column, the per-row disclosure of a policy over a sensitive column, the
+  accepted cost channel of a pruned filter or copied conjunct on a masked column (and that repeated probes can recover a
+  single row's value a caller's filter isolates in a granule), the cost of a sort on a masked leading ordering-key
+  column (no read in key order on a raw read), rows-only entries' `columns` narrowing the rows they add, the accepted
+  row-order disclosure of masked ordering-key and partition columns
   with how an administrator avoids it, and an enrichment value disclosing its absent key (allow the key wherever its
   enrichment's columns are allowed)
 - [ ] 7.2 Upgrade notes of the release that ships the change: the behaviour switch, `$masked` and the reserved name,

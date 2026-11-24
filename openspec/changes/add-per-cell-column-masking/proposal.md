@@ -29,8 +29,12 @@ admits a given row.
   - an `intersect` or `except` whose operand outputs the field, since that shape has no row to take a mark from;
   - a query that carries a lambda parameter or an output name (explicit, derived or generated) equal to a table it
     reads, since such a name could capture the table-qualified column names the mask is evaluated over.
+- A rows-only entry (one carrying `rows` on a role with no read path) now narrows the columns shown on the rows it
+  adds: a column its `columns` list leaves out is absent there. Today that list is ignored, and the reading role's
+  columns show on those rows. An entry whose `columns` is `null` behaves as today, while one with a list can hide more
+  than before and can turn `columns_restricted` to `true`.
 - A table that stores a column whose physical name is the table's own name or one of its enrichments' keeps hiding
-  instead of masking, and a TTL treats a masked column as a hidden one.
+  instead of masking, and a TTL over a masked column is refused `403 column_not_entitled`.
 - CSV export and Flight SQL return a masked cell as an empty field or an Arrow null, with no flag column.
 - A null-rejecting comparison on a masked field (`=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, the string-match operators,
   `is not null`) is evaluated so it keeps the stored column's primary-key, partition and skip-index pruning; without
@@ -53,15 +57,17 @@ None.
 - `table-access-control`: "Column visibility by caller role" distinguishes visible, masked and hidden columns and
   defines a masked column's per-row value; "Hidden columns are absent from every read surface" scopes its
   no-marking rule to hidden columns; "Caller-effective privilege reporting" counts a masked column in
-  `columns_restricted`; the pipeline paths refuse a masked column as a hidden one.
+  `columns_restricted`; "Per-role row policies" and "Role-keyed access API" let a rows-only entry's `columns` narrow
+  the rows it adds; the pipeline paths refuse a masked column as a hidden one.
 - `structured-query`: the response envelope gains the `$masked` row member; a masked field reads as absent at every
-  reference, with no trace of the stored value; the enrichment pushdown and partition-transfer requirements exempt
-  masked fields; aggregate, window, distinct, union and scalar-subquery cells over absent inputs are flagged; `intersect`
+  reference, with no trace of the stored value; the enrichment pushdown requirements keep masked fields and mask the
+  pushed results outside, and partition transfer from a masked partition field takes rewritten conjuncts only; "SQL
+  translation" and "Output column naming when `as` is omitted" carry the masked exceptions; aggregate, window, distinct, union and scalar-subquery cells over absent inputs are flagged; `intersect`
   and `except` over a masked output are refused; null-rejecting comparisons on a masked field keep pruning; `$masked`
   is a reserved output name.
 - `query-schema-discovery`: a field carries a `masked` flag.
 - `table-management`: the `permissions` description counts a masked column in `columns_restricted`, and a schema
-  change's TTL treats a masked column as hidden.
+  change refuses a TTL over a masked column (`403 column_not_entitled`).
 - `sql-query-translation`: "Set operations combine query blocks" names the `intersect`/`except` refusal over a masked
   output as its one exception.
 - `query-csv-export`: a masked cell is an empty field and the export carries no flag.
@@ -85,4 +91,6 @@ None.
   set-operation refusal), `docs/grafana-dashboards.md` and the panels under `grafana/dashboards/` (a stray `$masked`
   column), the upgrade notes of the release that ships it.
 - **No new configuration, migration or credential.** A caller with a single governing role on a table, or none of
-  whose governing roles carries a row policy there, sees no change.
+  whose governing roles carries a row policy there (and no rows-only entry with a `columns` list), reads the same rows,
+  columns and values as today. Only the `$masked` output-name refusal (BREAKING above) and discovery's `masked: false`
+  member reach it.

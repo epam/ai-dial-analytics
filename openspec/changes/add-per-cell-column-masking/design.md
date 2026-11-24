@@ -78,16 +78,17 @@ any flag value other than an explicit `0` as absent.
 of several, so inlining it at every reference would multiply its size by the number of references: wildcard entries,
 flags, rewritten conjuncts, the copies of the filter in key subqueries and in the page block. That could exceed the
 server's `max_query_size` for masked callers only. Instead, the first reference **rendered** in a scope renders
-`(ifNull(<or>, 0) AS __adas_mcond_<i>)` and every later one renders the bare alias. Inside a lambda body the condition is **always rendered in full**, never as the alias, and its definition is never
-placed there, for two reasons probed on 26.3:
-- An alias defined inside a lambda body is invisible outside it.
-- A lambda parameter shadows an alias of the same name inside the body. A caller who names a parameter
-  `__adas_mcond_0` and passes a Boolean array would otherwise turn every bare reference in the body into its own
-  parameter, and read the stored value of an absent cell.
+`(ifNull(<or>, 0) AS __adas_mcond_<i>)` and every later one renders the bare alias, **inside lambda bodies too**. The
+definition sits at a reference outside every lambda body, and its place in the text does not matter. ClickHouse
+resolves an alias from before its definition, from a lambda body (nested ones included), from `WHERE`, `HAVING` and
+`ORDER BY`, and from another aggregate's argument; this was probed on 26.3 and 26.8. An alias defined inside a lambda
+body is invisible outside it, so a scope whose every reference sits in lambda bodies (a filter-only lambda, a key
+subquery) defines the alias at the first reference in each outermost body and reuses it there. No lambda parameter can
+shadow the alias, because internal names are chosen apart from every parameter name. A parameter shadows only an
+alias with exactly its name, which was probed.
 
-Rendering the full text there makes the body independent of every internal name. Its column references are the
-hard-qualified physical names `"<table>"."<column>"`, and those can still be captured by a caller-declared name equal
-to the table:
+The column references in a condition are the hard-qualified physical names `"<table>"."<column>"`, and those can be
+captured by a caller-declared name:
 - An **output alias** named after the table captures them in the whole SELECT scope. ClickHouse resolves `t.x` against
   a same-scope alias `t` first, reading `x` as a subcolumn of the alias's type, and falls back to the table column
   where that type has no such subcolumn. This was probed on 26.3 and 26.8. A `String` alias `t` gives `t.size` as its
@@ -95,9 +96,15 @@ to the table:
   reads the stored cell. That is a leak.
 - A **lambda parameter** named after the table captures both the mask's and the value's references in its body. A
   missing element is an error there, not a fallback, which was probed.
+- A **dotted output name** `<table>.<column>` captures them on 26.8, though not on 26.3. The 26.8 analyzer caches one
+  resolution per full dotted name in a scope, so the single identifier `"t.c"` and the compound `"t"."c"` share a
+  result. A `group_by` or `sort` key that names an output `t.c` renders as `"t.c"`. Resolved before a mask in `HAVING`
+  or `ORDER BY`, it turns the mask's `"t"."c"` into the caller's value. Probed: `GROUP BY` that alias with
+  `HAVING max(<masked deployment>) = 'd2'` answers on an absent cell, and an `ORDER BY` orders the absent row by its
+  stored value.
 
 The statement therefore refuses, with `400 bad_request`, a query that references a masked field and carries a name
-equal to a table it reads (its source or an enrichment). That covers a lambda parameter, and every resolved output name
+that equals a table it reads (its source or an enrichment), or begins with that name followed by `.`. That covers a lambda parameter, and every resolved output name
 at every level: an explicit alias, a name `OutputColumnNaming` derives from a field or function, and a name
 `CompositeQueryBuilder.operand` generates for a leaf output. All of them are rendered as aliases in the scope where the
 mask is evaluated. A query that names the masked field fails today with `unknown field`. One that reaches it only
@@ -118,9 +125,22 @@ probed on 26.3 and 26.8. Whether a reference defines or reuses the alias is deci
 rendered, not when the condition is built, because one translated filter `Condition` can be rendered in more than one
 scope: the key subquery receives the outer filter (`StructuredQueryBuilder.keyPredicates`). Each derived table,
 subquery or page block is its own scope and defines the alias again, so
-the text grows with the number of scopes × conditions, not with the number of references. A statement that still
-exceeds the server limit fails as any oversized statement does today. The flag column names are chosen around the same
+the text grows with scopes × conditions, plus one copy per outermost lambda body only in a scope that references the
+condition nowhere outside lambdas. It does not grow with references. Two server limits bound it, and ADAS sets neither:
+`max_query_size` (256 KiB) and `max_ast_elements` (50 000). An OR-shaped policy reaches the AST limit first, at about a
+dozen inlined copies of a 1 000-term filter (probed). A statement over either limit fails as any oversized statement
+does today. The flag column names are chosen around the same
 declared names.
+
+**Rows-only entries narrow what they add.** Today a role whose entry carries `rows` but has no read path adds its rows
+to a confined caller, and its `columns` are ignored. So the governing roles' columns show, with stored values, on rows
+only that entry admits, whatever its own list says. A grant holder who writes such an entry's `columns` has that list
+thrown away. The decision now also counts each **row-contributing** role: one whose policy enters the row filter but
+which does not govern. Such a role allows a column only when its own list and every governing role allow it, so it
+only narrows. A column it leaves out is masked, absent on the rows it adds, and its policy enters the mask condition
+of the columns it allows. The set of contributing roles is the one `RowPolicyFilter.confining` computes, shared the way
+`readsTable` already is, so the two cannot drift. An entry whose `columns` is `null` narrows nothing, so it behaves as
+today.
 
 *Alternative rejected:* render the condition in `SensitiveColumnAccess` through `RowPolicyPredicates`. That closes the
 `RowPolicyPredicates` → `CatalogQueryService` → `SensitiveColumnAccess` bean cycle `RowPolicyFilter` already works
@@ -156,7 +176,13 @@ a new `value()` returns the masked expression when a mask is set:
 Each physical reader is checked case by case:
 - Enrichment derived tables project the raw column, and the mask is applied in the outer select, where the source row
   the condition reads is in scope.
-- Read-shaping pushdown skips a masked field: its conjuncts and calls stay in the outer statement.
+- Read shaping keeps masked fields. Copies and pushed calls read stored values in the derived table, and the outer
+  statement masks the conjunct and the pushed column, where the source row is in scope. Every copyable conjunct is
+  `NULL` or false on an absent cell, so the outer form implies the copy and the rows are unchanged. Every allow-listed
+  call accepts any input without error, so pushing it discloses nothing. The outer mask takes the call's own value on
+  an absent cell: `NULL` for the calls that return `NULL` over `NULL`, and `''` and `[]` for `json_extract_string_ci`
+  and `json_extract_array`, whose input is read as `''`. A blanket scalar mask would be wrong for those two: `NULL`
+  where the reference gives `''`, and a `Variant` that array functions reject. Probed on 26.3.
 - Composite key reduction (`CompositeQueryBuilder.addReduction`) selects the partner's stored key column and tests the
   reduced operand's own stored key against it (`reducedBinding IN (…)`). A row whose key is absent cannot match in
   `ON` anyway, so testing its stored key drops nothing that could have matched. Its
@@ -194,7 +220,7 @@ depend on the same condition in different contexts — `total_price` next to `su
 project_id)`, or two different windows — get separate flags. Each name is chosen when the statement is built so that
 it differs from every output name of the query: `__adas_mask_<i>`, with the suffix advanced past any output a caller
 named that way. The shipped `__adas_` reservation, which applies only when a computed field is projected, is
-unchanged, so no query that runs today is refused. The column's expression depends on the context:
+unchanged, so the flag names refuse no query that runs today. The column's expression depends on the context:
 
 | Context | Row mode | Aggregate mode |
 |---|---|---|
@@ -215,17 +241,23 @@ flags. A new step after both, applied before `QueryResultPage(outputColumns(sele
 - replaces a bare composite masked cell with null.
 
 Where rows collapse, the flags do not take part in the comparison:
-- **A distinct projection** computes each flag as `max(<flag>) OVER (PARTITION BY <every output>)` in the same
-  SELECT. Windows are evaluated before `DISTINCT`, `sort` and `page`, so the flags are constant across rows with equal
-  outputs, and `DISTINCT` over outputs plus flags returns exactly the distinct outputs. `sort`, `page` and `having`
-  stay where they are today. `<flag>` is the context's flag above, so in aggregate mode it is
-  `max(max(NOT mask)) OVER (PARTITION BY …)`. The partition also takes the row flag (`NOT mask`) of each composite
-  masked output, since those outputs collapse apart by that flag. Otherwise an absent and a stored empty cell would
-  share a partition and spread the other outputs' marks between two rows that stay distinct.
-- **A distinct projection with a window output** cannot partition by that output in the SELECT that computes it. The
+- **A distinct projection in row mode** is rendered as `GROUP BY <every output>` in place of `DISTINCT`:
+  - Each flag becomes `max(<flag>)`.
+  - The keys gain the row flag (`NOT mask`) of each output that is a bare masked composite field.
+  - A sort key that is not an output is ordered by `any(<key>)`, the same arbitrary row `DISTINCT` keeps (probed on
+    26.3).
+  - `sort`, `page` and `having` stay where they are.
+  - Memory is bounded by the distinct rows and spills under the budget's group-by threshold.
+
+  A windowed flag, `max(<flag>) OVER (PARTITION BY <every output>)`, was rejected because it sorts every row. On
+  100M synthetic rows it exceeded the 2 GiB query budget, where `GROUP BY` used tens of MiB. The SQL front end already
+  lowers a SQL `GROUP BY` with no aggregate to a DSL distinct, so it takes this path too.
+- **A distinct projection in aggregate mode** keeps `max(max(NOT mask)) OVER (PARTITION BY <every output>)`, which is
+  a window over groups, not rows.
+- **A distinct projection with a window output** cannot group by that output in the SELECT that computes it. The
   DSL builder therefore plans it as the SQL front end already does (`RelToStructuredQueryTranslator.aggregateCtx`):
-  the window in an inner block, and `DISTINCT` with the windowed flags in an outer block over it, where the window
-  output is an ordinary column. Both surfaces then accept and mark the same queries, and none is refused.
+  the window in an inner block, and the grouped form above in an outer block over it, where the window output is an
+  ordinary column. Both surfaces then accept and mark the same queries, and none is refused.
 - **Composite queries** propagate a leaf's flag through outer blocks as a flag-only binding on the leaf output's
   alias: the value is already absent there, and only the mark travels.
 - **`UNION ALL`** branches project two flags per output position, so their columns align. The **mark** flag ORs the
@@ -234,7 +266,19 @@ Where rows collapse, the flags do not take part in the comparison:
   Each is a constant `0` where it does not apply. Derived tables and CTEs carry the same pair per output, so an outer
   block reading a leaf's composite output nulls it from the leaf's bare-absent flag rather than guessing from the
   outer expression.
-- **`UNION`** (distinct) is that `UNION ALL` grouped by the outputs, with `max` of each flag.
+- **`UNION`** (distinct) is that `UNION ALL` grouped by the outputs, with `max` of each flag, ordered by each group's
+  first occurrence:
+  - Every branch also projects its ordinal and `rowNumberInAllBlocks()` over the branch as rendered, and the grouped
+    block sorts by `min((ordinal, row))`.
+  - The stateful row number keeps a branch's own `ORDER BY` in the plan, which ClickHouse otherwise removes under a
+    `GROUP BY`.
+  - The rows, and which of them the default limit keeps, are then those `UNION DISTINCT` returns for the same text
+    (probed on 26.3 and 26.8).
+  - A windowed `DISTINCT` over the union was rejected: it re-sorts by the partition, and returned other rows that
+    changed with the thread count.
+
+  No collapsing form keeps `DISTINCT`'s early stop under a page limit, because a row's mark depends on every duplicate
+  of it.
 - **`INTERSECT` and `EXCEPT`** compare rows, and a mark has no single source there. A branch whose output depends on a
   masked field is refused `400 bad_request`. A query that names the field fails today with `unknown field`, because
   the column is hidden. A wildcard `INTERSECT` ran today over the visible columns, and is the declared breaking case.
@@ -351,7 +395,8 @@ refuses it explicitly as a column the path reads.
     hold other reading roles.
 - **Clients that ignore `$masked` read partial aggregates as complete.**
   - Discovery's `masked` flag, the per-row marks and the upgrade notes make the change visible.
-  - A caller with one governing role, or none of whose governing roles carries a row policy, sees no change.
+  - A caller with one governing role, or none of whose governing roles carries a row policy, has no masked column, so
+    it never reads a partial value.
 - **Clients that render every row member as a column, such as a generic JSON panel, show a `$masked` column** on rows
   where masking applies. → An explicit column selection in the client drops it, and the upgrade notes say so.
 - **Cost.** It is proportional to rows × masked columns read, and measured at a small fraction of query time, more on
@@ -359,10 +404,34 @@ refuses it explicitly as a column the path reads.
   keeps filters as cheap as for an unmasked caller.
 - **The pruning rewrite opens a cost channel.** The data store prunes by the stored column, so the granules read, and
   with them latency and the query budget, depend on whether absent cells store a matching value. A probe on 26.3
-  read on the order of a hundred times more rows when they did. The returned rows never change. The maintainers
-  accept this coarse, granule-level channel over full scans on masked key and partition columns, which the benchmark
-  showed to read more than an order of magnitude more rows. No form can prune by a value without the read volume
-  depending on it. → It is stated as an accepted disclosure in the spec and in `docs/row-level-security.md`.
+  read on the order of a hundred times more rows when they did. The returned rows never change.
+  - **The signal is per granule, but a single row is not out of reach.** The signal is kept per granule, per
+    skip-index granule or per part. A probe on 26.3 recovered two rows exactly by equality or range probes: a row
+    that starts a granule, and an absent row whose granule's other rows the caller can read.
+  - **Each probe is noisy.** The caller sees latency, memory and the budget refusal, not a row count, so every probe
+    needs repetition.
+  - **A copied enrichment conjunct does the same.** It narrows the join build by stored values.
+
+  The maintainers accept this over full scans on masked key and partition columns, which the benchmark showed to
+  read more than an order of magnitude more rows. No form can prune by a value without the read volume depending on
+  it. → It is stated as an accepted disclosure in the spec and in `docs/row-level-security.md`, with how to avoid it:
+  list the column on every governing role.
+- **A sort on a masked field cannot read in key order.**
+  - The sort reads the masked value, not the ordering key. So ClickHouse reads every row the filter selects and keeps
+    the page, where an unmasked caller could read in key order and stop at the limit.
+  - The gap exists only on a raw (non-`FINAL`) read of a table whose ordering key leads with the masked column, or
+    whose earlier key columns the filter fixes by equality. A probe on 26.3 and 26.8 read the whole window there,
+    against a few granules for an unmasked caller.
+  - A `FINAL` read, and `dial_usage_log`, whose key leads with `project_id` and `deployment`, read the whole window
+    either way.
+  - Sort memory stays bounded by the page, so only the time budget is at stake.
+
+  → Accepted and stated in `docs/row-level-security.md`.
+
+  *Alternative rejected:* sort by the stored column. It places absent rows by their stored values and changes which
+  rows a page returns.
+- **A row-mode distinct with a page limit no longer stops early.** The mark ORs every collapsed row, so the whole
+  filtered range is read. This is the cost of exact marks, and the grouped form keeps it bounded in memory.
 - **Row order discloses masked ordering-key values.** Without a total order, and inside order-sensitive aggregates,
   ClickHouse returns rows in roughly storage order, which follows the stored ordering-key and partition values. An
   absent key cell between present ones can be read from its neighbours, often exactly. This was probed on 26.3. The
@@ -382,8 +451,9 @@ refuses it explicitly as a column the path reads.
   against that rule.
 - **Collapsed rows mark conservatively.** A distinct or `UNION` row is marked when any row it collapses had the cell
   absent, even if another collapsed row stored it. This is accepted as for aggregates: the mark means "partial".
-- **`INTERSECT` and `EXCEPT` over a masked output, and a table-named name next to a masked field, are refused.** It
-  is no regression, because both fail today, but it is a role-dependent refusal. → The `400` names the cause, and the
+- **`INTERSECT` and `EXCEPT` over a masked output, and a table-named name next to a masked field, are refused.** A
+  query that names the masked field fails today with `unknown field`. One that reaches it only through a wildcard ran
+  today, and is the declared breaking case. Both are role-dependent refusals. → The `400` names the cause, and the
   docs say so.
 - **An entity any of whose tables stores a column named after a table of the entity hides instead of masking.** That
   covers a source column named after the source or an enrichment, and an enrichment column named after its own
@@ -392,15 +462,19 @@ refuses it explicitly as a column the path reads.
   through a column `t` of `t`, and an enrichment's `"e"."size"` through a source column `e`, which was probed
   on 26.3 and 26.8. An enrichment column named after the source does not capture. → The spec states the fallback, so no mask is evaluated there. The same resolution
   already affects the row filter on such a table today. That predates this change and is out of its scope.
-- **TTL treats a masked column as hidden.** Which rows a TTL removes would reveal stored values of absent cells. →
-  `ttl.column` cannot name one, and a stored TTL on one refuses every `ttl` member.
+- **A TTL cannot be over a masked column.** Which rows a TTL removes would reveal stored values of absent cells.
+  → A `ttl.column` naming one, and any `ttl` member while the stored TTL is on one, is refused
+  `403 column_not_entitled`. It is not the hidden column's `422`, which hides a type and nullability this caller
+  already reads in `GET`.
 - **An absent array expands to no element**, so a count over an expansion silently covers the present rows only. →
   This is stated in the spec and in `docs/row-level-security.md`.
 
 ## Migration Plan
 
-There is no data or catalog migration and no configuration. Deploying the build switches every multi-role caller from
-hiding to masking at once.
+There is no data or catalog migration and no configuration. Deploying the build switches, at once, every caller with
+a would-be-masked column (one that is not visible but that some governing role allows) from hiding to masking, except
+on a table under the hiding fallback. Rows-only entries with a `columns` list start narrowing the rows they add. The
+`$masked` output-name refusal applies to every caller.
 
 On rollback, an older build hides masked columns again: queries, saved queries and dashboards that reference them fail
 with `unknown field` for those callers, as they did before. No data is at risk. The upgrade notes tell operators to
