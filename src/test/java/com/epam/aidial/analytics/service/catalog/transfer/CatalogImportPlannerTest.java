@@ -122,6 +122,19 @@ class CatalogImportPlannerTest {
     }
 
     @Test
+    void nonActiveDependencyOutsideTheBundleFailsThePipeline() {
+        for (final TableStatus status : List.of(TableStatus.PENDING, TableStatus.FAILED)) {
+            final PlannedObject planned = plan(bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target"))),
+                    ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of("usage_base", existing(source("usage_base"), status),
+                            "rollup_target", existing(source("rollup_target"))))).pipelines().getFirst();
+
+            assertThat(planned.action()).isEqualTo(ImportAction.FAIL);
+            assertThat(planned.problems()).containsExactly("dependency 'usage_base' is not in the bundle and is " + status
+                    + " on this environment, so pipeline 'rollup' cannot be imported");
+        }
+    }
+
+    @Test
     void enrichmentReferencedOnlyInFilterIsDependency() {
         final BundlePipeline rollup = new BundlePipeline(new BundlePipeline.Declaration("rollup", PipelineKind.AGGREGATE,
                 "rollup_target", List.of("usage_base"), "\"usage_sentiment.sentiment\" = 'positive'",

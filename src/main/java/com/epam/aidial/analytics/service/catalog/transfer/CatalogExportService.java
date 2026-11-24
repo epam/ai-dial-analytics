@@ -273,7 +273,7 @@ public class CatalogExportService {
                     }
                     if (component.roles() != null) {
                         requireEntries(definition, component.roles());
-                        walk.roles.put(definition.getName(), component.roleSet());
+                        walk.limitRoles(definition.getName(), component.roleSet());
                     }
                     if (component.accessOnlySelected()) {
                         walk.accessOnly(definition);
@@ -430,8 +430,13 @@ public class CatalogExportService {
             accessOnly.keySet().removeIf(name -> tables.containsKey(name) || systemTables.containsKey(name));
         }
 
+        /** A table component listing {@code roles}: only those roles' entries are candidates for {@code table}. */
+        private void limitRoles(String table, Set<String> listed) {
+            roles.put(table, listed);
+        }
+
         /** {@code definition}'s portable access, limited to its component's {@code roles} when it lists some. */
-        private PortableAccess portable(TableDefinitionEntity definition) {
+        private PortableAccess candidateAccess(TableDefinitionEntity definition) {
             final PortableAccess all = tableAccess.portable(definition);
             final Set<String> listed = roles.get(definition.getName());
             if (listed == null) {
@@ -461,7 +466,7 @@ public class CatalogExportService {
             if (followed.containsKey(definition.getName())) {
                 return;
             }
-            final PortableAccess kept = portable(definition);
+            final PortableAccess kept = candidateAccess(definition);
             followed.put(definition.getName(), kept);
             for (final String enrichment : TableAccessService.enrichmentsNamed(kept.entries())) {
                 table(enrichment, "column policy of " + definition.getName());
@@ -677,7 +682,7 @@ public class CatalogExportService {
                     .filter(TableDefinitionEntity::isSystem)
                     .forEach(definition -> required.putIfAbsent(definition.getName(), SELECTED));
             for (final String name : candidates) {
-                final PortableAccess portable = followed.computeIfAbsent(name, table -> portable(loadedTables.get(table)))
+                final PortableAccess portable = followed.computeIfAbsent(name, table -> candidateAccess(loadedTables.get(table)))
                         .withoutSkipped(skippedTables::contains);
                 access.put(name, portable);
                 if (systemCandidates.contains(name) && !portable.entries().isEmpty()) {

@@ -432,7 +432,7 @@ public class CatalogImportPlanner {
     // --- closure and limits --------------------------------------------------------------------------
 
     /**
-     * Every dependency must be in the bundle, be a required system table, or already exist here; and an object
+     * Every dependency must be in the bundle, be a required system table, or already exist here and be ACTIVE; and an object
      * whose dependency is refused is refused too, since it could be neither created nor armed.
      */
     private static void requireClosure(List<PlannedObject> systemTables, List<PlannedObject> tables,
@@ -472,8 +472,13 @@ public class CatalogImportPlanner {
             }
             return;
         }
-        if (!target.tables().containsKey(needed)) {
+        final ImportTarget.Table existing = target.tables().get(needed);
+        if (existing == null) {
             planned.fail(what + " '" + needed + "' is neither in the bundle nor on this environment");
+        } else if (existing.status() != TableStatus.ACTIVE) {
+            // Nothing over it could be armed, and a table a pipeline reads cannot be deleted for repair while the pipeline exists.
+            planned.fail(what + " '" + needed + "' is not in the bundle and is " + existing.status()
+                    + " on this environment, so " + planned.kind().code() + " '" + planned.name() + "' cannot be imported");
         }
     }
 

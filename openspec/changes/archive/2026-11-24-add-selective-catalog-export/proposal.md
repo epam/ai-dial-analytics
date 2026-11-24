@@ -52,7 +52,8 @@ None.
 ## Impact
 
 - **API**: `ExportComponent` gains `dependencies`, `access_only` and `roles` on `POST /v1/catalog/export` and `/export/preview`.
-  Import endpoints are unchanged; a bundle whose `access` names a target-only table now imports instead of being refused.
+  Import endpoints keep their shape; a bundle whose `access` names a target-only user table now imports instead of being
+  refused, and a dependency the bundle does not carry must be ACTIVE on the target, not only exist there.
 - **Code**: `web/dto/catalog/ExportComponent`, `service/catalog/transfer/CatalogExportService` (selection and walk),
   `CatalogImportPlanner` (access key check), `ImportTargetReader` (read the tables `access` names), and the export and bundle doc
   strings that feed `docs/openapi.json`.

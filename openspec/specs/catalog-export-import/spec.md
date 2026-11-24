@@ -434,8 +434,10 @@ entries; an access entry is not an object.
 - An enrichment table to be created, or a pipeline to be created, that depends on a table the bundle neither carries under `tables`
   nor lists under `required_system_tables` SHALL be `FAIL` naming that table when the target does not have it either, a name an SQL
   statement's `FROM` reads excepted as "An SQL declaration's import dependencies are read from its statement" defines. A dependency
-  the bundle does not list is checked on the target for existence only: its state and columns are left to the validation pass, and
-  a system table among them is not checked as a required system table.
+  the bundle does not list SHALL also be ACTIVE on the target: one that is PENDING or FAILED there SHALL make the object `FAIL`
+  naming it and its state, since nothing over it could be armed, and a table a pipeline reads cannot be deleted for repair while
+  that pipeline exists. Its columns are left to the validation pass, and a system table among them is not checked as a required
+  system table.
 - `differs` SHALL compare the serialized `prev` and `next`, excluding `enabled`, state and timestamps; `metadata_only` SHALL be true
   when only descriptions, display names or tags differ.
 - Pipeline entries SHALL also carry `armable`, `arm_problems[]` and `reused_name`.
@@ -472,6 +474,9 @@ entry ended `rollback_failed`.
 - **THEN** the `p` entry is `FAIL` naming `usage_base`, and `/import` is `422` with `error` `catalog_import_invalid`
 - **AND WHEN** the target has `usage_base`
 - **THEN** the `p` entry is `CREATE`
+- **AND WHEN** the target's `usage_base` is PENDING or FAILED
+- **THEN** the `p` entry is `FAIL` naming `usage_base` and its state, and `/import` is `422` with `error`
+  `catalog_import_invalid`
 
 ### Requirement: Shared validation pass
 
@@ -1296,7 +1301,7 @@ The refusals, in this order:
   a PENDING, FAILED or OTLP landing table or an unresolvable pipeline, whether the selection names it or a closure reaches it, and
   before the column checks of "Export authorization".
 - An access-only table none of whose candidate entries survives the reduction of "Access export" (one that stores no entry, or
-  whose entries all stay behind) SHALL be `400` `catalog_export_empty`, on `/export` and `/export/preview` alike, since the
+  whose entries all stay behind) SHALL be `422` `catalog_export_empty`, on `/export` and `/export/preview` alike, since the
   selection would carry nothing for it. It is checked once the closure is resolved, so after the refusals of "Excluded and
   system tables on export" and the column checks of "Export authorization".
 
@@ -1482,6 +1487,6 @@ as the other requirements define, and the bundle's `format_version` SHALL NOT ch
 
 - **GIVEN** a user table `t` that stores no access entry
 - **WHEN** `t` is selected with `access_only: true` and `include_access: true`, to `/export` or to `/export/preview`
-- **THEN** the response is `400` with `error` `catalog_export_empty`
+- **THEN** the response is `422` with `error` `catalog_export_empty`
 - **AND WHEN** `t`'s only stored entry is one for `READ_ONLY_ANALYTIC`, a bundle name an earlier build stored
-- **THEN** the response is still `400` with `error` `catalog_export_empty`
+- **THEN** the response is still `422` with `error` `catalog_export_empty`

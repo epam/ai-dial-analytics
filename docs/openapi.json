@@ -767,7 +767,7 @@
             "type": "array"
           },
           "required_system_tables": {
-            "description": "System tables, by name, that the carried closure reaches, the selection names or whose access the bundle carries; a pipeline exported with dependencies false brings none in. Import requires each to exist on the target and never creates one or changes its definition",
+            "description": "System tables, by name, that the carried closure reaches, that the selection names, or whose access the bundle carries; a pipeline exported with dependencies false brings none in. Import requires each to exist on the target and never creates one or changes its definition",
             "example": [
               "dial_usage_log"
             ],

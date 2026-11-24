@@ -1398,12 +1398,12 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
         // An access-only table with nothing to carry is refused, by the preview too.
         for (final String path : List.of("/v1/catalog/export", "/v1/catalog/export/preview")) {
             exportCall(path, accessOnlyOf(ROLL))
-                    .andExpect(status().isBadRequest())
+                    .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.error").value("catalog_export_empty"));
         }
         storedAccess(ROLL, access -> ((ArrayNode) access.get("read")).add("READ_ONLY_ANALYTIC"));
         exportCall("/v1/catalog/export", accessOnlyOf(ROLL))
-                .andExpect(status().isBadRequest())
+                .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("catalog_export_empty"))
                 .andExpect(jsonPath("$.message").value(containsString("role 'READ_ONLY_ANALYTIC' (validation_error)")));
 

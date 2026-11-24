@@ -96,12 +96,22 @@ it. Both selectors therefore keep their state outside the maps a closure visit c
 - An unknown role is a `TableNotFoundException`-style `404 not_found` thrown once the table is loaded and its `TABLE_GET` checked, so a
   caller who may not get the table learns nothing about its roles. Role comparison reuses the trim-and-exact rule of the access API's
   one-role `GET`.
+- An access-only table with no entry the export can carry is `CatalogExportEmptyException`, `422` `catalog_export_empty`, thrown in
+  `withAccess` once the reduction has run, on the preview too. It is `422` because the body is well formed and only stored state leaves
+  it nothing to carry, as with `catalog_export_invalid`; this module keeps `400` for refusals made while the body is read. Its own
+  code tells a client the selection is not wrong but empty. The preview refuses as the export does, as for every other export
+  refusal; the message names each role that stays behind with its error code, and the preview of the same table without
+  `access_only` gives the structured `left_behind`.
 
 ### D5. Import
 
 - `ImportTargetReader.tableNames` also adds the bundle's `access` keys when `includeAccess` is true, so a target-only table is loaded
   with its stored entries.
-- `planAccess` treats a key with no owner as valid when `target.tables()` holds it. Nothing else on the import side changes: the
+- `requireDependency` requires a dependency the bundle neither carries nor lists to be ACTIVE on the target, not only to exist there.
+  Before, only a hand-edited bundle had such a dependency; a pipeline exported alone has nothing else. A PENDING or FAILED one would
+  plan the pipeline `CREATE` as a draft that cannot be armed, and a table a pipeline reads cannot be deleted for repair while the
+  pipeline exists, so the object fails in the preview instead.
+- `planAccess` treats a key with no owner as valid when `target.tables()` holds it as a user table. Nothing else on the import side changes: the
   planner already reads the stored entries for every key before its owner check, the validator's table-refused check scans only plan
   objects (so it never refuses a table named only by access), the apply step and its audit work by table name under the import scope,
   compensation touches only created objects, and a policies-only bundle has no object that could conflict under `FAIL_IF_EXISTS`.

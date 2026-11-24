@@ -696,10 +696,10 @@ public class DefaultExceptionHandler {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_export_invalid", ex.getMessage());
     }
 
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
     @ExceptionHandler(CatalogExportEmptyException.class)
     public ErrorView handleCatalogExportEmpty(HttpServletRequest req, CatalogExportEmptyException ex) {
-        return new ErrorView(req, HttpStatus.BAD_REQUEST, "catalog_export_empty", ex.getMessage());
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_export_empty", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)

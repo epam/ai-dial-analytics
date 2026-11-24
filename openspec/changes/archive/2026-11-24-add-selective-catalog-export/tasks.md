@@ -56,6 +56,9 @@
       (`bundleLevelAccessProblemsFailEveryEntryUnderThem` and `importValidatesAccessWithThePutRules` assert it)
 - [x] 3.3 No other import change is expected: the validator, apply step, audit and compensation already work by table name. The
       round-trip tests of 4.2 pin it
+- [x] 3.4 `CatalogImportPlanner.requireDependency` also requires a dependency the bundle does not carry to be ACTIVE on the
+      target, since a pipeline exported alone otherwise plans `CREATE` over a PENDING or FAILED table; `CatalogImportPlannerTest`
+      pins it
 
 ## 4. Tests
 

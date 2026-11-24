@@ -215,8 +215,9 @@ carries.
 - **An export can carry less than a closure.** A pipeline component with `"dependencies": false` exports the pipeline
   alone; a table component with `"access_only": true` exports only the table's access, with `"roles"` narrowing it to
   some roles. Both are for an environment that already has the tables: the import finds them there and never creates
-  a missing one. The preview reports it, as `FAIL`, or for the table an SQL statement's `FROM` reads, as an arm
-  problem.
+  a missing one. The preview reports a table a pipeline needs that is missing, PENDING or FAILED as `FAIL` on the
+  pipeline entry (a missing table an SQL statement's `FROM` reads only as an arm problem), and a missing table an
+  access key names under `validation_errors`.
 - **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
   `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
 

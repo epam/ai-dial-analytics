@@ -52,7 +52,8 @@ curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/j
 ```
 
 - **`dependencies: false`** (pipeline): the bundle holds the pipeline alone. The import creates it only when every
-  table it reads or targets exists here; the preview shows a missing one as `FAIL` on the pipeline entry. The table an
+  table it reads or targets exists here and is ACTIVE; the preview shows a missing, PENDING or FAILED one as `FAIL` on
+  the pipeline entry. The table an
   SQL statement's `FROM` reads is the exception: a missing one leaves the pipeline `CREATE`, imported disabled, with
   `armable: false` and an `arm_problems` entry.
 - **`access_only: true`** (table, with `include_access`): the bundle holds only the table's entries, under `access`,
@@ -60,7 +61,7 @@ curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/j
   resolution policy, since no object travels. A table missing here is a `validation_errors` problem rather than a
   table the import creates, and an entry whose column policy names an enrichment or column this environment lacks is
   `FAIL`: the export does not bring that enrichment along. A table with no entry the export can carry is refused
-  (`400 catalog_export_empty`) rather than exported empty. A system table selected this way is also listed under
+  (`422 catalog_export_empty`) rather than exported empty. A system table selected this way is also listed under
   `required_system_tables` and checked there like any other: one missing here is a `FAIL` on that entry.
 - **`roles`** (table, with `include_access`): only the listed roles' entries travel, whether or not the table does.
   The other roles' entries are neither carried nor reported under `left_behind`, and their column policies bring
