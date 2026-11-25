@@ -133,7 +133,9 @@ map keyed by the selected column names or aliases (enrichment columns by their q
 name); a select expression the statement does not name SHALL be keyed by its derived name per the
 `sql-query-translation` naming contract (a function call by its lowercase name, e.g. `count`) and
 never by the planner's synthetic `EXPR$<n>`. Every projected column SHALL be present in every row
-with JSON `null` for null cells.
+with JSON `null` for null cells. A row with a marked cell SHALL carry the `$masked` member exactly as
+the DSL endpoint's rows do (see [structured-query](../structured-query/spec.md), "Response envelope"
+and "Masked inputs are reported per output cell"), naming each marked column by its key in the row.
 `totalCount` SHALL never be populated on this path — SQL provides no total-count opt-in — and,
 per the service's shared response serialization (null bean properties are omitted), the
 `totalCount` key SHALL be absent from the JSON body, exactly as the DSL endpoint serializes a
@@ -154,6 +156,13 @@ null `totalCount`.
 
 - **WHEN** a client posts `{"sql": "SELECT count(*) FROM dial_usage_log"}` to `/v1/queries/execute-sql`
 - **THEN** each row carries the key `count` and no `EXPR$0` key
+
+#### Scenario: A SQL row with an absent cell lists it in $masked
+
+- **GIVEN** a caller for whom `total_price` is masked, present on the rows of project `P1` only
+- **WHEN** it posts `SELECT project_id, sum(total_price) AS cost FROM dial_usage_log GROUP BY project_id`
+- **THEN** the row of `P1` carries no `$masked`, and the row of `P2` is
+  `{"project_id": "P2", "cost": null, "$masked": ["cost"]}`
 
 ### Requirement: HTTP error mapping
 

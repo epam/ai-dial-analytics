@@ -217,7 +217,7 @@
 
 ## 8. Verification
 
-- [ ] 8.1 `openspec validate add-per-cell-column-masking --strict` and `openspec validate --specs --strict`; at archive,
+- [x] 8.1 `openspec validate add-per-cell-column-masking --strict` and `openspec validate --specs --strict`; at archive,
   ADDED requirements go before the `## Implementation notes` header of each spec that has one (structured-query,
   query-schema-discovery, flight-sql-endpoint)
-- [ ] 8.2 `./gradlew clean build`
+- [x] 8.2 `./gradlew clean build`

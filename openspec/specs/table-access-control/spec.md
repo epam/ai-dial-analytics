@@ -253,9 +253,9 @@ caller, **after** implication is applied:
   it;
 - `rows_restricted` SHALL be `true` exactly when row-policy evaluation confines the caller on the table (see
   "Row-policy evaluation by caller role", and the enrichment bullet above), on `system` and non-`system` tables alike;
-- `columns_restricted` SHALL be `true` exactly when column-visibility evaluation hides at least one of the table's own
-  columns from the caller (see "Column visibility by caller role", row policies of the governing roles included), on
-  `system` and non-`system` tables alike; a
+- `columns_restricted` SHALL be `true` exactly when column-visibility evaluation hides or masks at least one of the
+  table's own columns from the caller (see "Column visibility by caller role", row policies of the governing roles
+  included), on `system` and non-`system` tables alike; a
   column hidden only by the clearance does not set it, and it is `false` for a caller with no governing role on the
   table, as `rows_restricted` is for a caller that may not read it;
 - `grant` SHALL be `true` exactly when the caller holds `TABLE_GRANT`, and so may call the table's access API (see
@@ -336,6 +336,14 @@ evaluation used for enforcement so the two cannot diverge. Reporting SHALL NOT c
 - **AND WHEN** the list names every column of the table
 - **THEN** the table carries `permissions.columns_restricted = false`
 
+#### Scenario: A caller with a masked column is reported as column-restricted
+
+- **GIVEN** an entry for `R` with `read`, `rows` and `columns` naming some of the table's columns, and an entry for `U`
+  with `read`, `rows` and `columns` `null`
+- **WHEN** a caller carrying both reads the table's definition
+- **THEN** every column is listed and the table carries `permissions.columns_restricted = true`, because the columns
+  `R` does not list are masked
+
 #### Scenario: An enrichment reports its source's read-side flags
 
 - **GIVEN** a source on which role `X`'s entry carries `read` and a row policy, and an enrichment of it on which `X`'s
@@ -409,8 +417,9 @@ like any body that does not bind to the request type, SHALL be refused by the st
 A row policy SHALL **narrow** a read and SHALL NOT **grant** one. Whether a caller may read a table at all SHALL remain
 decided by its global privileges and the table's grant lists, unchanged. A policy on a role with no read path to the
 table SHALL grant no read: a caller carrying only that role reads nothing, while a caller confined by another of its
-roles also reads that policy's rows (see "Row-policy evaluation by caller role"). Such an entry's `columns` are not
-consulted (see "Column visibility by caller role").
+roles also reads that policy's rows (see "Row-policy evaluation by caller role"). Such an entry's `columns` narrow what
+the rows it adds show and widen nothing: a column the list leaves out is absent on the rows only it adds (see "Column visibility
+by caller role", row-contributing roles).
 
 A policy's role SHALL follow the grantee rules: a raw provider role name, trimmed, non-blank, and not a bundle or
 privilege name. `*` SHALL be a valid policy subject, with the meaning it has in a grant: its policy is one every
@@ -1037,8 +1046,9 @@ policies"). A stored entry SHALL be returned with `privileges` de-duplicated in 
 An entry whose `privileges` is empty and whose `rows` and `columns` are both `null` SHALL NOT be stored: a `PUT` of one
 SHALL remove the role's entry if it has one, and SHALL answer `200` with that empty entry, after which a
 `GET .../access?role=<role>` answers `404`. An entry MAY carry `rows`, `columns` or both with an empty `privileges`: it then
-grants nothing. Its `columns` narrow a caller only where the role governs the caller's access to the table (see
-"Column visibility by caller role"), a global read privilege included, and are ignored otherwise. Its `rows` take part
+grants nothing. Its `columns` narrow a caller where the role governs the caller's access to the table (see
+"Column visibility by caller role"), a global read privilege included, and where its `rows` add rows to a confined
+caller as a row-contributing role, narrowing what those rows show; they are ignored otherwise. Its `rows` take part
 in "Row-policy evaluation by caller role", which combines the policy of every role a confined caller carries whether
 or not that role may read the table: on a role with no read path to the table, `rows` therefore **adds** its rows to a
 confined caller that also carries the role, rather than narrowing anything, and gives a caller carrying only that
@@ -1607,22 +1617,81 @@ approximation: a role name some configured provider maps to the privilege counts
 privilege globally on the request, whichever of its roles conferred it.
 
 A governing role **allows** a column when it has no column policy on the table, or has one that lists the column; it
-is **row-unrestricted** when it has no row policy on the table. A column SHALL be **visible** to the caller when some
-row-unrestricted governing role allows it, or when every governing role allows it; otherwise it SHALL be **hidden**.
+is **row-unrestricted** when it has no row policy on the table. A **row-contributing** role is one the caller carries
+whose row policy enters the caller's row filter (see "Row-policy evaluation by caller role") but which does not
+govern, such as an entry carrying `rows` on a role with no read path. It allows a column when its own column policy
+allows it **and** every governing role allows it, so it only narrows and never widens. Each of the table's columns
+SHALL be, for the caller, exactly one of:
+
+- **visible**, when some row-unrestricted governing role allows it, or when every governing role and every
+  row-contributing role allows it;
+- **masked**, when it is not visible and at least one governing role allows it;
+- **hidden**, when no governing role allows it.
 
 Each entry is one unit — a role's readers see that role's columns on that role's rows — and the rows a caller reads
-are the union of its roles' row reach (see "Row-policy evaluation by caller role"), which does not record which role
-admitted a row. A column SHALL therefore be shown only when it is allowed on every row the caller may read: by one role
-that admits every row, or by every role that admits any. When no governing role carries a row policy, the visible
-columns are the union of the governing roles' lists; when the caller is confined, they are their intersection. The rule
-MAY hide a column the caller could have seen on the rows one role alone admits: it fails closed rather than pair one
-role's rows with another role's columns. The rule applies unchanged to a caller that may not read the table, whose
-governing roles are get-governing: a governing role's row policy still makes it an intersection there, although such
-a caller reads no rows; that narrowing is accepted rather than given a separate rule. A role that does not govern — an IdP group, a role conferring only `write`, a
-role conferring only `get` to a caller that may read — SHALL take no part, so it SHALL NOT lift a restriction. That
-includes a role whose entry carries `rows` but which has no read path: its row policy adds its rows to a confined
-caller carrying it, by row-policy evaluation, but its `columns` are not consulted, so on those rows too the caller sees
-only the columns the rule above admits from its governing roles. A caller with no governing role is covered below.
+are the union of its roles' row reach (see "Row-policy evaluation by caller role"). A visible column SHALL read its
+stored value on every row the caller reads. A masked column's **mask condition** SHALL be the disjunction of the row
+policies of the governing roles and the row-contributing roles that allow it, every one of which carries a row
+policy, since a row-unrestricted governing role allowing the column would make it visible. On each row the caller reads, a masked column SHALL read its stored value
+when the mask condition is true on the row and SHALL be **absent** otherwise — where it is false and where it is
+unknown alike — so a masked column is never shown on a row that no governing or row-contributing role allowing it
+admits. The mask condition SHALL be
+evaluated with the caller values the row filter is evaluated with on the same request (see "Caller values resolve per
+read and an absent one is unknown"), so a policy whose caller value is unknown, or whose comparison is unknown on a
+row because a column it reads is null there, admits that row to the mask no more than it admits it to the row filter. How each surface returns an absent cell, and how a query
+reads one, is specified by that surface: see [structured-query](../structured-query/spec.md), "A masked field reads as
+absent at every reference", and the CSV-export and Flight SQL capabilities. A hidden column SHALL be treated as
+"Hidden columns are absent from every read surface" states; a masked column is not hidden.
+
+When no governing role carries a row policy, no column is masked and the visible columns are the union of the
+governing roles' lists.
+
+A column that would be masked SHALL be hidden instead, as the rule without masking would decide, when any table of its
+**entity** — the governed table (the column's own table, or for an enrichment column its source) and every enrichment
+registered on it, whatever its status — stores a column whose physical name (`source_name`) equals the name of any
+table of that entity. That covers a source column named after the source or an enrichment, and an enrichment column
+named after its own enrichment. A query names the governed
+table's columns, and each enrichment's, by that table's name, and the data store resolves such a qualified name to the
+like-named column of the source, reading that column's subcolumns in place of the named table's columns. A mask
+could then admit a row its policy does not, or return a source column's derived value as an enrichment value. Hiding
+keeps the guarantee on such a table, at the cost of the columns masking would have shown there.
+
+Gaining a role SHALL NOT remove a column from the rows the caller's other roles admit: a column a confined role allows
+stays readable on that role's rows, whatever other roles the caller gains — except on a table where the hiding fallback
+above applies, which keeps the rule without masking. The rule applies
+unchanged to a caller that may not read the table, whose governing roles are get-governing; such a caller reads no
+rows, so for it a masked column differs from a visible one in being reported masked and counted in
+`columns_restricted`, in the refusals a query over a masked field meets on translation and validation (see
+[structured-query](../structured-query/spec.md)), in the TTL refusal below, which a caller holding `modify` without
+`read` meets too, and in the pipeline refusal (see "Pipeline paths refuse a masked column"). A role that does not
+govern — an IdP group, a role conferring only `write`, a role conferring only `get` to a caller that may read — SHALL
+take no part, so it SHALL NOT lift a restriction and its row policy SHALL NOT enter a mask condition, unless it is a
+row-contributing role. A role whose entry carries `rows` but which has no read path adds its rows to a confined caller
+carrying it, by row-policy evaluation, and its `columns` then narrow what those rows show: a column its list leaves out
+is masked, and absent on the rows only it adds. A rows-only entry whose `columns` is `null` narrows nothing, so it shows
+the governing roles' columns on the rows it adds, as before this change. A caller with no governing role is covered
+below.
+
+A masked column SHALL be listed, named and referenced wherever a visible column is: schema discovery (which marks it,
+see [query-schema-discovery](../query-schema-discovery/spec.md), "A masked field is marked"), the catalog read and
+revision snapshots, `column_count`, the schema the query, translation, CSV-export and Flight SQL surfaces resolve
+against, a schema change other than as a TTL column, catalog export and an import entry's `prev`. Where a
+requirement elsewhere speaks of the columns "visible" to a caller — on those schema surfaces, or as the columns the
+verbs `get`, `read` and `modify` act on (see "Per-table privilege grants") — a masked column is among them, its values
+readable on the rows its mask admits. A TTL SHALL NOT be over a masked column: a `ttl.column` naming it is refused
+`403 column_not_entitled`, and a stored TTL on it refuses every `ttl` member, because watching which rows a TTL removes
+would disclose stored values of absent cells. The remaining
+exceptions are reporting, where it
+counts as restricted (see "Caller-effective privilege reporting"), and the paths that read without a row filter, which
+refuse it (see "Pipeline paths refuse a masked column").
+
+Masking discloses, row by row, whether a governing or row-contributing role that allows the column admits the row: a
+cell is present
+exactly where its mask condition is true. On the rows that role itself admits, this is what its row reach already
+discloses. On rows only another of the caller's roles admits, it is new, and it holds even when the policy reads a
+column the caller cannot see, such as a sensitive one. That disclosure is accepted as the cost of showing each role's
+columns on its own rows, as the persisted literal of a saved query is accepted (see
+[saved-queries](../saved-queries/spec.md), "A sensitive value may be persisted in a saved query body").
 
 A column policy SHALL apply to its role whatever path that role reads the table by, a global privilege included, so
 confining a broadly-entitled role takes an entry on that role. A `*` entry's `columns` therefore confine only callers
@@ -1638,15 +1707,18 @@ only a caller that gets or reads the table through at least one governing role.
 A computed field, which is not a catalog column and so cannot be named by a policy, SHALL be visible exactly when every
 catalog column whose values it returns is visible — for the computed fields of `dial_usage_log_payload`, its
 `request_body` and `request_cache_control`, named in a source entry as `dial_usage_log_payload.request_body` and
-`dial_usage_log_payload.request_cache_control`.
+`dial_usage_log_payload.request_cache_control`. It SHALL be masked when none of those columns is hidden and at least
+one is masked, and absent on every row where any of them is absent; otherwise it SHALL be hidden.
 
-The clearance SHALL stack on top: a sensitive column SHALL be visible only when the column policies allow it **and**
-the caller holds the clearance on the table. A column policy SHALL NOT grant anything: whether the caller may get or
-read the table at all is decided by its privileges, unchanged.
+The clearance SHALL stack on top: a sensitive column SHALL be visible or masked only when the column policies make it
+so **and** the caller holds the clearance on the table; without the clearance it is hidden. A column policy SHALL NOT
+grant anything: whether the caller may get or read the table at all is decided by its privileges, unchanged.
 
 For an enrichment, the governing roles and their policies SHALL be its source's, the policy naming the enrichment's
 column `c` as `<enrichment>.c`; when the caller may not read the source, a role holding `get` on the enrichment through
-the enrichment's own `modify` list SHALL also govern it, as a row-unrestricted role with no column policy.
+the enrichment's own `modify` list SHALL also govern it, as a row-unrestricted role with no column policy. A masked
+enrichment column's mask condition SHALL be evaluated on the source row its value is joined to, so an enrichment value
+is present exactly where the source row satisfies it.
 
 Column policies SHALL narrow what a caller sees and acts on through `get`, `read` and `modify` — the verbs the
 clearance extends — and SHALL NOT narrow `write`: a row insert is judged as before. They SHALL NOT apply to the system
@@ -1674,7 +1746,8 @@ SHALL NOT be evaluated and every column SHALL be visible.
   and `columns` `["a", "project"]`; and an entry for `U` with `read`, `rows` admitting `project = 'P2'` and `columns`
   `null`
 - **WHEN** a caller carrying both runs `SELECT * FROM t`
-- **THEN** it reads the rows of `P1` and of `P2` with columns `a` and `project` only, and its `GET /v1/tables/t` reports
+- **THEN** it reads the rows of `P1` and of `P2` with columns `project`, `a` and `c`, where `c` carries its stored value
+  on the rows of `P2` and is absent on the rows of `P1`, and its `GET /v1/tables/t` reports
   `permissions.columns_restricted = true`
 
 #### Scenario: A role with no row policy shows the columns it allows on every row
@@ -1686,22 +1759,77 @@ SHALL NOT be evaluated and every column SHALL be visible.
 
 #### Scenario: A column every confining role lists is visible
 
-- **GIVEN** an entry for `R` with `read`, `rows` admitting `project = 'P1'` and `columns` `["a", "c"]`, and an entry for
-  `U` with `read`, `rows` admitting `project = 'P2'` and `columns` `["b", "c"]`
-- **WHEN** a caller carrying both requests the entity's schema and queries the table
-- **THEN** both show `c` only, over the rows of `P1` and of `P2`
+- **GIVEN** a table with columns `project`, `a`, `b`, `c` and `d`; an entry for `R` with `read`, `rows` admitting
+  `project = 'P1'` and `columns` `["a", "c"]`; and an entry for `U` with `read`, `rows` admitting `project = 'P2'` and
+  `columns` `["b", "c"]`
+- **WHEN** a caller carrying both requests the entity's schema
+- **THEN** it lists `a`, `b` and `c`, with `a` and `b` marked masked, and lists neither `project` nor `d`
+- **AND WHEN** it queries the table
+- **THEN** it reads the rows of `P1` and of `P2`; `c` carries its stored value on every row, `a` only on the rows of
+  `P1` and `b` only on the rows of `P2`, each absent on the other project's rows
 
-#### Scenario: Gaining a column-restricted role can hide a confined role's columns
+#### Scenario: Gaining a column-restricted role masks a confined role's columns to its rows
 
 - **GIVEN** a table with columns `project`, `x` and `y`; an entry for `A` with `read`, `rows` admitting
   `project = 'P1'` and `columns` `null`; and an entry for `B` with `read`, no `rows` and `columns` `["x"]`
 - **WHEN** a caller carrying both runs `SELECT * FROM t`
-- **THEN** it reads every row with column `x` only, because showing `A`'s other columns would show them on the rows
-  only `B` admits
+- **THEN** it reads every row with columns `project`, `x` and `y`; `x` carries its stored value on every row, and
+  `project` and `y` carry theirs on the rows of `P1` and are absent on every other row, because only `A` allows them
 - **AND WHEN** `B`'s entry also carries `rows`, admitting `project = 'P2'`
-- **THEN** it reads the rows of `P1` and of `P2`, still with column `x` only
+- **THEN** it reads the rows of `P1` and of `P2`; `x` carries its stored value on both, and `project` and `y` on the
+  rows of `P1` only
 - **AND WHEN** instead `B`'s `columns` list `x`, `y` and `project`
-- **THEN** it reads every row with all three columns
+- **THEN** it reads every row with all three columns, none absent
+
+#### Scenario: Gaining a column-restricted role can hide a confined role's columns
+
+- **GIVEN** a table `t` with columns `project`, `t`, `x` and `y`, so the hiding fallback applies; an entry for `A`
+  with `read`, `rows` admitting `project = 'P1'` and `columns` `null`; and an entry for `B` with `read`, no `rows`
+  and `columns` `["x"]`
+- **WHEN** a caller carrying both runs `SELECT * FROM t`
+- **THEN** it reads every row with column `x` only, and nothing is marked masked, because masking would show `A`'s
+  other columns on the rows only `B` admits and the fallback keeps the rule without masking
+
+#### Scenario: A masked column follows the caller value of the policy that allows it
+
+- **GIVEN** a table whose `read` list is `["*", "V"]`: a `*` entry with `read`, `rows` admitting
+  `user_hash = caller.user_hash()` and `columns` `null`, and an entry for `V` with `read`, `rows` admitting
+  `project = 'P2'` and `columns` `["project"]`
+- **WHEN** a caller carrying `V` whose own `user_hash` is `u1` queries the table
+- **THEN** it reads its own rows and the rows of `P2`; `project` carries its stored value on every one of them, and
+  every other column carries its stored value on the rows whose `user_hash` is `u1` and is absent on the rest
+- **AND WHEN** the same caller's `user_hash` is unknown on the request
+- **THEN** it reads the rows of `P2` only, with every column but `project` absent on all of them, and each such cell
+  is reported absent by the surface that returns it
+
+#### Scenario: A table with a column named after it hides instead of masking
+
+- **GIVEN** a table `t` that stores a column named `t`, an entry for `A` with `read`, `rows` admitting `p = 'P1'` and
+  `columns` `null`, and an entry for `B` with `read`, `rows` admitting `p = 'P2'` and `columns` `["p"]`
+- **WHEN** a caller carrying both requests the entity's schema
+- **THEN** it lists `p` only, as the intersection of the two lists, and nothing is marked masked
+
+#### Scenario: An older revision lists a masked column
+
+- **GIVEN** a caller whose governing roles on a non-system table mask a column under the current policies
+- **WHEN** it reads an older revision snapshot of the table, recorded before the column policies existed
+- **THEN** the snapshot lists the masked column, as the current catalog read does
+
+#### Scenario: A null policy column makes the cell absent
+
+- **GIVEN** an entry for `A` with `read`, `rows` admitting `route_name = 'r1'` and `columns` `null`, and an entry for `B`
+  with `read`, `rows` admitting `project = 'P2'` and `columns` `["project"]`, and a row of `P2` whose `route_name` is
+  null
+- **WHEN** a caller carrying both queries the table
+- **THEN** on that row every column but `project` is absent and reported absent, exactly as on a row of `P2` whose
+  `route_name` is `r2`
+
+#### Scenario: A caller that only gets the table lists a masked column
+
+- **GIVEN** an entry for `G1` with `get`, `rows` admitting `project = 'P1'` and `columns` `["a"]`, and an entry for `G2`
+  with `get`, `rows` admitting `project = 'P2'` and `columns` `["b"]`
+- **WHEN** a caller carrying both and no read on the table reads `GET /v1/tables/t`
+- **THEN** the definition lists `a` and `b`, and `permissions.columns_restricted` is `true`
 
 #### Scenario: A rows-only entry without a read path adds rows but no columns
 
@@ -1710,6 +1838,9 @@ SHALL NOT be evaluated and every column SHALL be visible.
   gives `N` a read
 - **WHEN** a caller carrying both runs `SELECT * FROM t`
 - **THEN** it reads the rows of `P1` and of `P2`, with columns `a` and `project` only
+- **AND WHEN** `N`'s `columns` are `["project"]` instead
+- **THEN** it reads the rows of `P1` and of `P2`; `project` carries its stored value on every row, and `a` carries its
+  stored value on the rows of `P1` and is absent on the rows of `P2`, which only `N` adds
 
 #### Scenario: An unrestricted reading role lifts the restriction
 
@@ -1744,6 +1875,9 @@ SHALL NOT be evaluated and every column SHALL be visible.
 - **THEN** it carries `a` and not `s`
 - **AND WHEN** `X` is granted `sensitive`
 - **THEN** it carries `a` and `s`
+- **AND WHEN** instead `X`'s entry also carries `rows`, and the caller carries a second reading role with `rows` and
+  `columns` `["a"]`, without the clearance
+- **THEN** it carries `a` and not `s`: the clearance hides `s`, which is not masked
 
 #### Scenario: A source's allowlist hides the enrichment columns it does not name
 
@@ -1787,6 +1921,11 @@ SHALL NOT be evaluated and every column SHALL be visible.
   `dial_usage_log_payload.request_body_full` and `dial_usage_log_payload.request_body_rebuild`
 - **AND WHEN** the list names both columns
 - **THEN** it carries both computed fields
+- **AND WHEN** instead `X`'s `columns` name `dial_usage_log_payload.request_body` only, as at first, its entry also
+  carries `rows` admitting `project_id = 'P2'`, and the caller also carries `Y`, whose entry carries `read`, `rows`
+  admitting `project_id = 'P1'` and `columns` `null`
+- **THEN** both computed fields are listed and marked masked, and a query returns them on the rows of `P1` and
+  absent on the rows of `P2`
 
 #### Scenario: none mode shows every column
 
@@ -1806,15 +1945,17 @@ naming it SHALL be refused as naming an unknown column (`422`), while an `add` o
 still refused `422` as a name that already exists, as for a hidden sensitive column (see
 [table-management](../table-management/spec.md), "Modify table schema via PATCH"). A `ttl.column` SHALL resolve
 against the columns visible to the caller only, so naming a hidden column fails as naming an undeclared one (`422`)
-and TTL validation never reveals its type or nullability; and while the stored TTL is on a column hidden from the
-caller by a column policy, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled`
+and TTL validation never reveals its type or nullability; a `ttl.column` naming a column masked for the caller SHALL be
+refused `403 column_not_entitled` naming it, before that validation; and while the stored TTL is on a column hidden from the
+caller by a column policy, or masked for it, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled`
 naming that column, and the TTL left unchanged — where the column is also sensitive and the caller lacks the
 clearance, the response is `403 column_not_entitled` too. The list item's `column_count` SHALL not
 count it (see [table-management](../table-management/spec.md), "Read and list table definitions"), and an import
 entry's `prev` SHALL omit it (see [catalog-export-import](../catalog-export-import/spec.md), "Import entries"). No
-response SHALL mark a column as withheld or carry a placeholder for it; as for an unentitled sensitive column, a
-definition's structural fields are returned as stored and a conflict refusal such as `409 column_in_column_policy`
-names the columns it concerns.
+response SHALL mark a hidden column as withheld or carry a placeholder for it; as for an unentitled sensitive column,
+a definition's structural fields are returned as stored and a conflict refusal such as `409 column_in_column_policy`
+names the columns it concerns. A masked column is not hidden: it is listed on these surfaces like a visible one, and
+schema discovery and query results mark it and its absent cells as "Column visibility by caller role" refers to.
 
 The same parity covers two surfaces that resolve against the writer's own view. Sessions-source validation (see
 [instance-settings](../instance-settings/spec.md), "Sessions-source validation") resolves the bound fields against the
@@ -1840,7 +1981,7 @@ they stood just before that deletion, so a later enrichment of the same name, gr
 judge an earlier life's revisions. When no recorded state of the table or of its source can be found, every column of
 the snapshot SHALL be hidden. A snapshot's `permissions.columns_restricted` SHALL be
 judged over the revision's own columns, except on a system table's snapshot, which carries none and reports it `true`
-exactly when a column policy, the revision's or the current one, confines the caller (see
+exactly when a column policy, the revision's or the current one, hides or masks a column for the caller (see
 [audit-trail](../audit-trail/spec.md), "Historical table snapshots").
 
 #### Scenario: Every query surface omits a hidden column
@@ -2225,3 +2366,93 @@ access is its source's.
 - **WHEN** a bundle whose `access` gives `*` the `write` privilege on a user table `t` is imported with `include_access=true`
 - **THEN** that access entry is `FAIL` with a problem naming `validation_error`, the import is `422` with `error`
   `catalog_import_invalid`, and `t`'s access is unchanged
+
+### Requirement: Pipeline paths refuse a masked column
+
+Every path "Pipeline and export paths refuse a hidden column" lists, catalog export excepted, SHALL refuse a column
+masked for the calling identity (see "Column visibility by caller role") exactly as it refuses a hidden one: HTTP 403
+with machine code `column_not_entitled`, naming the column, judged with the hidden columns before any column is judged
+for the clearance, over the same columns that requirement says the path reads. Those paths are pipeline authoring
+(`enrich` and `aggregate` registration, enable, patch and preview, and an aggregate's refresh on request) and the
+runner's data-plane endpoints under the calling identity. They read without the row filter and without the mask, and
+a pipeline writes what it derives into a table where the row a value came from no longer decides who may read it, so
+a column the caller may read on some rows only SHALL NOT reach them. A fragment that parses because the masked column
+is in the caller's schema SHALL still be refused for it, as a column the path reads. The re-attribution of a parse
+failure to `column_not_entitled` keeps keying on a column a column policy hides: a masked column parses, so it is
+never the cause of one, and a caller whose restricted columns are all masked receives a fragment's genuine parse
+diagnostic, although its `columns_restricted` is `true`. For the same reason a masked column is not a protected column
+for an unplannable aggregate SQL statement (see [aggregate-pipeline](../aggregate-pipeline/spec.md)): a planning
+failure whose text mentions a masked column, and no hidden or unentitled sensitive one, SHALL stay the `422` planning
+diagnostic. A statement that does plan and reads a masked column is refused `403 column_not_entitled` by the rule
+above.
+
+A masked column SHALL be judged at the point in each path where a hidden one is, so the refusal SHALL NOT change the
+order in which a path already decides `403 row_policy_confined` (see [pipeline-registry](../pipeline-registry/spec.md),
+and [enrichment-runtime](../enrichment-runtime/spec.md), "The pipeline data plane refuses a row-confined caller") and
+`403 column_not_entitled`; a registration or patch that leaves the pipeline disarmed is judged when it is armed, as
+for a hidden column. Where the confinement check comes first, as on an armed registration and on the runner's data
+plane, a masked column reaches this refusal only for a caller that is not confined — one carrying a row-unrestricted
+reading role whose column policy leaves out a column a confined role of the caller allows.
+
+Where one of these paths withholds a value read from a column hidden from the caller instead of refusing it, it SHALL
+withhold it for a masked column too. In particular, an `enrichment_behind` note SHALL carry no instant read from the
+read source's `version_column` when that column is masked for the caller, exactly as when it is hidden. Those values
+come from reads without the row filter, so they can come from rows on which the cell is absent for the caller. A
+`lag_seconds` value and the note's gap stay returned, as for a hidden version column.
+
+Catalog export SHALL NOT refuse a masked column: a bundle carries the column's definition, which the caller may see,
+and no stored value. Work running under the system identity SHALL NOT be refused for a masked column, as for a hidden
+one.
+
+#### Scenario: An author cannot register a pipeline over a masked column
+
+- **GIVEN** a caller holding `REGISTRY_ADMIN` whose governing roles on `dial_usage_log` are `A`, with `read`, `rows`
+  admitting `project_id = 'P1'` and `columns` `null`, and `B`, with `read`, no `rows` and `columns` listing every
+  column of the table but `deployment` — so it reads every row and `deployment` alone is masked
+- **WHEN** it registers an armed (`enabled: true`) `enrich` pipeline whose bound input reads `deployment`
+- **THEN** the response is `403 column_not_entitled` naming `deployment`, and nothing is stored
+
+#### Scenario: A confined caller is refused for its confinement first
+
+- **GIVEN** the same caller without `B`, so it is confined to `P1`, and a second role with `read`, `rows` admitting
+  `project_id = 'P2'` and `columns` `["project_id"]`, so `deployment` is masked
+- **WHEN** it registers the same armed pipeline
+- **THEN** the response is `403 row_policy_confined`, as for any confined caller
+
+#### Scenario: A runner scan over a masked column is refused
+
+- **GIVEN** a runner identity that is not confined on a pipeline's read source but for which a column the scan returns
+  is masked
+- **WHEN** it calls the pipeline's scan
+- **THEN** the response is `403 column_not_entitled` naming that column
+
+#### Scenario: A masked column is refused before an unentitled sensitive one
+
+- **GIVEN** a caller that is not confined, and a pipeline declaration that reads a column masked for it and a
+  sensitive column of another table it lacks the clearance for
+- **WHEN** the caller registers it armed
+- **THEN** the response is `403 column_not_entitled`, whatever order the tables are visited in
+
+#### Scenario: An unplannable aggregate statement mentioning only a masked column keeps its planning diagnostic
+
+- **GIVEN** a caller that is not confined, for which `deployment` is masked on an aggregate pipeline's input and no
+  column of it is hidden
+- **WHEN** it previews an aggregate whose SQL statement mentions `deployment` and cannot be planned
+- **THEN** the response is the `422` planning diagnostic
+- **AND WHEN** it previews an aggregate whose SQL statement plans and reads `deployment`
+- **THEN** the response is `403 column_not_entitled` naming `deployment`
+
+#### Scenario: A preview's note omits the instants of a masked version column
+
+- **GIVEN** a caller holding `REGISTRY_ADMIN` that is not confined on an `enrich` pipeline's read source, for which
+  the source's `version_column` is masked, and an enrichment behind its source
+- **WHEN** it requests a `sql` enrich preview
+- **THEN** the preview runs, and its `enrichment_behind` note names the enrichment and gives the gap, but carries
+  neither the newest sampled version nor the enrichment's materialized position
+
+#### Scenario: An export carries a masked column
+
+- **GIVEN** a caller holding `REGISTRY_READ` and `get` on a table, whose governing roles there mask one of its columns
+- **WHEN** it exports the table
+- **THEN** the export succeeds and the bundle's table definition lists that column
+
