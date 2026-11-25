@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: epam/ai-dial-ci/actions/java_prepare@4.13.2
+      - uses: epam/ai-dial-ci/actions/java_prepare@5.1.0
         with:
           java-version: 25
       - name: Run multiReplicaTest
@@ -75,7 +75,7 @@ jobs:
       # cancelled() as well: a cluster that never recovers ends the job on its timeout, which is reported as cancelled.
       - name: Upload test reports
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: multi-replica-reports-${{ matrix.clickhouse }}
           path: |
