@@ -179,8 +179,8 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
             // The first branch reads P1 and the absent rows of P2: 31 distinct values, null among them.
             final List<Map<String, Object>> masked = sqlRows(caller(), "SELECT route FROM " + table + " WHERE project <> 'P3' UNION DISTINCT"
                     + " SELECT route FROM " + table + " ORDER BY route");
-            // P1's routes are r199 down to r170, P3's r169 down to r020. ClickHouse's own UNION DISTINCT emits the branches in
-            // either order on several threads, so the expected page is stated, not read back from it.
+            // P1's routes are r199 down to r170, P3's r169 down to r020. On several threads ClickHouse's own UNION DISTINCT can
+            // emit the branches in another order, or interleave them, so the expected page is stated, not read back from it.
             final List<Object> first = new ArrayList<>();
             for (int i = 170; i < 200; i++) {
                 first.add("r" + i);

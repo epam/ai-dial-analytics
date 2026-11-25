@@ -744,17 +744,42 @@ class ReadShapingRenderTest {
                         .contains(key + " \"" + ReadShaping.PAGE_KEY + "\"");
             }
             // Each reader cut where it reads, never elsewhere: the grain join's keys, the page block's key, and the page
-            // restriction, the stored keys in the page's and a row whose stored key the tuple cannot match.
+            // restriction, which keeps the rows whose stored keys are the page's, and the rows whose stored key is null.
             final String pageKeys = "\\) in \\(select \"" + ReadShaping.PAGE_KEY + "\"";
             final String readers = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD)
                     .replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
                     .replace(key + " \"" + ReadShaping.PAGE_KEY + "\"", "<page key>")
                     .replaceAll("(?i)\\(" + Pattern.quote(key) + ", \"dial_usage_log\"\\.\"request_time\"" + pageKeys, "<page restriction>")
                     .replaceAll("(?i)" + Pattern.quote(key) + pageKeys.substring(2), "<page restriction>")
-                    .replaceAll("(\"" + ReadShaping.PAGE_ALIAS + "\"\\)\\)) or " + Pattern.quote(key) + " is null", "$1 <page restriction>");
+                    .replaceAll("(" + Pattern.quote("\"" + ReadShaping.PAGE_ALIAS + "\"") + "\\)\\)) or " + Pattern.quote(key) + " is null", "$1 <page restriction>");
             assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
                     .as(shape + ": " + sql).isEmpty();
         });
+    }
+
+    /**
+     * A filter on a masked key that the payload's key subquery copies is read there behind its mask, as in the statement:
+     * only the subquery's selected key reads the stored value, so the derived table is audited, not cut.
+     */
+    @Test
+    void maskedKeyFilterCopiedIntoTheKeySubqueryKeepsItsMask() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        bindings.put("event_id", bindings.get("event_id").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class)
+                .eq("d1"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final String key = "\"dial_usage_log\".\"event_id\"";
+        final org.jooq.Select<?> count = builder.buildCount(ctx, masked, countingWhere(and(WINDOW, cmp(ComparisonOp.EQ, field("event_id"),
+                new ValueExpr(ValueType.STRING, "00000000-0000-4000-8000-000000000001")), cmp(ComparisonOp.ICO, field(BODY), str("error")))));
+        final String sql = MaskRendering.render(() -> count.getSQL(ParamType.INLINED));
+
+        final String keySubquery = "(?i)in \\(select " + Pattern.quote(key) + " from \"dial_usage_log\"";
+        assertThat(sql).as("the key subquery copies the key filter: " + sql).containsPattern(keySubquery);
+        final String readers = sql.replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
+                .replaceAll(keySubquery, "in (select <selected key> from \"dial_usage_log\"");
+        assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
+                .as(sql).isEmpty();
     }
 
     /** The test model with the body masked to the rows of deployment {@code d1}. */
