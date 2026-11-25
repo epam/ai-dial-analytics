@@ -18,7 +18,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  *       a servlet filter at highest precedence so it runs ahead of the security filter chain — a 401, a
  *       URL-level 403 and an unmapped-path 404 must carry the echo too, and none of those reaches an
  *       interceptor.
- *   <li>{@link RunnerContractInterceptor} requires the header on the four runner-only data-plane handlers,
+ *   <li>{@link RunnerContractInterceptor} requires the header on the runner-only data-plane handlers,
  *       registered as a {@code HandlerInterceptor} because it needs the resolved handler method to read
  *       {@link RunnerContractExempt}, which a filter does not have.
  * </ul>

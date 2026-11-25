@@ -644,6 +644,27 @@ class DraftPipelineIntegrationTest extends AbstractClickHouseIntegrationTest {
     }
 
     @Test
+    void llmDraftTrialInputServesTheMappingItsGateDerivedRatherThanTheStoredOne() throws Exception {
+        final String table = "dr_late_trial";
+        try {
+            registerDraftBeforeItsTargetHasColumns(table, "dr-late-trial",
+                    Transforms.llm().output("body_model", "The model.").member());
+
+            // The runner evaluates the declaration trial input hands it, so that declaration must be the one arming
+            // would store — the gate's in-memory mapping — and not the stored empty one.
+            mockMvc.perform(runnerPost(PIPELINES + "/dr-late-trial/trial-input")
+                            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.pipeline.enabled").value(false))
+                    .andExpect(jsonPath("$.pipeline.outputs[*].column", contains("body_model")))
+                    .andExpect(jsonPath("$.pipeline.response_schema.properties.body_model").exists())
+                    .andExpect(jsonPath("$.input_rows").isArray());
+        } finally {
+            mockMvc.perform(delete("/v1/tables/" + table));
+        }
+    }
+
+    @Test
     void schemaPatchReDerivesDisabledLlmDraftWhoseOutputsNowResolveAndBumpsItsGeneration() throws Exception {
         // One output resolves and one names a column the target does not have yet: nothing derives.
         register("{\"name\":\"dr-rederive\",\"kind\":\"enrich\",\"target\":\"" + LABELS + "\","

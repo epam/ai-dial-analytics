@@ -648,6 +648,53 @@ class PipelineDataAuthorizationIntegrationTest extends AbstractOidcAuthIntegrati
                 .andReturn().getResponse().getContentAsString(), "$.name");
     }
 
+    /**
+     * The dry run's trial input is authorized as the preview is, not by the data-plane grants: the runner forwards its
+     * author's credential, and the two grants its own service identity holds must not let a dry run read what that
+     * author may not.
+     */
+    @Test
+    void dataPlaneGrantsAloneDoNotAdmitTrialInput() throws Exception {
+        grant(ENRICHMENT, "write", WRITER_ROLE);
+        grant(DEFAULT_READ_SOURCE, "read", WRITER_ROLE);
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + pipelineName + "/trial-input")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(runner()))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"));
+    }
+
+    /**
+     * An author allowed to preview the pipeline but not cleared for the sensitive column its filter reads is refused
+     * the trial input with the preview's own code — what the runner then reports to that author.
+     */
+    @Test
+    void trialInputAppliesTheCallersSensitiveEntitlement() throws Exception {
+        mockMvc.perform(delete("/v1/pipelines/" + pipelineName).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+        final String sensitive = JsonPath.read(mockMvc.perform(post("/v1/pipelines")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin()))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"authz-trial-sensitive\"," + rowTransform() + ","
+                                + "\"kind\":\"enrich\",\"target\":\"" + ENRICHMENT + "\",\"trigger\":{\"kind\":\"schedule\"},"
+                                + "\"filter\":\"length(\\\"dial_usage_log_payload.request_body\\\") > 0\","
+                                + "\"enabled\":true}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString(), "$.name");
+        // `registry` holds REGISTRY_ADMIN and global TABLE_READ; the target's write is granted here, so the refusal
+        // below is the sensitive check rather than the grant check.
+        grant(ENRICHMENT, "write", "registry");
+
+        mockMvc.perform(runnerPost("/v1/pipelines/" + sensitive + "/trial-input")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(registryAuthor()))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("sensitive_column_not_entitled"));
+        mockMvc.perform(delete("/v1/pipelines/" + sensitive).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(status().isNoContent());
+    }
+
     private static String fullAdmin() {
         return JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
                 Map.of("sub", "full-user", "roles", List.of("admin"), "email", "full@test"));

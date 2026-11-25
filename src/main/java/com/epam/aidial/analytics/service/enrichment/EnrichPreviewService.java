@@ -4,6 +4,7 @@ import com.epam.aidial.analytics.exception.PipelinePreviewBudgetExceededExceptio
 import com.epam.aidial.analytics.exception.PipelineReadBudgetExceededException;
 import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.enrichment.model.EnrichDeclaration;
+import com.epam.aidial.analytics.service.enrichment.model.GroupPage;
 import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
 import com.epam.aidial.analytics.service.enrichment.model.TransformOutput;
 import com.epam.aidial.analytics.service.enrichment.model.TransformType;
@@ -36,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * The dry run of an {@code enrich} declaration — the checkpoint an author has between declaring a
@@ -49,9 +51,9 @@ import java.util.Set;
  * <p><b>It writes nothing, calls no model, and renders no prompt.</b> The first two are what make it
  * free to run; the third is a boundary rather than an omission. The template renderer and the
  * group-input assembler live in the runner, and their escaping decides what the model actually receives;
- * a second implementation here would be the last place anyone would notice drift. No rendered-request dry
- * run exists on either service — the runner exposes runtime introspection and operator actions, not a
- * rendering surface — and one belongs to the runner, which owns the renderer.
+ * a second implementation here would be the last place anyone would notice drift. The rendered-request dry
+ * run belongs to the runner, which owns the renderer; {@link #trialInput} is the read it is built on, and
+ * renders nothing either.
  *
  * <p>It answers in the shared preview shape and echoes nothing the pipeline read serves: no schema, no
  * mapping, no inputs. What it adds is what only a read can tell — the sampled values, their types, and the
@@ -60,7 +62,8 @@ import java.util.Set;
  * <p><b>Every read rides an already-bounded governed path</b> — {@link ScanService},
  * {@link GroupFetchService}, or {@link MaterializeService#preview} — under an explicit row cap, rather than the
  * aggregate preview's compiled-statement path. Every read that returns row values is capped at
- * {@link #SAMPLE_ROWS}; the others project no bound column and carry caps of their own — the group choice and
+ * {@link #SAMPLE_ROWS}, except trial input's group fetch, which returns what the runner's own fetch would, under
+ * that fetch's row and byte caps; the others project no bound column and carry caps of their own — the group choice and
  * the clamp probe read one row, and a group's member count reads up to one past the runner's fetch cap. That is not a
  * preference for reuse: the aggregate preview's budget bounds memory and time but <em>not rows read</em>,
  * and an {@code llm} pipeline's bindings routinely name the request and response bodies, which are
@@ -96,6 +99,9 @@ public class EnrichPreviewService {
     private static final String GROUP_REMEDY = "Bind fewer heavy columns, narrow the group with a "
             + "`member_select`, or have pipeline.budget.* raised.";
 
+    private static final String TRIAL_ROWS_REMEDY = "Pass a smaller `limit`, reference fewer heavy columns in the "
+            + "`filter` or the bindings, or have pipeline.budget.* raised.";
+
     private final PipelineService pipelines;
     private final PipelineAuthorizer authorizer;
     private final EnrichResolver resolver;
@@ -107,9 +113,50 @@ public class EnrichPreviewService {
     private final PreviewValueCapper capper;
     private final PortableQueryRenderer portable;
 
-    /** A sample before its values are capped: its columns, rows, the group it describes, and its notes. */
+    /** The most rows a trial input returns for a row-grain pipeline: the preview's own sample size. */
+    public static final int TRIAL_MAX_ROWS = SAMPLE_ROWS;
+
+    /**
+     * A sample before its values are capped: its columns, rows, the group it describes, and its notes — and, for a
+     * row-grain trial input, its first `limit` rows keyed as the runner's scan keys them ({@code rows} itself otherwise).
+     */
     private record Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey,
-            List<PreviewNote> notes) {}
+            List<PreviewNote> notes, List<Map<String, Object>> scanRows) {
+
+        Sample(List<PreviewColumn> columns, List<Map<String, Object>> rows, String groupKey, List<PreviewNote> notes) {
+            this(columns, rows, groupKey, notes, rows);
+        }
+    }
+
+    /** An {@code llm} sample together with the response schema the model would be held to, null when none. */
+    private record LlmSample(Sample sample, Map<String, Object> schema) {}
+
+    /** A pipeline that passed the checks its preview runs: its resolution, declaration, transform and state. */
+    private record Gated(ResolvedEnrichPipeline resolved, EnrichDeclaration declaration,
+            EnrichSpec.TransformSpec transform, boolean enabled) {
+
+        boolean group() {
+            return declaration.triggerKind() == TriggerKind.GROUP;
+        }
+    }
+
+    /**
+     * What the Enrichment Runner's dry run evaluates: the preview of the same body, the declaration that preview
+     * sampled through, and the rows the runner would receive, uncapped.
+     *
+     * @param preview   the preview, exactly as {@link #preview} answers it
+     * @param compiled  the declaration the sample was read through — for a disabled pipeline, as the gate derived it
+     *                  in memory — carrying the response schema the preview computed
+     * @param inputRows a row-grain pipeline's newest sampled rows, or a group pipeline's whole fetched group
+     * @param truncated whether the group fetch's caps cut the group; null for a row-grain pipeline
+     */
+    public record TrialInput(PipelinePreview preview, ResolvedEnrichPipeline compiled,
+            List<Map<String, Object>> inputRows, Boolean truncated) {
+
+        public TrialInput {
+            inputRows = List.copyOf(inputRows);
+        }
+    }
 
     /**
      * Previews one {@code enrich} pipeline. {@code groupKey} names the group to sample for a
@@ -117,6 +164,76 @@ public class EnrichPreviewService {
      * restrict a row-grain or Class-1 sample to a version window.
      */
     public PipelinePreview preview(String name, String groupKey, Instant from, Instant to) {
+        final Gated gated = gate(name);
+        return underPreviewBudget(gated.group(), () -> gated.transform().getType() == TransformType.SQL
+                ? class1Preview(gated.resolved(), gated.declaration(), groupKey, from, to)
+                : llmPreview(gated.resolved(), gated.declaration(), gated.transform(), groupKey, from, to));
+    }
+
+    /**
+     * The input of the Enrichment Runner's dry run of one {@code llm} pipeline: the same checks, in the same order,
+     * and the same sample as {@link #preview}, plus what the model would actually receive — a row-grain pipeline's
+     * newest {@code limit} sampled rows, or a group pipeline's whole group as the runner's fetch assembles it — with
+     * no value cap.
+     *
+     * <p>The group's members are fetched by the runner's own {@link GroupFetchService} assembly over the gated
+     * declaration, not taken from the preview's five-member sample: the sample ranks members by the declaration's
+     * selection, so it need not be the head of what the fetch delivers.
+     *
+     * @param limit the row-grain rows to return, {@code 1} when null; refused on a {@code group} pipeline
+     */
+    public TrialInput trialInput(String name, String groupKey, Instant from, Instant to, Integer limit) {
+        final Gated gated = gate(name);
+        if (gated.transform().getType() == TransformType.SQL) {
+            throw new PipelineValidationException("pipeline '" + name + "' runs a `sql` transform, which calls no "
+                    + "model and has nothing to try; its preview shows the values it computes");
+        }
+        final int rows = trialRows(gated, limit);
+        final ResolvedEnrichPipeline resolved = gated.resolved();
+        return underPreviewBudget(gated.group(), () -> {
+            final LlmSample llm = llmSample(resolved, gated.declaration(), gated.transform(), groupKey, from, to, rows);
+            final Sample sample = llm.sample();
+            final PipelinePreview preview = finish(PortableQueryRenderer.Portable.NONE, sample);
+            // The declaration the sample was read through, carrying the schema the preview composed from it: for a
+            // disabled draft that is the gate's in-memory mapping, which is what arming would store.
+            final ResolvedEnrichPipeline compiled = new ResolvedEnrichPipeline(resolved.pipeline(), resolved.spec(),
+                    resolved.source(), resolved.grainKey(), resolved.versionColumn(), llm.schema());
+            if (!gated.group()) {
+                return new TrialInput(preview, compiled, sample.scanRows(), null);
+            }
+            // Gated on the group alone: a group whose sampled members could not be read back may still be fetched.
+            if (sample.groupKey() == null) {
+                return new TrialInput(preview, compiled, List.of(), false);
+            }
+            final GroupPage page = groups.fetchForTrial(resolved, sample.groupKey());
+            return new TrialInput(preview, compiled, page.rows(), page.truncated());
+        });
+    }
+
+    /** The row-grain rows a trial input returns: {@code 1} by default, at most {@link #TRIAL_MAX_ROWS}. */
+    private static int trialRows(Gated gated, Integer limit) {
+        if (gated.group()) {
+            if (limit != null) {
+                throw new PipelineValidationException("`limit` is the number of rows to try for a row-grain "
+                        + "pipeline, and '" + gated.declaration().name() + "' is triggered per group, whose trial "
+                        + "input is the whole group; omit it");
+            }
+            return 0;
+        }
+        if (limit == null) {
+            return 1;
+        }
+        if (limit < 1 || limit > TRIAL_MAX_ROWS) {
+            throw new PipelineValidationException("`limit` must be between 1 and " + TRIAL_MAX_ROWS + ", got " + limit);
+        }
+        return limit;
+    }
+
+    /**
+     * Resolves {@code name} and runs the checks its preview runs before sampling, in the order arming runs them for
+     * a disabled pipeline.
+     */
+    private Gated gate(String name) {
         final ResolvedEnrichPipeline resolved = pipelines.getEnrich(name);  // 404 unknown, 422 wrong kind
         final EnrichDeclaration declaration = resolved.declaration();
         // Authorized here as well as inside each delegate, so the target's grant is required before anything
@@ -155,19 +272,23 @@ public class EnrichPreviewService {
             // to have answered rather than a shape to report.
             validator.validateForPreview(declaration);
         }
-        final boolean group = declaration.triggerKind() == TriggerKind.GROUP;
+        return new Gated(resolved, declaration, transform, enabled);
+    }
+
+    /** Runs a preview's reads, refusing one over the pipeline read budget under the preview's own code. */
+    private <T> T underPreviewBudget(boolean group, Supplier<T> reads) {
         try {
-            return transform.getType() == TransformType.SQL
-                    ? class1Preview(resolved, declaration, groupKey, from, to)
-                    : llmPreview(resolved, declaration, transform, groupKey, from, to);
+            return reads.get();
         } catch (PipelineReadBudgetExceededException ex) {
             // The read paths are the runner's and refuse under its code; the preview's refusal is the author's.
             // Which read was refused is named, because a preview issues several and their remedies differ: a
             // refused member read is the bound columns, a refused member count is the filter.
             final String exceeded = ex.exceeded() == null ? "its resource budget" : ex.exceeded();
             final String read = ex.what() == null ? "" : " (" + ex.what() + ")";
+            final String remedy = ScanService.TRIAL_ROWS_READ.equals(ex.what()) ? TRIAL_ROWS_REMEDY
+                    : group ? GROUP_REMEDY : WINDOWED_REMEDY;
             throw new PipelinePreviewBudgetExceededException("this pipeline's preview" + read + " exceeded " + exceeded
-                    + " (pipeline.budget.*). " + (group ? GROUP_REMEDY : WINDOWED_REMEDY), ex);
+                    + " (pipeline.budget.*). " + remedy, ex);
         }
     }
 
@@ -203,6 +324,18 @@ public class EnrichPreviewService {
     private PipelinePreview llmPreview(ResolvedEnrichPipeline resolved,
             EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
             String groupKey, Instant from, Instant to) {
+        return finish(PortableQueryRenderer.Portable.NONE,
+                llmSample(resolved, declaration, transform, groupKey, from, to, 0).sample());
+    }
+
+    /**
+     * The {@code llm} sample before its values are capped, and the response schema it was composed against.
+     *
+     * @param trialRows how many row-grain rows trial input also reads as the runner's scan keys them; 0 for the preview
+     */
+    private LlmSample llmSample(ResolvedEnrichPipeline resolved,
+            EnrichDeclaration declaration, EnrichSpec.TransformSpec transform,
+            String groupKey, Instant from, Instant to, int trialRows) {
         final Map<String, Object> stored = transform.getResponseSchema();
         // Composed through the throwing entry point, not the resolver's swallowing one, although the schema is
         // no longer returned: a target whose columns no longer fit the transform's outputs is the single most
@@ -214,7 +347,7 @@ public class EnrichPreviewService {
 
         final Sample sample = declaration.triggerKind() == TriggerKind.GROUP
                 ? groupSample(resolved, declaration, groupKey, from, to)
-                : rowSample(resolved, declaration, groupKey, from, to);
+                : rowSample(resolved, declaration, groupKey, from, to, trialRows);
         final List<PreviewNote> notes = new ArrayList<>(sample.notes());
         if (schema == null) {
             notes.add(PreviewNote.of(PreviewNoteCode.UNCONSTRAINED_RESPONSE, "this declaration stores no "
@@ -226,7 +359,7 @@ public class EnrichPreviewService {
                         + "`description`: neither its `prose` nor the target column's `description` carries one, so "
                         + "the model is told nothing about what the field means. Declare prose on the output, or a "
                         + "description on the column")));
-        return finish(PortableQueryRenderer.Portable.NONE, new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes));
+        return new LlmSample(new Sample(sample.columns(), sample.rows(), sample.groupKey(), notes, sample.scanRows()), schema);
     }
 
     /**
@@ -234,9 +367,9 @@ public class EnrichPreviewService {
      * left matching rows out, the clamp is named rather than the filter blamed.
      */
     private Sample rowSample(ResolvedEnrichPipeline resolved, EnrichDeclaration declaration, String groupKey,
-            Instant from, Instant to) {
+            Instant from, Instant to, int trialRows) {
         requireNoGroupKey(groupKey, declaration);
-        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to);
+        final ScanService.RowSample sample = scans.previewRows(resolved, SAMPLE_ROWS, from, to, trialRows);
         final List<PreviewNote> notes = new ArrayList<>();
         if (sample.heldBy() != null) {
             notes.add(PreviewNotes.heldByEnrichment(sample.heldBy()));
@@ -248,7 +381,7 @@ public class EnrichPreviewService {
         } else if (sample.rows().isEmpty()) {
             notes.add(noMatchingRows());
         }
-        return new Sample(sample.columns(), sample.rows(), null, notes);
+        return new Sample(sample.columns(), sample.rows(), null, notes, sample.scanRows());
     }
 
     /**

@@ -12,6 +12,7 @@ import com.epam.aidial.analytics.service.enrichment.MaterializeService;
 import com.epam.aidial.analytics.service.enrichment.ScanService;
 import com.epam.aidial.analytics.service.enrichment.model.GroupPage;
 import com.epam.aidial.analytics.service.enrichment.model.MaterializePage;
+import com.epam.aidial.analytics.service.enrichment.model.ResolvedEnrichPipeline;
 import com.epam.aidial.analytics.service.enrichment.model.ScanPage;
 import com.epam.aidial.analytics.service.enrichment.support.RunnerContactMetrics;
 import com.epam.aidial.analytics.service.enrichment.support.RunnerContract;
@@ -72,11 +73,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc(addFilters = false)
 class PipelineDataContractTest {
 
-    /** The four runner-only surfaces, which require the header. */
+    /** The runner-only surfaces, which require the header. */
     private static final String SCAN = "/v1/pipelines/tox-live/scan";
     private static final String GROUP_ROWS = "/v1/pipelines/tox-live/group-rows";
     private static final String MATERIALIZE = "/v1/pipelines/tox-live/materialize";
     private static final String ROWS = "/v1/pipelines/tox-live/rows";
+    private static final String TRIAL_INPUT = "/v1/pipelines/tox-live/trial-input";
 
     @Autowired
     private MockMvc mockMvc;
@@ -122,7 +124,7 @@ class PipelineDataContractTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {SCAN, GROUP_ROWS, MATERIALIZE, ROWS})
+    @ValueSource(strings = {SCAN, GROUP_ROWS, MATERIALIZE, ROWS, TRIAL_INPUT})
     void noHeaderRefusesEveryRunnerEndpoint(String path) throws Exception {
         mockMvc.perform(call(path))
                 .andExpect(status().isConflict())
@@ -130,7 +132,7 @@ class PipelineDataContractTest {
 
         // The point of refusing in preHandle: nothing below the web layer ran, so no cursor moved, no model
         // call was made and no read budget was spent.
-        verifyNoInteractions(scanService, groupFetchService, materializeService, writeService, pipelines);
+        verifyNoInteractions(scanService, groupFetchService, materializeService, writeService, enrichPreviewService, pipelines);
         verify(contactMetrics).recordRefusal(RunnerContractException.Reason.REQUIRED);
         verify(contactMetrics, never()).recordContact(anyString());
         // Decided before the pipeline lookup, so the only name in hand is the unvalidated path segment.
@@ -138,7 +140,7 @@ class PipelineDataContractTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {SCAN, GROUP_ROWS, MATERIALIZE, ROWS})
+    @ValueSource(strings = {SCAN, GROUP_ROWS, MATERIALIZE, ROWS, TRIAL_INPUT})
     void wrongVersionRefusesEveryRunnerEndpoint(String path) throws Exception {
         mockMvc.perform(call(path).header(RunnerContract.HEADER, "999"))
                 .andExpect(status().isConflict())
@@ -148,7 +150,7 @@ class PipelineDataContractTest {
                         Matchers.containsString(RunnerContract.VERSION_VALUE),
                         Matchers.containsString("999"))));
 
-        verifyNoInteractions(scanService, groupFetchService, materializeService, writeService, pipelines);
+        verifyNoInteractions(scanService, groupFetchService, materializeService, writeService, enrichPreviewService, pipelines);
         verify(contactMetrics).recordRefusal(RunnerContractException.Reason.MISMATCH);
         verify(contactMetrics, never()).recordAttempt(anyString());
     }
@@ -237,6 +239,30 @@ class PipelineDataContractTest {
                 .andExpect(jsonPath("$.error").value("runner_contract_required"));
 
         verifyNoInteractions(pipelines, scanService);
+    }
+
+    /**
+     * A trial input is asked for by an author through the runner's dry run, so serving one is not the runner's
+     * contact: counting it would make a runner whose scheduled work has stalled look alive.
+     */
+    @Test
+    void servedTrialInputRecordsNoRunnerContact() throws Exception {
+        final PipelineEntity pipeline = new PipelineEntity();
+        pipeline.setName("tox-live");
+        pipeline.setKind(PipelineKind.ENRICH);
+        given(pipelines.get("tox-live")).willReturn(pipeline);
+        given(enrichPreviewService.trialInput("tox-live", null, null, null, 2)).willReturn(new EnrichPreviewService.TrialInput(
+                new PipelinePreview(null, null, List.of(), List.of(), null, null, List.of()),
+                new ResolvedEnrichPipeline(pipeline, null, null, null, null), List.of(Map.of("deployment", "gpt-4")), null));
+
+        mockMvc.perform(post(TRIAL_INPUT).contentType(MediaType.APPLICATION_JSON).content("{\"limit\":2}")
+                        .header(RunnerContract.HEADER, RunnerContract.VERSION_VALUE))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.input_rows[0].deployment").value("gpt-4"))
+                .andExpect(jsonPath("$.truncated").doesNotExist());
+
+        verify(contactMetrics, never()).recordContact(anyString());
+        verify(contactMetrics, never()).recordAttempt(anyString());
     }
 
     @Test

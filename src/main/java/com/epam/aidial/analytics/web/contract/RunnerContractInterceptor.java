@@ -15,17 +15,14 @@ import org.springframework.web.servlet.HandlerInterceptor;
 /**
  * Requires a matching {@link RunnerContract#HEADER} on every {@code POST} handler under
  * {@code /v1/pipelines/{name}} that is not {@link RunnerContractExempt} — that is, on
- * {@code scan}, {@code group-rows}, {@code materialize} and {@code rows}, and not on the two operator
- * surfaces.
+ * {@code scan}, {@code group-rows}, {@code materialize}, {@code rows} and {@code trial-input}, and not on the
+ * two operator surfaces.
  *
  * <p><b>Deny-by-default over one closed class.</b> {@code PipelineDataController} is mapped at
- * {@code /v1/pipelines/{name}} and holds exactly six {@code POST} mappings, so "every POST under the prefix
+ * {@code /v1/pipelines/{name}} and holds exactly seven {@code POST} mappings, so "every POST under the prefix
  * except the two exempt ones" is a statement about one class rather than a path list that has to be kept in
- * step. The one list that <em>does</em> have to be kept in step is {@code OidcSecurityConfiguration}'s,
- * which enumerates the same four paths as {@code authenticated()} — an opt-in enumeration of exactly what
- * this interceptor is deny-by-default about. They stay separate lists deliberately: one is an authorization
- * rule and the other a versioning rule, and collapsing them would make a security decision follow from a
- * build constant. Each names the other; change one and check the other.
+ * step. Authorization is a separate rule decided elsewhere ({@code OidcSecurityConfiguration} and the
+ * method-level privileges), so a security decision never follows from a build constant.
  *
  * <p><b>Where it runs.</b> In {@code preHandle}, so the refusal is decided before the pipeline lookup, the
  * per-call grant check and any ClickHouse read — a skewed caller cannot consume a read budget or reach the
@@ -46,7 +43,7 @@ import org.springframework.web.servlet.HandlerInterceptor;
  * because a Spring {@code /**} matches zero segments as well as many — and would then refuse
  * {@code POST /v1/pipelines}, pipeline <em>registration</em>, which the requirement says explicitly must
  * not need the header. {@code /v1/pipelines/*&#47;**} is the pipeline-scoped prefix: at least one segment
- * for the name, then whatever follows. Everything it matches beyond the six mappings on
+ * for the name, then whatever follows. Everything it matches beyond the seven mappings on
  * {@code PipelineDataController} is either not a {@code POST} or not a handler at all, and is passed
  * through above.
  */
