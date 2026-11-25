@@ -94,6 +94,15 @@ public final class MaskedPlanRules {
         return rules.readsMasked;
     }
 
+    /** Every output name, at every level, and every lambda parameter {@code query} declares. */
+    public static Set<String> declaredNames(CompositeQuery query) {
+        final MaskedPlanRules rules = new MaskedPlanRules(entity -> Set.of(), entity -> Set.of());
+        rules.outputs(query);
+        final Set<String> declared = new HashSet<>(rules.names.keySet());
+        declared.addAll(rules.params);
+        return declared;
+    }
+
     /** By position, the masked fields each output of {@code query} depends on. */
     private List<Set<String>> outputs(CompositeQuery query) {
         return block(query.block(), input(query.source()), query.columns());

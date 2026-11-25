@@ -132,6 +132,7 @@ public class CompositeQueryBuilder {
         private final Consumer<QueryEntityModel> finalReads;
         private final StructuredQueryBuilder builder;
         private final boolean marked;
+        private final Set<String> declared;
         private final Map<CompositeQuery, Field<?>> scalarFlags = new IdentityHashMap<>();
         private int aliases;
 
@@ -144,6 +145,9 @@ public class CompositeQueryBuilder {
             this.finalReads = finalReads;
             this.builder = queryBuilder.withSubqueryRenderer(this);
             this.marked = MaskedPlanRules.readsMaskedField(root, entity -> maskedFields(this.models.apply(entity)));
+            // A name the caller declares could capture an operand alias's flag columns ("t0"."__adas_mf_0") and lose a
+            // mark, so in a plan that carries marks the aliases skip every one.
+            this.declared = marked ? MaskedPlanRules.declaredNames(root) : Set.of();
         }
 
         private static Set<String> maskedFields(QueryEntityModel model) {
@@ -625,7 +629,11 @@ public class CompositeQueryBuilder {
         }
 
         private String nextAlias() {
-            return "t" + aliases++;
+            String alias;
+            do {
+                alias = "t" + aliases++;
+            } while (declared.contains(alias));
+            return alias;
         }
 
         private record Operand(Table<?> table, Map<String, Field<?>> fields, Map<String, ColumnMark> marks) {}
