@@ -118,7 +118,7 @@
   conjunct over a masked enrichment field on the same grounds; transfer partition bounds from a masked partition
   column only for rewritten comparisons. Test that a masked `request_body ico 'error'` count projects `__adas_c0`, not
   `request_body`, and equals the unshaped statement's count
-- [ ] 3.8 Rendered-SQL test: for each clause shape (projection, wildcard, filter rewritten and not, group, order,
+- [x] 3.8 Rendered-SQL test: for each clause shape (projection, wildcard, filter rewritten and not, group, order,
   having, join, window, distinct, union, scalar subquery, array expansion, object path, count, composite leaf,
   enrichment column, the late-materialized page block and outer statement), every occurrence of a masked column's
   physical name is inside its mask or a rewritten conjunct guarded by it, outside an explicit allowlist of the readers

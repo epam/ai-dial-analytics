@@ -5,6 +5,7 @@ import com.epam.aidial.analytics.service.query.ColumnMask;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.JooqTypes;
+import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
@@ -654,6 +655,34 @@ class ReadShapingRenderTest {
             assertThat(outerWhere(sql)).containsIgnoringCase("\"dial_usage_log_payload\".\"__adas_c0\"")
                     .containsIgnoringCase("\"dial_usage_log\".\"deployment\" = 'd1'");
         }
+    }
+
+    /**
+     * The rendered-SQL safety check over the enrichment shapes: outside the payload's derived table, whose copied conjuncts
+     * and pushed calls read stored values on purpose, the masked body is read only behind its mask.
+     */
+    @Test
+    void maskedBodyIsReadOnlyBehindItsMaskOutsideTheDerivedTable() {
+        final String body = "\"" + PAYLOAD + "\".\"request_body\"";
+        final FilterNode search = and(WINDOW, cmp(ComparisonOp.ICO, field(BODY), str("error")));
+        final QueryEntityModel masked = maskedBody();
+        final List<SortItem> byTrace = List.of(new SortItem("trace_id", SortDir.ASC, null));
+        // Built once and rendered by MaskRendering's two passes, as the executor renders a statement.
+        final Map<String, org.jooq.Select<?>> shapes = new LinkedHashMap<>();
+        shapes.put("count over a body search", builder.buildCount(ctx, masked, countingWhere(search)));
+        shapes.put("a body search, the body projected", builder.build(ctx, masked, row(search, List.of(col(field("trace_id")), col(field(BODY))),
+                byTrace, new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("the body projected", builder.build(ctx, masked, row(WINDOW, List.of(col(field("trace_id")), col(field(BODY))), byTrace,
+                new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a call over the body", builder.build(ctx, masked, row(WINDOW, List.of(col(fn("length", field(BODY)), "size")), null,
+                new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a late-materialized page and its outer statement", builder.build(ctx, masked, lastTenWithBodies(),
+                StructuredQueryBuilder.MAX_LIMIT));
+        shapes.forEach((shape, select) -> {
+            final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+            assertThat(sql).as(shape + " reads the body").contains(body);
+            assertThat(MaskedSqlAudit.unguarded(MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD), List.of(body))).as(shape + ": " + sql).isEmpty();
+        });
     }
 
     /** The test model with the body masked to the rows of deployment {@code d1}. */
