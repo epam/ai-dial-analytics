@@ -162,10 +162,6 @@ final class PlannedObject {
         return applied.contains(op);
     }
 
-    boolean anyApplied() {
-        return !applied.isEmpty();
-    }
-
     /** Refused because the object exists under {@code FAIL_IF_EXISTS}. */
     void conflict(String problem) {
         this.conflict = true;

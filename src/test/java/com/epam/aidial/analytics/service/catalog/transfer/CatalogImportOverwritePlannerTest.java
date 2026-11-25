@@ -154,6 +154,16 @@ class CatalogImportOverwritePlannerTest {
     }
 
     @Test
+    void ttlOverAnotherColumnIsKept() {
+        final PlannedObject planned = overwrite(withTtl(source(column("id"), column("ts"), column("seen")), "ts", 30),
+                withTtl(source(column("id"), column("ts"), column("seen")), "seen", 30));
+
+        assertThat(planned.action()).isEqualTo(ImportAction.SKIP);
+        assertThat(planned.toEntry().notApplied()).extracting(NotApplied::kind, NotApplied::name)
+                .containsExactly(tuple(NotApplied.Kind.TARGET_OWNED, "ttl"));
+    }
+
+    @Test
     void hiddenColumnFailsOnlyWhenThereAreChanges() {
         final BundleTable stored = source(column("id"), sensitive(column("pii"), true));
         final BundleTable visible = source(column("id"));
@@ -391,9 +401,13 @@ class CatalogImportOverwritePlannerTest {
     }
 
     private static BundleTable withTtl(BundleTable table, int days) {
+        return withTtl(table, "ts", days);
+    }
+
+    private static BundleTable withTtl(BundleTable table, String column, int days) {
         final DefineSchemaRequest s = table.schema();
         return new BundleTable(table.table(), new DefineSchemaRequest(s.columns(), s.orderingKey(), s.partitionBy(),
-                s.grainKey(), s.cardinality(), s.identityColumn(), s.versionColumn(), new TtlRequest("ts", days, TtlUnit.DAY),
+                s.grainKey(), s.cardinality(), s.identityColumn(), s.versionColumn(), new TtlRequest(column, days, TtlUnit.DAY),
                 s.write()));
     }
 

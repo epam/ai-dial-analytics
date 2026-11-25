@@ -212,6 +212,12 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("forbidden"))
                 .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_SENSITIVE")));
+
+        // As the schema patch does, a grant on the table is enough.
+        grant(PLAIN, "importer", "get", "modify", "sensitive");
+        upload("/v1/catalog/import", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].status").value("updated"));
     }
 
     @Test

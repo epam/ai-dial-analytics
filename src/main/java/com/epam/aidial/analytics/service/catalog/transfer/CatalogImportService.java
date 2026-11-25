@@ -143,8 +143,8 @@ public class CatalogImportService {
      * The endpoint gates of the services import calls in-process, which it bypasses: define-schema's global
      * {@code TABLE_MODIFY}, the schema patch's {@code TABLE_MODIFY} on each table an update changes, held globally or
      * granted on it, the registry's {@code REGISTRY_ADMIN} for a pipeline created or updated, and {@code TABLE_SENSITIVE}
-     * for a sensitive column created, added or raised, which on a table with no grants only the global clearance can
-     * satisfy. All before the collision check.
+     * for a sensitive column: globally for one created, since a new table has no grants, and held globally or granted on
+     * the table for one an update adds or raises. All before the collision check.
      */
     private void authorize(ImportPlan plan) {
         if (!securityMode.isEnforced()) {
@@ -174,18 +174,25 @@ public class CatalogImportService {
         if (sensitive) {
             require(Privilege.TABLE_SENSITIVE, "declaring sensitive columns on tables it creates");
         }
-        if (plan.tables().stream().filter(PlannedObject::intendsUpdate).anyMatch(CatalogImportService::raisesSensitive)) {
-            require(Privilege.TABLE_SENSITIVE, "marking columns of existing tables sensitive");
+        // The schema patch asks the clearance on the table it changes, so a grant on that table is enough, as for TABLE_MODIFY.
+        for (final PlannedObject updated : plan.tables().stream().filter(PlannedObject::intendsUpdate)
+                .filter(CatalogImportService::raisesSensitive).toList()) {
+            if (!tablePrivileges.isAllowed(updated.name(), Privilege.TABLE_SENSITIVE)) {
+                throw new CatalogTransferForbiddenException("importing this bundle means marking columns of table '"
+                        + updated.name() + "' sensitive, which requires the TABLE_SENSITIVE privilege on it");
+            }
         }
     }
 
     /** Whether an update adds a sensitive column or sets {@code sensitive: true} on one. */
     private static boolean raisesSensitive(PlannedObject table) {
         final List<ColumnRequest> columns = table.table().schema().columns() == null ? List.of() : table.table().schema().columns();
-        return table.changes().stream().anyMatch(change -> change.op() == PlannedChange.Op.UPDATE_COLUMN
-                && change.fields().contains("sensitive")
-                || change.op() == PlannedChange.Op.ADD_COLUMN && columns.stream()
-                        .anyMatch(column -> column.name().equals(change.name()) && Boolean.TRUE.equals(column.sensitive())));
+        return table.changes().stream().anyMatch(change -> switch (change.op()) {
+            case UPDATE_COLUMN -> change.fields().contains("sensitive");
+            case ADD_COLUMN -> columns.stream()
+                    .anyMatch(column -> column.name().equals(change.name()) && Boolean.TRUE.equals(column.sensitive()));
+            default -> false;
+        });
     }
 
     private void require(Privilege privilege, String what) {
@@ -210,8 +217,8 @@ public class CatalogImportService {
 
     private ImportResult applySteps(ImportPlan plan, String importId, String bundleHash, ResolutionPolicy policy) {
         // What this import wrote, created and updated alike, in apply order, for compensation to undo in reverse.
-        final List<PlannedObject> createdTables = new ArrayList<>();
-        final List<PlannedObject> createdPipelines = new ArrayList<>();
+        final List<PlannedObject> writtenTables = new ArrayList<>();
+        final List<PlannedObject> writtenPipelines = new ArrayList<>();
         PlannedObject failedAt = null;
         plan.systemTables().forEach(planned -> planned.status(SKIPPED));
         for (final PlannedObject table : plan.tables()) {
@@ -219,7 +226,7 @@ public class CatalogImportService {
                 notAttempted(table, failedAt);
             } else if (!table.writes()) {
                 table.status(SKIPPED);
-            } else if (table.updates() ? !updateTable(table, createdTables) : !createTable(table, createdTables)) {
+            } else if (table.updates() ? !updateTable(table, writtenTables) : !createTable(table, writtenTables)) {
                 failedAt = table;
             }
         }
@@ -228,11 +235,7 @@ public class CatalogImportService {
                 notAttempted(pipeline, failedAt);
             } else if (!pipeline.writes()) {
                 pipeline.status(SKIPPED);
-            } else if (pipeline.updates() ? updatePipeline(pipeline, createdPipelines) : createPipeline(pipeline)) {
-                if (pipeline.creates()) {
-                    createdPipelines.add(pipeline);
-                }
-            } else {
+            } else if (pipeline.updates() ? !updatePipeline(pipeline, writtenPipelines) : !createPipeline(pipeline, writtenPipelines)) {
                 failedAt = pipeline;
             }
         }
@@ -243,11 +246,11 @@ public class CatalogImportService {
                 entry.status(SKIPPED);
                 entry.problems().add("not attempted: the import stopped at " + stoppedAt);
             });
-            compensate(createdPipelines, createdTables, failedAt);
+            compensate(writtenPipelines, writtenTables, failedAt);
         } else if (!plan.access().isEmpty()) {
             accessFailed = !importAccess(plan);
             if (accessFailed) {
-                compensate(createdPipelines, createdTables, null);
+                compensate(writtenPipelines, writtenTables, null);
             }
         }
         final String outcome = failedAt == null && !accessFailed ? COMPLETED
@@ -304,9 +307,11 @@ public class CatalogImportService {
         }
     }
 
-    private boolean createPipeline(PlannedObject planned) {
+    /** Creates one pipeline, recorded for compensation once it committed. */
+    private boolean createPipeline(PlannedObject planned, List<PlannedObject> created) {
         try {
             pipelineService.create(pipelineMapper.toRegistration(planned.pipeline()));
+            created.add(planned);
             planned.status(CREATED);
             return true;
         } catch (RuntimeException ex) {

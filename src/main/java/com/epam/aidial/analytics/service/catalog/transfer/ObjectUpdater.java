@@ -94,7 +94,8 @@ class ObjectUpdater {
 
     /**
      * Reverts the table's applied steps from the target's object as the plan read it: drops the columns the update
-     * added and restores the column metadata in one schema patch, then restores the table metadata.
+     * added and restores the column metadata in one schema patch, then restores the table metadata. A description the
+     * target left unset is restored blank, since the metadata update reads a null description as "keep".
      */
     void revertTable(PlannedObject planned) {
         final BundleTable existing = (BundleTable) planned.existing();
@@ -113,7 +114,7 @@ class ObjectUpdater {
         if (planned.wasApplied(METADATA)) {
             final List<String> tableFields = fields(planned, PlannedChange.Op.UPDATE_TABLE);
             catalog.updateMetadata(planned.name(),
-                    tableFields.contains("description") ? existing.table().description() : null,
+                    tableFields.contains("description") ? orBlank(existing.table().description()) : null,
                     tableFields.contains("tag_order") ? Change.set(orEmpty(existing.table().tagOrder())) : Change.leave());
         }
     }

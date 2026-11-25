@@ -61,8 +61,18 @@ final class TargetOwnedFields {
 
     /** A table's TTL as the report spells it, or null when it has none. */
     static String ttl(BundleTable table) {
+        final TtlRequest ttl = ttlOf(table);
+        return ttl == null ? null : ttl.interval() + " " + ttl.unit();
+    }
+
+    /** Whether two tables carry the same TTL, its column included; an empty TTL is none. */
+    static boolean sameTtl(BundleTable left, BundleTable right) {
+        return Objects.equals(ttlOf(left), ttlOf(right));
+    }
+
+    private static TtlRequest ttlOf(BundleTable table) {
         final TtlRequest ttl = table == null ? null : table.schema().ttl();
-        return ttl == null || ttl.isEmpty() ? null : ttl.interval() + " " + ttl.unit();
+        return ttl == null || ttl.isEmpty() ? null : ttl;
     }
 
     /**

@@ -151,7 +151,7 @@ final class ObjectDiff {
             notApplied.add(new NotApplied(NotApplied.Kind.COLUMN_ORDER, name, "an import never reorders columns: it appends "
                     + "the ones it adds"));
         }
-        if (!Objects.equals(TargetOwnedFields.ttl(existing), TargetOwnedFields.ttl(bundle))) {
+        if (!TargetOwnedFields.sameTtl(existing, bundle)) {
             notApplied.add(new NotApplied(NotApplied.Kind.TARGET_OWNED, TargetOwnedFields.TABLE_TTL, "retention is "
                     + "environment-specific, so an update keeps the target's"));
         }

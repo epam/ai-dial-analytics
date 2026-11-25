@@ -193,10 +193,10 @@ An existing object that differs is `UPDATE`, through the services its own endpoi
   next write), `rebuild_from_zero` (an aggregate rescans its input), `rearm_required` and `existing_rows_not_rederived`.
 
 A difference the import cannot apply — a column's type, nullability or enum values, a table's write mode or frozen
-keys, a pipeline's kind or target, or any table with a column hidden from you — is `FAIL`, and the import answers `422`:
+keys, a pipeline's kind or target, or a change to a table with a column hidden from you — is `FAIL`, and the import answers `422`:
 delete the object and import it again, or change it by hand. An object whose only differences are kept is `SKIP`, so
 re-running the bundle with `OVERWRITE` changes nothing. Updating needs `TABLE_MODIFY` on each updated table,
-`REGISTRY_ADMIN` for a pipeline, and `TABLE_SENSITIVE` to mark a column sensitive.
+`REGISTRY_ADMIN` for a pipeline, and `TABLE_SENSITIVE` on the table to mark one of its columns sensitive.
 
 After the import:
 

@@ -685,8 +685,9 @@ and be reported on it.
 
 Import SHALL require `TABLE_CREATE` at both endpoints, and because the create and update services are called in-process it SHALL
 repeat the controller gates programmatically: global `TABLE_MODIFY` when the bundle creates any table, `TABLE_MODIFY` on each table
-it updates (held globally or granted on that table), `REGISTRY_ADMIN` when it creates or updates any pipeline, and global
-`TABLE_SENSITIVE` when any created column is sensitive or an update adds a sensitive column or sets `sensitive: true` on one.
+it updates (held globally or granted on that table), `REGISTRY_ADMIN` when it creates or updates any pipeline, global
+`TABLE_SENSITIVE` when any created column is sensitive, and `TABLE_SENSITIVE` on each table an update adds a sensitive column to
+or sets `sensitive: true` on a column of (held globally or granted on that table).
 
 A missing privilege SHALL be `403` with `error` `forbidden`. Compensation SHALL delete only objects this import created, without a
 `TABLE_DELETE` check, and SHALL revert only objects this import updated. When security is not enforced, every check in this
@@ -709,6 +710,8 @@ requirement SHALL be skipped.
 
 - **WHEN** a caller without `TABLE_SENSITIVE` imports with `OVERWRITE` a bundle that sets `sensitive: true` on an existing column
 - **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+- **AND WHEN** a role the caller carries is granted `sensitive` on that table
+- **THEN** the import marks the column sensitive
 
 #### Scenario: Updating a pipeline needs REGISTRY_ADMIN
 
