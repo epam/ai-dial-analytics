@@ -3,7 +3,6 @@ package com.epam.aidial.analytics.service.catalog.transfer;
 import com.epam.aidial.analytics.exception.CatalogImportConflictException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
 import com.epam.aidial.analytics.exception.CatalogTransferForbiddenException;
-import com.epam.aidial.analytics.exception.ResolutionPolicyUnsupportedException;
 import com.epam.aidial.analytics.service.audit.AuditImportScope;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
@@ -13,10 +12,12 @@ import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableAccessService.ImportStatus;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
+import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
 import com.epam.aidial.analytics.web.dto.catalog.CatalogBundle;
 import com.epam.aidial.analytics.web.dto.catalog.ImportPreview;
 import com.epam.aidial.analytics.web.dto.catalog.ImportResult;
+import com.epam.aidial.analytics.web.dto.catalog.PlannedChange;
 import com.epam.aidial.analytics.web.dto.catalog.ResolutionPolicy;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest.ColumnRequest;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
@@ -49,13 +50,16 @@ import java.util.stream.Stream;
  * each object is created in import order (sources, then
  * enrichments, then pipelines, always disabled), and, with {@code include_access}, the bundle's access entries are
  * written last, in one transaction. On the first
- * failure, what this import created is deleted again in reverse order. That compensation is best effort: a crash
- * mid-import, or a ClickHouse drop that runs before a catalog delete fails, can leave an object behind, and
- * re-running the bundle with {@code SKIP_IF_EXISTS} converges on it.
+ * failure, what this import created is deleted again and what it updated reverted, in reverse order. That compensation
+ * is best effort: a crash mid-import, or a ClickHouse drop that runs before a catalog delete fails, can leave an object
+ * behind, and re-running the bundle with {@code SKIP_IF_EXISTS} or {@code OVERWRITE} converges on it.
  *
- * <p><b>Import never mutates an existing object's definition, columns or pipeline.</b> A required system table is
- * checked by name. Only an import with {@code include_access}, which needs {@code TABLE_GRANT}, writes access entries,
- * onto created, existing and system tables alike: per role, never removing one.
+ * <p><b>Only {@code OVERWRITE} changes an existing object</b>, and only through the services its endpoints use: it adds
+ * columns and updates metadata through {@code PUT /v1/tables/{name}} and the schema patch, and re-declares a pipeline
+ * through its {@code PATCH}, an enabled aggregate disabled first and left so ({@link ObjectUpdater}). Compensation then
+ * reverts what was updated as well as deleting what was created. A required system table is checked by name, never
+ * written. Only an import with {@code include_access}, which needs {@code TABLE_GRANT}, writes access entries, onto
+ * created, existing and system tables alike: per role, never removing one.
  */
 @Slf4j
 @Service
@@ -64,6 +68,7 @@ public class CatalogImportService {
 
     static final String COMPLETED = "completed";
     static final String CREATED = "created";
+    static final String UPDATED = "updated";
     static final String SKIPPED = "skipped";
     static final String ROLLED_BACK = "rolled_back";
     static final String ROLLBACK_FAILED = "rollback_failed";
@@ -85,6 +90,8 @@ public class CatalogImportService {
     private final SecurityClaimsExtractor claims;
     private final AuditImportScope importScope;
     private final TableAccessService tableAccess;
+    private final ObjectUpdater updater;
+    private final TableAccessEvaluator tablePrivileges;
 
     /** What importing {@code file} would do. Writes nothing; problems are reported, not thrown. */
     public ImportPreview preview(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy, boolean includeAccess) {
@@ -121,11 +128,6 @@ public class CatalogImportService {
 
     /** The authorized plan, before the validation pass. */
     private ImportPlan prepare(byte[] file, boolean acknowledgeReusedNames, ResolutionPolicy policy, boolean includeAccess) {
-        if (policy == ResolutionPolicy.OVERWRITE) {
-            throw new ResolutionPolicyUnsupportedException("resolution_policy OVERWRITE is not supported: import never "
-                    + "changes an existing object's definition, columns or pipeline; use SKIP_IF_EXISTS and change existing "
-                    + "objects through their own endpoints");
-        }
         final CatalogBundle bundle = parser.parseBundle(file);
         // The access API's own gate, before the target's access is read: it depends on nothing the plan holds.
         if (includeAccess && securityMode.isEnforced()) {
@@ -139,9 +141,10 @@ public class CatalogImportService {
 
     /**
      * The endpoint gates of the services import calls in-process, which it bypasses: define-schema's global
-     * {@code TABLE_MODIFY}, pipeline registration's {@code REGISTRY_ADMIN}, and {@code TABLE_SENSITIVE}
-     * for a sensitive column, which on a table with no grants only the global clearance can satisfy. All before the
-     * collision check.
+     * {@code TABLE_MODIFY}, the schema patch's {@code TABLE_MODIFY} on each table an update changes, held globally or
+     * granted on it, the registry's {@code REGISTRY_ADMIN} for a pipeline created or updated, and {@code TABLE_SENSITIVE}
+     * for a sensitive column created, added or raised, which on a table with no grants only the global clearance can
+     * satisfy. All before the collision check.
      */
     private void authorize(ImportPlan plan) {
         if (!securityMode.isEnforced()) {
@@ -152,8 +155,17 @@ public class CatalogImportService {
         if (!created.isEmpty()) {
             require(Privilege.TABLE_MODIFY, "creating tables");
         }
+        for (final PlannedObject updated : plan.tables().stream().filter(PlannedObject::intendsUpdate).toList()) {
+            if (!tablePrivileges.isAllowed(updated.name(), Privilege.TABLE_MODIFY)) {
+                throw new CatalogTransferForbiddenException("importing this bundle means updating table '" + updated.name()
+                        + "', which requires the TABLE_MODIFY privilege on it");
+            }
+        }
         if (plan.pipelines().stream().anyMatch(PlannedObject::creates)) {
             require(Privilege.REGISTRY_ADMIN, "creating pipelines");
+        }
+        if (plan.pipelines().stream().anyMatch(PlannedObject::intendsUpdate)) {
+            require(Privilege.REGISTRY_ADMIN, "re-declaring existing pipelines");
         }
         final boolean sensitive = created.stream()
                 .flatMap(table -> table.schema().columns() == null ? Stream.empty() : table.schema().columns().stream())
@@ -162,6 +174,18 @@ public class CatalogImportService {
         if (sensitive) {
             require(Privilege.TABLE_SENSITIVE, "declaring sensitive columns on tables it creates");
         }
+        if (plan.tables().stream().filter(PlannedObject::intendsUpdate).anyMatch(CatalogImportService::raisesSensitive)) {
+            require(Privilege.TABLE_SENSITIVE, "marking columns of existing tables sensitive");
+        }
+    }
+
+    /** Whether an update adds a sensitive column or sets {@code sensitive: true} on one. */
+    private static boolean raisesSensitive(PlannedObject table) {
+        final List<ColumnRequest> columns = table.table().schema().columns() == null ? List.of() : table.table().schema().columns();
+        return table.changes().stream().anyMatch(change -> change.op() == PlannedChange.Op.UPDATE_COLUMN
+                && change.fields().contains("sensitive")
+                || change.op() == PlannedChange.Op.ADD_COLUMN && columns.stream()
+                        .anyMatch(column -> column.name().equals(change.name()) && Boolean.TRUE.equals(column.sensitive())));
     }
 
     private void require(Privilege privilege, String what) {
@@ -185,6 +209,7 @@ public class CatalogImportService {
     }
 
     private ImportResult applySteps(ImportPlan plan, String importId, String bundleHash, ResolutionPolicy policy) {
+        // What this import wrote, created and updated alike, in apply order, for compensation to undo in reverse.
         final List<PlannedObject> createdTables = new ArrayList<>();
         final List<PlannedObject> createdPipelines = new ArrayList<>();
         PlannedObject failedAt = null;
@@ -192,19 +217,21 @@ public class CatalogImportService {
         for (final PlannedObject table : plan.tables()) {
             if (failedAt != null) {
                 notAttempted(table, failedAt);
-            } else if (!table.creates()) {
+            } else if (!table.writes()) {
                 table.status(SKIPPED);
-            } else if (!createTable(table, createdTables)) {
+            } else if (table.updates() ? !updateTable(table, createdTables) : !createTable(table, createdTables)) {
                 failedAt = table;
             }
         }
         for (final PlannedObject pipeline : plan.pipelines()) {
             if (failedAt != null) {
                 notAttempted(pipeline, failedAt);
-            } else if (!pipeline.creates()) {
+            } else if (!pipeline.writes()) {
                 pipeline.status(SKIPPED);
-            } else if (createPipeline(pipeline)) {
-                createdPipelines.add(pipeline);
+            } else if (pipeline.updates() ? updatePipeline(pipeline, createdPipelines) : createPipeline(pipeline)) {
+                if (pipeline.creates()) {
+                    createdPipelines.add(pipeline);
+                }
             } else {
                 failedAt = pipeline;
             }
@@ -226,7 +253,8 @@ public class CatalogImportService {
         final String outcome = failedAt == null && !accessFailed ? COMPLETED
                 : plan.all().anyMatch(planned -> ROLLBACK_FAILED.equals(planned.status())) ? ROLLBACK_FAILED : ROLLED_BACK;
         final String objects = Stream.concat(plan.all()
-                        .map(planned -> planned.kind().code() + ":" + planned.name() + "=" + planned.status()),
+                        .map(planned -> planned.kind().code() + ":" + planned.name() + "(" + planned.action().code().toLowerCase(Locale.ROOT)
+                                + ")=" + planned.status()),
                         plan.access().stream().map(entry -> "access:" + entry.table() + "/" + entry.role() + "=" + entry.status()))
                 .collect(Collectors.joining(", "));
         if (COMPLETED.equals(outcome)) {
@@ -289,37 +317,88 @@ public class CatalogImportService {
         }
     }
 
+    /**
+     * Updates one existing table: its metadata, then its schema patch, each its own committed step. Recorded for
+     * compensation before the first step, which reverts only the steps that committed.
+     */
+    private boolean updateTable(PlannedObject planned, List<PlannedObject> written) {
+        written.add(planned);
+        try {
+            updater.updateTable(planned);
+            planned.status(UPDATED);
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Catalog import: updating table '{}' failed; compensating", planned.name(), ex);
+            planned.status(FAILED);
+            planned.problems().add(describe(ex));
+            return false;
+        }
+    }
+
+    /** Disables one existing pipeline when the plan says so, then re-declares it, each its own committed step. */
+    private boolean updatePipeline(PlannedObject planned, List<PlannedObject> written) {
+        written.add(planned);
+        try {
+            updater.updatePipeline(planned);
+            planned.status(UPDATED);
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Catalog import: updating pipeline '{}' failed; compensating", planned.name(), ex);
+            planned.status(FAILED);
+            planned.problems().add(describe(ex));
+            return false;
+        }
+    }
+
     private static void notAttempted(PlannedObject planned, PlannedObject failedAt) {
         planned.status(SKIPPED);
-        if (planned.creates()) {
+        if (planned.writes()) {
             planned.problems().add("not attempted: the import stopped at " + failedAt.kind().code() + " '"
                     + failedAt.name() + "'");
         }
     }
 
     /**
-     * Deletes what this import created, pipelines first and then tables in reverse order (enrichments before their
-     * sources, as delete requires). A table that a pipeline still targets is left in place, since deleting the
-     * table would delete that pipeline with it: either the pipeline was not created by this import, or it was and
-     * its own rollback failed.
+     * Undoes what this import wrote, pipelines first and then tables, each in reverse apply order (enrichments before
+     * their sources, as delete requires): a created object is deleted, an updated one reverted to the target's object as
+     * the plan read it ({@link ObjectUpdater}). A created table that a pipeline still targets is left in place, since
+     * deleting the table would delete that pipeline with it: either the pipeline was not created by this import, or it
+     * was and its own rollback failed.
+     *
+     * @param writtenPipelines the pipelines this import created or updated, in apply order
+     * @param writtenTables    the tables this import created or updated, in apply order
      */
-    private void compensate(List<PlannedObject> createdPipelines, List<PlannedObject> createdTables,
+    private void compensate(List<PlannedObject> writtenPipelines, List<PlannedObject> writtenTables,
             PlannedObject failedAt) {
-        for (final PlannedObject pipeline : createdPipelines.reversed()) {
+        for (final PlannedObject pipeline : writtenPipelines.reversed()) {
             try {
-                pipelineService.delete(pipeline.name());
-                pipeline.status(ROLLED_BACK);
+                if (pipeline.updates()) {
+                    updater.revertPipeline(pipeline);
+                } else {
+                    pipelineService.delete(pipeline.name());
+                }
+                markRollback(pipeline, failedAt, true, null);
             } catch (RuntimeException ex) {
                 log.warn("Catalog import: rolling back pipeline '{}' failed", pipeline.name(), ex);
-                pipeline.status(ROLLBACK_FAILED);
-                pipeline.problems().add("rollback failed: " + describe(ex));
+                markRollback(pipeline, failedAt, false, "rollback failed: " + describe(ex));
             }
         }
-        for (final PlannedObject table : createdTables.reversed()) {
+        for (final PlannedObject table : writtenTables.reversed()) {
+            if (table.updates()) {
+                try {
+                    updater.revertTable(table);
+                    markRollback(table, failedAt, true, null);
+                } catch (RuntimeException ex) {
+                    log.warn("Catalog import: reverting table '{}' failed", table.name(), ex);
+                    markRollback(table, failedAt, false, "rollback failed: " + describe(ex));
+                }
+                continue;
+            }
             final Optional<PipelineEntity> owner = pipelines.findByTarget(table.name());
             if (owner.isPresent()) {
                 final String pipeline = owner.get().getName();
-                final boolean ours = createdPipelines.stream().anyMatch(created -> created.name().equals(pipeline));
+                final boolean ours = writtenPipelines.stream().anyMatch(created -> created.creates()
+                        && created.name().equals(pipeline));
                 markRollback(table, failedAt, false, "kept: pipeline '" + pipeline + "' targets it and "
                         + (ours ? "was created by this import, but its rollback failed" : "was not created by this import"));
                 continue;
@@ -334,7 +413,11 @@ public class CatalogImportService {
         }
     }
 
-    /** The failing object keeps {@code failed}; anything else created before it reports how its rollback went. */
+    /**
+     * The failing object keeps {@code failed}; anything else written before it reports how its rollback went.
+     *
+     * @param removed whether the object was deleted, or, for an update, reverted
+     */
     private static void markRollback(PlannedObject table, PlannedObject failedAt, boolean removed, String problem) {
         if (problem != null) {
             table.problems().add(problem);

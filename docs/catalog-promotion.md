@@ -83,15 +83,18 @@ curl -s -X POST 'localhost:5000/v1/catalog/import/preview?resolution_policy=SKIP
 The preview runs the same validation pass as the import and writes nothing. Check, in this order:
 
 - **`validation_errors` and every `problems` list are empty.** Otherwise the import answers `422`.
-- **`env_specific`.** Every value that is likely to mean something else here: `transform.model`,
-  `advanced.rate_rpm`, `trigger.cron`, absolute dates in filters and table `ttl`. **A model must exist on the
+- **`env_specific`.** Every value that is likely to mean something else here: the deployment binding
+  (`transform.preset`, `transform.model`, `transform.route`), every `advanced` member, `trigger.cron`, table `ttl`, and
+  absolute dates in filters and statements. Each item carries the bundle's `value`, this environment's `target_value`
+  on an existing object, and `kept`: whether this environment's value stays (see step 7). **A model must exist on the
   target**: nothing checks `transform.model` at arm time, so a missing deployment shows up only as the runner's
   call failures.
 - **`required_system_tables`.** Each must exist here as an ACTIVE system table. Its columns are not compared:
   a pipeline that reads a column missing here reports it under `arm_problems` instead.
-- **`differs` on `SKIP` entries.** Import never changes an existing object's definition, columns or pipeline (only
-  its access, with `include_access=true`). Compare `prev` with `next` and fix
-  drift through the object's own endpoints (`PATCH /v1/tables/{name}/schema`, `PATCH /v1/pipelines/{name}`).
+- **`differs` on `SKIP` entries.** `SKIP_IF_EXISTS` never changes an existing object's definition, columns or
+  pipeline (only its access, with `include_access=true`). Its entry lists under `changes` what `OVERWRITE` would
+  change: bring the object to the bundle with `OVERWRITE` (step 7), or fix it through the object's own endpoints
+  (`PATCH /v1/tables/{name}/schema`, `PATCH /v1/pipelines/{name}`).
 - **`reused_name`.** The target once had a pipeline of this name that was enabled, then deleted. The Enrichment Runner resets the
   scan cursor, group state and queued work of a recreated pipeline, so it scans from the beginning. It keeps the deleted
   pipeline's dead letters and today's spend counters under the name: a requeue of an old dead letter replays the old payload
@@ -122,11 +125,11 @@ curl -s -X POST 'localhost:5000/v1/catalog/import?resolution_policy=SKIP_IF_EXIS
 ```
 
 `FAIL_IF_EXISTS` refuses (`409`) when any object already exists; `SKIP_IF_EXISTS` keeps those and imports the
-rest. Add `include_access=true` to import the bundle's access as well (an existing entry never conflicts). Every object
+rest; `OVERWRITE` updates them where it safely can (step 7) and imports the rest. Add `include_access=true` to import the bundle's access as well (an existing entry never conflicts). Every object
 is created as its own committed step; the access is written last, in one transaction, so it lands whole or not at
 all. If one fails, what the import created is deleted
-again (`outcome: rolled_back`, per-entry `status`). That is best effort: with `outcome: rollback_failed`, look at
-the entries marked `rollback_failed`. Re-running the same bundle with `SKIP_IF_EXISTS` recreates anything
+again and what it updated reverted (`outcome: rolled_back`, per-entry `status`). That is best effort: with `outcome: rollback_failed`, look at
+the entries marked `rollback_failed`. Re-running the same bundle with `SKIP_IF_EXISTS` (or `OVERWRITE`) recreates anything
 missing, but refuses a table left behind PENDING or FAILED: delete it (`DELETE /v1/tables/{name}`) first.
 
 ## 4. Grant access
@@ -144,7 +147,8 @@ own (`409 enrichment_follows_source`); grant it only `write` or `modify`.
 
 ## 5. Arm the pipelines
 
-Every pipeline lands **disabled**, whatever `exported_enabled` says.
+Every created pipeline lands **disabled**, whatever `exported_enabled` says, and so does an enabled aggregate an
+`OVERWRITE` import re-declares (step 7).
 
 1. **Enable the enrichment-producing (`enrich`) pipelines first**, then the aggregates that read their
    enrichments: an aggregate's freshness clamp needs the enrichment's pipeline running.
@@ -165,3 +169,37 @@ Every pipeline lands **disabled**, whatever `exported_enabled` says.
   `dial_app_route` pipeline previews `armable: false` naming `app-routes` until its pair is listed: allow each
   pair on the target with `PUT /v1/settings/app-routes` before arming (step 5), and set `sessions-source` there
   if the target serves sessions.
+
+## 7. Re-promoting a changed bundle
+
+A bundle that evolves after it was first imported — a new column, reworded descriptions, a changed output expression —
+reaches an environment that already has its objects with `resolution_policy=OVERWRITE`:
+
+```bash
+curl -s -X POST 'localhost:5000/v1/catalog/import/preview?resolution_policy=OVERWRITE' -F file=@bundle.json
+curl -s -X POST 'localhost:5000/v1/catalog/import?resolution_policy=OVERWRITE' -F file=@bundle.json
+```
+
+An existing object that differs is `UPDATE`, through the services its own endpoints use. Read three lists on each entry:
+
+- **`changes`**: what the import does. `update_table` (description, tag order), `add_column` (appended after the
+  existing columns), `update_column` (description, display name, tag, heavy, and `sensitive` from false to true),
+  `disable` and `redeclare` (a pipeline's declaration, the members that change named).
+- **`not_applied`**: what it keeps, and why. A column only this environment has (`extra_column`, never dropped), a
+  different column order (`column_order`), a `sensitive` flag the bundle would clear (`sensitive_loosening`, never
+  widened), and each target-owned field (`target_owned`): every `advanced` member, `trigger.cron`, table `ttl`, and the
+  deployment binding while the preset is the same. A changed preset takes the bundle's whole binding.
+- **`effects`**: what the change sets off, left to you. `generation_bump` (dependent rollups wait for that pipeline's
+  next write), `rebuild_from_zero` (an aggregate rescans its input), `rearm_required` and `existing_rows_not_rederived`.
+
+A difference the import cannot apply — a column's type, nullability or enum values, a table's write mode or frozen
+keys, a pipeline's kind or target, or any table with a column hidden from you — is `FAIL`, and the import answers `422`:
+delete the object and import it again, or change it by hand. An object whose only differences are kept is `SKIP`, so
+re-running the bundle with `OVERWRITE` changes nothing. Updating needs `TABLE_MODIFY` on each updated table,
+`REGISTRY_ADMIN` for a pipeline, and `TABLE_SENSITIVE` to mark a column sensitive.
+
+After the import:
+
+1. **Re-arm** each aggregate marked `rearm_required`, in the order of step 5; an `enrich` pipeline keeps its state.
+2. **Backfill** an `enrich` pipeline marked `existing_rows_not_rederived` over the period whose rows should be
+   recomputed the new way: rows it already wrote keep their earlier values.

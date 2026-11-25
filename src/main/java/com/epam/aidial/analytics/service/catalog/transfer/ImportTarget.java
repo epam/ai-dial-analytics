@@ -18,7 +18,8 @@ import java.util.Set;
  * @param pipelines             the target's pipelines the bundle names, in bundle shape, by name
  * @param pipelinesVisible      whether the caller may see a pipeline declaration ({@code REGISTRY_READ}), and so
  *                              whether an entry reports one as {@code prev}
- * @param pipelineByTarget      the name of the pipeline targeting each bundle pipeline's target that has one
+ * @param pipelineByTarget      the name of the pipeline targeting each bundle pipeline's target, and each bundle table, that
+ *                              has one
  * @param reusedPipelineNames   bundle pipeline names {@code pipeline_aud} records as deleted after having been
  *                              enabled at some revision: only a pipeline that ran left runner state behind
  * @param tableCount            how many tables the target holds

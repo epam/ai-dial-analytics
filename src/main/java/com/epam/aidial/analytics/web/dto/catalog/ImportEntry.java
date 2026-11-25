@@ -26,6 +26,16 @@ public record ImportEntry(
         @Schema(description = "Whether only descriptions, display names or tags differ")
         @JsonProperty("metadata_only") Boolean metadataOnly,
 
+        @Schema(description = "What an OVERWRITE import changes on the existing object; under SKIP_IF_EXISTS, what it would "
+                + "change. Empty for a new object")
+        List<PlannedChange> changes,
+
+        @Schema(description = "What an OVERWRITE import keeps on the existing object although the bundle differs, and why")
+        @JsonProperty("not_applied") List<NotApplied> notApplied,
+
+        @Schema(description = "Consequences of the changes that the import reports and does not act on")
+        List<ImportEffect> effects,
+
         @Schema(description = "Why the object cannot be imported")
         List<String> problems,
 
@@ -39,13 +49,13 @@ public record ImportEntry(
         @Schema(description = "Pipelines only: the target deleted a pipeline of this name that had been enabled")
         @JsonProperty("reused_name") Boolean reusedName,
 
-        @Schema(description = "Import result only: `created`, `skipped`, `rolled_back`, `rollback_failed` or "
+        @Schema(description = "Import result only: `created`, `updated`, `skipped`, `rolled_back`, `rollback_failed` or "
                 + "`failed`. Access entries report theirs in `access`")
         String status) {
 
     /** This entry with {@code status} set. */
     public ImportEntry withStatus(String newStatus) {
-        return new ImportEntry(name, importAction, prev, next, differs, metadataOnly, problems, armable, armProblems,
-                reusedName, newStatus);
+        return new ImportEntry(name, importAction, prev, next, differs, metadataOnly, changes, notApplied, effects, problems,
+                armable, armProblems, reusedName, newStatus);
     }
 }

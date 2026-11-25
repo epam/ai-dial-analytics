@@ -52,10 +52,11 @@ public class CatalogTransferController {
             + "by name, so a recreated one resumes from them";
 
     private static final String POLICY_DESCRIPTION = "What to do with a bundle object that already exists: "
-            + "FAIL_IF_EXISTS refuses the import (409), SKIP_IF_EXISTS keeps the existing object unchanged and imports "
-            + "the rest. OVERWRITE is refused (422): import never changes an existing object's definition, columns or "
-            + "pipeline. An existing access entry never conflicts: with include_access, the bundle's entries are written "
-            + "under either policy.";
+            + "FAIL_IF_EXISTS refuses the import (409); SKIP_IF_EXISTS keeps the existing object unchanged and imports "
+            + "the rest, reporting what OVERWRITE would change; OVERWRITE updates it where that is safe (adds columns, "
+            + "updates table and column metadata, re-declares a pipeline), keeps environment-specific fields, never drops, "
+            + "renames or retypes anything, and refuses an object it cannot bring to the bundle. An existing access entry "
+            + "never conflicts: with include_access, the bundle's entries are written under every policy.";
 
     private static final String INCLUDE_ACCESS_DESCRIPTION = "Also write the bundle's access entries, per role, onto "
             + "created, existing and system tables alike, never removing one; requires TABLE_GRANT. Default false: the "

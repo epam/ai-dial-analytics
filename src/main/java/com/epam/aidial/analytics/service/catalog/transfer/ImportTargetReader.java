@@ -89,6 +89,8 @@ class ImportTargetReader {
             pipelineNames.add(pipeline.pipeline().name());
             targets.add(pipeline.pipeline().target());
         }
+        // The pipeline writing a bundle table too: an update of an enrichment's columns bumps that pipeline's generation.
+        nullSafe(bundle.tables()).forEach(table -> targets.add(table.table().name()));
         final Map<String, BundlePipeline> bundled = new LinkedHashMap<>();
         for (final PipelineEntity pipeline : pipelines.findAllById(pipelineNames)) {
             bundled.put(pipeline.getName(), pipelineMapper.toBundle(pipeline));

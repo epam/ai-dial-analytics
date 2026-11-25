@@ -10,6 +10,7 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
+import com.epam.aidial.analytics.web.dto.catalog.PlannedChange;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
 import com.epam.aidial.analytics.web.mapper.table.TableMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -28,7 +29,8 @@ import java.util.stream.Stream;
 /**
  * The validation pass both import calls share, so a preview and an import cannot disagree.
  *
- * <p>It runs the real services — table create, define-schema, pipeline create — in import order inside
+ * <p>It runs the real services — table create, define-schema, pipeline create, and for an {@code OVERWRITE} update the
+ * table metadata update, schema patch and pipeline patch ({@link ObjectUpdater}) — in import order inside
  * one PostgreSQL transaction that is always rolled back, with ClickHouse DDL replaced by a no-op. Every check
  * those services make is therefore the check the import will meet, and nothing is written: no catalog row, no
  * ClickHouse table, no audit revision. Once every pipeline is created it checks every access entry of an import
@@ -37,7 +39,8 @@ import java.util.stream.Stream;
  * does, inside the same transaction, to report {@code armable}; arming only after all are created means an enrich
  * pipeline reading another one's target is checked against that pipeline, whichever comes first. Existing objects
  * the import keeps are not re-created, so later objects are validated against them rather than against the bundle's
- * version — under {@code FAIL_IF_EXISTS} too, so the preview of a conflicting bundle still validates its new objects.
+ * version — under {@code FAIL_IF_EXISTS} too, so the preview of a conflicting bundle still validates its new objects —
+ * and objects it updates are updated first, so later objects are validated against them as the import leaves them.
  *
  * <p>The pass runs in a transaction of its own ({@code REQUIRES_NEW}), so it can never doom a caller's. The
  * services join it (none uses {@code REQUIRES_NEW}), and a refusal one of them throws marks it rollback-only
@@ -63,11 +66,12 @@ class CatalogImportValidator {
     private final JdbcTemplate jdbc;
     private final TableAccessService tableAccess;
     private final TableDefinitionRepository definitions;
+    private final ObjectUpdater updater;
 
     CatalogImportValidator(PlatformTransactionManager transactionManager, TableCatalogService catalog,
             TableSchemaCreationService schemas, PipelineService pipelineService,
             TableMapper tableMapper, PipelineMapper pipelineMapper, JdbcTemplate jdbc, TableAccessService tableAccess,
-            TableDefinitionRepository definitions) {
+            TableDefinitionRepository definitions, ObjectUpdater updater) {
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.catalog = catalog;
@@ -78,6 +82,7 @@ class CatalogImportValidator {
         this.jdbc = jdbc;
         this.tableAccess = tableAccess;
         this.definitions = definitions;
+        this.updater = updater;
     }
 
     /** Runs the pass over {@code plan}, adding each refusal to the object it concerns. Writes nothing. */
@@ -112,7 +117,11 @@ class CatalogImportValidator {
 
         private void run() {
             for (final PlannedObject table : plan.tables()) {
-                if (!table.creates() || stopped(table)) {
+                if (!table.writes() || stopped(table)) {
+                    continue;
+                }
+                if (table.updates()) {
+                    attempt(table, () -> updater.updateTable(table, DdlExecutor.NO_OP));
                     continue;
                 }
                 final String source = table.table().table().sourceTable();
@@ -123,7 +132,7 @@ class CatalogImportValidator {
                 attempt(table, () -> createTable(table.table()));
             }
             for (final PlannedObject pipeline : plan.pipelines()) {
-                if (!pipeline.creates() || stopped(pipeline)) {
+                if (!pipeline.writes() || stopped(pipeline)) {
                     continue;
                 }
                 final BundlePipeline.Declaration declaration = pipeline.pipeline().pipeline();
@@ -134,7 +143,11 @@ class CatalogImportValidator {
                     refuse(pipeline, refusedDependency);
                     continue;
                 }
-                attempt(pipeline, () -> pipelineService.create(pipelineMapper.toRegistration(pipeline.pipeline())));
+                if (pipeline.updates()) {
+                    attempt(pipeline, () -> updater.updatePipeline(pipeline));
+                } else {
+                    attempt(pipeline, () -> pipelineService.create(pipelineMapper.toRegistration(pipeline.pipeline())));
+                }
             }
             checkAccess();
             for (final PlannedObject pipeline : plan.pipelines()) {
@@ -230,9 +243,14 @@ class CatalogImportValidator {
             schemas.defineSchema(name, tableMapper.toDefineInput(table.schema()), DdlExecutor.NO_OP);
         }
 
-        /** What {@code PATCH enabled=true} would say about the pipeline as the import leaves it. */
+        /**
+         * What {@code PATCH enabled=true} would say about the pipeline as the import leaves it. A pipeline the import keeps
+         * enabled is armed already: one it skips passed the gate when it was armed, and one it updates passed it again in
+         * its own re-declaration, which runs the gate because it leaves the pipeline enabled.
+         */
         private void arm(PlannedObject pipeline) {
-            if (pipeline.existing() instanceof BundlePipeline existing && existing.exportedEnabled()) {
+            if (pipeline.existing() instanceof BundlePipeline existing && existing.exportedEnabled()
+                    && !pipeline.hasChange(PlannedChange.Op.DISABLE)) {
                 pipeline.armable(true);
                 return;
             }

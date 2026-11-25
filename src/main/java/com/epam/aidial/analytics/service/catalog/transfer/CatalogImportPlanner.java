@@ -41,13 +41,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Plans a catalog import against a snapshot of the target ({@link ImportTarget}), touching no repository:
- * checks the required system tables, classifies each collision by the resolution policy,
+ * checks the required system tables, classifies each collision by the resolution policy (under {@code OVERWRITE}, and as a
+ * preview under {@code SKIP_IF_EXISTS}, through the {@link ObjectDiff} of the existing object),
  * checks that every dependency is in the bundle or already on the target, orders the objects, checks the
  * catalog limits on the totals, and collects the environment-specific values.
  *
@@ -210,12 +210,14 @@ public class CatalogImportPlanner {
     private PlannedObject planTable(PlannedObject planned, ResolutionPolicy policy, ImportTarget target,
             List<EnvSpecificValue> envSpecific, List<String> validationErrors) {
         final BundleTable table = planned.table();
-        final DefineSchemaRequest schema = table.schema();
-        if (schema.ttl() != null) {
-            envSpecific.add(new EnvSpecificValue(PlannedObject.Kind.TABLE.code(), planned.name(), "ttl",
-                    schema.ttl().interval() + " " + schema.ttl().unit()));
-        }
         final ImportTarget.Table existing = target.tables().get(planned.name());
+        final BundleTable stored = existing == null || existing.system() ? null : existing.bundle();
+        final String bundledTtl = TargetOwnedFields.ttl(table);
+        final String storedTtl = TargetOwnedFields.ttl(stored);
+        if (bundledTtl != null || storedTtl != null) {
+            envSpecific.add(new EnvSpecificValue(PlannedObject.Kind.TABLE.code(), planned.name(), TargetOwnedFields.TABLE_TTL,
+                    bundledTtl, storedTtl, stored != null));
+        }
         if (existing != null && existing.system()) {
             planned.fail("table '" + planned.name() + "' is a system table on this environment");
             return planned;
@@ -233,6 +235,13 @@ public class CatalogImportPlanner {
                 planned.conflict("table '" + planned.name() + "' already exists");
             } else {
                 planned.skip();
+                final ObjectDiff.Result diff = ObjectDiff.table(existing.bundle(), table,
+                        target.pipelineByTarget().get(planned.name()));
+                if (policy == ResolutionPolicy.OVERWRITE) {
+                    overwrite(planned, diff, hiddenColumns(existing));
+                } else {
+                    planned.diff(diff);
+                }
             }
             compare(planned, existing.bundle());
             return planned;
@@ -245,6 +254,37 @@ public class CatalogImportPlanner {
             validationErrors.add("table '" + planned.name() + "': " + problem);
         }
         return planned;
+    }
+
+    /**
+     * Records an {@code OVERWRITE} diff: a refusal fails the object, a change updates it, and an object with nothing to
+     * change stays {@code SKIP} with what it keeps. A table that hides a column from the caller cannot be updated, because
+     * the schema patch resolves the caller's visible columns only.
+     *
+     * @param hidden why the caller cannot see the whole table, or null when it can
+     */
+    private static void overwrite(PlannedObject planned, ObjectDiff.Result diff, String hidden) {
+        planned.diff(diff);
+        if (diff.refused()) {
+            diff.refusals().forEach(planned::fail);
+        } else if (diff.hasChanges()) {
+            planned.update(diff);
+            if (hidden != null) {
+                planned.fail("updating " + planned.kind().code() + " '" + planned.name() + "' needs every column of it "
+                        + "visible to the caller: " + hidden);
+            }
+        }
+    }
+
+    /** Why the caller cannot see every column of an existing table, or null when it can. */
+    private static String hiddenColumns(ImportTarget.Table existing) {
+        if (existing.prev() == null) {
+            return "the caller may not get the table";
+        }
+        final int all = nullSafe(existing.bundle().schema().columns()).size();
+        final int visible = nullSafe(existing.prev().schema().columns()).size();
+        return visible < all ? (all - visible) + " column(s) are hidden from the caller, by sensitivity or by a column policy"
+                : null;
     }
 
     /** How many columns define-schema would persist for this table: its own plus the provenance it is given. */
@@ -284,14 +324,20 @@ public class CatalogImportPlanner {
     private PlannedObject planPipeline(PlannedObject planned, ResolutionPolicy policy, boolean acknowledgeReusedNames,
             ImportTarget target, List<EnvSpecificValue> envSpecific) {
         final BundlePipeline.Declaration declaration = planned.pipeline().pipeline();
-        collectEnvSpecific(declaration, envSpecific);
         final BundlePipeline existing = target.pipelines().get(planned.name());
+        collectEnvSpecific(declaration, existing == null ? null : existing.pipeline(), policy, envSpecific);
         if (existing != null) {
             planned.found(existing, target.pipelinesVisible() ? existing : null);
             if (policy == ResolutionPolicy.FAIL_IF_EXISTS) {
                 planned.conflict("pipeline '" + planned.name() + "' already exists");
             } else {
                 planned.skip();
+                final ObjectDiff.Result diff = ObjectDiff.pipeline(existing, planned.pipeline(), jsonMapper);
+                if (policy == ResolutionPolicy.OVERWRITE) {
+                    overwrite(planned, diff, null);
+                } else {
+                    planned.diff(diff);
+                }
             }
             compare(planned, existing);
             return planned;
@@ -312,16 +358,27 @@ public class CatalogImportPlanner {
         return planned;
     }
 
-    private static void collectEnvSpecific(BundlePipeline.Declaration declaration, List<EnvSpecificValue> envSpecific) {
-        final BiConsumer<String, Object> add = (field, value) -> {
-            if (value != null) {
-                envSpecific.add(new EnvSpecificValue(PlannedObject.Kind.PIPELINE.code(), declaration.name(), field,
-                        value.toString()));
+    /**
+     * The pipeline's environment-specific values: each target-owned field the bundle or, on an existing pipeline, the
+     * target sets, and each absolute date literal in its filter or statement. An existing pipeline keeps the target's
+     * value of a target-owned field, except under {@code OVERWRITE} for a deployment binding whose preset changed, which
+     * takes the bundle's.
+     *
+     * @param stored the target's declaration, or null when the pipeline is new
+     */
+    private static void collectEnvSpecific(BundlePipeline.Declaration declaration, BundlePipeline.Declaration stored,
+            ResolutionPolicy policy, List<EnvSpecificValue> envSpecific) {
+        for (final TargetOwnedFields.Field field : TargetOwnedFields.PIPELINE) {
+            final Object value = field.read(declaration);
+            final Object targetValue = field.read(stored);
+            if (value == null && targetValue == null) {
+                continue;
             }
-        };
-        add.accept("transform.model", declaration.transform() == null ? null : declaration.transform().model());
-        add.accept("advanced.rate_rpm", declaration.advanced() == null ? null : declaration.advanced().rateRpm());
-        add.accept("trigger.cron", declaration.trigger() == null ? null : declaration.trigger().cron());
+            final boolean kept = stored != null && (policy != ResolutionPolicy.OVERWRITE
+                    || TargetOwnedFields.kept(field, declaration, stored));
+            envSpecific.add(new EnvSpecificValue(PlannedObject.Kind.PIPELINE.code(), declaration.name(), field.path(),
+                    text(value), text(targetValue), kept));
+        }
         // A statement's date literals are found by the filter's own scan, so a `WHERE request_time >= '2026-08-05'` in
         // `sql` is as visible as the same predicate written as a filter.
         for (final String field : List.of("filter", "sql")) {
@@ -329,10 +386,19 @@ public class CatalogImportPlanner {
             if (text != null) {
                 final Matcher dates = DATE_LITERAL.matcher(text);
                 while (dates.find()) {
-                    add.accept(field, dates.group(1));
+                    envSpecific.add(new EnvSpecificValue(PlannedObject.Kind.PIPELINE.code(), declaration.name(), field,
+                            dates.group(1), null, false));
                 }
             }
         }
+    }
+
+    /** A field value as the report spells it: an enum by its wire code, anything else by its string form. */
+    private static String text(Object value) {
+        if (value == null) {
+            return null;
+        }
+        return value instanceof Enum<?> constant ? constant.name().toLowerCase(Locale.ROOT) : value.toString();
     }
 
     /** The table names a declaration cannot be created or armed without. */
@@ -447,7 +513,7 @@ public class CatalogImportPlanner {
             }
         }
         for (final PlannedObject pipeline : pipelines) {
-            if (!pipeline.creates()) {
+            if (!pipeline.writes()) {
                 continue;
             }
             final BundlePipeline.Declaration declaration = pipeline.pipeline().pipeline();
