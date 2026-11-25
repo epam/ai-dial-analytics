@@ -80,7 +80,7 @@
     filter copied into a key subquery and a first mask reference in a lambda capture;
   - a lambda reading 16 masked fields under a policy near 16 KiB, sixteen lambdas each reading one, and a filter-only
     lambda in a key subquery all run under the default `max_query_size` and `max_ast_elements`
-- [ ] 3.5 Collapsing shapes:
+- [x] 3.5 Collapsing shapes:
   - a row-mode distinct projection with marks renders as `GROUP BY <every output>` in place of `DISTINCT`, each flag as
     `max(<flag>)`, a sort key that is not an output as `any(<key>)`, and the row flag (`NOT mask`) of each output that is
     a bare masked composite field as a further key;

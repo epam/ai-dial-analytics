@@ -458,6 +458,12 @@ refuses it explicitly as a column the path reads.
   rows a page returns.
 - **A row-mode distinct with a page limit no longer stops early.** The mark ORs every collapsed row, so the whole
   filtered range is read. This is the cost of exact marks, and the grouped form keeps it bounded in memory.
+  Benchmarked on synthetic data (millions of rows, four threads, 26.3 and 26.8), the collapsing forms against the
+  `DISTINCT` they replace: without a sort, the grouped form stays within a small factor of `DISTINCT` at low and high
+  cardinality alike (both finish in hundredths of a second); with a sort at high cardinality it is faster, since
+  `DISTINCT` then sorts every distinct value; over a JSON output it is within about half again. The aggregate-mode
+  window costs up to a few times the plain aggregate-mode `DISTINCT` it extends, over many groups. None changes the
+  order of magnitude of the statement.
 - **Row order discloses masked ordering-key values.** Without a total order, and inside order-sensitive aggregates,
   ClickHouse returns rows in roughly storage order, which follows the stored ordering-key and partition values. An
   absent key cell between present ones can be read from its neighbours, often exactly. This was probed on 26.3. The
