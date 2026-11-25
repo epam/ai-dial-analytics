@@ -17,9 +17,11 @@ import org.apache.calcite.tools.Frameworks;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Builds the Calcite schema the SQL front end validates against, from the same catalog as the
@@ -51,7 +53,19 @@ public class CalciteQueryCatalog {
             SchemaPlus rootSchema,
             Map<String, Map<String, QueryFieldType>> entityFieldTypes,
             Map<String, Map<String, QueryFieldType>> entityElementTypes,
-            Map<String, List<String>> entityWildcardFields) {
+            Map<String, List<String>> entityWildcardFields,
+            Map<String, Set<String>> entityMaskedFields,
+            Map<String, Set<String>> entityTables) {
+
+        /** The flat names of {@code entity}'s fields a column policy masks for the caller; empty for an unknown entity. */
+        public Set<String> maskedFields(String entity) {
+            return entityMaskedFields.getOrDefault(entity, Set.of());
+        }
+
+        /** The tables {@code entity} reads: its source and the enrichments in its model; empty for an unknown entity. */
+        public Set<String> tables(String entity) {
+            return entityTables.getOrDefault(entity, Set.of());
+        }
 
         /** Declared flat field types for {@code entity}, or null if it is not a queryable entity. */
         public Map<String, QueryFieldType> fieldTypes(String entity) {
@@ -85,6 +99,8 @@ public class CalciteQueryCatalog {
         final Map<String, Map<String, QueryFieldType>> elementTypes = new LinkedHashMap<>();
         final Map<String, List<String>> wildcardFields = new LinkedHashMap<>();
         final Map<String, Table> entityTables = new LinkedHashMap<>();
+        final Map<String, Set<String>> maskedFields = new LinkedHashMap<>();
+        final Map<String, Set<String>> tables = new LinkedHashMap<>();
         final List<QueryEntityModel> models = new ArrayList<>();
         for (final String name : catalog.queryableEntityNames(bar)) {
             catalog.findModel(name, bar).ifPresent(model -> {
@@ -95,6 +111,17 @@ public class CalciteQueryCatalog {
                 types.put(model.entity(), fieldTypes(model));
                 elementTypes.put(model.entity(), elementTypes(model));
                 wildcardFields.put(model.entity(), List.copyOf(WildcardProjection.sourceFields(model)));
+                final Set<String> masked = new HashSet<>();
+                model.bindings().forEach((field, binding) -> {
+                    if (binding.isMasked()) {
+                        masked.add(field);
+                    }
+                });
+                maskedFields.put(model.entity(), Set.copyOf(masked));
+                final Set<String> read = new HashSet<>();
+                read.add(model.table().getName());
+                model.enrichments().forEach(join -> read.add(join.table().getName()));
+                tables.put(model.entity(), Set.copyOf(read));
             });
         }
         // The same table instances are reachable twice: bare in the root, which keeps every statement
@@ -108,7 +135,8 @@ public class CalciteQueryCatalog {
             }
         });
         InformationSchema.attach(root, List.copyOf(models));
-        return new Snapshot(root, Map.copyOf(types), Map.copyOf(elementTypes), Map.copyOf(wildcardFields));
+        return new Snapshot(root, Map.copyOf(types), Map.copyOf(elementTypes), Map.copyOf(wildcardFields),
+                Map.copyOf(maskedFields), Map.copyOf(tables));
     }
 
     private static Map<String, QueryFieldType> fieldTypes(QueryEntityModel model) {

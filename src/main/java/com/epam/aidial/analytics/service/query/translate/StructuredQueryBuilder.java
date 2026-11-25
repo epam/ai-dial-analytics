@@ -1140,6 +1140,13 @@ public class StructuredQueryBuilder {
         return names;
     }
 
+    /** Every field name an expression references (a lambda's own parameters excluded, a scalar subquery's body not). */
+    public static Set<String> referencedFields(Expr expr) {
+        final Set<String> names = new HashSet<>();
+        collectExpr(expr, names);
+        return names;
+    }
+
     /** Collects every field name a query references across filter, having, select, sort, and group_by. */
     public static Set<String> referencedFields(StructuredQuery query) {
         final Set<String> names = new HashSet<>();

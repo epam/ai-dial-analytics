@@ -1,9 +1,11 @@
 package com.epam.aidial.analytics.service.query.sql;
 
+import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.observability.SqlLog;
 import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.model.SetOpKind;
+import com.epam.aidial.analytics.service.query.translate.MaskedPlanRules;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -301,7 +303,9 @@ public class SqlQueryFrontEnd {
                 }
                 return InformationSchemaExecutor.execute(root);
             }
-            return RelToStructuredQueryTranslator.translate(root, snapshot);
+            final SqlStatementPlan plan = RelToStructuredQueryTranslator.translate(root, snapshot);
+            refuseOverMaskedFields(plan, snapshot);
+            return plan;
         } catch (SqlParseException e) {
             throw parseError(sql, e);
         } catch (ValidationException e) {
@@ -487,6 +491,22 @@ public class SqlQueryFrontEnd {
 
     private static String normalized(SqlNode node) {
         return node.toString().replaceAll("\\s+", " ").toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * The refusals a masked field brings to a planned statement ({@link MaskedPlanRules}): here, where every SQL surface
+     * plans, so validation and a saved query's save refuse what the statement's execution would.
+     */
+    private static void refuseOverMaskedFields(SqlStatementPlan plan, CalciteQueryCatalog.Snapshot snapshot) {
+        try {
+            if (plan instanceof SqlTranslation translation) {
+                MaskedPlanRules.check(translation.query(), snapshot::maskedFields, snapshot::tables);
+            } else if (plan instanceof SqlCompositeTranslation composite) {
+                MaskedPlanRules.check(composite.query(), snapshot::maskedFields, snapshot::tables);
+            }
+        } catch (QueryValidationException e) {
+            throw new SqlTranslationException(e.getMessage(), e);
+        }
     }
 
     /** A parse failure of an INSERT, with the two known non-grammar causes — backticks, SETTINGS — named. */
