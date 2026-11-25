@@ -140,13 +140,13 @@
 - [x] 4.2 Null computed fields on rows whose flag is not `0`, and skip their completion read there
   (`ComputedFieldCompleter`, `RequestChainReader`), running the completion before the flag columns are stripped from
   the rows and from `outputColumns(select)`
-- [ ] 4.3 Refuse a top-level output column named `$masked` (`400 bad_request`; Flight `INVALID_ARGUMENT`) on the
+- [x] 4.3 Refuse a top-level output column named `$masked` (`400 bad_request`; Flight `INVALID_ARGUMENT`) on the
   statement's top-level output names only — a single-entity statement's and a composite plan's outermost block's, not
   in the shared `OutputColumnNaming.resolve` — in the DSL path and in `SqlQueryFrontEnd.plan` before its
   `INFORMATION_SCHEMA` branch, with tests for the DSL alias, the SQL alias, an `INFORMATION_SCHEMA` alias, translation,
   Flight and `validate-sql` (`valid: false`), that `$Masked` is accepted, and that a derived-table column named
   `$masked` executes
-- [ ] 4.4 Place the masked-output refusals (`$masked` name, `intersect`/`except`, a table-named name) where every surface
+- [x] 4.4 Place the masked-output refusals (`$masked` name, `intersect`/`except`, a table-named name) where every surface
   resolves the query: the SQL front end's plan step (`SqlQueryFrontEnd.plan`, which
   `validate-sql`, `sql` saved-query and inline-widget validation through `SavedQueryBodyResolver`, and `execute-sql`
   share) and the DSL builder (which `execute`, `translate` and `query`-kind saved-query and dashboard validation
