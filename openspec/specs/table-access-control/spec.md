@@ -1668,8 +1668,8 @@ govern — an IdP group, a role conferring only `write`, a role conferring only 
 take no part, so it SHALL NOT lift a restriction and its row policy SHALL NOT enter a mask condition, unless it is a
 row-contributing role. A role whose entry carries `rows` but which has no read path adds its rows to a confined caller
 carrying it, by row-policy evaluation, and its `columns` then narrow what those rows show: a column its list leaves out
-is masked, and absent on the rows only it adds. A rows-only entry whose `columns` is `null` narrows nothing, so it shows
-the governing roles' columns on the rows it adds, as before this change. A caller with no governing role is covered
+is masked, and absent on the rows only it adds. A rows-only entry whose `columns` is `null` narrows nothing: it shows
+the governing roles' columns on the rows it adds. A caller with no governing role is covered
 below.
 
 A masked column SHALL be listed, named and referenced wherever a visible column is: schema discovery (which marks it,

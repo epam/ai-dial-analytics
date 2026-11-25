@@ -1949,8 +1949,8 @@ separate count of the same filter; otherwise it SHALL be null.
 
 A row with at least one marked cell (see "Masked inputs are reported per output cell") SHALL carry one more member,
 `$masked`: a JSON array of the marked output columns' names, in projection order, each named as its key in the row. A
-row with no marked cell SHALL NOT carry `$masked`, so a caller none of whose columns is masked receives exactly the
-rows it received before masking existed, for any query that does not name an output `$masked`. `$masked` is never an
+row with no marked cell SHALL NOT carry `$masked`, so a caller none of whose columns is masked receives rows that carry
+their output columns alone, for any query that does not name an output `$masked`. `$masked` is never an
 output column (see "`$masked` is a reserved output
 column name"), so it cannot collide with one. A marked cell SHALL keep its key in the row, carrying its value: null for
 an absent field, or what the expression computed from the absent value.
