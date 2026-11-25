@@ -690,6 +690,45 @@ class CatalogQueryServiceTest {
         assertThat(ctx.renderInlined(model.bindings().get("widget_id").value())).isEqualTo("\"events\".\"widget_id\"");
     }
 
+    /** A sensitive column stays hidden without the clearance however the column policies would mask it. */
+    @Test
+    void sensitiveColumnWithoutClearanceStaysHiddenEvenWhenItWouldBeMasked() {
+        appendSourceWithEnrichment(Privilege.TABLE_READ, "X");
+        final TableDefinitionEntity source = definitions.findById("events").orElseThrow();
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("X", "Y"));
+        lenient().when(columns.findByTableNameOrderByOrdinal("events")).thenReturn(List.of(
+                column("events", "widget_id", QueryFieldType.STRING, 0), sensitiveColumn("events", "secret", QueryFieldType.STRING, 1)));
+        source.setRowPolicies(new RowPolicyCodec(new JsonMapperConfiguration().jsonMapper())
+                .write(Map.of("X", widgetIs("w1"), "Y", widgetIs("w2"))));
+        source.setColumnPolicies("{\"X\": [\"widget_id\"]}");
+
+        assertThat(oidcService("X", "Y").findModel("events", Privilege.TABLE_READ).orElseThrow().bindings())
+                .containsKey("widget_id").doesNotContainKey("secret");
+    }
+
+    /** A computed field is masked when a column it returns is, its mask the conjunction of theirs. */
+    @Test
+    void computedFieldsOverMaskedColumnsAreMasked() {
+        stubPayloadEntity(column("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0),
+                column("dial_usage_log_payload", "request_cache_control", QueryFieldType.STRING, 1));
+        final TableDefinitionEntity source = definitions.findById("dial_usage_log").orElseThrow();
+        source.getAccess().setRead(List.of("X", "Y"));
+        final TableDefinitionEntity payload = definitions.findBySourceTable("dial_usage_log").getFirst();
+        lenient().when(definitions.findById("dial_usage_log_payload")).thenReturn(Optional.of(payload));
+        lenient().when(columns.findByTableNameOrderByOrdinal("dial_usage_log")).thenReturn(List.of(
+                column("dial_usage_log", "trace_id", QueryFieldType.STRING, 0), column("dial_usage_log", "widget_id", QueryFieldType.STRING, 1)));
+        source.setRowPolicies(new RowPolicyCodec(new JsonMapperConfiguration().jsonMapper())
+                .write(Map.of("X", widgetIs("w1"), "Y", widgetIs("w2"))));
+        source.setColumnPolicies("{\"X\": [\"trace_id\"]}");
+
+        final QueryEntityModel model = oidcService("X", "Y").findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body").isMasked()).isTrue();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body_full").isMasked())
+                .as("its inputs are masked, none hidden").isTrue();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body_full").value())
+                .as("a stand-in is never wrapped").isSameAs(model.bindings().get("dial_usage_log_payload.request_body_full").physicalField());
+    }
+
     private static RowPolicy widgetIs(String widget) {
         return new RowPolicy(new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("widget_id"), new ValueExpr(ValueType.STRING, widget))));
     }

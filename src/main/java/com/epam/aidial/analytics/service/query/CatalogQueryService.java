@@ -272,7 +272,7 @@ public class CatalogQueryService {
                 final List<ColumnMask> inputMasks = new ArrayList<>();
                 for (final String input : ColumnVisibility.inputs(computed.column(), enrichmentColumns)) {
                     final ColumnMask inputMask = masks.of(enrichmentVisibility.masks(input));
-                    if (inputMask != null) {
+                    if (inputMask != null && !inputMasks.contains(inputMask)) {
                         inputMasks.add(inputMask);
                     }
                 }

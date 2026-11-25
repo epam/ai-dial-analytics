@@ -13,13 +13,13 @@
   its enrichment, and an enrichment `e` storing a `Map` column `e`); `isAll()` means "nothing hidden or masked", and its callers
   (`SensitiveProjectionGuard.enforceVisible`, `TableCallerPermissions`, `TableCatalogService`, `CatalogExportService`,
   `ImportTargetReader`) are reviewed against that meaning
-- [ ] 1.2 Update `SensitiveColumnAccessTest` to the modified scenarios (`confiningRolesIntersect`,
+- [x] 1.2 Update `SensitiveColumnAccessTest` to the modified scenarios (`confiningRolesIntersect`,
   `intersectionOfConfiningRoles`, `rowUnrestrictedRoleWidens`, `computedFieldsFollowTheirColumns`) and add cases for the
   `*` own-rows policy, a get-only caller and a sensitive column without the clearance staying hidden
 
 ## 2. Query model
 
-- [ ] 2.1 Add `mask` and `absent` to `QueryFieldBinding`, rename `field()` to `physicalField()`, add `value()` —
+- [x] 2.1 Add `mask` and `absent` to `QueryFieldBinding`, rename `field()` to `physicalField()`, add `value()` —
   `if(mask, if(mask, f, defaultValueOfArgumentType(assumeNotNull(f))), NULL)` for a scalar, `if(mask, f, <empty>)` for
   a composite, a computed stand-in left unwrapped — and review every former `field()` call site, recording in the
   commit which read the physical name on purpose
@@ -35,15 +35,15 @@
 - [x] 2.4 Add `masked` to `QuerySchemaFieldDto` and set it in discovery; update the `@Schema` descriptions that go
   stale (`columns_restricted` "hide or mask", `StructuredQueryResultDto.rows` naming `$masked`, the
   `403 column_not_entitled` descriptions naming masked columns); regenerate `docs/openapi.json`
-- [ ] 2.5 `CatalogQueryServiceTest`: replace `columnsHiddenByColumnPolicyLeaveTheModel` and
+- [x] 2.5 `CatalogQueryServiceTest`: replace `columnsHiddenByColumnPolicyLeaveTheModel` and
   `computedFieldsFollowTheColumnPolicyOfTheColumnsTheyReturn` with masked, hidden and computed cases
 
 ## 3. Statement building
 
-- [ ] 3.1 Resolve every reference through `value()`: `ExprTranslator.resolveFieldOrNull`, the wildcard projection
+- [x] 3.1 Resolve every reference through `value()`: `ExprTranslator.resolveFieldOrNull`, the wildcard projection
   (aliased to `physicalField().getName()`, the key it emits today), object-path access (mask around the extracted subcolumn), `toJSONString` over an object,
   array expansion, windows, `having`, the count query
-- [ ] 3.2 Keep the mask out of the enrichment derived table and apply it in the outer select; keep composite key
+- [x] 3.2 Keep the mask out of the enrichment derived table and apply it in the outer select; keep composite key
   reduction on stored keys (the join's `ON` compares masked outputs); keep the grain join on stored keys, translate its
   key sets through the same masked or rewritten conjunct forms as the outer filter, and transfer partition bounds from
   a masked partition field only for rewritten null-rejecting conjuncts
@@ -102,7 +102,7 @@
   - a flag propagated from a composite operand is wrapped `ifNull(flag, 0)`;
   - `intersect`/`except` whose operand output depends on a masked field is refused (`400 bad_request` naming the
     field)
-- [ ] 3.6 Rewrite top-level conjuncts of a masked scalar field compared with any operand containing no subquery and
+- [x] 3.6 Rewrite top-level conjuncts of a masked scalar field compared with any operand containing no subquery and
   not the null literal, nor an `in` list holding one (`eq`/`ne`/`lt`/`le`/`gt`/`ge`/`in`/string match), or tested
   `is not null` (`ne null`), to
   `mask AND <comparison on physicalField()>` with the operand reading masked values, in `FilterTranslator` for a
@@ -133,11 +133,11 @@
 
 ## 4. Results
 
-- [ ] 4.1 As a step of its own after `materialize` and `complete` (`StructuredQueryExecutor`, before the
+- [x] 4.1 As a step of its own after `materialize` and `complete` (`StructuredQueryExecutor`, before the
   `QueryResultPage(outputColumns(select), …)` and in `run()`), build `$masked` per row from the flags and each output's
   condition set (projection order, member omitted when empty, any flag value but `0` counting as absent), null a bare
   composite masked cell, and drop the flag columns from the columns and the row maps
-- [ ] 4.2 Null computed fields on rows whose flag is not `0`, and skip their completion read there
+- [x] 4.2 Null computed fields on rows whose flag is not `0`, and skip their completion read there
   (`ComputedFieldCompleter`, `RequestChainReader`), running the completion before the flag columns are stripped from
   the rows and from `outputColumns(select)`
 - [ ] 4.3 Refuse a top-level output column named `$masked` (`400 bad_request`; Flight `INVALID_ARGUMENT`) on the
@@ -155,7 +155,7 @@
 
 ## 5. Other consumers
 
-- [ ] 5.1 `TableCallerPermissions`: `columns_restricted` is true when a column is hidden or masked
+- [x] 5.1 `TableCallerPermissions`: `columns_restricted` is true when a column is hidden or masked
   (`TableCallerPermissionsTest`)
 - [ ] 5.2 `TableMapper`, `TableCatalogService`, `TableSchemaService`, `CatalogExportService`, `ImportTargetReader`
   treat a masked column as visible, except that `TableSchemaService` refuses `403 column_not_entitled` a `ttl.column`
