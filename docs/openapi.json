@@ -739,7 +739,7 @@
               },
               "type": "object"
             },
-            "description": "Present only when exported with include_access: table -> role -> entry, for every covered table, system tables included. Imported only with include_access=true",
+            "description": "Present only when exported with include_access: table -> role -> entry, for every covered table, system tables included. A key may name a table the bundle does not carry, which import then requires on the target. Imported only with include_access=true",
             "type": "object"
           },
           "exported_at": {
@@ -767,7 +767,7 @@
             "type": "array"
           },
           "required_system_tables": {
-            "description": "System tables the bundle's objects depend on or whose access it carries, by name: import requires each to exist on the target and never creates one or changes its definition",
+            "description": "System tables, by name, that the carried closure reaches, that the selection names, or whose access the bundle carries; a pipeline exported with dependencies false brings none in. Import requires each to exist on the target and never creates one or changes its definition",
             "example": [
               "dial_usage_log"
             ],
@@ -1845,11 +1845,27 @@
       },
       "ExportComponent": {
         "properties": {
+          "access_only": {
+            "description": "Table only, with include_access. True carries only the table's access entries: no definition, and nothing it depends on or that depends on it, unless another selected component's closure reaches it. Default false",
+            "type": "boolean"
+          },
+          "dependencies": {
+            "description": "Pipeline only. False exports the pipeline alone, without its inputs, target or the enrichments it reads, unless another selected component's closure reaches it; import then needs each on the target. Default true",
+            "type": "boolean"
+          },
           "name": {
             "description": "Table or pipeline name",
             "example": "usage_sentiment",
             "minLength": 1,
             "type": "string"
+          },
+          "roles": {
+            "description": "Table only, with include_access. Carries only these roles' entries of the table; absent carries every role's",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
           },
           "type": {
             "description": "Object kind",
@@ -1912,7 +1928,7 @@
             "type": "array"
           },
           "required_system_tables": {
-            "description": "System tables the bundle would require on the target by name, never carrying their definitions: those its objects depend on and, with include_access, those whose access it carries",
+            "description": "System tables the bundle would require on the target by name, never carrying their definitions: those the carried closure reaches or the selection names and, with include_access, those whose access it carries",
             "items": {
               "$ref": "#/components/schemas/ExportEntry"
             },
@@ -1931,7 +1947,7 @@
       "ExportRequest": {
         "properties": {
           "components": {
-            "description": "Objects to export; empty or absent exports everything exportable. With include_access, a system table may be named to export its access",
+            "description": "Objects to export; empty or absent exports everything exportable. Each brings its dependency closure unless a selector narrows it: dependencies false on a pipeline, access_only or roles on a table. With include_access, a system table may be named to export its access",
             "items": {
               "$ref": "#/components/schemas/ExportComponent"
             },
@@ -5457,6 +5473,59 @@
         ],
         "type": "object"
       },
+      "TrialInputRequest": {
+        "properties": {
+          "from": {
+            "description": "Exclusive lower bound on the input's version column (row-grain pipelines only)",
+            "example": "2026-07-01T00:00:00Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "group_key": {
+            "description": "The group to try, for a `group`-triggered pipeline; without it the newest group is chosen, as the preview chooses it",
+            "example": "chat-42",
+            "type": "string"
+          },
+          "limit": {
+            "description": "How many of the newest sampled rows to return, 1 to 5; 1 when omitted. Refused on a `group` pipeline, whose trial input is the whole group",
+            "example": 1,
+            "format": "int32",
+            "type": "integer"
+          },
+          "to": {
+            "description": "Inclusive upper bound on the input's version column (row-grain pipelines only)",
+            "example": "2026-08-01T00:00:00Z",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TrialInputResponse": {
+        "properties": {
+          "input_rows": {
+            "description": "The rows the runner would receive, with no value cap: the newest `limit` sampled rows keyed as a scan row, or the whole group as `/group-rows` returns it",
+            "items": {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pipeline": {
+            "$ref": "#/components/schemas/PipelineDto",
+            "description": "The compiled projection of the declaration the sample was read through; for a disabled pipeline, as the gate derived it rather than as stored"
+          },
+          "preview": {
+            "$ref": "#/components/schemas/PreviewDto",
+            "description": "The response `POST /v1/pipelines/{name}/preview` gives for the same body, values capped"
+          },
+          "truncated": {
+            "description": "Whether the group fetch's row or byte cap cut the group (`group` pipelines only)",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "TriggerRequest": {
         "properties": {
           "cron": {
@@ -6123,7 +6192,7 @@
     },
     "/v1/catalog/export": {
       "post": {
-        "description": "Returns a bundle file of the listed tables and pipelines with their dependency closure, computed in both directions; an empty or absent list exports every exportable object. System tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left out. Each table needs TABLE_GET, and one with sensitive columns the caller may not see is refused (403 `sensitive_column_not_entitled`), and one with a column a column policy hides from the caller is refused 403 `column_not_entitled`, checked across every bundle table first. Access (privileges, row policies and column policies) travels only with `include_access: true`, which requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, and an enrichment a column policy names joins the export.",
+        "description": "Returns a bundle file of the listed tables and pipelines with their dependency closure, computed in both directions; an empty or absent list exports every exportable object. System tables travel by name, as required system tables; OTLP landing tables and PENDING/FAILED tables are left out. Each selected table, and each table a selection's closure reaches, needs TABLE_GET (a pipeline exported with `dependencies: false` checks none of its tables), and a table the bundle carries with sensitive columns the caller may not see is refused (403 `sensitive_column_not_entitled`), and one with a column a column policy hides from the caller is refused 403 `column_not_entitled`, checked across every bundle table first. Access (privileges, row policies and column policies) travels only with `include_access: true`, which requires TABLE_GRANT and covers system tables too: only what a PUT would accept now is carried, and an enrichment a column policy names joins the export. Selectors narrow a component: `dependencies: false` exports a pipeline alone; `access_only: true` carries only a table's access, with no definition and nothing connected; `roles` carries only the listed roles' entries. A component another selected component's closure reaches travels as that closure decides.",
         "operationId": "exportCatalog",
         "requestBody": {
           "content": {
@@ -9271,7 +9340,7 @@
           },
           {
             "description": "The ADAS <-> Enrichment Runner contract version the caller was built against, compared for equality. Absent -> 409 `runner_contract_required`; different -> 409 `runner_contract_mismatch`. Every `/v1/pipelines` response echoes the version this build serves in the same header, so a caller that sees no echo is talking to an ADAS older than the contract and must not act on what it read.",
-            "example": 6,
+            "example": 7,
             "in": "header",
             "name": "Adas-Contract-Version",
             "required": true,
@@ -9405,7 +9474,7 @@
           },
           {
             "description": "The ADAS <-> Enrichment Runner contract version the caller was built against, compared for equality. Absent -> 409 `runner_contract_required`; different -> 409 `runner_contract_mismatch`. Every `/v1/pipelines` response echoes the version this build serves in the same header, so a caller that sees no echo is talking to an ADAS older than the contract and must not act on what it read.",
-            "example": 6,
+            "example": 7,
             "in": "header",
             "name": "Adas-Contract-Version",
             "required": true,
@@ -9895,7 +9964,7 @@
           },
           {
             "description": "The ADAS <-> Enrichment Runner contract version the caller was built against, compared for equality. Absent -> 409 `runner_contract_required`; different -> 409 `runner_contract_mismatch`. Every `/v1/pipelines` response echoes the version this build serves in the same header, so a caller that sees no echo is talking to an ADAS older than the contract and must not act on what it read.",
-            "example": 6,
+            "example": 7,
             "in": "header",
             "name": "Adas-Contract-Version",
             "required": true,
@@ -10029,7 +10098,7 @@
           },
           {
             "description": "The ADAS <-> Enrichment Runner contract version the caller was built against, compared for equality. Absent -> 409 `runner_contract_required`; different -> 409 `runner_contract_mismatch`. Every `/v1/pipelines` response echoes the version this build serves in the same header, so a caller that sees no echo is talking to an ADAS older than the contract and must not act on what it read.",
-            "example": 6,
+            "example": 7,
             "in": "header",
             "name": "Adas-Contract-Version",
             "required": true,
@@ -10140,6 +10209,139 @@
           }
         },
         "summary": "Scan a page of source rows for an enrich pipeline",
+        "tags": [
+          "Pipelines"
+        ],
+        "x-internal": true
+      }
+    },
+    "/v1/pipelines/{name}/trial-input": {
+      "post": {
+        "description": "Runs every check and the sample `POST /v1/pipelines/{name}/preview` runs for the same body, under the caller's identity — the runner forwards the credential of the person who asked for the dry run — and returns that `preview`, the compiled `pipeline` it sampled through (for a disabled pipeline, as the gate derived it) and the `input_rows` the runner would receive with no value cap: the newest `limit` sampled rows of a row-grain pipeline, or the whole group of a `group` one as `/group-rows` assembles it, with `truncated`, read after the preview's member sample and so able to hold members ingested since. Writes nothing, advances no cursor, and is served for a disabled pipeline.",
+        "operationId": "fetchPipelineTrialInput",
+        "parameters": [
+          {
+            "description": "Pipeline name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The ADAS <-> Enrichment Runner contract version the caller was built against, compared for equality. Absent -> 409 `runner_contract_required`; different -> 409 `runner_contract_mismatch`. Every `/v1/pipelines` response echoes the version this build serves in the same header, so a caller that sees no echo is talking to an ADAS older than the contract and must not act on what it read.",
+            "example": 7,
+            "in": "header",
+            "name": "Adas-Contract-Version",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrialInputRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrialInputResponse"
+                }
+              }
+            },
+            "description": "The preview, the declaration it sampled through, and the rows the runner would receive, uncapped"
+          },
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "A malformed body, or one carrying an unknown member (`bad_request`)"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "As the preview: a column the caller may not read (`column_not_entitled`, `sensitive_column_not_entitled`), a row-confined caller (`row_policy_confined`), no `read` on the source or `write` on the target (`pipeline_access_denied`), or no `REGISTRY_ADMIN` (`forbidden`)"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "No such pipeline (`unknown_pipeline`)"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "Contract version missing (`runner_contract_required`) or not the one this build serves (`runner_contract_mismatch`); nothing was read, computed or written; or a conflict arming would also report (`pipeline_conflict`, `table_is_system`)"
+          },
+          "413": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "The declaration would not arm; the pipeline calls no model (`aggregate`, or a `sql` transform); the body does not fit the pipeline (`limit` outside 1-5 or on a `group` pipeline, and the preview's own refusals) (`pipeline_validation_failed`); or a read exceeded the preview's budget (`pipeline_preview_budget_exceeded`)"
+          },
+          "500": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorView"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the input of the Enrichment Runner's dry run of an llm pipeline",
         "tags": [
           "Pipelines"
         ],

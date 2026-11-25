@@ -13,8 +13,8 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **`CLICKHOUSE_HOST` must reach only the primary replica** (§5).
 - **Four new writer grants** (§1).
 - **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
-- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `6`, and a runner on
-  any other version is refused, so enrichment pauses until both sides match (§7, §10).
+- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `7`, and a runner on
+  any other version is refused, so enrichment pauses until both sides match (§7, §10, §15).
 - **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
   registered `usage-client-identity-live` applies it by hand (§8).
 - **Under `SYNC_REQUEST_BODY_MODE=delta`, a repeated large request body that is not JSON is stored once**, so later
@@ -27,8 +27,10 @@ This release runs ADAS on replicated ClickHouse storage, on every deployment, a 
 - **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§13).
 - **With Keeper down, row writes, pipeline runs and the data-sync requeue answer `503` in about ten seconds**, and the writer user must be
   allowed two `insert_keeper_*` settings (§14).
+- **The Enrichment Runner can try an `llm` pipeline against its model** through a new runner-only read,
+  `POST /v1/pipelines/{name}/trial-input` (§15).
 - **A column that only row-confined roles allow, and another of the caller's roles does not, is masked rather than
-  hidden**: JSON rows carry a reserved `$masked` member, and `$masked` is refused as an output name for everyone (§15).
+  hidden**: JSON rows carry a reserved `$masked` member, and `$masked` is refused as an output name for everyone (§16).
 
 ---
 
@@ -124,8 +126,8 @@ response such as `intent_counts.check`, and otherwise reads the response member 
 nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
 also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
 
-- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `6` in this
-  release (the route preset and the input token budget of §10), and a runner on any other version is refused
+- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `7` in this
+  release (the route preset, the input token budget of §10 and the trial input of §15), and a runner on any other version is refused
   until both sides match, so enrichment pauses during the skew.
 - **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
   in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
@@ -195,7 +197,7 @@ that budget was one runner-wide setting. A `group` pipeline may now declare its 
   `group` to `schedule` leaves it out of `advanced`. A negative value is refused the same way.
 - **Restate it on every declaration patch.** `advanced` is replaced, not merged, so a `PATCH` that re-declares the
   pipeline without `advanced.input_token_budget` clears it, and the runner's default trimming applies again.
-- **Contract `6`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
+- **Contract `7`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
   it (§7).
 - **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
   runner's default trimming applies again. Roll ADAS and the runner back together.
@@ -211,9 +213,15 @@ carries.
   Upgrade the target before importing a bundle exported by 0.24.
 - **Older bundles still import.** A version `1`, `2` or `3` bundle imports into 0.24 unchanged.
 - **Access travels only on request.** `include_access: true` in the export body and `include_access=true` on the
-  import, each requiring `TABLE_GRANT`, carry every covered table's role entries, system tables included, and upsert
-  them per role on the target, never removing one. Without them nothing about access changes. The runbook is
-  [`catalog-promotion.md`](catalog-promotion.md).
+  import, each requiring `TABLE_GRANT`, carry every covered table's role entries (or only the roles a component's
+  `roles` lists), system tables included, and upsert them per role on the target, never removing one. Without them
+  nothing about access changes. The runbook is [`catalog-promotion.md`](catalog-promotion.md).
+- **An export can carry less than a closure.** A pipeline component with `"dependencies": false` exports the pipeline
+  alone; a table component with `"access_only": true` exports only the table's access, with `"roles"` narrowing it to
+  some roles. Both are for an environment that already has the tables: the import finds them there and never creates
+  a missing one. The preview reports a table a pipeline needs that is missing, PENDING or FAILED as `FAIL` on the
+  pipeline entry (a missing table an SQL statement's `FROM` reads only as an arm problem), and a missing table an
+  access key names under `validation_errors`.
 - **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
   `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
 
@@ -275,7 +283,22 @@ ingest and enrichment relayout copies keep ClickHouse's defaults and pause throu
   `UNKNOWN_STATUS_OF_INSERT`, whose retry on an `append` table can store the rows twice (at-least-once, as before).
 - **Rollback.** An earlier build sends neither setting and waits out ClickHouse's defaults again.
 
-## 15. Masked columns and `$masked`
+## 15. Trial input for the runner's dry run
+
+The Enrichment Runner can now call a pipeline's model or application on a sampled row or group and show what it
+answered, before the pipeline is armed. It reads its input through `POST /v1/pipelines/{name}/trial-input`, which
+runs the same checks as `POST /v1/pipelines/{name}/preview`, under the identity of the person who asked for the dry
+run, and returns the preview together with the declaration and the uncapped rows the model would receive (see
+[`enrichment-runtime`](../openspec/specs/enrichment-runtime/spec.md)). `/preview` itself is unchanged and still
+calls no model.
+
+- **Contract `7`.** The endpoint is part of the runner contract, so the runner must be the 0.24 release that calls
+  it (§7).
+- **Who may use it.** `REGISTRY_ADMIN` in addition to `read` on the source and `write` on the target, with the
+  preview's own column and row checks, all against the caller. The runner's service grants alone do not admit it.
+- **Rollback.** Roll ADAS and the runner back together. Nothing is stored, so there is nothing to undo.
+
+## 16. Masked columns and `$masked`
 
 On 0.23.3 a caller saw a column only when every role it reads through allowed it, so gaining a column-restricted role
 could hide columns. Now a column that only row-confined roles allow, and another of the caller's roles does not, is
@@ -312,7 +335,7 @@ enrichments store a column named after a table of the entity.
 | Replicated ClickHouse storage required | An `Atomic` database is refused at startup; plain tables in a `Replicated` database convert on the first start | Set up Keeper, server settings and writer grants (§1); change an `Atomic` engine by hand (§2); stop the previous version before deploying (§3) |
 | `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
 | Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `6` | A runner on any contract other than `6` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§7) |
+| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `7` | A runner on any contract other than `7` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§7) |
 | Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§8) |
 | Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§9) |
 | `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§10) |
@@ -320,4 +343,5 @@ enrichments store a column named after a table of the entity.
 | Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §7 for route pipelines (§12) |
 | Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§13) |
 | Row writes, pipeline runs and the data-sync requeue cap ClickHouse's Keeper retries | With Keeper down they answer `503 clickhouse_unavailable` in about ten seconds, not two minutes; data-sync ingest and relayout copies are unchanged | Let the writer user set `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` (§14) |
-| Masked columns; reserved `$masked` (breaking) | A column only row-confined roles allow shows on their rows instead of being hidden; JSON rows list absent cells under `$masked`; `$masked`, and for masked callers `INTERSECT`/`EXCEPT` and table-named aliases, are refused `400` | Rename `$masked` outputs; declare columns in generic JSON panels; read `$masked` where a masked column is summed; expect `unknown field` for those callers after a rollback (§15) |
+| `POST /v1/pipelines/{name}/trial-input` for the runner's dry run | Additive, runner-only; contract `7` | Deploy the matching Enrichment Runner in the same window (§15) |
+| Masked columns; reserved `$masked` (breaking) | A column only row-confined roles allow shows on their rows instead of being hidden; JSON rows list absent cells under `$masked`; `$masked`, and for masked callers `INTERSECT`/`EXCEPT` and table-named aliases, are refused `400` | Rename `$masked` outputs; declare columns in generic JSON panels; read `$masked` where a masked column is summed; expect `unknown field` for those callers after a rollback (§16) |

@@ -13,6 +13,8 @@ import com.epam.aidial.analytics.web.dto.enrichment.ReadyWhenDto;
 import com.epam.aidial.analytics.web.dto.enrichment.ScanRequest;
 import com.epam.aidial.analytics.web.dto.enrichment.ScanResponse;
 import com.epam.aidial.analytics.web.dto.enrichment.TransformVarDto;
+import com.epam.aidial.analytics.web.dto.enrichment.TrialInputRequest;
+import com.epam.aidial.analytics.web.dto.enrichment.TrialInputResponse;
 import com.epam.aidial.analytics.web.dto.enrichment.VarSpecBody;
 import com.epam.aidial.analytics.web.dto.pipeline.PipelineDto;
 import com.epam.aidial.analytics.web.dto.pipeline.PipelineRequests.AdvancedRequest;
@@ -161,7 +163,7 @@ class RunnerContractShapeTest {
         return shapes;
     }
 
-    /** The four runner-only data-plane endpoints, request and response alike. */
+    /** The runner-only data-plane endpoints, request and response alike. */
     private static Map<Class<?>, List<String>> dataPlane() {
         final Map<Class<?>, List<String>> shapes = new LinkedHashMap<>();
         shapes.put(ScanRequest.class, List.of(
@@ -178,6 +180,13 @@ class RunnerContractShapeTest {
                 "rows_written: long", "next_cursor: String", "has_more: boolean", "lag_seconds: Long"));
         shapes.put(WriteRowsRequest.class, List.of("rows: List<Map<String, Object>>"));
         shapes.put(WriteRowsResponse.class, List.of("inserted: int"));
+        // The dry run's trial input came with VERSION 7. `preview` is pinned by its type alone: the runner hands it
+        // back to its own caller unread, so the preview's interior is the operator surface's contract, not this one.
+        shapes.put(TrialInputRequest.class, List.of(
+                "group_key: String", "from: Instant", "to: Instant", "limit: Integer"));
+        shapes.put(TrialInputResponse.class, List.of(
+                "preview: PipelineResponses.PreviewDto", "pipeline: PipelineDto",
+                "input_rows: List<Map<String, Object>>", "truncated: Boolean"));
         return shapes;
     }
 

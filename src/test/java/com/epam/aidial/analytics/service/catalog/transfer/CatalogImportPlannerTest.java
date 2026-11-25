@@ -122,6 +122,19 @@ class CatalogImportPlannerTest {
     }
 
     @Test
+    void nonActiveDependencyOutsideTheBundleFailsThePipeline() {
+        for (final TableStatus status : List.of(TableStatus.PENDING, TableStatus.FAILED)) {
+            final PlannedObject planned = plan(bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target"))),
+                    ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of("usage_base", existing(source("usage_base"), status),
+                            "rollup_target", existing(source("rollup_target"))))).pipelines().getFirst();
+
+            assertThat(planned.action()).isEqualTo(ImportAction.FAIL);
+            assertThat(planned.problems()).containsExactly("dependency 'usage_base' is not in the bundle and is " + status
+                    + " on this environment, so pipeline 'rollup' cannot be imported");
+        }
+    }
+
+    @Test
     void enrichmentReferencedOnlyInFilterIsDependency() {
         final BundlePipeline rollup = new BundlePipeline(new BundlePipeline.Declaration("rollup", PipelineKind.AGGREGATE,
                 "rollup_target", List.of("usage_base"), "\"usage_sentiment.sentiment\" = 'positive'",
@@ -395,6 +408,36 @@ class CatalogImportPlannerTest {
                 .anyMatch(error -> error.contains("blank role key"))
                 .anyMatch(error -> error.contains("trim to role 'viewers'"));
         assertThat(plan.access()).allMatch(PlannedAccess::failed);
+    }
+
+    @Test
+    void accessMayNameTableOnlyTheTargetHas() {
+        final BundleTable base = source("usage_base");
+        final ImportTarget.Table stored = new ImportTarget.Table("usage_base", TableType.SOURCE, false, TableStatus.ACTIVE, base,
+                base, Map.of("viewers", new AccessEntry(List.of(), null, List.of("id"))));
+        final CatalogBundle policiesOnly = new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(),
+                List.of(), List.of(), List.of(), Map.of("usage_base", Map.of("viewers", entry("read"))));
+
+        final ImportPlan plan = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS, target(Map.of("usage_base", stored)),
+                true);
+
+        assertThat(plan.validationErrors()).isEmpty();
+        assertThat(plan.access()).noneMatch(PlannedAccess::failed);
+        assertThat(plan.accessEntries().getFirst().prev().columns()).containsExactly("id");
+        assertThat(plan.hasProblems()).isFalse();
+
+        final ImportPlan missing = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS, target(Map.of()), true);
+        assertThat(missing.validationErrors()).anyMatch(error -> error.contains("'usage_base'")
+                && error.contains("does not exist on this environment"));
+        assertThat(missing.access()).allMatch(PlannedAccess::failed);
+
+        // A same-named system table here is not the table the bundle's access was exported from.
+        final ImportTarget.Table system = new ImportTarget.Table("usage_base", TableType.SOURCE, true, TableStatus.ACTIVE, null,
+                null, Map.of());
+        final ImportPlan clash = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS,
+                target(Map.of("usage_base", system)), true);
+        assertThat(clash.validationErrors()).anyMatch(error -> error.contains("is a system table on this environment"));
+        assertThat(clash.access()).allMatch(PlannedAccess::failed);
     }
 
     @Test

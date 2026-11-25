@@ -159,6 +159,16 @@ public class GroupFetchService {
     private final PipelineBudgetProperties readBudget;
     private final ReplicaRouter replicas;
 
+    /**
+     * The runner's group assembly, at its configured default row cap, over a declaration the caller already
+     * resolved and gated — the trial input of the runner's dry run, whose declaration may be a disabled draft's
+     * in-memory mapping rather than the stored one a reload by name would read. Every rule of
+     * {@link #fetch(String, String, Integer)} applies unchanged: the same selection, governance, caps and order.
+     */
+    public GroupPage fetchForTrial(ResolvedEnrichPipeline resolved, String groupKey) {
+        return fetch(resolved, groupKey, null);
+    }
+
     public GroupPage fetch(String pipelineName, String groupKey, Integer limit) {
         return fetch(pipelines.resolveForScan(pipelineName), groupKey, limit);   // 404 unknown_pipeline if absent
     }

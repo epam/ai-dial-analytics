@@ -50,6 +50,7 @@ import org.springframework.util.unit.DataSize;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -214,7 +215,7 @@ class ScanServiceTest {
 
     @Test
     void previewSampleCarriesOnlyTheGrainKeyAndTheInputsNewestFirst() {
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, 0);
 
         final String sql = executed(1).getFirst();
         // The filter's enrichment column still draws its join and still filters; it is not returned.
@@ -229,11 +230,64 @@ class ScanServiceTest {
                 tuple("deployment", PreviewColumnRole.INPUT));
     }
 
+    /**
+     * Trial input's reads: the preview's narrow sample, carrying its cursor tuple, then a wide read of only the rows
+     * returned, bounded above by the newest sampled row and selecting what a scan row carries — so a JSONata input
+     * reading a filter or cursor column sees it as on the runner's page, and a heavy filter column is read for those
+     * rows alone. The preview's rows are cut back to the sampled columns.
+     */
+    @Test
+    void trialSampleReadsOnlyItsReturnedRowsScanShaped() {
+        final Map<String, Object> sampled = new LinkedHashMap<>();
+        sampled.put("event_id", "e2");
+        sampled.put("deployment", "gpt-4");
+        sampled.put("__cursor_v", 2_000L);
+        sampled.put("__cursor_id", "e2");
+        final Map<String, Object> older = new LinkedHashMap<>(sampled);
+        older.put("event_id", "e1");
+        older.put("__cursor_v", 1_000L);
+        older.put("__cursor_id", "e1");
+        final Map<String, Object> wide = new LinkedHashMap<>();
+        wide.put("event_id", "e2");
+        wide.put("deployment", "gpt-4");
+        wide.put(SESSION, "s1");
+        wide.put("_ingested_at", "2026-01-01T00:00:00Z");
+        given(executor.executeScan(any(), any(), any(), any()))
+                .willReturn(new ArrayList<>(List.of(sampled, older)))
+                .willReturn(new ArrayList<>(List.of(wide)));
+
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, 1);
+
+        final List<String> statements = executed(2);
+        assertThat(statements.getFirst()).startsWith("select \"dial_usage_log\".\"event_id\" \"event_id\", "
+                + "\"dial_usage_log\".\"deployment\" \"deployment\", toUnixTimestamp64Milli(\"_ingested_at\") \"__cursor_v\"")
+                .doesNotContain("\"_ingested_at\" \"_ingested_at\"")
+                .endsWith("order by toUnixTimestamp64Milli(\"_ingested_at\") desc, toString(\"event_id\") desc limit 5");
+        assertThat(statements.get(1)).startsWith("select \"dial_usage_log\".\"event_id\" \"event_id\", "
+                + "\"dial_usage_log\".\"deployment\" \"deployment\", ")
+                .contains("\"" + SESSION + "\"").contains("\"_ingested_at\" \"_ingested_at\"")
+                .contains("<= (2000, 'e2')")
+                .doesNotContain("__cursor_v")
+                .endsWith("order by toUnixTimestamp64Milli(\"_ingested_at\") desc, toString(\"event_id\") desc limit 1");
+        assertThat(sample.scanRows()).containsExactly(wide);
+        assertThat(sample.rows()).hasSize(2)
+                .allSatisfy(row -> assertThat(row).containsOnlyKeys("event_id", "deployment"));
+    }
+
+    /** No sampled row, no wide read. */
+    @Test
+    void emptyTrialSampleIssuesNoWideRead() {
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, 3);
+
+        executed(1);
+        assertThat(sample.scanRows()).isEmpty();
+    }
+
     @Test
     void enrichmentWithNoBoundWithholdsThePreviewWithoutStatement() {
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, null, null)));
 
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, 0);
 
         assertThat(sample.heldBy()).isEqualTo(ENRICHMENT);
         assertThat(sample.rows()).isEmpty();
@@ -248,7 +302,7 @@ class ScanServiceTest {
                 .willReturn(new ArrayList<>())
                 .willReturn(new ArrayList<>(List.of(Map.of("__cursor_v", 9_000L))));
 
-        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null);
+        final ScanService.RowSample sample = service.previewRows(rowGrain("deployment"), 5, null, null, 0);
 
         final List<String> statements = executed(2);
         assertThat(statements.getFirst()).contains("<= (1000, 'e1')");
@@ -267,7 +321,7 @@ class ScanServiceTest {
         given(scanSources.cursorColumns(SOURCE)).willReturn(new CursorColumns("_ingested_at", "event_id", SOURCE, "request_time"));
         given(freshness.bound(any(), anyString())).willReturn(Optional.of(new EnrichmentFreshness.Bound(ENRICHMENT, 9_000L, "e9")));
 
-        service.previewRows(rowGrain("deployment"), 5, Instant.ofEpochMilli(1_000L), null);
+        service.previewRows(rowGrain("deployment"), 5, Instant.ofEpochMilli(1_000L), null, 0);
 
         final String probe = executed(2).get(1);
         assertThat(probe).contains("> (9000, 'e9')").contains("\"_ingested_at\" > fromUnixTimestamp64Milli(1000)");

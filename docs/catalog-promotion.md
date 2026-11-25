@@ -14,8 +14,8 @@ curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/j
   -d '{"components":[{"type":"table","name":"usage_sentiment"}]}' -o bundle.json
 ```
 
-An empty body (`{}`) exports everything exportable. System tables the bundle needs travel by name only, under
-`required_system_tables`, never as tables. OTLP landing tables and PENDING/FAILED tables are left out and listed
+An empty body (`{}`) exports everything exportable. System tables the exported closure reaches travel by name only,
+under `required_system_tables`, never as tables (a pipeline exported alone lists none; see below). OTLP landing tables and PENDING/FAILED tables are left out and listed
 under `skipped`. Access travels only on request (below); otherwise each environment sets its own (step 4).
 
 To carry access too, add `"include_access": true` (this needs `TABLE_GRANT`):
@@ -27,15 +27,48 @@ curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/j
   -d '{"include_access":true}' -o bundle.json
 ```
 
-The bundle then has an `access` member: every role's entry on each covered table, system tables included, in the
-shape `GET /v1/tables/{name}/access` returns. Exporting everything covers every system table you may get that keeps an
+The bundle then has an `access` member: every role's entry on each covered table (or only the roles a selection
+lists, below), system tables included, in the shape `GET /v1/tables/{name}/access` returns. Exporting everything covers every system table you may get that keeps an
 entry once unportable state is left behind; a selection may name a system table to export its access. Only what a `PUT .../access` would accept now travels. Leftover state an
 earlier build stored (an enrichment's read side, `write` or `modify` for `*` or on a system table, a role that is now a
 bundle or privilege name, an entry naming a skipped enrichment) stays behind. **The export preview's `left_behind` is
 the only report of it**: neither the bundle nor the import mentions it, so read it before you promote. A column policy
 naming an enrichment (`<enrichment>.<column>`) brings that enrichment, and the pipeline that fills it, into the export,
-so the import then also needs the privileges for creating them. Handle an access-carrying bundle as access
-configuration: it says which roles may read what.
+so the import then also needs the privileges for creating them; an access-only table's policies bring nothing (below).
+Handle an access-carrying bundle as access configuration: it says which roles may read what.
+
+### One pipeline, or some roles' access
+
+When the target already has the tables, a component can carry less than its closure:
+
+```bash
+# one pipeline alone: no input, target or enrichment it reads, and no access
+curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/json' \
+  -d '{"components":[{"type":"pipeline","name":"sentiment_enrich","dependencies":false}]}' -o bundle.json
+# one role's entry on one table, and nothing else
+curl -s -X POST localhost:5000/v1/catalog/export -H 'Content-Type: application/json' \
+  -d '{"components":[{"type":"table","name":"usage_base","access_only":true,"roles":["analytics-viewers"]}],
+       "include_access":true}' -o bundle.json
+```
+
+- **`dependencies: false`** (pipeline): the bundle holds the pipeline alone. The import creates it only when every
+  table it reads or targets exists here and is ACTIVE; the preview shows a missing, PENDING or FAILED one as `FAIL` on
+  the pipeline entry. The table an
+  SQL statement's `FROM` reads is the exception: a missing one leaves the pipeline `CREATE`, imported disabled, with
+  `armable: false` and an `arm_problems` entry.
+- **`access_only: true`** (table, with `include_access`): the bundle holds only the table's entries, under `access`,
+  with no definition and nothing connected. The import writes them onto the table this environment has, under either
+  resolution policy, since no object travels. A table missing here is a `validation_errors` problem rather than a
+  table the import creates, and an entry whose column policy names an enrichment or column this environment lacks is
+  `FAIL`: the export does not bring that enrichment along. A table with no entry the export can carry is refused
+  (`422 catalog_export_empty`) rather than exported empty. A system table selected this way is also listed under
+  `required_system_tables` and checked there like any other: one missing here is a `FAIL` on that entry.
+- **`roles`** (table, with `include_access`): only the listed roles' entries travel, whether or not the table does.
+  The other roles' entries are neither carried nor reported under `left_behind`, and their column policies bring
+  nothing in.
+
+A component that another selection's closure reaches travels as that closure decides. The import still needs
+`TABLE_CREATE`, and `TABLE_GRANT` for access.
 
 ## 2. Preview on the target environment
 

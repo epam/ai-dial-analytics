@@ -4718,9 +4718,9 @@ table it reads (see table-access-control, "Row-policy evaluation by caller role"
 
 ### Requirement: Caller values in a query resolve per execution
 
-On every execution of a query — `POST /v1/queries/execute`, `POST /v1/queries/execute-csv`, and every SQL surface
-whose statement holds a caller value (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values in
-SQL") — each caller value SHALL be replaced by the executing caller's own value, inlined as an escaped string literal.
+Each caller value SHALL be replaced by the executing caller's own value, inlined as an escaped string literal, on
+every execution of a query: `POST /v1/queries/execute`, `POST /v1/queries/execute-csv`, and every SQL surface whose
+statement holds a caller value (see [sql-query-translation](../sql-query-translation/spec.md), "Caller values in SQL").
 It SHALL be resolved from the identity of the request being served and SHALL NOT be cached across requests, so the
 same query body run by two callers returns each its own rows.
 

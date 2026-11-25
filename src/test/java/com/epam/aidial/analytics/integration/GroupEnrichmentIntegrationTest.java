@@ -993,7 +993,7 @@ class GroupEnrichmentIntegrationTest extends AbstractClickHouseIntegrationTest {
 
         mockMvc.perform(get("/v1/pipelines?kind=enrich&view=compiled"))
                 .andExpect(status().isOk())
-                .andExpect(header().string(RunnerContract.HEADER, "6"))
+                .andExpect(header().string(RunnerContract.HEADER, "7"))
                 .andExpect(jsonPath("$.pipelines[?(@.name == '" + name + "')].advanced.input_token_budget")
                         .value(contains(0)));
     }
