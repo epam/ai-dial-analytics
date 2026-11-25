@@ -775,7 +775,14 @@ class ReadShapingRenderTest {
         final String sql = MaskRendering.render(() -> count.getSQL(ParamType.INLINED));
 
         final String keySubquery = "(?i)in \\(select " + Pattern.quote(key) + " from \"dial_usage_log\"";
-        assertThat(sql).as("the key subquery copies the key filter: " + sql).containsPattern(keySubquery);
+        final Matcher opened = Pattern.compile(keySubquery).matcher(sql);
+        assertThat(opened.find()).as("a key subquery over the source: " + sql).isTrue();
+        int close = opened.start() + 3;
+        for (int depth = 1; depth > 0; close++) {
+            depth += sql.charAt(close) == '(' ? 1 : sql.charAt(close) == ')' ? -1 : 0;
+        }
+        assertThat(sql.substring(opened.start(), close)).as("it copies the key filter, behind the key's mask")
+                .contains("'00000000-0000-4000-8000-000000000001'").contains(MaskRendering.ALIAS_PREFIX);
         final String readers = sql.replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
                 .replaceAll(keySubquery, "in (select <selected key> from \"dial_usage_log\"");
         assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
