@@ -127,7 +127,7 @@
   but not their conjuncts, the reduced operand's own key in `reducedBinding IN (…)`, the aligned lookup's partition
   pre-selection `partitionExpr(source.p) IN PS`, copied conjuncts and pushed calls inside an enrichment's derived
   table, and a masked computed field's unwrapped stand-in, whose value the completer nulls from the row's flag)
-- [ ] 3.9 Rewrite-equivalence test on ClickHouse: for every rewritten operator, the rewritten and unrewritten forms
+- [x] 3.9 Rewrite-equivalence test on ClickHouse: for every rewritten operator, the rewritten and unrewritten forms
   return the same rows, including stored `NULL`s and absent cells, under `transform_null_in = 0` and `1`, with an `in`
   list holding a null item among the cases (left unrewritten)
 
@@ -177,7 +177,7 @@
 
 ## 6. Integration tests
 
-- [ ] 6.1 Update `ColumnPolicyReadIntegrationTest` to the modified "Column visibility by caller role" scenarios
+- [x] 6.1 Update `ColumnPolicyReadIntegrationTest` to the modified "Column visibility by caller role" scenarios
   (masked columns listed and absent per row, the `*` own-rows case with a known and an unknown caller value, a policy
   over a column that is null on a row, get-only caller, clearance still hides)
 - [ ] 6.2 New masked-query integration test over DSL, SQL, CSV and Flight: the "A masked field reads as absent at every

@@ -12,10 +12,13 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -34,12 +37,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * clearance still shows it {@code s}. Every surface must treat {@code c} as a column the table does not have, which
  * each test pins by comparing with {@code zz}, a column the table really lacks. Flight SQL and
  * {@code INFORMATION_SCHEMA.COLUMNS} are covered in {@code FlightMetadataAuthIntegrationTest}.
+ *
+ * <p>The masked-column cases ("Column visibility by caller role") run over a probe of their own, read by a caller whose
+ * roles each confine the rows: a column one role allows reads its stored value on that role's rows and is absent, and
+ * listed under {@code $masked}, on the rest.
  */
 class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     private static final String BASE = "/v1/tables";
     private static final String TABLE = "cp_read_probe";
     private static final String ROLE = "cp-x";
+    /** The probe of the masked-column cases, which create and drop it themselves. */
+    private static final String MASKED = "cp_mask_probe";
+    private static final String MASKED_MEMBER = "$masked";
 
     @BeforeEach
     void createProbe() throws Exception {
@@ -56,7 +66,7 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                         + "{\"k\":\"k2\",\"a\":\"a2\",\"c\":\"2026-01-02T00:00:00Z\",\"s\":\"s2\"}]}")
                 .andExpect(status().isOk());
         send(put(BASE + "/" + TABLE + "/access?role=" + ROLE), admin(),
-                "{\"generation\":" + generation() + ",\"privileges\":[\"read\",\"sensitive\",\"modify\"],\"columns\":[\"s\",\"k\",\"a\",\"k\"]}")
+                "{\"generation\":" + generation(TABLE) + ",\"privileges\":[\"read\",\"sensitive\",\"modify\"],\"columns\":[\"s\",\"k\",\"a\",\"k\"]}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.columns.length()").value(3))
                 .andExpect(jsonPath("$.columns[0]").value("a"))
@@ -200,15 +210,173 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 .andExpect(jsonPath("$.ttl.interval").value(1));
     }
 
+    // --- masked columns: a caller whose roles each confine the rows ------------------------------------
+
+    /**
+     * "One role's columns are not shown on another role's rows": {@code cpm-r} reads the rows of {@code P1} with
+     * {@code k}, {@code project} and {@code a}, {@code cpm-u} the rows of {@code P2} with every column, so {@code c} is
+     * masked to {@code P2}, while the sensitive {@code s} stays hidden without the clearance.
+     */
+    @Test
+    void oneRolesColumnsAreAbsentOnAnotherRolesRowsAndListedMasked() throws Exception {
+        createMaskProbe();
+        try {
+            entry("cpm-r", "[\"read\"]", "[\"a\",\"project\",\"k\"]", projectIs("P1"));
+            entry("cpm-u", "[\"read\"]", "null", projectIs("P2"));
+            final String caller = caller("u9", "cpm-r", "cpm-u");
+
+            final List<Map<String, Object>> rows = rows(caller, "SELECT k, project, a, c FROM " + MASKED + " ORDER BY k");
+            assertThat(rows).extracting(row -> row.get("k")).containsExactly("k1", "k2", "k3");
+            assertThat(rows.get(0)).containsEntry("a", "a1").containsEntry("c", null).containsEntry(MASKED_MEMBER, List.of("c"));
+            assertThat(rows.get(1)).containsEntry("c", "c2").doesNotContainKey(MASKED_MEMBER);
+            final List<Map<String, Object>> dsl = JsonPath.read(execute(caller, "{\"entity\":\"" + MASKED + "\",\"mode\":\"row\","
+                    + "\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"k\"}},{\"expr\":{\"type\":\"field\",\"name\":\"c\"}}],"
+                    + "\"sort\":[{\"field\":\"k\",\"dir\":\"asc\"}],\"page\":{\"type\":\"offset\",\"limit\":10}}")
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.rows");
+            assertThat(dsl.get(0)).containsEntry("c", null).containsEntry(MASKED_MEMBER, List.of("c"));
+            assertThat(dsl.get(1)).containsEntry("c", "c2").doesNotContainKey(MASKED_MEMBER);
+            // CSV writes the absent cell as an empty field.
+            assertThat(csv("/v1/queries/execute-sql-csv", caller, "{\"sql\":\"SELECT k, c FROM " + MASKED + " ORDER BY k\"}").split("\r\n"))
+                    .startsWith("k,c", "k1,", "k2,c2");
+
+            mockMvc.perform(get("/v1/queries/entities/schema/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.fields[?(@.name == 'c')].masked", contains(true)))
+                    .andExpect(jsonPath("$.fields[?(@.name == 'a')].masked", contains(false)))
+                    .andExpect(jsonPath("$.fields[*].name", not(hasItem("s"))));
+            mockMvc.perform(get(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller)))
+                    .andExpect(jsonPath("$.columns[*].name", hasItem("c")))
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+            // The clearance still hides a sensitive column the policies would mask.
+            expectUnknown(sql(caller, "SELECT s FROM " + MASKED), "s");
+        } finally {
+            dropMaskProbe();
+        }
+    }
+
+    /** "A masked column follows the caller value of the policy that allows it", with a known and an unknown value. */
+    @Test
+    void maskedColumnFollowsTheCallerValueOfThePolicyThatAllowsIt() throws Exception {
+        createMaskProbe();
+        try {
+            entry("*", "[\"read\"]", "null", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
+                    + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}");
+            entry("cpm-v", "[\"read\"]", "[\"project\"]", projectIs("P2"));
+            final String statement = "SELECT project, a, c FROM " + MASKED;
+
+            final List<Map<String, Object>> known = rows(caller("u1", "cpm-v"), statement);
+            assertThat(known).extracting(row -> row.get("project")).containsExactlyInAnyOrder("P1", "P2", "P2", "P3");
+            for (final Map<String, Object> row : known) {
+                if ("P2".equals(row.get("project"))) {
+                    assertThat(row).as("a P2 row is not u1's").containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a", "c"));
+                } else {
+                    assertThat(row).as("u1's own row").doesNotContainKey(MASKED_MEMBER).doesNotContainEntry("a", null);
+                }
+            }
+
+            final List<Map<String, Object>> unknown = rows(caller(null, "cpm-v"), statement);
+            assertThat(unknown).extracting(row -> row.get("project")).containsExactly("P2", "P2");
+            assertThat(unknown).allSatisfy(row -> assertThat(row).containsEntry("c", null).containsEntry(MASKED_MEMBER, List.of("a", "c")));
+        } finally {
+            dropMaskProbe();
+        }
+    }
+
+    /** "A null policy column makes the cell absent": a row whose {@code route} is null reads as a row of another route. */
+    @Test
+    void nullPolicyColumnMakesTheCellAbsent() throws Exception {
+        createMaskProbe();
+        try {
+            entry("cpm-a", "[\"read\"]", "null", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"route\"},"
+                    + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"r1\"}]}}");
+            entry("cpm-b", "[\"read\"]", "[\"project\"]", projectIs("P2"));
+
+            final List<Map<String, Object>> rows = rows(caller("u9", "cpm-a", "cpm-b"), "SELECT project, a FROM " + MASKED + " WHERE project = 'P2'");
+            assertThat(rows).hasSize(2).allSatisfy(row -> assertThat(row).containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a")));
+        } finally {
+            dropMaskProbe();
+        }
+    }
+
+    /** "A caller that only gets the table lists a masked column". */
+    @Test
+    void getOnlyCallerListsTheMaskedColumns() throws Exception {
+        createMaskProbe();
+        try {
+            entry("cpm-g1", "[\"get\"]", "[\"a\"]", projectIs("P1"));
+            entry("cpm-g2", "[\"get\"]", "[\"c\"]", projectIs("P2"));
+
+            mockMvc.perform(get(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u9", "cpm-g1", "cpm-g2"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.columns[*].name", containsInAnyOrder("a", "c")))
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+        } finally {
+            dropMaskProbe();
+        }
+    }
+
     // --- helpers --------------------------------------------------------------------------------------
+
+    /**
+     * {@link #MASKED}: rows of {@code P1}, {@code P2} (one with a null {@code route}) and {@code P3}, the {@code P1} and
+     * {@code P3} rows written for user {@code u1}, and a sensitive column {@code s}.
+     */
+    private void createMaskProbe() throws Exception {
+        send(post(BASE), admin(), "{\"name\":\"" + MASKED + "\",\"type\":\"source\"}").andExpect(status().isCreated());
+        final StringBuilder columns = new StringBuilder();
+        for (final String name : List.of("k", "project", "a", "c", "user_hash")) {
+            columns.append("{\"source_name\":\"").append(name).append("\",\"name\":\"").append(name).append("\",\"type\":\"string\"},");
+        }
+        send(post(BASE + "/" + MASKED + "/schema"), admin(), "{\"columns\":[" + columns
+                + "{\"source_name\":\"route\",\"name\":\"route\",\"type\":\"string\",\"nullable\":true},"
+                + "{\"source_name\":\"s\",\"name\":\"s\",\"type\":\"string\",\"sensitive\":true}],\"ordering_key\":[\"k\"]}")
+                .andExpect(status().isOk());
+        send(post(BASE + "/" + MASKED + "/rows"), admin(), "{\"rows\":["
+                + "{\"k\":\"k1\",\"project\":\"P1\",\"a\":\"a1\",\"c\":\"c1\",\"user_hash\":\"u1\",\"route\":\"r1\",\"s\":\"s1\"},"
+                + "{\"k\":\"k2\",\"project\":\"P2\",\"a\":\"a2\",\"c\":\"c2\",\"user_hash\":\"u2\",\"route\":\"r2\",\"s\":\"s2\"},"
+                + "{\"k\":\"k3\",\"project\":\"P2\",\"a\":\"a3\",\"c\":\"c3\",\"user_hash\":\"u2\",\"route\":null,\"s\":\"s3\"},"
+                + "{\"k\":\"k4\",\"project\":\"P3\",\"a\":\"a4\",\"c\":\"c4\",\"user_hash\":\"u1\",\"route\":\"r3\",\"s\":\"s4\"}]}")
+                .andExpect(status().isOk());
+    }
+
+    private void dropMaskProbe() throws Exception {
+        mockMvc.perform(delete(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(admin())));
+    }
+
+    /** PUTs {@code role}'s whole entry on {@link #MASKED}. */
+    private void entry(String role, String privileges, String columns, String rows) throws Exception {
+        send(put(BASE + "/" + MASKED + "/access?role=" + role), admin(), "{\"generation\":" + generation(MASKED) + ",\"privileges\":"
+                + privileges + ",\"columns\":" + columns + ",\"rows\":" + rows + "}").andExpect(status().isOk());
+    }
+
+    private static String projectIs(String project) {
+        return "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"" + project + "\"}]}}";
+    }
+
+    private List<Map<String, Object>> rows(String token, String statement) throws Exception {
+        return JsonPath.read(sql(token, statement).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.rows");
+    }
+
+    /**
+     * A readonly-issuer caller carrying {@code roles}, unmapped, whose {@code caller.user_hash} is {@code userHash} (that
+     * issuer takes it from the {@code email} claim as is), or unknown when it is {@code null}.
+     */
+    private static String caller(String userHash, String... roles) {
+        final Map<String, Object> claims = new HashMap<>(Map.of("sub", "cpm-user", "roles", List.of(roles)));
+        if (userHash != null) {
+            claims.put("email", userHash);
+        }
+        return JwtTestTokens.token(READONLY_ISSUER, AUDIENCE, claims);
+    }
 
     /** A refusal of {@code column} exactly as for {@code zz}, which the table does not have: 400 naming it. */
     private static void expectUnknown(ResultActions actions, String column) throws Exception {
         actions.andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").value(containsString(column)));
     }
 
-    private long generation() throws Exception {
-        return ((Number) JsonPath.read(mockMvc.perform(get(BASE + "/" + TABLE + "/access").header(HttpHeaders.AUTHORIZATION, bearer(admin())))
+    private long generation(String table) throws Exception {
+        return ((Number) JsonPath.read(mockMvc.perform(get(BASE + "/" + table + "/access").header(HttpHeaders.AUTHORIZATION, bearer(admin())))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.generation")).longValue();
     }
 
