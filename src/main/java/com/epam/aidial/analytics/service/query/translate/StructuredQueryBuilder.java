@@ -3,11 +3,13 @@ package com.epam.aidial.analytics.service.query.translate;
 import com.epam.aidial.analytics.configuration.QueryFinalProperties;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.ColumnMark;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.FinalDecision;
 import com.epam.aidial.analytics.service.query.FinalTables;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
+import com.epam.aidial.analytics.service.query.OutputFlag;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
@@ -104,6 +106,9 @@ public class StructuredQueryBuilder {
 
     /** Hard ceiling on a requested row limit; a request above it is rejected, never clamped. */
     public static final int MAX_LIMIT = 1000;
+
+    /** The derived table a marked distinct block with a window output computes in; callers cannot name {@code __adas_}. */
+    private static final String WINDOWED_ALIAS = "__adas_w";
 
     /**
      * How a block's {@code page} is rendered. {@link #GOVERNED} is the shared row governance every
@@ -583,11 +588,8 @@ public class StructuredQueryBuilder {
                 && MaskMarking.readsMarks(exprTranslator, effective.bindings(), outputs);
         if (marks != MaskMarking.Mode.NONE) {
             if (query.distinct() && marked && outputs.values().stream().anyMatch(WindowExpressions::containsWindow)) {
-                // shortcut: a distinct block with a window output cannot collapse its marked rows in the block that computes the
-                // window; it is refused until it is planned as an inner window block under an outer grouped one. Such a query
-                // reads a masked field, which it could not name before masking.
-                throw new QueryValidationException("a distinct projection with a window output is not supported yet beside a"
-                        + " masked field; drop 'distinct' or the window");
+                return windowedDistinct(dsl, model, query, maxLimit, policy, extra, shaping, declarePaths, keyConjuncts, marks,
+                        outputs);
             }
             final List<Field<?>> partition = new ArrayList<>(outputFields.values());
             partition.addAll(bareFlags);
@@ -611,6 +613,52 @@ public class StructuredQueryBuilder {
                 collapsed));
         applyPage(select, query.page(), maxLimit, policy);
         return select;
+    }
+
+    /**
+     * A distinct block with a window output whose rows carry marks, planned as the SQL front end plans one: the rows cannot
+     * be grouped, nor a window partitioned, by a window in the SELECT that computes it. The block without {@code distinct},
+     * sort and page computes its outputs, and each sort key that is not one, as a derived table with every output's flags;
+     * an outer distinct block over it collapses the rows by the grouped form, ORing the marks, and sorts and pages.
+     */
+    private SelectQuery<Record> windowedDistinct(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
+            LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean declarePaths,
+            List<Condition> keyConjuncts, MaskMarking.Mode marks, Map<String, Expr> outputs) {
+        final List<OutputColumn> columns = new ArrayList<>(query.select());
+        final Set<String> named = new HashSet<>(outputs.keySet());
+        if (query.sort() != null) {
+            query.sort().stream().filter(item -> named.add(item.field())).forEach(item -> columns.add(new OutputColumn(new FieldExpr(item.field()), null)));
+        }
+        final SelectQuery<Record> inner = render(dsl, model, new StructuredQuery(query.entity(), query.filter(), query.mode(), false, columns,
+                query.groupBy(), query.having(), null, null, query.finalRead()), 0, LimitPolicy.NESTED, extra, shaping, false, declarePaths,
+                keyConjuncts, MaskMarking.Mode.NESTED);
+        final Map<String, Field<?>> projected = new HashMap<>();
+        final Map<Integer, String> markFlags = new HashMap<>();
+        final Map<Integer, String> bareFlags = new HashMap<>();
+        for (final Field<?> field : inner.getSelect()) {
+            final OutputFlag flag = OutputFlag.of(field);
+            if (flag == null) {
+                projected.putIfAbsent(field.getName(), field);
+            } else if (!flag.zero()) {
+                (flag.bare() ? bareFlags : markFlags).put(flag.position(), field.getName());
+            }
+        }
+        final List<String> names = OutputColumnNaming.resolve(columns);
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
+        for (int i = 0; i < names.size(); i++) {
+            final String name = names.get(i);
+            final Expr expr = columns.get(i).expr();
+            final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(WINDOWED_ALIAS, name), projected.get(name).getDataType()),
+                    ExprFieldType.of(expr, model.bindings()), ExprFieldType.ofElement(expr, model.bindings()), false);
+            final String mark = markFlags.get(i);
+            final String bare = bareFlags.get(i);
+            bindings.put(name, mark == null ? binding : binding.marked(new ColumnMark(DSL.field(DSL.name(WINDOWED_ALIAS, mark), Integer.class),
+                    bare == null ? null : DSL.field(DSL.name(WINDOWED_ALIAS, bare), Integer.class))));
+        }
+        final QueryEntityModel derived = new QueryEntityModel(WINDOWED_ALIAS, inner.asTable(WINDOWED_ALIAS), bindings, List.of(), List.of());
+        final List<OutputColumn> select = outputs.keySet().stream().map(name -> new OutputColumn(new FieldExpr(name), null)).toList();
+        return render(dsl, derived, new StructuredQuery(WINDOWED_ALIAS, null, QueryMode.ROW, true, select, null, null, query.sort(), query.page(),
+                null), maxLimit, policy, LeafRestriction.NONE, Map.of(), false, false, List.of(), marks);
     }
 
     /** Whether {@code expr} reads a masked field of {@code model}. */

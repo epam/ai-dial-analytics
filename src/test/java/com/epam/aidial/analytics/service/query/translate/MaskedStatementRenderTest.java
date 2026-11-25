@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.exception.QueryValidationException;
+import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.ColumnMask;
 import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.MaskRendering;
@@ -18,12 +19,14 @@ import com.epam.aidial.analytics.service.query.model.LambdaParamExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
 import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
+import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.SortDir;
 import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
+import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.jooq.DSLContext;
 import org.jooq.Record;
@@ -128,6 +131,25 @@ class MaskedStatementRenderTest {
         assertThat(MaskFlag.Marks.of(select.getSelect()).outputs()).containsExactly("tags", "p");
     }
 
+    /** The window is computed in a derived table with its flags, and the distinct collapses above it, as SQL plans it. */
+    @Test
+    void distinctWithWindowOutputCollapsesAboveTheBlockComputingTheWindow() {
+        final Expr total = new WindowExpr(new FnExpr("sum", false, List.of(new FieldExpr("n"))), List.of(new FieldExpr("p")), null, null);
+        final StructuredQuery query = new StructuredQuery("t", null, QueryMode.ROW, true,
+                List.of(column(new FieldExpr("p")), new OutputColumn(total, "total")), null, null,
+                List.of(new SortItem("total", SortDir.DESC, null)), null);
+        final SelectQuery<Record> select = build(query);
+        final String sql = render(select).toLowerCase(Locale.ROOT);
+
+        assertThat(sql).as(sql).contains("over (partition by", "\"__adas_mf_1\"", ") \"__adas_w\"", "group by \"__adas_w\".\"p\", \"__adas_w\".\"total\"",
+                "max(\"__adas_w\".\"__adas_mf_1\")").doesNotContain("distinct");
+        assertThat(sql.indexOf("over (")).as("the window is computed inside").isLessThan(sql.indexOf(") \"__adas_w\""));
+        final MaskFlag.Marks marks = MaskFlag.Marks.of(select.getSelect());
+        assertThat(marks.outputs()).containsExactly("p", "total");
+        assertThat(marks.flags()).hasSize(1);
+        assertThat(sql.substring(sql.lastIndexOf("order by"))).contains("desc").endsWith("limit 100");
+    }
+
     @Test
     void maskedFieldBringsItsRefusals() {
         assertThatThrownBy(() -> build(row(List.of(new OutputColumn(new FieldExpr("secret"), "t")), null)))
@@ -163,6 +185,18 @@ class MaskedStatementRenderTest {
                 new ComparisonNode(ComparisonOp.GT, List.of(new FieldExpr("n"), new ValueExpr(ValueType.INTEGER, "0"))),
                 new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("p"), new ValueExpr(ValueType.STRING, "P2"))))))));
         assertThat(orFilter).as("only a top-level conjunct takes the form").doesNotContain("\"t\".\"n\" > 0");
+
+        final FilterNode callerProject = new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("secret"), new ParamExpr(CallerValues.PROJECT)));
+        final String known = CallerValues.resolving(name -> "P9", () -> render(build(row(List.of(column(new FieldExpr("p"))), callerProject))));
+        assertThat(known).as(known).contains("\"t\".\"secret\" = 'P9'");
+        final String unknown = CallerValues.resolving(name -> null, () -> render(build(row(List.of(column(new FieldExpr("p"))), callerProject))));
+        assertThat(unknown).as(unknown).contains("CAST(NULL, 'Nullable(UInt8)')").doesNotContain("\"t\".\"secret\" =");
+
+        final FilterNode emptyAnd = new LogicalNode(LogicalOp.AND, List.of(
+                new ComparisonNode(ComparisonOp.GT, List.of(new FieldExpr("n"), new ValueExpr(ValueType.INTEGER, "0"))),
+                new LogicalNode(LogicalOp.AND, List.of())));
+        assertThatThrownBy(() -> build(row(List.of(column(new FieldExpr("p"))), emptyAnd)))
+                .as("an empty 'and' beside a rewritten conjunct is still refused").isInstanceOf(QueryValidationException.class);
     }
 
     @Test

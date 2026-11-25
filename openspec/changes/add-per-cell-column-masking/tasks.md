@@ -170,7 +170,7 @@
   `422`); extend `SensitiveProjectionGuardTest` and
   `ColumnPolicyPipelineIntegrationTest` with the "Pipeline paths refuse a masked column" scenarios (an unconfined
   caller with a masked column, and a confined one refused for its confinement first)
-- [ ] 5.4 Withhold the `enrichment_behind` note's instants when the read source's `version_column` is masked: gate
+- [x] 5.4 Withhold the `enrichment_behind` note's instants when the read source's `version_column` is masked: gate
   `AggregateRefreshService` (`model.exposesSourceColumn`), `MaterializeService` and `EnrichPreviewService`
   (`versionVisible`) on the strict `visible(column)`, and check every other disclosure keyed on "the column is in the
   caller's model" the same way
