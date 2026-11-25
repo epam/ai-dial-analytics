@@ -777,7 +777,8 @@ class ReadShapingRenderTest {
         final String keySubquery = "(?i)in \\(select " + Pattern.quote(key) + " from \"dial_usage_log\"";
         final Matcher opened = Pattern.compile(keySubquery).matcher(sql);
         assertThat(opened.find()).as("a key subquery over the source: " + sql).isTrue();
-        int close = opened.start() + 3;
+        // Just past the subquery's own "(", whose depth the walk starts at.
+        int close = opened.start() + "in (".length();
         for (int depth = 1; depth > 0; close++) {
             depth += sql.charAt(close) == '(' ? 1 : sql.charAt(close) == ')' ? -1 : 0;
         }
