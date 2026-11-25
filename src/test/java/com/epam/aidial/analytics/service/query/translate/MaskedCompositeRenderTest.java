@@ -111,6 +111,26 @@ class MaskedCompositeRenderTest {
         assertThat(sql).contains("union all", "rownumberinallblocks()", "group by", "min((").doesNotContain("union distinct");
     }
 
+    /**
+     * In a plan that reads a masked field only in a filter, a union whose outputs cannot be marked keeps its plain form, and
+     * an intersect's branches project no flags, which it would compare with the values.
+     */
+    @Test
+    void setOperationsOverUnmarkableOutputsKeepTheirPlainForm() {
+        final CompositeQuery filtered = new CompositeQuery(new EntityRelation("t", T), block(List.of(new OutputColumn(new FieldExpr("p"), "v")),
+                new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("secret"), new ValueExpr(ValueType.STRING, "x")))),
+                List.of(column("v")));
+        final CompositeQuery plain = leaf(List.of(new OutputColumn(new FieldExpr("p"), "v")), List.of(column("v")));
+
+        final String union = render(build(over(new SetOpRelation(SetOpKind.UNION, false, List.of(filtered, plain), List.of(column("v"))),
+                "v"))).toLowerCase(Locale.ROOT);
+        assertThat(union).as(union).contains("union distinct").doesNotContain("rownumberinallblocks()");
+
+        final String intersect = render(build(over(new SetOpRelation(SetOpKind.INTERSECT, false, List.of(filtered, plain),
+                List.of(column("v"))), "v"))).toLowerCase(Locale.ROOT);
+        assertThat(intersect).as(intersect).contains("intersect distinct").doesNotContain("__adas_mf_", "__adas_bf_");
+    }
+
     @Test
     void outerJoinOperandFlagsAreReadAsZeroWhereUnmatched() {
         final RelationColumn left = column("lp");

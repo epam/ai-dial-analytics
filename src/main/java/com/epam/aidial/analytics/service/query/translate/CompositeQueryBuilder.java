@@ -191,6 +191,8 @@ public class CompositeQueryBuilder {
             if (!marked) {
                 return null;
             }
+            // shortcut: an array or map output reads [] where its cell is absent or the subquery finds no row (which the plain
+            // form refuses); carry the bare flag into the statement's flags if a client needs the null.
             final SelectQuery<Record> select = render(subquery, LimitPolicy.NESTED, 0, MaskMarking.Mode.NESTED);
             final Flags flags = Flags.of(select);
             final Field<?> output = select.getSelect().getFirst();
@@ -335,16 +337,20 @@ public class CompositeQueryBuilder {
                 throw new IllegalStateException(
                         "a set operation needs at least two branches, got " + branches.size());
             }
-            // In a plan that reads a masked field every branch projects two flags per output, so the branches align.
+            // In a plan that reads a masked field every union branch projects two flags per output, so the branches align.
+            // An intersect or except compares whole rows, flags included, and MaskedPlanRules refuses one over a marked
+            // output, so its branches project none.
+            final boolean union = marked && setOp.kind() == SetOpKind.UNION;
             final List<SelectQuery<Record>> rendered = new ArrayList<>(branches.size());
             for (final CompositeQuery branch : branches) {
-                rendered.add(render(branch, LimitPolicy.NESTED, 0, nested()));
+                rendered.add(render(branch, LimitPolicy.NESTED, 0, union ? nested() : MaskMarking.Mode.NONE));
             }
-            if (marked && setOp.kind() == SetOpKind.UNION && !setOp.all()) {
+            final Flags flags = union ? Flags.of(rendered) : Flags.NONE;
+            // A union none of whose positions can be marked keeps the plain form.
+            if (union && !setOp.all() && flags.zeroMark().size() < flags.mark().size()) {
                 return distinctUnion(rendered);
             }
-            return new SetOpTable(setOpTemplate(rendered, " " + setOp.kind().keyword() + " " + setOp.qualifier() + " "),
-                    marked ? Flags.of(rendered) : Flags.NONE);
+            return new SetOpTable(setOpTemplate(rendered, " " + setOp.kind().keyword() + " " + setOp.qualifier() + " "), flags);
         }
 
         private static Table<?> setOpTemplate(List<? extends QueryPart> branches, String separator) {

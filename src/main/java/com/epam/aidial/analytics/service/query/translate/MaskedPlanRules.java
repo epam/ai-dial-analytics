@@ -241,7 +241,8 @@ public final class MaskedPlanRules {
                 if (caseExpr.when() != null) {
                     for (final CaseBranch branch : caseExpr.when()) {
                         if (branch != null) {
-                            visitFilter(branch.when());
+                            // A condition's operands decide the output's value, so they mark it, as MaskMarking walks them.
+                            visitFilter(branch.when(), depends);
                             visitExpr(branch.then(), depends);
                         }
                     }
@@ -265,23 +266,31 @@ public final class MaskedPlanRules {
         }
     }
 
-    /** Walks {@code node} for lambda parameters and nested statements, which a set or truth value marks nothing by. */
+    /** Walks a {@code where}, {@code having} or {@code on} tree, whose truth marks no output. */
     private void visitFilter(FilterNode node) {
+        visitFilter(node, new HashSet<>());
+    }
+
+    /**
+     * Walks {@code node} for lambda parameters and nested statements; its operands' scalar subqueries join {@code depends}.
+     * A subquery's set or truth value marks nothing, so its body's outputs do not.
+     */
+    private void visitFilter(FilterNode node, Set<String> depends) {
         switch (node) {
             case null -> { }
             case LogicalNode logical -> {
                 if (logical.args() != null) {
-                    logical.args().forEach(this::visitFilter);
+                    logical.args().forEach(arg -> visitFilter(arg, depends));
                 }
             }
             case ComparisonNode comparison -> {
                 if (comparison.args() != null) {
-                    comparison.args().forEach(arg -> visitExpr(arg, new HashSet<>()));
+                    comparison.args().forEach(arg -> visitExpr(arg, depends));
                 }
             }
             case SubqueryNode subquery -> {
                 if (subquery.operands() != null) {
-                    subquery.operands().forEach(arg -> visitExpr(arg, new HashSet<>()));
+                    subquery.operands().forEach(arg -> visitExpr(arg, depends));
                 }
                 if (subquery.subquery() != null) {
                     outputs(subquery.subquery());

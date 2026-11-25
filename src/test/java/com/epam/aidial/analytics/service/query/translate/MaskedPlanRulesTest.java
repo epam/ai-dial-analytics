@@ -1,16 +1,25 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.exception.QueryValidationException;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
+import com.epam.aidial.analytics.service.query.model.ComparisonNode;
+import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.CompositeQuery;
 import com.epam.aidial.analytics.service.query.model.DerivedRelation;
 import com.epam.aidial.analytics.service.query.model.EntityRelation;
+import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.FnExpr;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.RelationColumn;
+import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
 import com.epam.aidial.analytics.service.query.model.SetOpKind;
 import com.epam.aidial.analytics.service.query.model.SetOpRelation;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.sql.ResultColumnKind;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.junit.jupiter.api.Test;
@@ -54,6 +63,20 @@ class MaskedPlanRulesTest {
         assertThatThrownBy(() -> check(intersect)).isInstanceOf(QueryValidationException.class).hasMessageContaining("'secret'");
     }
 
+    /** A scalar subquery in a {@code case} condition decides the output, so a masked field it reads marks it. */
+    @Test
+    void maskedFieldReachedThroughCaseConditionSubqueryRefusesIntersect() {
+        final CompositeQuery total = entityBlock(new OutputColumn(new FnExpr("sum", false, List.of(new FieldExpr("secret"))), "s"), "s");
+        final Expr decided = new CaseExpr(List.of(new CaseBranch(new ComparisonNode(ComparisonOp.GT,
+                List.of(new ValueExpr(ValueType.INTEGER, "100"), new ScalarSubqueryExpr(total))), str("a"))), str("b"));
+        final CompositeQuery left = entityBlock(new OutputColumn(decided, "v"), "v");
+        final CompositeQuery right = entityBlock(new OutputColumn(new FieldExpr("p"), "v"), "v");
+        final CompositeQuery intersect = new CompositeQuery(new SetOpRelation(SetOpKind.INTERSECT, false, List.of(left, right),
+                List.of(column("v"))), block(new OutputColumn(new FieldExpr("v"), null)), List.of(column("v")));
+
+        assertThatThrownBy(() -> check(intersect)).isInstanceOf(QueryValidationException.class).hasMessageContaining("'secret'");
+    }
+
     @Test
     void tableNamedNameIsRefusedOnlyBesideMaskedFieldAndFieldOwnNameIsExempt() {
         assertThatThrownBy(() -> MaskedPlanRules.check(single(new OutputColumn(new FieldExpr("secret"), "e.x")), MASKED, TABLES))
@@ -87,6 +110,10 @@ class MaskedPlanRulesTest {
 
     private static StructuredQuery block(OutputColumn output) {
         return single(output);
+    }
+
+    private static ValueExpr str(String value) {
+        return new ValueExpr(ValueType.STRING, value);
     }
 
     private static RelationColumn column(String name) {

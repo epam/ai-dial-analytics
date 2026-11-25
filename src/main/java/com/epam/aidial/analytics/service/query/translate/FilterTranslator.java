@@ -7,6 +7,8 @@ import com.epam.aidial.analytics.service.query.DocumentComparisons;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.Expr;
@@ -14,6 +16,7 @@ import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
+import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
@@ -90,19 +93,10 @@ public class FilterTranslator {
      * by the stored column's ordering key, partition and skip indexes as it does for a caller allowed the column.
      */
     public Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
-        final List<FilterNode> conjuncts = StructuredQueryBuilder.conjuncts(node);
-        if (conjuncts.stream().noneMatch(conjunct -> prunable(conjunct, bindings) != null)) {
+        if (StructuredQueryBuilder.conjuncts(node).stream().noneMatch(conjunct -> prunable(conjunct, bindings) != null)) {
             return toCondition(node, bindings, Position.PREDICATE);
         }
-        final List<Condition> translated = new ArrayList<>(conjuncts.size());
-        for (final FilterNode conjunct : conjuncts) {
-            // A conjunct the derived table computes is read as its substitution, which already carries the mask.
-            final QueryFieldBinding masked = pushed.containsKey(conjunct) ? null : prunable(conjunct, bindings);
-            final Condition condition = toCondition(conjunct, bindings, Position.PREDICATE);
-            translated.add(masked == null ? condition : DSL.and(DSL.condition(masked.mask().reference()),
-                    toComparison((ComparisonNode) conjunct, unmasked(bindings, masked), Position.PREDICATE)));
-        }
-        return DSL.and(translated);
+        return toPrunedCondition(node, bindings);
     }
 
     private Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings, Position windows) {
@@ -121,16 +115,34 @@ public class FilterTranslator {
     }
 
     /**
+     * {@code node} with each top-level conjunct of the pruning form rewritten. A non-empty {@code and} is walked, anything
+     * else translates as usual, an empty {@code and}'s refusal included. A conjunct the derived table computes is read as
+     * its substitution, which already carries the mask.
+     */
+    private Condition toPrunedCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
+        if (node != null && pushed.containsKey(node)) {
+            return pushed.get(node);
+        }
+        if (node instanceof LogicalNode(LogicalOp op, List<FilterNode> args) && op == LogicalOp.AND && args != null && !args.isEmpty()) {
+            return DSL.and(args.stream().map(arg -> toPrunedCondition(arg, bindings)).toList());
+        }
+        final QueryFieldBinding masked = prunable(node, bindings);
+        return masked == null ? toCondition(node, bindings, Position.PREDICATE) : DSL.and(DSL.condition(masked.mask().reference()),
+                toComparison((ComparisonNode) node, unmasked(bindings, masked), Position.PREDICATE));
+    }
+
+    /**
      * The masked binding a conjunct's left operand is when the conjunct takes the pruning form, else {@code null}: a
      * masked scalar field, referenced bare, compared by {@code eq}, {@code ne}, {@code lt}, {@code le}, {@code gt},
      * {@code ge}, {@code in} or a string match with an operand that holds no subquery and is not the null literal (nor an
      * {@code in} list holding one), or tested {@code ne null} ({@code is not null}). {@code NULL op e} is never true for
      * such a comparison, whatever {@code e} is, so conjoining the mask rejects exactly the rows the masked form rejects. A
-     * comparison binding a caller value is left to the ordinary translation, which replaces it before it renders.
+     * caller value as {@code e} is bound by the comparison's own translation: a known one is a literal, and an unknown one
+     * replaces the comparison with {@code NULL}, which rejects every row in either form.
      */
     static QueryFieldBinding prunable(FilterNode node, Map<String, QueryFieldBinding> bindings) {
         if (!(node instanceof ComparisonNode(ComparisonOp op, List<Expr> args)) || args == null || args.size() != 2
-                || !(args.getFirst() instanceof FieldExpr(String name)) || CallerValues.usesCallerValue((ComparisonNode) node)) {
+                || !(args.getFirst() instanceof FieldExpr(String name))) {
             return null;
         }
         final QueryFieldBinding binding = bindings.get(name);
@@ -139,9 +151,7 @@ public class FilterTranslator {
         }
         final Expr right = args.get(1);
         // The other operand keeps reading masked values, so it may not read this field: it renders over the stored column.
-        final boolean[] subquery = {false};
-        WindowExpressions.visit(right, expr -> subquery[0] |= expr instanceof ScalarSubqueryExpr);
-        if (subquery[0] || StructuredQueryBuilder.referencedFields(right).contains(name)) {
+        if (holdsSubquery(right) || StructuredQueryBuilder.referencedFields(right).contains(name)) {
             return null;
         }
         if (isNullLiteral(right)) {
@@ -152,6 +162,25 @@ public class FilterTranslator {
                     ? binding : null;
         }
         return binding;
+    }
+
+    /** Whether {@code expr} holds a subquery: a scalar one, or an {@code in} or {@code exists} in a {@code case} condition. */
+    private static boolean holdsSubquery(Expr expr) {
+        final boolean[] found = {false};
+        WindowExpressions.visit(expr, visited -> found[0] |= visited instanceof ScalarSubqueryExpr
+                || visited instanceof CaseExpr(List<CaseBranch> when, Expr ignored) && when != null
+                && when.stream().anyMatch(branch -> branch != null && holdsSubquery(branch.when())));
+        return found[0];
+    }
+
+    /** Whether {@code node}'s tree holds an {@code in} or {@code exists}; its operands are {@link WindowExpressions#visit}ed. */
+    private static boolean holdsSubquery(FilterNode node) {
+        return switch (node) {
+            case null -> false;
+            case SubqueryNode ignored -> true;
+            case LogicalNode logical -> logical.args() != null && logical.args().stream().anyMatch(FilterTranslator::holdsSubquery);
+            case ComparisonNode ignored -> false;
+        };
     }
 
     /** {@code bindings} with {@code masked}'s field read as its stored column, for the comparison guarded by its mask. */
