@@ -180,7 +180,7 @@
 - [x] 6.1 Update `ColumnPolicyReadIntegrationTest` to the modified "Column visibility by caller role" scenarios
   (masked columns listed and absent per row, the `*` own-rows case with a known and an unknown caller value, a policy
   over a column that is null on a row, get-only caller, clearance still hides)
-- [ ] 6.2 New masked-query integration test over DSL, SQL, CSV and Flight: the "A masked field reads as absent at every
+- [x] 6.2 New masked-query integration test over DSL, SQL, CSV and Flight: the "A masked field reads as absent at every
   reference", "Masked inputs are reported per output cell", "Set operations over a masked output", "Response
   envelope" and surface scenarios, each checked against a reference built from the entity's flattened rows (enrichments
   joined on stored keys) with each absent cell then replaced by its absent value; include an unknown caller value and

@@ -92,7 +92,7 @@ class MaskedExecutionIntegrationTest {
     static void createProbes() {
         dropProbes();
         // The mask admits the rows of P1. kA and kB are absent and store different values; kC is present and stores null.
-        ClickHouseProbe.execute("CREATE TABLE " + VALUES + " (k String, p String, n Nullable(Int64), opts Array(Int64) DEFAULT [0, 5])"
+        ClickHouseProbe.execute("CREATE TABLE " + VALUES + " (k String, p String, n Nullable(Int64), opts Array(Int64) DEFAULT [1, 2, 0, 5])"
                 + " ENGINE = ReplicatedMergeTree ORDER BY k");
         ClickHouseProbe.execute("INSERT INTO " + VALUES + " (k, p, n) VALUES ('k1', 'P1', 1), ('k2', 'P1', 2), ('kA', 'P2', 0), ('kB', 'P2', 5),"
                 + " ('kC', 'P1', NULL)");
@@ -245,6 +245,44 @@ class MaskedExecutionIntegrationTest {
                 null, null, List.of(new SortItem(BODY, SortDir.ASC, null)), new OffsetPage(0, 10, false))));
         assertThat(distinct).extracting(row -> row.get(BODY)).containsExactly("fine", "has an error", null);
         assertThat(distinct.get(2)).containsEntry(MaskFlag.MEMBER, List.of(BODY));
+
+        // Grouped with a visible key and sorted by the exempt output: d2's two absent rows are one null group.
+        final List<Map<String, Object>> keyed = run(builder.build(dsl, model, new StructuredQuery(SOURCE, null, QueryMode.AGGREGATE, false,
+                List.of(new OutputColumn(field("deployment"), null), body, count), List.of("deployment", BODY), null,
+                List.of(new SortItem(BODY, SortDir.ASC, null)), new OffsetPage(0, 10, false))));
+        assertThat(keyed).extracting(row -> row.get("deployment") + "/" + row.get(BODY)).containsExactly("d1/fine", "d1/has an error", "d2/null");
+        assertThat(((Number) keyed.get(2).get("rows")).longValue()).isEqualTo(2L);
+
+        // A scalar subquery projecting the exempt output over an absent row returns null, marked.
+        final List<RelationColumn> entity = List.of(new RelationColumn("event_id", QueryFieldType.STRING, ResultColumnKind.STRING),
+                new RelationColumn("request_time", QueryFieldType.TIMESTAMP, ResultColumnKind.TIMESTAMP),
+                new RelationColumn("deployment", QueryFieldType.STRING, ResultColumnKind.STRING),
+                new RelationColumn(BODY, QueryFieldType.STRING, ResultColumnKind.STRING));
+        final CompositeQuery absentBody = new CompositeQuery(new EntityRelation(SOURCE, entity), new StructuredQuery(SOURCE,
+                cmp(ComparisonOp.EQ, field("event_id"), str("e2")), QueryMode.ROW, false, List.of(body), null, null, null, null),
+                List.of(new RelationColumn(BODY, QueryFieldType.STRING, ResultColumnKind.STRING)));
+        final List<OutputColumn> outputs = List.of(new OutputColumn(field("event_id"), null),
+                new OutputColumn(new com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr(absentBody), "b"));
+        final CompositeQuery root = new CompositeQuery(new EntityRelation(SOURCE, entity), new StructuredQuery(SOURCE,
+                cmp(ComparisonOp.EQ, field("event_id"), str("e1")), QueryMode.ROW, false, outputs, null, null, null, null),
+                List.of(entity.getFirst(), new RelationColumn("b", QueryFieldType.STRING, ResultColumnKind.STRING)));
+        assertThat(run(composite.build(dsl, root, ignored -> model, 1000))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("b", null).containsEntry(MaskFlag.MEMBER, List.of("b")));
+    }
+
+    /** A filter whose only reference to a mask is inside a lambda defines the mask in the lambda body, and runs. */
+    @Test
+    void maskReferencedOnlyInsideFilterLambdaIsDefinedInTheBodyAndRuns() {
+        final Expr matches = new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of("x"), new FnExpr("equals", false,
+                List.of(new LambdaParamExpr("x"), field("n")))), field("opts")));
+        final SelectQuery<?> select = builder.build(dsl, valuesModel(), new StructuredQuery(VALUES, cmp(ComparisonOp.EQ, matches,
+                new ValueExpr(ValueType.BOOLEAN, "true")), QueryMode.ROW, false, List.of(new OutputColumn(field("k"), null)), null, null,
+                List.of(new SortItem("k", SortDir.ASC, null)), new OffsetPage(0, 10, false)));
+        final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+
+        assertThat(sql.indexOf(" AS \"" + MaskRendering.ALIAS_PREFIX)).as(sql).isGreaterThan(sql.indexOf("->"));
+        // k1 and k2 find their values; kA and kB store values opts holds, but their cells are absent, and kC stores null.
+        assertThat(run(select)).extracting(row -> row.get("k")).containsExactly("k1", "k2");
     }
 
     /** Beside a masked field, an output named after a table the query reads (or beginning with it and '.') is refused. */
@@ -265,7 +303,7 @@ class MaskedExecutionIntegrationTest {
     @Test
     void lambdaParameterNamedLikeInternalAliasReadsTheAbsentValue() {
         final String param = "__adas_mcond_0";
-        // opts holds [0, 5], the values kA and kB store.
+        // opts holds [1, 2, 0, 5]: the values kA and kB store among them.
         final Expr hit = new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of(param), new FnExpr("equals", false,
                 List.of(new LambdaParamExpr(param), field("n")))), field("opts")));
         final StructuredQuery query = new StructuredQuery(VALUES, cmp(ComparisonOp.IN, field("k"), strings("kA", "kB")), QueryMode.ROW, false,

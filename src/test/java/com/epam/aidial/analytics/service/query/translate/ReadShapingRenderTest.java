@@ -691,6 +691,29 @@ class ReadShapingRenderTest {
         });
     }
 
+    /**
+     * A filter on a masked source field that a late-materialized page copies into its key subquery renders the mask's
+     * condition once in each scope that reads it, never once per reference: the page block, the outer statement.
+     */
+    @Test
+    void maskedFilterCopiedIntoThePageKeySubqueryRendersItsConditionOncePerScope() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put("deployment", bindings.get("deployment").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "trace_id"), String.class)
+                .eq("mask-trace"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final StructuredQuery page = row(and(WINDOW, cmp(ComparisonOp.EQ, field("deployment"), str("d1"))),
+                List.of(col(field("trace_id")), col(field("deployment")), col(field(BODY))), newestFirst(), new OffsetPage(0, 10, false));
+
+        final org.jooq.Select<?> select = builder.build(ctx, masked, page, StructuredQueryBuilder.MAX_LIMIT);
+        final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+        assertThat(pageKeySubqueries(sql)).as("a late-materialized page: " + sql).isNotEmpty();
+        assertThat(pageKeySubqueries(sql).getFirst()).as("the filter, in its pruning form, is copied into the page block")
+                .contains("'mask-trace'").contains("\"dial_usage_log\".\"deployment\" = 'd1'");
+        final int definitions = sql.split("'mask-trace'", -1).length - 1;
+        assertThat(definitions).as("once per scope that reads it: " + sql).isBetween(2, sql.toLowerCase().split("select ", -1).length - 1);
+    }
+
     /** The test model with the body masked to the rows of deployment {@code d1}. */
     private static QueryEntityModel maskedBody() {
         final QueryEntityModel base = model();

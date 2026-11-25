@@ -194,6 +194,54 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
         }
     }
 
+    /**
+     * A computed field over a masked column is absent wherever that column is: {@code mq-ca} reads the caller's own rows
+     * ({@code user_hash = caller.user_hash}) with every column, {@code mq-cb} the rows of {@code pB} without the body, so
+     * the body, and {@code request_body_full} completed from it, are masked to the caller's own rows. A caller whose value
+     * is unknown has the mask unknown on every row: the computed cell is null and marked, as the body is.
+     */
+    @Test
+    void computedFieldOverMaskedColumnIsNullAndMarkedWhereTheMaskIsUnknown() throws Exception {
+        final String usage = "dial_usage_log";
+        final String full = "dial_usage_log_payload.request_body_full";
+        final String event = "00000000-0000-4000-8000-0000000000d1";
+        ClickHouseProbe.execute("INSERT INTO " + usage + " (event_id, project_id, deployment, user_hash, request_time, trace_id, core_span_id,"
+                + " _ingested_at) VALUES (toUUID('" + event + "'), 'pB', 'mq-d', 'mq-owner', '2026-01-01 00:00:00.000', 'mq-seed', 's',"
+                + " '2026-01-01 00:00:01.000')");
+        ClickHouseProbe.execute("INSERT INTO dial_usage_log_payload (event_id, request_time, trace_id, core_span_id, request_body) VALUES"
+                + " (toUUID('" + event + "'), '2026-01-01 00:00:00.000', 'mq-seed', 's', '{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}')");
+        try {
+            // The body is sensitive, so the clearance too: without it the field would be hidden rather than masked.
+            entry(usage, "mq-ca", "[\"read\",\"sensitive\"]", "null", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
+                    + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}");
+            entry(usage, "mq-cb", "[\"read\"]", "[\"event_id\",\"request_time\",\"trace_id\",\"project_id\"]", "{\"filter\":{\"op\":\"eq\","
+                    + "\"args\":[{\"type\":\"field\",\"name\":\"project_id\"},{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"pB\"}]}}");
+            final String statement = "SELECT trace_id, \"" + full + "\" FROM " + usage + " WHERE trace_id = 'mq-seed'";
+
+            final Map<String, Object> owner = sqlRows(computedCaller("mq-owner"), statement).getFirst();
+            assertThat(owner.get(full)).as("the caller's own row").isNotNull();
+            assertThat(owner).doesNotContainKey(MEMBER);
+            final Map<String, Object> unknown = sqlRows(computedCaller(null), statement).getFirst();
+            assertThat(unknown).containsEntry(full, null).containsEntry(MEMBER, List.of(full));
+        } finally {
+            for (final String role : List.of("mq-ca", "mq-cb")) {
+                mockMvc.perform(delete(BASE + "/" + usage + "/access?role=" + role).header(HttpHeaders.AUTHORIZATION, bearer(admin())));
+            }
+            for (final String table : List.of(usage, "dial_usage_log_payload")) {
+                ClickHouseProbe.execute("ALTER TABLE " + table + " DELETE WHERE trace_id = 'mq-seed' SETTINGS mutations_sync = 1");
+            }
+        }
+    }
+
+    /** A caller carrying {@code mq-ca} and {@code mq-cb}, whose {@code caller.user_hash} is {@code userHash}, or unknown for {@code null}. */
+    private static String computedCaller(String userHash) {
+        final Map<String, Object> claims = new java.util.HashMap<>(Map.of("sub", "mq-computed", "roles", List.of("mq-ca", "mq-cb")));
+        if (userHash != null) {
+            claims.put("email", userHash);
+        }
+        return JwtTestTokens.token(READONLY_ISSUER, AUDIENCE, claims);
+    }
+
     @Test
     void csvAndFlightCarryAnAbsentCellAsNullWithNoMarks() throws Exception {
         final String csv = mockMvc.perform(post("/v1/queries/execute-sql-csv").header(HttpHeaders.AUTHORIZATION, bearer(caller()))
