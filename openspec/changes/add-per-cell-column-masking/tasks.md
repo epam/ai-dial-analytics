@@ -187,7 +187,7 @@
   a null policy column, with a computed field, so a row whose mask is unknown is marked and its computed value is null
 - [ ] 6.3 Pruning test: a rewritten key-column filter reads no more rows (`system.query_log` `read_rows`) than the same
   filter for a caller allowed the column
-- [ ] 6.4 Schema discovery and Flight metadata: masked fields listed, `masked` flag set (`FlightMetadataAuthIntegrationTest`
+- [x] 6.4 Schema discovery and Flight metadata: masked fields listed, `masked` flag set (`FlightMetadataAuthIntegrationTest`
   `columnPolicyHidesColumnsOnEveryFlightChannel` keeps the hidden case)
 
 ## 7. Docs

@@ -3,6 +3,7 @@ package com.epam.aidial.analytics.integration;
 import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableAccessService.AccessEntries;
 import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
+import com.epam.aidial.analytics.service.table.TableAccessService.RowsRequest;
 import com.epam.aidial.analytics.web.flight.FlightSqlServerLifecycle;
 import com.epam.aidial.analytics.web.security.JwtTestTokens;
 import org.apache.arrow.flight.CallOption;
@@ -195,6 +196,35 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
             assertThat(tableSchemaFields("dial_usage_log", bearerOption(fullAdminToken()))).contains("deployment");
         } finally {
             tableAccess.delete("dial_usage_log", "viewer", null);
+        }
+    }
+
+    /**
+     * A masked column is listed on every Flight channel as a visible one is. {@code viewer}, confined to the rows of
+     * {@code P1} with three columns, beside {@code fm-u}, which reads the rows of {@code P2} with every column, masks the
+     * rest instead of hiding them, so each channel lists what {@code viewer} alone lists without an entry.
+     */
+    @Test
+    void columnPolicyMasksColumnsListedOnEveryFlightChannel() throws Exception {
+        final CallOption unconfined = bearerOption(readOnlyToken());
+        final List<String> schema = tableSchemaFields("dial_usage_log", unconfined);
+        final List<String> catalog = catalogSqlColumnNames(unconfined);
+        final AccessEntries before = tableAccess.list("dial_usage_log");
+        assertThat(before.roles()).doesNotContainKeys("viewer", "fm-u");
+        tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(),
+                new RowsRequest(null, "project_id = 'P1'"), List.of("event_id", "project_id", "request_time")));
+        tableAccess.put("dial_usage_log", "fm-u", new EntryRequest(LongNode.valueOf(tableAccess.list("dial_usage_log").generation()),
+                List.of("read"), new RowsRequest(null, "project_id = 'P2'"), null));
+        try {
+            final CallOption masked = bearerOption(JwtTestTokens.token(READONLY_ISSUER, AUDIENCE,
+                    Map.of("sub", "fm-user", "roles", List.of("viewer", "fm-u"), "email", "fm@test")));
+            assertThat(tableSchemaFields("dial_usage_log", masked)).contains("deployment").containsExactlyElementsOf(schema);
+            assertThat(catalogSqlColumnNames(masked)).containsExactlyElementsOf(catalog);
+            final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1", masked);
+            assertThat(info.getSchemaOptional().orElseThrow().getFields().stream().map(Field::getName).toList()).contains("deployment");
+        } finally {
+            tableAccess.delete("dial_usage_log", "viewer", null);
+            tableAccess.delete("dial_usage_log", "fm-u", null);
         }
     }
 
