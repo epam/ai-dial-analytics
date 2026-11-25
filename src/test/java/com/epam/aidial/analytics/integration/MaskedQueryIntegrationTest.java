@@ -33,6 +33,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasSize;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -45,8 +46,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * masked field reads as absent at every reference", "Masked inputs are reported per output cell" and "Set operations
  * over a masked output", and the response envelope, CSV and Flight SQL specs). The probe's {@code n} is masked to the rows
  * of {@code P1} for a caller carrying {@code mq-r}, which reads the rows of {@code P1} with every column, and {@code mq-u},
- * which reads the rows of {@code P2} with {@code k} and {@code project} only. Each value is checked against a reference
- * the author computes from the stored rows, with every absent cell replaced by {@code NULL}.
+ * which reads the rows of {@code P2} with {@code k} and {@code project} only. Projections and aggregates are checked
+ * against a reference statement the author runs over the stored rows with every absent cell replaced by {@code NULL};
+ * the other surfaces against the values the fixture states.
  */
 class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
@@ -117,9 +119,7 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
     @Test
     void setOperationsOverMaskedOutput() throws Exception {
         for (final String kind : List.of("INTERSECT", "EXCEPT")) {
-            sql(caller(), "SELECT n FROM " + TABLE + " " + kind + " SELECT n FROM " + TABLE)
-                    .andExpect(status().isBadRequest())
-                    .andExpect(jsonPath("$.message").value(containsString("'n'")));
+            refused(sql(caller(), "SELECT n FROM " + TABLE + " " + kind + " SELECT n FROM " + TABLE), "reads masked field 'n'");
         }
         sql(caller(), "SELECT k FROM " + TABLE + " INTERSECT SELECT k FROM " + TABLE).andExpect(status().isOk());
 
@@ -161,26 +161,34 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
     void maskedMemberIsReservedAsTopLevelOutputName() throws Exception {
         final String dslQuery = "{\"entity\":\"" + TABLE + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"k\"},"
                 + "\"as\":\"$masked\"}],\"page\":{\"type\":\"offset\",\"limit\":10}}";
+        final String sqlBody = "{\"sql\":\"SELECT k AS \\\"$masked\\\" FROM " + TABLE + "\"}";
         for (final ResultActions refused : List.of(send(post("/v1/queries/execute"), admin(), dslQuery),
                 send(post("/v1/queries/translate"), admin(), dslQuery),
                 sql(admin(), "SELECT k AS \"$masked\" FROM " + TABLE),
                 sql(admin(), "SELECT TABLE_NAME AS \"$masked\" FROM INFORMATION_SCHEMA.TABLES"),
-                send(post("/v1/queries/translate-sql"), admin(), "{\"sql\":\"SELECT k AS \\\"$masked\\\" FROM " + TABLE + "\"}"))) {
-            refused.andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").value(containsString("$masked")));
+                send(post("/v1/queries/translate-sql"), admin(), sqlBody),
+                send(post("/v1/queries/execute-sql-csv"), admin(), sqlBody),
+                send(post("/v1/queries/execute-csv"), admin(), dslQuery))) {
+            refused(refused, "$masked");
         }
-        send(post("/v1/queries/validate-sql"), admin(), "{\"sql\":\"SELECT k AS \\\"$masked\\\" FROM " + TABLE + "\"}")
-                .andExpect(status().isOk()).andExpect(jsonPath("$.valid").value(false));
+        send(post("/v1/queries/validate-sql"), admin(), sqlBody)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.valid").value(false))
+                .andExpect(jsonPath("$.issues[0].message").value(containsString("$masked")));
         try (BufferAllocator allocator = new RootAllocator(); FlightSqlClient client = flight(allocator)) {
             assertThatThrownBy(() -> client.execute("SELECT k AS \"$masked\" FROM " + TABLE, bearerOption(admin())))
+                    .hasMessageContaining("$masked")
                     .isInstanceOfSatisfying(FlightRuntimeException.class,
                             ex -> assertThat(ex.status().code()).isEqualTo(FlightStatusCode.INVALID_ARGUMENT));
         }
 
-        // Matched case-sensitively, and only at the top level.
+        // Matched case-sensitively, and only at the top level: a derived table's column of that name runs and saves.
         sql(admin(), "SELECT k AS \"$Masked\" FROM " + TABLE + " ORDER BY k").andExpect(status().isOk())
                 .andExpect(jsonPath("$.rows[0]['$Masked']").value("k1"));
-        sql(admin(), "SELECT x FROM (SELECT k AS \"$masked\", k AS x FROM " + TABLE + ") s ORDER BY x").andExpect(status().isOk())
-                .andExpect(jsonPath("$.rows[0].x").value("k1"));
+        final String derived = "SELECT x FROM (SELECT k AS \"$masked\", k AS x FROM " + TABLE + ") s ORDER BY x";
+        sql(admin(), derived).andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].x").value("k1"));
+        final String saved = JsonPath.read(send(post("/v1/saved-queries"), admin(), savedSql(derived.replace("\"", "\\\"")))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.id");
+        mockMvc.perform(delete("/v1/saved-queries/" + saved).header(HttpHeaders.AUTHORIZATION, bearer(admin())));
     }
 
     /**
@@ -190,27 +198,64 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
      */
     @Test
     void maskedOutputRefusalsApplyOnExecutionAndOnSave() throws Exception {
+        // `writer` is a shared persona; this entry lives on this class's own probe, which each test drops, so no other class sees it.
         entry("writer", "[]", "null", "P1");
         final String writer = JwtTestTokens.token(PERSONAS_ISSUER, AUDIENCE, Map.of("sub", "mq-writer", "roles", List.of("writer", "mq-u"),
                 "email", "mq-writer@test"));
-        final List<String> statements = List.of("SELECT n AS " + TABLE + " FROM " + TABLE, "SELECT n AS \\\"" + TABLE + ".x\\\" FROM " + TABLE,
-                "SELECT n FROM " + TABLE + " INTERSECT SELECT n FROM " + TABLE, "SELECT k AS \\\"$masked\\\" FROM " + TABLE);
-        for (final String statement : statements) {
-            send(post("/v1/queries/execute-sql"), writer, "{\"sql\":\"" + statement + "\"}").andExpect(status().isBadRequest());
-            send(post("/v1/saved-queries"), writer, "{\"name\":\"Masked\",\"scope\":\"personal\",\"sql\":\"" + statement + "\"}")
-                    .andExpect(status().isBadRequest());
-            send(post("/v1/dashboards"), writer, "{\"name\":\"Masked\",\"visibility\":\"private\",\"widgets\":[{\"id\":\"w1\","
-                    + "\"row_limit\":10,\"layout\":{\"x\":0,\"y\":0,\"w\":6,\"h\":4},\"inline_query\":{\"name\":\"Raw\",\"sql\":\"" + statement
-                    + "\"}}]}").andExpect(status().isBadRequest());
+        final String tableNamed = "names a table the query reads";
+        // Statement (JSON-escaped) -> the refusal's own words, so an unrelated 400 does not pass.
+        final Map<String, String> statements = new LinkedHashMap<>();
+        statements.put("SELECT n AS " + TABLE + " FROM " + TABLE, tableNamed);
+        statements.put("SELECT n AS \\\"" + TABLE + ".x\\\" FROM " + TABLE, tableNamed);
+        statements.put("SELECT n FROM " + TABLE + " INTERSECT SELECT n FROM " + TABLE, "reads masked field 'n'");
+        statements.put("SELECT k AS \\\"$masked\\\" FROM " + TABLE, "$masked");
+        try {
+            for (final Map.Entry<String, String> entry : statements.entrySet()) {
+                final String statement = entry.getKey();
+                refused(send(post("/v1/queries/execute-sql"), writer, "{\"sql\":\"" + statement + "\"}"), entry.getValue());
+                refused(send(post("/v1/saved-queries"), writer, savedSql(statement)), entry.getValue());
+                refused(send(post("/v1/dashboards"), writer, "{\"name\":\"Masked\",\"visibility\":\"private\",\"widgets\":[{\"id\":\"w1\","
+                        + "\"row_limit\":10,\"layout\":{\"x\":0,\"y\":0,\"w\":6,\"h\":4},\"inline_query\":{\"name\":\"Raw\",\"sql\":\""
+                        + statement + "\"}}]}"), entry.getValue());
+            }
+            for (final Map.Entry<String, String> alias : Map.of(TABLE, tableNamed, "$masked", "$masked").entrySet()) {
+                refused(send(post("/v1/saved-queries"), writer, "{\"name\":\"Masked\",\"scope\":\"personal\",\"query\":{\"entity\":\"" + TABLE
+                        + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"n\"},\"as\":\"" + alias.getKey() + "\"}]}}"),
+                        alias.getValue());
+            }
+            mockMvc.perform(get("/v1/saved-queries").header(HttpHeaders.AUTHORIZATION, bearer(writer)))
+                    .andExpect(jsonPath("$.saved_queries[?(@.name == 'Masked')]", hasSize(0)));
+            mockMvc.perform(get("/v1/dashboards").header(HttpHeaders.AUTHORIZATION, bearer(writer)))
+                    .andExpect(jsonPath("$.dashboards[?(@.name == 'Masked')]", hasSize(0)));
+
+            // The same caller saves and runs the masked field itself, and may choose those names beside no masked field.
+            final String saved = JsonPath.read(send(post("/v1/saved-queries"), writer, savedSql("SELECT n FROM " + TABLE)).andExpect(status().isCreated())
+                    .andReturn().getResponse().getContentAsString(), "$.id");
+            mockMvc.perform(delete("/v1/saved-queries/" + saved).header(HttpHeaders.AUTHORIZATION, bearer(writer)));
+            sql(writer, "SELECT k AS " + TABLE + " FROM " + TABLE + " ORDER BY k").andExpect(status().isOk());
+            sql(writer, "SELECT k AS \"" + TABLE + ".x\" FROM " + TABLE + " ORDER BY k").andExpect(status().isOk());
+            sql(writer, "SELECT n FROM " + TABLE + " ORDER BY k").andExpect(status().isOk()).andExpect(jsonPath("$.rows[2]['$masked'][0]").value("n"));
+        } finally {
+            deleteOwned(writer, "/v1/saved-queries", "saved_queries");
+            deleteOwned(writer, "/v1/dashboards", "dashboards");
         }
-        for (final String alias : List.of(TABLE, "$masked")) {
-            send(post("/v1/saved-queries"), writer, "{\"name\":\"Masked\",\"scope\":\"personal\",\"query\":{\"entity\":\"" + TABLE + "\","
-                    + "\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"n\"},\"as\":\"" + alias + "\"}]}}")
-                    .andExpect(status().isBadRequest());
+    }
+
+    private static void refused(ResultActions actions, String refusal) throws Exception {
+        actions.andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").value(containsString(refusal)));
+    }
+
+    private static String savedSql(String statement) {
+        return "{\"name\":\"Masked\",\"scope\":\"personal\",\"sql\":\"" + statement + "\"}";
+    }
+
+    /** Deletes whatever {@code token} owns under {@code path} named {@code Masked}: a refusal that let one through. */
+    private void deleteOwned(String token, String path, String member) throws Exception {
+        final List<String> ids = JsonPath.read(mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, bearer(token)))
+                .andReturn().getResponse().getContentAsString(), "$." + member + "[?(@.name == 'Masked')].id");
+        for (final String id : ids) {
+            mockMvc.perform(delete(path + "/" + id).header(HttpHeaders.AUTHORIZATION, bearer(token)));
         }
-        // The same names beside no masked field are a caller's to choose.
-        sql(writer, "SELECT k AS " + TABLE + " FROM " + TABLE + " ORDER BY k").andExpect(status().isOk());
-        sql(writer, "SELECT n FROM " + TABLE + " ORDER BY k").andExpect(status().isOk()).andExpect(jsonPath("$.rows[2]['$masked'][0]").value("n"));
     }
 
     // --- helpers --------------------------------------------------------------------------------------

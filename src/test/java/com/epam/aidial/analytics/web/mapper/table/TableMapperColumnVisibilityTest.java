@@ -1,6 +1,12 @@
 package com.epam.aidial.analytics.web.mapper.table;
 
 import com.epam.aidial.analytics.service.audit.TableSnapshot;
+import com.epam.aidial.analytics.service.query.model.ComparisonNode;
+import com.epam.aidial.analytics.service.query.model.ComparisonOp;
+import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
@@ -19,6 +25,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -98,6 +105,20 @@ class TableMapperColumnVisibilityTest {
         when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(new ColumnVisibility(Set.of("employee_name")));
 
         assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("employee_name");
+    }
+
+    @Test
+    @DisplayName("a masked column is listed like a visible one, on the current read and on a revision")
+    void maskedColumnIsListed() {
+        when(sensitiveAccess.maySeeSensitive("finance_costs")).thenReturn(true);
+        final FilterNode p1 = new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("project"), new ValueExpr(ValueType.STRING, "P1")));
+        final ColumnVisibility masked = new ColumnVisibility(Set.of("k"), Map.of("employee_name", List.of(p1)), Set.of("k", "employee_name"), null);
+        when(sensitiveAccess.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(masked);
+        when(sensitiveAccess.visibleColumnsAtRevision(any(TableDefinitionEntity.class), any(), any())).thenReturn(masked);
+
+        assertThat(mapper.toDto(view()).columns()).extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
+        assertThat(mapper.toDto(new TableSnapshot(view(), new TableDefinitionEntity(), new TableDefinitionEntity()), true).columns())
+                .extracting(TableDto.ColumnDto::name).containsExactly("k", "employee_name");
     }
 
     @Test

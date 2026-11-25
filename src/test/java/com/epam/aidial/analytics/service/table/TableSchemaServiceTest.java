@@ -779,6 +779,49 @@ class TableSchemaServiceTest {
         verifyNoInteractions(ddlExecutor);
     }
 
+    /** {@code masked} masked to the rows of one project, {@code visible} visible, every other column hidden. */
+    private void maskByColumnPolicy(String masked, String... visible) {
+        final java.util.Set<String> named = new java.util.HashSet<>(java.util.Set.of(visible));
+        named.add(masked);
+        final com.epam.aidial.analytics.service.query.model.FilterNode p1 = new com.epam.aidial.analytics.service.query.model.ComparisonNode(
+                com.epam.aidial.analytics.service.query.model.ComparisonOp.EQ,
+                List.of(new com.epam.aidial.analytics.service.query.model.FieldExpr("project"),
+                        new com.epam.aidial.analytics.service.query.model.ValueExpr(com.epam.aidial.analytics.service.query.model.ValueType.STRING, "P1")));
+        given(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .willReturn(new com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility(java.util.Set.of(visible),
+                        java.util.Map.of(masked, List.of(p1)), named, null));
+    }
+
+    @Test
+    void ttlColumnMaskedByColumnPolicyIsColumnNotEntitledBeforeItsValidity() {
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0),
+                column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1), column("widget_metrics", "label", QueryFieldType.STRING, 2));
+        maskByColumnPolicy("birth_date", "widget_id");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("birth_date", 1, TtlUnit.DAY)))))
+                .as("a TTL over it would disclose stored values of absent cells")
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("birth_date");
+        maskByColumnPolicy("label", "widget_id", "birth_date");
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("label", 1, TtlUnit.DAY)))))
+                .as("refused before the type check, so no oracle on a masked column's type")
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class);
+        verifyNoInteractions(ddlExecutor);
+    }
+
+    @Test
+    void storedTtlOnMaskedColumnRefusesEveryTtlMember() {
+        widgetMetricsWithTtlOn(column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1));
+        maskByColumnPolicy("birth_date", "widget_id");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(null))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("birth_date");
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("widget_id", 1, TtlUnit.DAY)))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class);
+        verifyNoInteractions(ddlExecutor);
+    }
+
     @Test
     void storedTtlOnColumnThatIsOnlySensitiveStaysForbidden() {
         final ColumnMappingEntity birth = column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1);

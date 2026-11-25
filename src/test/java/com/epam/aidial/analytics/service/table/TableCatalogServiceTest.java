@@ -368,6 +368,28 @@ class TableCatalogServiceTest {
         verify(columns).findByTableNameOrderByOrdinal("t");
     }
 
+    /** A masked column is counted like a visible one. */
+    @Test
+    void columnCountCountsMaskedColumns() {
+        final TableDefinitionEntity t = definition("t", TableType.SOURCE, null, TableStatus.ACTIVE);
+        given(definitions.findAll(any(org.springframework.data.domain.Sort.class))).willReturn(List.of(t));
+        given(columns.countByTable()).willReturn(List.of(new ColumnRepositoryCount("t", 3, 0)));
+        final List<ColumnMappingEntity> own = List.of(column("t", "a"), column("t", "b"), column("t", "c"));
+        given(columns.findByTableNameOrderByOrdinal("t")).willReturn(own);
+        final com.epam.aidial.analytics.service.query.model.FilterNode p1 = new com.epam.aidial.analytics.service.query.model.ComparisonNode(
+                com.epam.aidial.analytics.service.query.model.ComparisonOp.EQ,
+                List.of(new com.epam.aidial.analytics.service.query.model.FieldExpr("project"),
+                        new com.epam.aidial.analytics.service.query.model.ValueExpr(com.epam.aidial.analytics.service.query.model.ValueType.STRING, "P1")));
+        final ColumnVisibility visibility = new ColumnVisibility(java.util.Set.of("a"), java.util.Map.of("b", List.of(p1)),
+                java.util.Set.of("a", "b"), null);
+        given(sensitiveAccess.visibleColumns(t)).willReturn(visibility);
+        given(callerPermissions.resolve(t, visibility, own)).willReturn(new com.epam.aidial.analytics.service.table.grant.EffectivePermissions(
+                true, true, true, false, false, false, false, false, true));
+
+        assertThat(service.list()).singleElement().satisfies(summary -> assertThat(summary.columnCount()).as("a and the masked b; c is hidden")
+                .isEqualTo(2));
+    }
+
     /** A {@code countByTable} row for the list test. */
     private record ColumnRepositoryCount(String tableName, long columnCount, long sensitiveCount)
             implements ColumnMappingRepository.TableColumnCount {

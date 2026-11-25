@@ -150,6 +150,50 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
                 .andExpect(status().isCreated());
     }
 
+    // --- masked columns ("Pipeline paths refuse a masked column") ---------------------------------------
+
+    /**
+     * "An author cannot register a pipeline over a masked column": {@code registry} is confined to the rows of
+     * {@code P1} with every column, {@code cpp-x} reads every row with a few, so the author reads every row and
+     * {@code deployment} is masked.
+     */
+    @Test
+    void authorCannotRegisterPipelineOverMaskedColumn() throws Exception {
+        entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
+        entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"columns\":[" + CURSOR + ",\"project_id\"]");
+        send(post("/v1/pipelines"), registryWith("cpp-x"), enrichBody("cpp-masked-input", TARGET, boundTo("deployment"), ""))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("column_not_entitled"))
+                .andExpect(jsonPath("$.message").value(containsString("'deployment'")));
+        asAdmin(get("/v1/pipelines/cpp-masked-input")).andExpect(status().isNotFound());
+    }
+
+    /** "A confined caller is refused for its confinement first": both roles carry rows, so the author is confined. */
+    @Test
+    void confinedAuthorIsRefusedForItsConfinementFirst() throws Exception {
+        entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
+        entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"rows\":{\"where\":\"project_id = 'P2'\"},\"columns\":[\"project_id\"]");
+        send(post("/v1/pipelines"), registryWith("cpp-x"), enrichBody("cpp-masked-input", TARGET, boundTo("deployment"), ""))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("row_policy_confined"));
+    }
+
+    /** "An unplannable aggregate statement mentioning only a masked column keeps its planning diagnostic". */
+    @Test
+    void unplannableAggregateOverMaskedColumnKeepsItsDiagnosticAndPlannedOneIsRefused() throws Exception {
+        entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
+        entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"columns\":[" + CURSOR + ",\"project_id\",\"user_hash\"]");
+        rollup("SELECT deployment, sum(project_id) FROM dial_usage_log GROUP BY 1", false);
+        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "").andExpect(status().isUnprocessableContent());
+
+        asAdmin(delete("/v1/pipelines/cpp-rollup")).andExpect(status().isNoContent());
+        rollup("SELECT deployment, count(DISTINCT user_hash) FROM dial_usage_log GROUP BY 1", false);
+        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("column_not_entitled"))
+                .andExpect(jsonPath("$.message").value(containsString("deployment")));
+    }
+
     // --- the runner's scan ------------------------------------------------------------------------------
 
     @Test
@@ -505,6 +549,11 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
 
     private static String registry() {
         return JwtTestTokens.token(FULL_ISSUER, AUDIENCE, Map.of("sub", "cpp-registry", "roles", List.of("registry"), "email", "registry@test"));
+    }
+
+    /** The {@code registry} author also carrying {@code role}, unmapped: its entry on a table decides what it adds there. */
+    private static String registryWith(String role) {
+        return JwtTestTokens.token(FULL_ISSUER, AUDIENCE, Map.of("sub", "cpp-registry", "roles", List.of("registry", role), "email", "registry@test"));
     }
 
     private static String runnerToken() {

@@ -1,7 +1,5 @@
 package com.epam.aidial.analytics.integration;
 
-import com.clickhouse.client.api.Client;
-import com.clickhouse.client.api.query.GenericRecord;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
 import com.epam.aidial.analytics.service.query.CallerValues;
 import com.epam.aidial.analytics.service.query.ColumnMask;
@@ -42,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class MaskedFilterRewriteIntegrationTest {
 
     private static final String TABLE = "mask_rewrite_probe";
+    private static final String PRUNED = "mask_prune_probe";
 
     private final DSLContext dsl = new QueryDslConfiguration().clickhouseRenderContext();
     private final ExprTranslator expressions = new ExprTranslator(new ValueExprToObjectMapper());
@@ -77,23 +77,50 @@ class MaskedFilterRewriteIntegrationTest {
     @AfterAll
     static void dropProbe() {
         ClickHouseProbe.execute("DROP TABLE IF EXISTS " + TABLE);
+        ClickHouseProbe.execute("DROP TABLE IF EXISTS " + PRUNED);
+    }
+
+    /**
+     * A filter in the pruning form on the masked ordering key reads no more rows than the same filter for a caller allowed
+     * the column ({@code system.query_log} {@code read_rows}), while the masked form, which the data store cannot prune by,
+     * reads every row: the probe is ordered by {@code n} in granules of eight rows.
+     */
+    @Test
+    void rewrittenKeyFilterReadsNoMoreRowsThanForCallerAllowedTheColumn() {
+        ClickHouseProbe.execute("DROP TABLE IF EXISTS " + PRUNED);
+        ClickHouseProbe.execute("CREATE TABLE " + PRUNED + " (k String, p String, n Int64) ENGINE = ReplicatedMergeTree ORDER BY n"
+                + " SETTINGS index_granularity = 8");
+        ClickHouseProbe.execute("INSERT INTO " + PRUNED + " SELECT toString(number), if(number % 2 = 0, 'P1', 'P2'), number FROM numbers(1000)");
+        final FilterNode key = cmp(ComparisonOp.EQ, "n", number("500"));
+
+        final long allowed = readRows(sql(PRUNED, key, false));
+        assertThat(readRows(sql(PRUNED, key, true))).isLessThanOrEqualTo(allowed);
+        assertThat(readRows(sql(PRUNED, masked(key), true))).as("the masked form scans").isEqualTo(1000L).isGreaterThan(allowed);
     }
 
     @Test
     void everyShapeReturnsTheRowsOfItsMaskedForm() {
         final Expr dayAgo = new FnExpr("date_sub", false, List.of(str("day"), new ValueExpr(ValueType.INTEGER, "1"),
                 new FnExpr("now", false, List.of())));
-        final List<FilterNode> shapes = List.of(
+        final List<FilterNode> rewritten = List.of(
                 cmp(ComparisonOp.EQ, "n", number("1")), cmp(ComparisonOp.NE, "n", number("1")), cmp(ComparisonOp.LT, "n", number("5")),
                 cmp(ComparisonOp.LE, "n", number("1")), cmp(ComparisonOp.GT, "n", number("1")), cmp(ComparisonOp.GE, "n", number("5")),
                 cmp(ComparisonOp.IN, "n", new ArrayExpr(List.of(number("1"), number("5")))),
                 cmp(ComparisonOp.EQ, "s", str("a")), cmp(ComparisonOp.NE, "s", str("a")), cmp(ComparisonOp.CO, "s", str("b")),
                 cmp(ComparisonOp.NC, "s", str("b")), cmp(ComparisonOp.ICO, "s", str("AB")), cmp(ComparisonOp.INC, "s", str("AB")),
                 cmp(ComparisonOp.NE, "s", nullValue()),
-                cmp(ComparisonOp.GE, "ts", dayAgo), cmp(ComparisonOp.LT, "ts", dayAgo),
-                // Left in the masked form: an absent cell satisfies `is null`, and under transform_null_in = 1 a null item matches it.
-                cmp(ComparisonOp.EQ, "s", nullValue()), cmp(ComparisonOp.IN, "n", new ArrayExpr(List.of(number("1"), nullValue()))));
-        for (final FilterNode shape : shapes) {
+                cmp(ComparisonOp.GE, "ts", dayAgo), cmp(ComparisonOp.LT, "ts", dayAgo));
+        // Left in the masked form: an absent cell satisfies `is null`, and under transform_null_in = 1 a null item matches it.
+        final List<FilterNode> leftAlone = List.of(cmp(ComparisonOp.EQ, "s", nullValue()),
+                cmp(ComparisonOp.IN, "n", new ArrayExpr(List.of(number("1"), nullValue()))));
+        for (final FilterNode shape : rewritten) {
+            assertThat(prunes(sql(shape), shape)).as("the pruning form of " + shape).isTrue();
+        }
+        for (final FilterNode shape : leftAlone) {
+            assertThat(prunes(sql(shape), shape)).as("the masked form of " + shape).isFalse();
+        }
+        for (final FilterNode shape : java.util.stream.Stream.concat(rewritten.stream(), leftAlone.stream()).toList()) {
+            assertThat(prunes(sql(masked(shape)), shape)).as("the reference never takes the pruning form: " + shape).isFalse();
             for (final int transformNullIn : List.of(0, 1)) {
                 assertThat(keys(shape, transformNullIn)).as(shape + " under transform_null_in = " + transformNullIn)
                         .isEqualTo(keys(masked(shape), transformNullIn));
@@ -119,40 +146,58 @@ class MaskedFilterRewriteIntegrationTest {
 
     // --- helpers --------------------------------------------------------------------------------------
 
+    /** Whether {@code sql} holds the pruning form of {@code shape}: its field's stored column conjoined to the mask. */
+    private static boolean prunes(String sql, FilterNode shape) {
+        final String field = ((FieldExpr) ((ComparisonNode) shape).args().getFirst()).name();
+        return sql.toLowerCase(java.util.Locale.ROOT).contains(" and \"" + TABLE + "\".\"" + field + "\"");
+    }
+
     /** {@code shape} under an {@code or} with a branch no row satisfies: not a top-level conjunct, so never rewritten. */
     private static FilterNode masked(FilterNode shape) {
         return new LogicalNode(LogicalOp.OR, List.of(shape, new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("k"), str("none")))));
     }
 
     private List<String> keys(FilterNode filter, int transformNullIn) {
-        final String sql = sql(filter) + " SETTINGS transform_null_in = " + transformNullIn;
-        try (Client client = client()) {
-            return client.queryAll(sql).stream().map((GenericRecord row) -> row.getString("k")).toList();
-        }
+        return ClickHouseProbe.queryAll(sql(filter) + " SETTINGS transform_null_in = " + transformNullIn).stream()
+                .map(row -> row.getString("k")).toList();
     }
 
     private String sql(FilterNode filter) {
-        final StructuredQuery query = new StructuredQuery(TABLE, filter, QueryMode.ROW, false, List.of(new OutputColumn(new FieldExpr("k"), null)),
+        return sql(TABLE, filter, true);
+    }
+
+    /** The row query {@code k} over {@code table} where {@code filter}, for a caller with {@code masked} fields or allowed them. */
+    private String sql(String table, FilterNode filter, boolean masked) {
+        final StructuredQuery query = new StructuredQuery(table, filter, QueryMode.ROW, false, List.of(new OutputColumn(new FieldExpr("k"), null)),
                 null, null, List.of(new SortItem("k", SortDir.ASC, null)), new OffsetPage(0, 100, false));
-        final Supplier<String> render = () -> builder.build(dsl, model(), query).getSQL(ParamType.INLINED);
+        final Supplier<String> render = () -> builder.build(dsl, model(table, masked), query).getSQL(ParamType.INLINED);
         return MaskRendering.render(render);
     }
 
-    /** {@code n}, {@code s} and {@code ts} masked to the rows of {@code P1}. */
-    private static QueryEntityModel model() {
-        final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(TABLE, "p"), String.class).eq("P1"));
+    /** {@code n}, {@code s} and {@code ts} masked to the rows of {@code P1} when {@code masked}, else visible. */
+    private static QueryEntityModel model(String table, boolean masked) {
+        final ColumnMask mask = masked ? ColumnMask.of(DSL.field(DSL.name(table, "p"), String.class).eq("P1")) : null;
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
-        bind(bindings, "k", QueryFieldType.STRING, null);
-        bind(bindings, "p", QueryFieldType.STRING, null);
-        bind(bindings, "n", QueryFieldType.LONG, mask);
-        bind(bindings, "s", QueryFieldType.STRING, mask);
-        bind(bindings, "ts", QueryFieldType.TIMESTAMP, mask);
-        return new QueryEntityModel(TABLE, DSL.table(DSL.name(TABLE)), bindings, List.of(), List.of());
+        bind(bindings, table, "k", QueryFieldType.STRING, null);
+        bind(bindings, table, "p", QueryFieldType.STRING, null);
+        bind(bindings, table, "n", QueryFieldType.LONG, mask);
+        bind(bindings, table, "s", QueryFieldType.STRING, mask);
+        bind(bindings, table, "ts", QueryFieldType.TIMESTAMP, mask);
+        return new QueryEntityModel(table, DSL.table(DSL.name(table)), bindings, List.of(), List.of());
     }
 
-    private static void bind(Map<String, QueryFieldBinding> bindings, String name, QueryFieldType type, ColumnMask mask) {
-        final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(TABLE, name), JooqTypes.of(type)), type);
+    private static void bind(Map<String, QueryFieldBinding> bindings, String table, String name, QueryFieldType type, ColumnMask mask) {
+        final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(table, name), JooqTypes.of(type)), type);
         bindings.put(name, mask == null ? binding : binding.masked(mask));
+    }
+
+    /** The rows ClickHouse reports {@code sql} read, from {@code system.query_log}. */
+    private static long readRows(String sql) {
+        final String comment = "mask-prune-" + UUID.randomUUID();
+        ClickHouseProbe.queryAll(sql + " SETTINGS log_comment = '" + comment + "'");
+        ClickHouseProbe.execute("SYSTEM FLUSH LOGS");
+        return ClickHouseProbe.queryAll("SELECT toInt64(read_rows) AS r FROM system.query_log WHERE log_comment = '" + comment
+                + "' AND type = 'QueryFinish'").getFirst().getLong("r");
     }
 
     private static FilterNode cmp(ComparisonOp op, String field, Expr value) {
@@ -169,15 +214,5 @@ class MaskedFilterRewriteIntegrationTest {
 
     private static ValueExpr nullValue() {
         return new ValueExpr(ValueType.NULL, null);
-    }
-
-    private static Client client() {
-        final var container = ClickHouseContainerSupport.CLICKHOUSE;
-        return new Client.Builder()
-                .addEndpoint("http://" + container.getHost() + ":" + container.getMappedPort(ClickHouseContainerSupport.HTTP_PORT) + "/")
-                .setUsername(container.getUsername())
-                .setPassword(container.getPassword())
-                .setDefaultDatabase(ClickHouseContainerSupport.DATABASE)
-                .build();
     }
 }

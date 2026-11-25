@@ -157,14 +157,14 @@
 
 - [x] 5.1 `TableCallerPermissions`: `columns_restricted` is true when a column is hidden or masked
   (`TableCallerPermissionsTest`)
-- [ ] 5.2 `TableMapper`, `TableCatalogService`, `TableSchemaService`, `CatalogExportService`, `ImportTargetReader`
+- [x] 5.2 `TableMapper`, `TableCatalogService`, `TableSchemaService`, `CatalogExportService`, `ImportTargetReader`
   treat a masked column as visible, except that `TableSchemaService` refuses `403 column_not_entitled` a `ttl.column`
   naming a masked column (before `TableTtlRules.requireValid`, keyed on the physical name) and any `ttl` member while
   the stored TTL is on one; update `TableMapperColumnVisibilityTest`, `TableCatalogServiceTest`,
   `TableSchemaServiceTest`, `CatalogTransferAuthIntegrationTest` (an export with a masked column succeeds; a
   hidden one is still refused) and `TableGrantRevisionIntegrationTest` (an older revision lists a masked column; a
   system table's snapshot reports `columns_restricted` for a masked-only caller)
-- [ ] 5.3 `SensitiveProjectionGuard` refuses a masked column as a hidden one on every pipeline path, before the
+- [x] 5.3 `SensitiveProjectionGuard` refuses a masked column as a hidden one on every pipeline path, before the
   clearance and after the `row_policy_confined` check, while the unplannable-statement mention check in
   `AggregateSqlValidator` keeps judging hidden columns only (a statement mentioning only a masked column keeps its
   `422`); extend `SensitiveProjectionGuardTest` and
@@ -185,7 +185,7 @@
   envelope" and surface scenarios, each checked against a reference built from the entity's flattened rows (enrichments
   joined on stored keys) with each absent cell then replaced by its absent value; include an unknown caller value and
   a null policy column, with a computed field, so a row whose mask is unknown is marked and its computed value is null
-- [ ] 6.3 Pruning test: a rewritten key-column filter reads no more rows (`system.query_log` `read_rows`) than the same
+- [x] 6.3 Pruning test: a rewritten key-column filter reads no more rows (`system.query_log` `read_rows`) than the same
   filter for a caller allowed the column
 - [x] 6.4 Schema discovery and Flight metadata: masked fields listed, `masked` flag set (`FlightMetadataAuthIntegrationTest`
   `columnPolicyHidesColumnsOnEveryFlightChannel` keeps the hidden case)

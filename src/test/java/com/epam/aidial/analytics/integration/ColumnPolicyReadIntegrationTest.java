@@ -219,8 +219,8 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
      */
     @Test
     void oneRolesColumnsAreAbsentOnAnotherRolesRowsAndListedMasked() throws Exception {
-        createMaskProbe();
         try {
+            createMaskProbe();
             entry("cpm-r", "[\"read\"]", "[\"a\",\"project\",\"k\"]", projectIs("P1"));
             entry("cpm-u", "[\"read\"]", "null", projectIs("P2"));
             final String caller = caller("u9", "cpm-r", "cpm-u");
@@ -247,8 +247,11 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
             mockMvc.perform(get(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller)))
                     .andExpect(jsonPath("$.columns[*].name", hasItem("c")))
                     .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
-            // The clearance still hides a sensitive column the policies would mask.
-            expectUnknown(sql(caller, "SELECT s FROM " + MASKED), "s");
+            // The clearance still hides a sensitive column the policies would mask: refused word for word as a column the table lacks.
+            final String lacking = JsonPath.read(sql(caller, "SELECT zz FROM " + MASKED).andExpect(status().isBadRequest())
+                    .andReturn().getResponse().getContentAsString(), "$.message");
+            sql(caller, "SELECT s FROM " + MASKED).andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.message").value(lacking.replace("zz", "s")));
         } finally {
             dropMaskProbe();
         }
@@ -257,8 +260,8 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
     /** "A masked column follows the caller value of the policy that allows it", with a known and an unknown value. */
     @Test
     void maskedColumnFollowsTheCallerValueOfThePolicyThatAllowsIt() throws Exception {
-        createMaskProbe();
         try {
+            createMaskProbe();
             entry("*", "[\"read\"]", "null", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
                     + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}");
             entry("cpm-v", "[\"read\"]", "[\"project\"]", projectIs("P2"));
@@ -285,8 +288,8 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
     /** "A null policy column makes the cell absent": a row whose {@code route} is null reads as a row of another route. */
     @Test
     void nullPolicyColumnMakesTheCellAbsent() throws Exception {
-        createMaskProbe();
         try {
+            createMaskProbe();
             entry("cpm-a", "[\"read\"]", "null", "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"route\"},"
                     + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"r1\"}]}}");
             entry("cpm-b", "[\"read\"]", "[\"project\"]", projectIs("P2"));
@@ -298,18 +301,25 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
         }
     }
 
-    /** "A caller that only gets the table lists a masked column". */
+    /**
+     * "A caller that only gets the table lists a masked column": {@code cpm-g1} gets the rows of {@code P1} with every
+     * column, {@code cpm-g2} those of {@code P2} with {@code a}, so no column is hidden by a policy and every one but
+     * {@code a} is masked, which alone sets {@code columns_restricted}.
+     */
     @Test
     void getOnlyCallerListsTheMaskedColumns() throws Exception {
-        createMaskProbe();
         try {
-            entry("cpm-g1", "[\"get\"]", "[\"a\"]", projectIs("P1"));
-            entry("cpm-g2", "[\"get\"]", "[\"c\"]", projectIs("P2"));
+            createMaskProbe();
+            entry("cpm-g1", "[\"get\"]", "null", projectIs("P1"));
+            entry("cpm-g2", "[\"get\"]", "[\"a\"]", projectIs("P2"));
 
             mockMvc.perform(get(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u9", "cpm-g1", "cpm-g2"))))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.columns[*].name", containsInAnyOrder("a", "c")))
+                    .andExpect(jsonPath("$.columns[*].name", containsInAnyOrder("k", "project", "a", "c", "user_hash", "route")))
                     .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+            // With one role nothing is masked.
+            mockMvc.perform(get(BASE + "/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u9", "cpm-g1"))))
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(false));
         } finally {
             dropMaskProbe();
         }

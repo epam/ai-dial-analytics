@@ -8,6 +8,9 @@ import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
+import com.epam.aidial.analytics.service.query.model.ArrayExpr;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.Expr;
@@ -21,9 +24,11 @@ import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
+import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
 import com.epam.aidial.analytics.service.query.model.SortDir;
 import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
+import com.epam.aidial.analytics.service.query.model.SubqueryNode;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
@@ -203,6 +208,37 @@ class MaskedStatementRenderTest {
                 new LogicalNode(LogicalOp.AND, List.of())));
         assertThatThrownBy(() -> build(row(List.of(column(new FieldExpr("p"))), emptyAnd)))
                 .as("an empty 'and' beside a rewritten conjunct is still refused").isInstanceOf(QueryValidationException.class);
+    }
+
+    /** Which conjuncts take the pruning form: none whose other operand holds a subquery, however deep. */
+    @Test
+    void pruningFormSkipsOperandsHoldingSubqueryOrNullItem() {
+        final Map<String, QueryFieldBinding> bindings = model.bindings();
+        final Expr zero = new ValueExpr(ValueType.INTEGER, "0");
+        final Expr nullItem = new ValueExpr(ValueType.NULL, null);
+        for (final ComparisonOp op : List.of(ComparisonOp.EQ, ComparisonOp.NE, ComparisonOp.LT, ComparisonOp.LE, ComparisonOp.GT, ComparisonOp.GE)) {
+            assertThat(FilterTranslator.prunable(compare(op, "n", zero), bindings)).as(op.code()).isNotNull();
+        }
+        for (final ComparisonOp op : List.of(ComparisonOp.CO, ComparisonOp.NC, ComparisonOp.ICO, ComparisonOp.INC)) {
+            assertThat(FilterTranslator.prunable(compare(op, "secret", new ValueExpr(ValueType.STRING, "x")), bindings)).as(op.code()).isNotNull();
+        }
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.NE, "n", nullItem), bindings)).as("is not null").isNotNull();
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.EQ, "n", nullItem), bindings)).as("is null").isNull();
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.IN, "n", new ArrayExpr(List.of(zero, nullItem))), bindings)).isNull();
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.IN, "n", new ArrayExpr(List.of(zero))), bindings)).isNotNull();
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.GT, "p", zero), bindings)).as("not masked").isNull();
+        assertThat(FilterTranslator.prunable(compare(ComparisonOp.EQ, "tags", zero), bindings)).as("not scalar").isNull();
+
+        final Expr inLambda = new FnExpr("arrayCount", false, List.of(new LambdaExpr(List.of("x"), new ScalarSubqueryExpr(null)),
+                new FieldExpr("labels")));
+        final Expr inCase = new CaseExpr(List.of(new CaseBranch(new SubqueryNode(SubqueryNode.SubqueryKind.EXISTS, List.of(), null), zero)), zero);
+        for (final Expr operand : List.of(new ScalarSubqueryExpr(null), inLambda, inCase)) {
+            assertThat(FilterTranslator.prunable(compare(ComparisonOp.GT, "n", operand), bindings)).as(operand.toString()).isNull();
+        }
+    }
+
+    private static FilterNode compare(ComparisonOp op, String field, Expr operand) {
+        return new ComparisonNode(op, List.of(new FieldExpr(field), operand));
     }
 
     @Test
