@@ -482,15 +482,16 @@ final class ReadShaping {
     }
 
     /**
-     * The type of {@code name} when it is an enrichment field a conjunct over it may be pushed for, else {@code null}. A
-     * masked field is never pushed: the derived table has no source row to evaluate its mask on.
+     * The type of {@code name} when it is an enrichment field, else {@code null}. A masked field qualifies too: its copy
+     * reads the stored value inside the derived table, and the statement's own conjunct keeps its masked form, which
+     * implies the copy (every copyable conjunct is false or {@code NULL} on an absent cell).
      */
     private static QueryFieldType fieldType(QueryEntityModel model, String name) {
         if (model.ownerOf(name) == null) {
             return null;
         }
         final QueryFieldBinding binding = model.bindings().get(name);
-        return binding == null || binding.isMasked() ? null : binding.type();
+        return binding == null ? null : binding.type();
     }
 
     /**
@@ -664,8 +665,8 @@ final class ReadShaping {
         final QueryFieldBinding binding = model.bindings().get(field);
         // A computed field is a stand-in, not a column a derived table could compute a call over; no call over one is
         // accepted anyway (StructuredQueryBuilder refuses it as projection-only).
-        // Nor is a masked field's: the derived table has no source row to evaluate its mask on.
-        if (binding == null || !binding.heavy() || binding.isComputed() || binding.isMasked() || binding.type() != QueryFieldType.STRING
+        // A masked field's call is computed over the stored value and read through the field's mask outside.
+        if (binding == null || !binding.heavy() || binding.isComputed() || binding.type() != QueryFieldType.STRING
                 || model.ownerOf(field) == null) {
             return null;
         }

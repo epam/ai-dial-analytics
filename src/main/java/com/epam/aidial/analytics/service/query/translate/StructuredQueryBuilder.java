@@ -440,16 +440,25 @@ public class StructuredQueryBuilder {
         final Map<String, Set<String>> omitted = new HashMap<>();
         final Map<Expr, Field<?>> calls = new HashMap<>();
         for (final ReadShaping.PushedCall call : plan.calls()) {
-            final Field<?> translated = exprTranslator.toField(call.call(), bindings);
+            // Computed over the stored column: the derived table has no source row to evaluate a mask on.
+            final Field<?> translated = exprTranslator.toField(call.call(), stored(bindings, call.field()));
             computed.computeIfAbsent(call.table(), ignored -> new ArrayList<>()).add(translated.as(call.alias()));
             omitted.computeIfAbsent(call.table(), ignored -> new HashSet<>()).add(call.field());
-            calls.put(call.call(), DSL.field(DSL.name(call.table(), call.alias()), translated.getDataType()));
+            final Field<?> pushed = DSL.field(DSL.name(call.table(), call.alias()), translated.getDataType());
+            final QueryFieldBinding binding = bindings.get(call.field());
+            // A masked field's pushed call is read through its mask, taking on an absent cell the value the call gives
+            // over the absent value, so the statement returns what it returns unshaped.
+            calls.put(call.call(), binding == null || !binding.isMasked() ? pushed
+                    : DSL.field("if({0}, if({0}, {1}, defaultValueOfArgumentType(assumeNotNull({1}))), {2})", pushed.getDataType(),
+                            binding.mask().reference(), pushed, exprTranslator.toField(call.call(), absentAt(bindings, call.field()))));
         }
         final Map<FilterNode, Condition> substituted = new HashMap<>();
         final List<Condition> preselected = new ArrayList<>();
         int next = plan.calls().size();
         for (final ReadShaping.PushedConjunct conjunct : conjuncts) {
-            final Condition condition = filterTranslator.toCondition(conjunct.node(), bindings);
+            // The copy reads the stored value; the statement's own conjunct keeps its masked or rewritten form, which
+            // implies the copy, so the rows are unchanged.
+            final Condition condition = filterTranslator.toCondition(conjunct.node(), stored(bindings, conjunct.field()));
             where.computeIfAbsent(conjunct.table(), ignored -> new ArrayList<>()).add(condition);
             // A lookup on an aligned enrichment also names the partitions its rows live in (PartitionPreselection),
             // bounded by whatever the filter already bounds the source's partition column to.
@@ -462,7 +471,10 @@ public class StructuredQueryBuilder {
                 final String alias = ReadShaping.CALL_PREFIX + next++;
                 computed.computeIfAbsent(conjunct.table(), ignored -> new ArrayList<>()).add(DSL.field(condition).as(alias));
                 omitted.computeIfAbsent(conjunct.table(), ignored -> new HashSet<>()).add(conjunct.field());
-                substituted.put(conjunct.node(), DSL.condition(DSL.field(DSL.name(conjunct.table(), alias), Boolean.class)));
+                final Condition column = DSL.condition(DSL.field(DSL.name(conjunct.table(), alias), Boolean.class));
+                final QueryFieldBinding binding = bindings.get(conjunct.field());
+                substituted.put(conjunct.node(), binding == null || !binding.isMasked() ? column
+                        : DSL.and(DSL.condition(binding.mask().reference()), column));
             }
         }
         final Map<String, EnrichmentJoins.Shaping> shaping = new HashMap<>();
@@ -473,6 +485,27 @@ public class StructuredQueryBuilder {
                     computed.getOrDefault(table, List.of()), omitted.getOrDefault(table, Set.of()), null));
         }
         return new Pushdown(shaping, calls, substituted, preselected);
+    }
+
+    /** {@code bindings} with {@code name}'s field read as its stored column, for what an enrichment's derived table computes. */
+    private static Map<String, QueryFieldBinding> stored(Map<String, QueryFieldBinding> bindings, String name) {
+        final QueryFieldBinding binding = bindings.get(name);
+        if (binding == null || !binding.isMasked()) {
+            return bindings;
+        }
+        final Map<String, QueryFieldBinding> rebound = new HashMap<>(bindings);
+        rebound.put(name, new QueryFieldBinding(name, binding.physicalField(), binding.type(), binding.elementType(), binding.heavy(),
+                binding.prunedPaths()));
+        return rebound;
+    }
+
+    /** {@code bindings} with {@code name}'s field read as its absent value ({@code NULL}), for a pushed call's absent result. */
+    private static Map<String, QueryFieldBinding> absentAt(Map<String, QueryFieldBinding> bindings, String name) {
+        final QueryFieldBinding binding = bindings.get(name);
+        final Map<String, QueryFieldBinding> rebound = new HashMap<>(bindings);
+        rebound.put(name, new QueryFieldBinding(name, DSL.field("NULL", binding.physicalField().getDataType()), binding.type(),
+                binding.elementType(), binding.heavy()));
+        return rebound;
     }
 
     /**

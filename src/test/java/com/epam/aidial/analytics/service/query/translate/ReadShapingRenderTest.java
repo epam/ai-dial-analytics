@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
+import com.epam.aidial.analytics.service.query.ColumnMask;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.JooqTypes;
@@ -636,6 +637,31 @@ class ReadShapingRenderTest {
             assertThat(outerWhere(sql)).containsIgnoringCase("and \"dial_usage_log_payload\".\"__adas_c0\")")
                     .doesNotContainIgnoringCase("ilike");
         }
+    }
+
+    /**
+     * Over a masked body the search is still computed inside the derived table, over the stored value, and the statement
+     * reads it behind the body's mask, which is evaluated where the source row is.
+     */
+    @Test
+    void maskedBodySearchIsStillDecidedInsideTheDerivedTableAndMaskedOutside() {
+        final StructuredQuery query = countingWhere(and(WINDOW, cmp(ComparisonOp.ICO, field(BODY), str("error"))));
+
+        for (final String sql : List.of(renderOn(maskedBody(), query), builder.buildCount(ctx, maskedBody(), query).getSQL(ParamType.INLINED))) {
+            assertThat(sql)
+                    .containsIgnoringCase("(\"dial_usage_log_payload\".\"request_body\" ilike '%error%') \"__adas_c0\"")
+                    .doesNotContainIgnoringCase("\"dial_usage_log_payload\".\"request_body\" from");
+            assertThat(outerWhere(sql)).containsIgnoringCase("\"dial_usage_log_payload\".\"__adas_c0\"")
+                    .containsIgnoringCase("\"dial_usage_log\".\"deployment\" = 'd1'");
+        }
+    }
+
+    /** The test model with the body masked to the rows of deployment {@code d1}. */
+    private static QueryEntityModel maskedBody() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put(BODY, bindings.get(BODY).masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class).eq("d1"))));
+        return new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
     }
 
     @Test

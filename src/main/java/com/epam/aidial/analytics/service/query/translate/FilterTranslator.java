@@ -96,7 +96,8 @@ public class FilterTranslator {
         }
         final List<Condition> translated = new ArrayList<>(conjuncts.size());
         for (final FilterNode conjunct : conjuncts) {
-            final QueryFieldBinding masked = prunable(conjunct, bindings);
+            // A conjunct the derived table computes is read as its substitution, which already carries the mask.
+            final QueryFieldBinding masked = pushed.containsKey(conjunct) ? null : prunable(conjunct, bindings);
             final Condition condition = toCondition(conjunct, bindings, Position.PREDICATE);
             translated.add(masked == null ? condition : DSL.and(DSL.condition(masked.mask().reference()),
                     toComparison((ComparisonNode) conjunct, unmasked(bindings, masked), Position.PREDICATE)));
