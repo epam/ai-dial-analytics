@@ -43,6 +43,10 @@ None of these need action during the upgrade. They are available once all three 
 - **Catalog export and import can carry table access** (role grants, system tables included) when you tick the
   option in **Export Config** / **Import Config**. Both need `TABLE_GRANT`. An API client that reads import
   responses must accept their new `access` list.
+- **A catalog export can carry less than a full closure**, for an environment that already has the tables. A
+  pipeline can be exported without its dependencies, and a table's access alone, optionally for some roles only.
+  The import never creates a missing table for these; its preview reports one a pipeline needs, or an access entry
+  names, as a failure. The runbook is [`catalog-promotion.md`](catalog-promotion.md).
 - **Faster failure when Keeper is down.** Row writes, pipeline runs and data-sync retries fail with `503` in about
   ten seconds instead of hanging for about two minutes. Data-sync ingest itself still waits out a short outage.
 - **Smaller payload storage under `SYNC_REQUEST_BODY_MODE=delta`.** A large request body that is not JSON (for

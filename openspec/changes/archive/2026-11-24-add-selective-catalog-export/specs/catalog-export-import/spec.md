@@ -1,0 +1,913 @@
+## ADDED Requirements
+
+### Requirement: Selective export
+
+An `ExportRequest` component SHALL accept optional selectors that narrow what it brings into the bundle, so that one pipeline,
+or some roles' access entries of one table, can be promoted into an environment that already has the tables they need:
+
+- `dependencies` (boolean, pipeline components only, default `true`). `false` SHALL export the pipeline alone: on its own account the
+  export SHALL NOT pull in its inputs, its target or the enrichments it reads, SHALL NOT list any of them under
+  `required_system_tables`, and SHALL carry no access for them. The pipeline itself travels as "Pipelines travel in source
+  projection" defines, and the import creates it only when each table it depends on is in the bundle or on the target, as "Import
+  entries" defines.
+- `access_only` (boolean, table components only, default `false`). `true` SHALL carry only that table's access entries: unless
+  another component's closure reaches the table (below), the export SHALL NOT write it under `tables`, and SHALL NOT pull in its
+  `source_table`, the pipeline that targets it, or any enrichment its column policies name. A selected system table is listed under
+  `required_system_tables`, as every system table the selection names is; a user table is named at most as a key of the bundle's
+  `access` member, which it is when it is covered.
+- `roles` (list of role names, table components only). The table's candidate entries (see "Access export") SHALL be the stored
+  entries of the listed roles only, whether or not the component sets `access_only`; without `roles` every stored entry is a
+  candidate entry. Each listed role SHALL be trimmed and compared with the table's stored roles as
+  `GET /v1/tables/{name}/access?role=` compares them, and roles that trim to the same name count once. A listed role whose stored
+  entry the reduction of "Access export" removes entirely is left behind as that requirement defines, and the bundle carries nothing
+  for it.
+
+A selector is present when its member is given with a non-null value; an absent or `null` member takes the default. Two selections
+of one object are the same when their selectors are equal once defaults are applied, `roles` being compared as a set of trimmed
+names, so `{ "type": "table", "name": "t" }` and `{ "type": "table", "name": "t", "access_only": false }` are the same.
+
+A table selected with `access_only: true` that no component's closure reaches is an **access-only table**. When another component's
+closure does reach it, the table travels as that closure decides, under `tables` or `required_system_tables` with the closure's
+reason, its entries pull in the enrichments their column policies name as "Access export" defines for any table the closure
+reaches, system tables included, and its component's `roles` still limits its candidate entries. Likewise a pipeline selected with
+`dependencies: false` that another component's closure reaches is expanded as that closure decides, and meets every rule a pipeline
+the closure reaches meets; one that no component's closure reaches is an **unexpanded pipeline**.
+
+The refusals, in this order:
+
+- A selector present on a component of the other type (`dependencies` on a table; `access_only` or `roles` on a pipeline), whatever
+  its value, an empty `roles` list, a `roles` item that is not a JSON string (a number, `null` or a nested array), and a listed role
+  that is blank once trimmed SHALL be `400` `bad_request` when the body is read, before any privilege or selection check.
+- `access_only: true`, or `roles`, on a request whose `include_access` is not true SHALL be `422` `catalog_export_invalid`, after the
+  endpoint's `REGISTRY_READ` check and before any name is resolved.
+- Two components naming the same object with different selections SHALL be `422` `catalog_export_invalid`, checked after the
+  `TABLE_GRANT` check of "Export authorization" and before any name is resolved. Components naming one object the same way count
+  once.
+- A table component's table SHALL be checked for `TABLE_GET` as "Export authorization" defines (`404` `not_found`, naming no role). A
+  listed role with no stored entry on that table SHALL then be `404` `not_found`, naming the table and the first such role in the
+  order listed. Both are checked
+  as each component is resolved, before the closure is walked, so before every refusal of "Excluded and system tables on export" for
+  a PENDING, FAILED or OTLP landing table or an unresolvable pipeline, whether the selection names it or a closure reaches it, and
+  before the column checks of "Export authorization".
+- An access-only table none of whose candidate entries survives the reduction of "Access export" (one that stores no entry, or
+  whose entries all stay behind) SHALL be `422` `catalog_export_empty`, on `/export` and `/export/preview` alike, since the
+  selection would carry nothing for it. It is checked once the closure is resolved, so after the refusals of "Excluded and
+  system tables on export" and the column checks of "Export authorization".
+
+A selection that walks no closure checks nothing only a closure needs: an access-only table and an unexpanded pipeline SHALL NOT make
+a selection `422` on account of a PENDING, FAILED or OTLP landing table, and an unexpanded pipeline SHALL NOT on account of a
+declaration that no longer resolves, since the tables it reads are never computed. An
+access-only table is not a bundle table for the column checks of "Export authorization", nor for the export path of
+[table-access-control](../table-access-control/spec.md) "Pipeline and export paths refuse a hidden column": none of its columns
+travels, so none is dropped. An unexpanded pipeline needs no `TABLE_GET` on the tables it reads or targets, because a pipeline read
+already exposes its whole declaration to a `REGISTRY_READ` holder (see [pipeline-registry](../pipeline-registry/spec.md)); with
+`include_access` the export still needs `TABLE_GRANT`.
+
+The export preview SHALL list a pipeline selected with `dependencies: false` with the reason `selected`, whether or not another
+component's closure reaches it. It SHALL NOT list an access-only user table
+among its objects; that table appears at most in the preview's `access`, as a candidate. A request that sets no selector SHALL resolve
+as the other requirements define, and the bundle's `format_version` SHALL NOT change on account of a selector.
+
+#### Scenario: A pipeline exported alone
+
+- **GIVEN** an `enrich` pipeline `sentiment_enrich` that reads `dial_usage_log` and targets `usage_sentiment`
+- **WHEN** the body selects only `{ "type": "pipeline", "name": "sentiment_enrich", "dependencies": false }`
+- **THEN** the response is `200`, `pipelines` holds only `sentiment_enrich`, and `tables` and `required_system_tables` are empty
+- **AND** the export preview lists `sentiment_enrich` with the reason `selected`
+
+#### Scenario: A pipeline alone carries no access
+
+- **WHEN** the same pipeline is exported with `dependencies: false` and `include_access: true`
+- **THEN** `required_system_tables` is empty and `access` is `{}`
+
+#### Scenario: A pipeline-only bundle imports where its tables exist
+
+- **GIVEN** the bundle of "A pipeline exported alone", and a target that has `dial_usage_log` and `usage_sentiment`, has never had a
+  pipeline named `sentiment_enrich`, and has no pipeline targeting `usage_sentiment`
+- **WHEN** it is imported with `resolution_policy=FAIL_IF_EXISTS`
+- **THEN** `sentiment_enrich` has `import_action` `CREATE`, it is created disabled, and `outcome` is `completed`
+- **AND WHEN** the target lacks `usage_sentiment`
+- **THEN** the `sentiment_enrich` entry is `FAIL` naming `usage_sentiment`, and `/import` is `422` with `error`
+  `catalog_import_invalid`
+
+#### Scenario: A pipeline alone is exported whatever its tables' state
+
+- **GIVEN** a pipeline `p` whose target is PENDING
+- **WHEN** the body selects only `{ "type": "pipeline", "name": "p", "dependencies": false }`
+- **THEN** the response is `200` and `pipelines` holds `p`
+- **AND WHEN** `p` instead reads an OTLP landing table, or its declaration no longer resolves
+- **THEN** the response is still `200` and `pipelines` holds `p`
+
+#### Scenario: A pipeline another component reaches is expanded
+
+- **GIVEN** a table `t` that the aggregate pipeline `p` targets, `p` reading `usage_base`
+- **WHEN** the body selects `{ "type": "table", "name": "t" }` and `{ "type": "pipeline", "name": "p", "dependencies": false }`
+- **THEN** `tables` holds `t` and `usage_base`, `pipelines` holds `p`, and the export preview gives `p` the reason `selected`
+- **AND WHEN** `usage_base` is PENDING
+- **THEN** the response is `422` with `error` `catalog_export_invalid`
+
+#### Scenario: A pipeline alone needs no get on its tables
+
+- **WHEN** a caller holding `REGISTRY_READ`, but no `get` on the target of pipeline `p`, selects
+  `{ "type": "pipeline", "name": "p", "dependencies": false }`
+- **THEN** the response is `200` and `pipelines` holds `p`
+
+#### Scenario: One role's policy exported alone
+
+- **GIVEN** a user table `t` that carries entries for `analytics-viewers` and `finance-owners`
+- **WHEN** the body selects only `{ "type": "table", "name": "t", "access_only": true, "roles": ["analytics-viewers"] }` with
+  `include_access: true`
+- **THEN** the response is `200`, `tables`, `pipelines` and `required_system_tables` are empty, and `access.t` holds only
+  `analytics-viewers`' entry
+- **AND** the export preview lists no object, and its `access` lists `t` with `roles` `["analytics-viewers"]` and no `left_behind`
+  item for `finance-owners`
+
+#### Scenario: A column policy travels without its enrichment
+
+- **GIVEN** a user table `t` whose entry for `analytics-viewers` carries `columns` `["a", "e.label"]`, `e` being an enrichment of `t`
+- **WHEN** `t` is selected with `access_only: true` and `include_access: true`
+- **THEN** `access.t.analytics-viewers` carries the `columns` unchanged, and `e` is neither under `tables` nor under
+  `required_system_tables`
+
+#### Scenario: An access-only system table pulls nothing in
+
+- **GIVEN** `analytics-viewers`' entry on `dial_usage_log` carries `columns` `["model", "usage_sentiment.label"]`
+- **WHEN** `dial_usage_log` is selected with `access_only: true` and `include_access: true`
+- **THEN** `required_system_tables` is `["dial_usage_log"]`, `tables` and `pipelines` are empty, and `access.dial_usage_log` carries
+  the entry
+- **AND** the export preview gives `dial_usage_log` the reason `selected`
+
+#### Scenario: An access-only table is exported whatever its state
+
+- **GIVEN** a PENDING user table `t` that carries an entry for `analytics-viewers`
+- **WHEN** `t` is selected with `access_only: true` and `include_access: true`
+- **THEN** the response is `200` and `access.t` holds the entry
+- **AND WHEN** `t` is instead an OTLP landing table carrying that entry
+- **THEN** the response is still `200` and `access.t` holds the entry
+
+#### Scenario: A hidden column does not refuse an access-only export
+
+- **GIVEN** a caller holding `REGISTRY_READ`, `TABLE_GRANT` and `get` on `t`, whose only governing role's `columns` on `t` omits
+  column `c`
+- **WHEN** the caller selects `t` with `access_only: true` and `include_access: true`
+- **THEN** the response is `200`, `access.t` carries `t`'s entries, and `tables` is empty
+
+#### Scenario: Roles limit a table that travels whole
+
+- **GIVEN** a user table `t` that carries entries for `analytics-viewers` and `finance-owners`
+- **WHEN** the body selects `{ "type": "table", "name": "t", "roles": ["finance-owners"] }` with `include_access: true`
+- **THEN** `tables` holds `t`, and `access.t` holds only `finance-owners`' entry
+
+#### Scenario: An unlisted role's column policy pulls nothing in
+
+- **GIVEN** `dial_usage_log` carries an entry for `analytics-viewers` with no column policy, and one for `finance-owners` whose
+  `columns` name `usage_sentiment.label`
+- **WHEN** `dial_usage_log` is selected with `roles` `["analytics-viewers"]` and `include_access: true`
+- **THEN** `usage_sentiment` is not under `tables`, `access.dial_usage_log` holds only `analytics-viewers`' entry, and the export
+  preview has no `left_behind` item for `finance-owners`
+
+#### Scenario: An access-only table another component reaches travels whole
+
+- **GIVEN** a pipeline `p` that targets `t`, and `t` carrying entries for `analytics-viewers` and `finance-owners`
+- **WHEN** the body selects `{ "type": "pipeline", "name": "p" }` and
+  `{ "type": "table", "name": "t", "access_only": true, "roles": ["analytics-viewers"] }` with `include_access: true`
+- **THEN** `tables` holds `t`, `access.t` holds only `analytics-viewers`' entry, and the export preview gives `t` the reason
+  `target of p`
+
+#### Scenario: An access-only system table another component reaches follows its column policies
+
+- **GIVEN** a pipeline `p` that reads `dial_usage_log`, and `analytics-viewers`' entry on `dial_usage_log` whose `columns` name
+  `usage_sentiment.label`, `usage_sentiment` being an enrichment of `dial_usage_log` that `sentiment_enrich` targets
+- **WHEN** the body selects `{ "type": "pipeline", "name": "p" }` and `{ "type": "table", "name": "dial_usage_log", "access_only": true }`
+  with `include_access: true`
+- **THEN** `required_system_tables` holds `dial_usage_log`, `tables` holds `usage_sentiment`, and `pipelines` holds `p` and
+  `sentiment_enrich`
+
+#### Scenario: A malformed selector
+
+- **WHEN** the body selects `{ "type": "pipeline", "name": "p", "roles": ["analytics-viewers"] }`, or
+  `{ "type": "table", "name": "t", "dependencies": true }`, or `{ "type": "table", "name": "t", "roles": [] }`, or
+  `{ "type": "table", "name": "t", "roles": [" "] }`, or `{ "type": "table", "name": "t", "roles": [1] }`, or
+  `{ "type": "table", "name": "t", "roles": [["a"]] }`
+- **THEN** the response is `400` with `error` `bad_request`, also for a caller without `REGISTRY_READ`
+
+#### Scenario: Access selectors without include_access
+
+- **WHEN** the body selects `{ "type": "table", "name": "t", "access_only": true }`, or
+  `{ "type": "table", "name": "t", "roles": ["analytics-viewers"] }`, and does not set `include_access`
+- **THEN** the response is `422` with `error` `catalog_export_invalid`
+- **AND WHEN** the body selects `{ "type": "table", "name": "does_not_exist", "access_only": true }` without `include_access`
+- **THEN** the response is `422` with `error` `catalog_export_invalid`, not `404`
+- **AND WHEN** a caller without `REGISTRY_READ` sends `{ "type": "table", "name": "t", "access_only": true }` without `include_access`
+- **THEN** the response is `403` with `error` `forbidden`
+
+#### Scenario: A role with no entry
+
+- **WHEN** `t` is selected with `access_only: true`, `roles` `["does-not-exist"]` and `include_access: true`, and `t` stores no
+  entry for `does-not-exist`
+- **THEN** the response is `404` with `error` `not_found`, and the message names `t` and `does-not-exist`
+- **AND WHEN** `t` is selected without `access_only`, with the same `roles`, and its closure reaches a PENDING table
+- **THEN** the response is still `404` with `error` `not_found`, not `422`
+
+#### Scenario: One object selected two ways
+
+- **WHEN** the body selects `{ "type": "table", "name": "t" }` and `{ "type": "table", "name": "t", "access_only": true }` with
+  `include_access: true`
+- **THEN** the response is `422` with `error` `catalog_export_invalid`
+- **AND WHEN** both components name a table that does not exist
+- **THEN** the response is still `422` with `error` `catalog_export_invalid`, not `404`
+- **AND WHEN** the caller lacks `TABLE_GRANT`
+- **THEN** the response is `403` with `error` `forbidden`
+
+#### Scenario: One object selected the same way twice
+
+- **GIVEN** a table `t` that stores entries for `a` and `b`
+- **WHEN** the body selects `{ "type": "table", "name": "t" }` and `{ "type": "table", "name": "t", "access_only": false }`, or
+  `t` twice with `roles` `["a", "b"]` and `[" b", "a"]`, with `include_access: true`
+- **THEN** the response is `200`, as for one selection of `t`
+
+#### Scenario: An access-only table the caller cannot get
+
+- **WHEN** a caller holding `REGISTRY_READ` and `TABLE_GRANT`, but no `get` on `t`, selects `t` with `access_only: true`,
+  `roles` `["does-not-exist"]` and `include_access: true`
+- **THEN** the response is `404` with `error` `not_found`, and the message does not name `does-not-exist`
+
+#### Scenario: An access-only table with nothing to carry
+
+- **GIVEN** a user table `t` that stores no access entry
+- **WHEN** `t` is selected with `access_only: true` and `include_access: true`, to `/export` or to `/export/preview`
+- **THEN** the response is `422` with `error` `catalog_export_empty`
+- **AND WHEN** `t`'s only stored entry is one for `READ_ONLY_ANALYTIC`, a bundle name an earlier build stored
+- **THEN** the response is still `422` with `error` `catalog_export_empty`
+
+## MODIFIED Requirements
+
+### Requirement: Catalog export endpoint
+
+`POST /v1/catalog/export` SHALL return a catalog bundle of the components named in its `ExportRequest` body, as `application/json`
+with the header `Content-Disposition: attachment; filename="adas-catalog-<timestamp>.json"`.
+
+The body SHALL be `{ "components": [ <component> ], "include_access": <boolean> }`, each component being
+`{ "type": "table", "name": "<name>", "access_only": <boolean>, "roles": ["<role>", ...] }` or
+`{ "type": "pipeline", "name": "<name>", "dependencies": <boolean> }`, where `include_access` is optional and defaults to `false`
+(see "Access export"), and `access_only`, `roles` and `dependencies` are optional selectors (see "Selective export"). An empty or
+absent `components` list
+SHALL export every exportable object: every ACTIVE table that is neither system-flagged nor an OTLP landing table, and every pipeline
+that does not read an OTLP landing table. An unknown `type` SHALL be `400`. After the refusals "Selective export" places before any
+name is resolved, a named table that does not exist SHALL be `404` with `error` `not_found`, and a named pipeline that does not exist
+SHALL be `404` with `error` `unknown_pipeline`. Export SHALL write nothing.
+
+#### Scenario: Export everything
+
+- **WHEN** `POST /v1/catalog/export` is called with `{}` on an environment holding user tables, an OTLP sink and pipelines
+- **THEN** the response is `200` with an attachment bundle holding every ACTIVE user table and every pipeline that reads no OTLP
+  landing table, and no OTLP landing table appears under `tables`
+
+#### Scenario: Unknown component name
+
+- **WHEN** the body lists `{ "type": "pipeline", "name": "does_not_exist" }`
+- **THEN** the response is `404` with `error` `unknown_pipeline`
+
+#### Scenario: Unknown component type
+
+- **WHEN** the body lists `{ "type": "saved_query", "name": "q" }`
+- **THEN** the response is `400` with `error` `bad_request`
+
+### Requirement: Export dependency closure
+
+The export SHALL include the dependency closure of the selected components, apart from an unexpanded pipeline and an access-only
+table, which bring in nothing (see "Selective export"). It is computed in both directions:
+a selected table SHALL pull
+in its `source_table` and every pipeline that targets it; a selected pipeline SHALL pull in its inputs and its target; and both SHALL
+pull in every enrichment a pipeline reads, including enrichments referenced only as `"<enrichment>.<column>"` tokens inside filter
+and measure expressions, or inside an `aggregate` pipeline's `sql` statement. With `include_access` true, a table's access SHALL
+also pull in every enrichment that a kept entry's column policy names as `<enrichment>.<column>`, as "Access export" defines. Apart
+from that, a system table, selected or reached, SHALL never be expanded: it pulls in neither its `source_table` nor any pipeline, and
+is written by name under `required_system_tables` (see "Excluded and system tables on export").
+
+For an `aggregate` pipeline in SQL mode, its inputs SHALL be the input table derived from the statement, and the enrichments it reads
+SHALL be found by scanning the stored statement for qualified tokens — the same scan the registry's dependency guards use — rather than
+by parsing it. A statement that does not parse SHALL therefore not make its pipeline `unresolvable`: a disabled draft whose `sql` cannot
+yet be read is exported with whatever its tokens reference, and with no input when none could be derived.
+
+#### Scenario: Enrichment pulls in its source
+
+- **WHEN** the selection is only the enrichment table `usage_sentiment`
+- **THEN** the bundle also holds its source table and the pipeline that targets `usage_sentiment`
+
+#### Scenario: Enrichment referenced only inside a filter
+
+- **WHEN** the selection is an aggregate pipeline whose only reference to enrichment `usage_sentiment` is the filter token
+  `"usage_sentiment.sentiment"`
+- **THEN** the bundle holds `usage_sentiment` and the pipeline that targets it
+
+#### Scenario: Enrichment referenced only inside an SQL statement
+
+- **WHEN** the selection is an aggregate pipeline in SQL mode whose statement reads `dial_usage_log` and references enrichment
+  `usage_sentiment` only as `"usage_sentiment.sentiment"` in its select list
+- **THEN** the bundle holds `usage_sentiment` and the pipeline that targets it, and `required_system_tables` names `dial_usage_log`
+
+#### Scenario: An unparseable SQL draft is exported, not skipped
+
+- **WHEN** an export of everything reaches a disabled aggregate pipeline whose stored `sql` does not parse
+- **THEN** the pipeline is in the bundle with its `sql` verbatim, and is not listed under `skipped` with `reason` `unresolvable`
+
+#### Scenario: A selected system enrichment is not expanded
+
+- **WHEN** the body selects only `{ "type": "table", "name": "dial_usage_log_payload" }` with `include_access: true`
+- **THEN** `dial_usage_log_payload` is listed under `required_system_tables`, and `dial_usage_log` is not required
+
+### Requirement: Excluded and system tables on export
+
+The export SHALL never write a system table (`TableDefinitionEntity.system`) as a table; it SHALL write under `required_system_tables`,
+a list of names with no columns, the name of each system table the closure reaches and, when `include_access` is true, of each system
+table whose access the bundle carries or that the selection names (see "Access export"). An explicit selection that names a system
+table SHALL be `422` with `error` `catalog_export_invalid` unless `include_access` is true: a system table's definition is required,
+never exported, and only its access may be selected.
+
+OTLP landing tables (`otel_<sink>_<signal>`) SHALL be excluded. PENDING and FAILED tables SHALL be excluded. When exporting
+everything, each excluded table SHALL be listed under `skipped` with `reason` `otlp`, `pending` or `failed`, a pipeline whose
+declaration no longer resolves SHALL be listed with `reason` `unresolvable` (and named in a `422` on explicit selection), and every object that needs
+one (an enrichment of it, a pipeline reading or targeting it) SHALL be excluded too and listed with `reason` `dependency_skipped`, or
+`otlp` for a pipeline that reads an OTLP landing table. An explicit selection that names or whose closure reaches an OTLP landing table,
+a pipeline that reads one, or a PENDING or FAILED table SHALL be `422` with `error` `catalog_export_invalid`. An access-only table and
+an unexpanded pipeline carry no table definition and have no closure walked, so neither SHALL count here as naming or reaching such a
+table, nor as naming a pipeline that reads one, and an unexpanded pipeline whose declaration no longer resolves SHALL NOT be named in
+a `422` (see "Selective export").
+
+#### Scenario: System table becomes a required system table
+
+- **WHEN** the closure reaches an enrichment of `dial_usage_log`
+- **THEN** `required_system_tables` is `["dial_usage_log"]`, and `dial_usage_log` is not under `tables`
+
+#### Scenario: Explicit system-table selection refused without access
+
+- **WHEN** the body selects the table `dial_usage_log` and does not set `include_access`
+- **THEN** the response is `422` with `error` `catalog_export_invalid`
+
+#### Scenario: Explicit OTLP selection refused
+
+- **WHEN** the body selects the table `otel_app_logs`
+- **THEN** the response is `422` with `error` `catalog_export_invalid`
+
+#### Scenario: Pending table skipped
+
+- **WHEN** an unselected-everything export runs while a table is PENDING
+- **THEN** that table is absent from `tables` and listed under `skipped` with `reason` `pending`
+
+### Requirement: Post-import runbook
+
+The project SHALL document the promotion runbook in `docs/catalog-promotion.md`: review `env_specific` (a model must exist on the
+target, because nothing checks it at arm time); enable enrichment-producing pipelines before the aggregates that read them; preview and
+then arm each pipeline; expect aggregates to rebuild from zero; run any data-sync backfill separately, since runner state does not
+travel; and, when promoting access, review every access entry's roles and row-policy values in the import preview
+and the export preview's `left_behind`, handle the bundle as access configuration, and remove a role on the target with
+`DELETE /v1/tables/{name}/access?role=`, since an import never removes one; and, to move one pipeline or some roles' access into an
+environment that already has the tables, export it with `dependencies: false`, or with `access_only` and `roles`, and read the import
+preview for a table the target lacks, which the import then refuses rather than creates.
+
+#### Scenario: Runbook present
+
+- **WHEN** the change ships
+- **THEN** `docs/catalog-promotion.md` exists and covers each of the seven steps
+
+### Requirement: Access export
+
+With `include_access` true, the bundle SHALL carry a top-level `access` object: one member per covered table, keyed by table name, each
+an object with one member per role key (a raw provider role or `*`), holding that role's entry `{ "privileges": [...], "rows": ..., "columns":
+... }` in the shape `GET /v1/tables/{name}/access` returns it: `privileges` de-duplicated in the order `get`, `read`, `sensitive`,
+`write`, `modify`, `rows` as `{ "filter": <filter node> }` or `null`, and `columns` as a sorted list or `null`; `rows` and `columns`
+SHALL always be present, as `null` when the role has none. Tables and roles SHALL be sorted by name. The member SHALL be present,
+possibly `{}`, whenever `include_access` was true, and absent otherwise.
+
+A **candidate** table SHALL be every table under `tables`, every access-only table (see "Selective export"), and every system table
+that the selection names, that the closure of the objects the bundle keeps reaches (for example, the input of a selected pipeline
+whose dependencies the export carries) or, when exporting everything, that the caller may get. A candidate's **candidate entries**
+SHALL be its stored entries, or, for a table whose component lists `roles`, the stored entries of the listed roles only: the other
+roles' entries are neither carried, nor left behind, nor followed below.
+
+A column policy names an enrichment's column as `<enrichment>.<column>`, and that enrichment's source is always the entry's table.
+Every enrichment that a candidate entry of a candidate other than an access-only table names this way, once steps 1 to 3 below have
+kept that entry, SHALL join the closure with
+the reason `column policy of <table>`, and SHALL pull in what it pulls in as any other closure table: its `source_table`, the pipeline
+that targets it and, through that pipeline, its inputs. This SHALL apply to system-table candidates too, which are otherwise never
+expanded. The edge SHALL NOT make the candidate need the enrichment: when exporting everything skips the enrichment, the candidate and
+every other object stay, and only the entry is left behind (step 4). Such an enrichment is gettable whenever its source is, and it
+meets every other rule a table the closure reaches meets: under a selection, a PENDING or FAILED one SHALL make the export `422` with
+`error` `catalog_export_invalid`, and one with a column the caller may not see SHALL refuse the export as "Export authorization"
+defines. A system enrichment named this way SHALL be listed under `required_system_tables`, as every system table the closure reaches
+is, and never exported; it stays listed even when step 4 later leaves the entry behind. An entry that steps 1 to 3 leave behind pulls
+nothing in, and so does every entry of an access-only table, whose enrichments are left to the target. Every `<enrichment>.<column>`
+an entry of any other carried table names is therefore an enrichment under `tables` or under `required_system_tables`, so an import
+of a bundle without access-only tables into a target that has the same system tables and none of the bundle's tables meets no access
+entry naming a missing enrichment.
+
+The bundle SHALL carry only what a `PUT /v1/tables/{name}/access?role=` on the exporting ADAS would accept now. Each candidate entry
+SHALL be reduced in this order, and every part removed SHALL be **left behind**:
+
+1. an enrichment's entry keeps only `write` and `modify`, leaving behind `get`, `read`, `sensitive`, `rows` and `columns`;
+2. a `*` entry, and every entry of a system table, leaves behind `write` and `modify`;
+3. a non-empty entry that the body rules of a `PUT` (see [table-access-control](../table-access-control/spec.md)) still refuse, such as
+   one stored for a role that is now a bundle or privilege name, has what remains of it left behind;
+4. an entry whose column policy names `<enrichment>.<column>` for an enrichment listed under the bundle's `skipped` has what remains of
+   it left behind. Only exporting everything skips objects, and steps 1 to 3 depend only on the entry and the exporting ADAS's catalog,
+   so this is the one step that needs the closure, and it runs once the closure is known;
+5. an entry left with no privilege and no policy is omitted.
+
+A **covered** table SHALL be a candidate that has at least one entry after this reduction. The bundle SHALL carry the portable entries
+of every covered table and nothing for any other candidate. A system enrichment is never covered, since a `PUT` refuses both its read side and its `write` and `modify`. A
+system table SHALL contribute only its access, never its definition, and SHALL be listed under `required_system_tables` whenever it is
+covered, named by the selection or reached by the closure. In the export preview, a system table under `required_system_tables` that
+is there only because exporting everything covers it SHALL carry the reason `access`.
+
+With `include_access` true, the export preview SHALL also return `access`: one item per candidate that is covered or has something left
+behind, sorted by table, each `{ table, roles: [<role>...], left_behind: [ { role, entry, error } ] }`. `roles` lists, sorted, the roles
+the bundle carries for the table. `left_behind` holds, sorted by role and then in step order, at most one item per role and step. In
+`entry` it gives, in entry shape with `rows` and `columns` always present, the part of that role's stored entry the step removed. In
+`error` it gives `dependency_skipped` for step 4, and otherwise the code the `PUT`'s checks of the body give that part, in the `PUT`'s
+order and with no generation, equal-entry or conflict check:
+for example `enrichment_follows_source` for an enrichment's read side, `table_is_system` for `write` or `modify` on a system table, and
+`validation_error` for a `*` entry's `write` or `modify` on another table or for a refused role. Without `include_access` the preview
+SHALL carry no `access` member. Only the export preview reports what was left behind: neither the bundle nor the import mentions it.
+
+#### Scenario: Access travels with a table
+
+- **GIVEN** a table `t` on which `analytics-viewers` carries `read` with a row policy and `finance-owners` carries `read` and
+  `sensitive` with `columns` `["a", "b"]`
+- **WHEN** a caller holding `REGISTRY_READ`, `get` on `t` and `TABLE_GRANT` exports `t` with `include_access: true`
+- **THEN** `access.t` holds both entries exactly as `GET /v1/tables/t/access` returns them, and `t` is under `tables` as without access
+
+#### Scenario: Exporting everything covers system tables
+
+- **GIVEN** `dial_usage_log` carries an entry for `analytics-viewers`, and no bundle table or pipeline depends on it
+- **WHEN** a caller holding `REGISTRY_READ`, `get` on `dial_usage_log` and `TABLE_GRANT` exports everything with
+  `include_access: true`
+- **THEN** `required_system_tables` contains `dial_usage_log`, `access.dial_usage_log` holds the entry, `dial_usage_log` is not under
+  `tables`, and the export preview gives `dial_usage_log` the reason `access`
+
+#### Scenario: A system table selected for its access alone
+
+- **GIVEN** no entry on `dial_usage_log` names an enrichment's column
+- **WHEN** the body selects only `{ "type": "table", "name": "dial_usage_log" }` with `include_access: true`
+- **THEN** the response is `200`, `tables` and `pipelines` are empty, `required_system_tables` is `["dial_usage_log"]`, and `access`
+  holds `dial_usage_log`'s entries
+
+#### Scenario: A system table the closure reaches carries its access
+
+- **GIVEN** a pipeline `p` that reads `dial_usage_log`, which carries an entry for `analytics-viewers`
+- **WHEN** only `p` is exported with `include_access: true`
+- **THEN** `required_system_tables` contains `dial_usage_log` and `access.dial_usage_log` holds the entry
+
+#### Scenario: A column policy pulls in its enrichment
+
+- **GIVEN** `analytics-viewers`' entry on `dial_usage_log` carries `columns` `["model", "usage_sentiment.label"]`, where
+  `usage_sentiment` is an enrichment of `dial_usage_log` that the `enrich` pipeline `sentiment_enrich` targets
+- **WHEN** only `dial_usage_log` is exported with `include_access: true`
+- **THEN** `tables` holds `usage_sentiment`, `pipelines` holds `sentiment_enrich`, the export preview gives `usage_sentiment` the
+  reason `column policy of dial_usage_log`, and `access.dial_usage_log.analytics-viewers` carries the `columns` unchanged
+- **AND WHEN** `usage_sentiment` is FAILED
+- **THEN** the response is `422` with `error` `catalog_export_invalid` naming `usage_sentiment`
+
+#### Scenario: A fresh export imports cleanly
+
+- **GIVEN** the bundle of "A column policy pulls in its enrichment"
+- **WHEN** it is imported with `include_access=true` into a target that has `dial_usage_log` and no `usage_sentiment`
+- **THEN** `outcome` is `completed`, `usage_sentiment` is created before the access is written, and
+  `GET /v1/tables/dial_usage_log/access` on the target returns the `analytics-viewers` entry as the bundle holds it
+
+#### Scenario: A left-behind entry pulls nothing in
+
+- **GIVEN** a table `t` that stores, for the bundle name `READ_ONLY_ANALYTIC`, an entry written by an earlier build whose `columns`
+  name `e.label`, `e` being an enrichment of `t`
+- **WHEN** only `t` is exported with `include_access: true`
+- **THEN** `e` is not exported, and the export preview lists `READ_ONLY_ANALYTIC` under `left_behind`
+
+#### Scenario: An entry naming a skipped enrichment stays behind
+
+- **GIVEN** `analytics-viewers`' entry on `dial_usage_log` carries `columns` `["model", "usage_sentiment.label"]`, and
+  `usage_sentiment` is FAILED
+- **WHEN** everything is exported with `include_access: true`
+- **THEN** `usage_sentiment` is listed under `skipped`, `access.dial_usage_log` carries no `analytics-viewers` entry, and the export
+  preview lists `analytics-viewers` under `left_behind` with `error` `dependency_skipped`
+
+#### Scenario: A skipped enrichment does not drop the table naming it
+
+- **GIVEN** a user table `t` whose entry for `analytics-viewers` carries `columns` `["a", "e.label"]`, `e` being a FAILED enrichment
+  of `t`
+- **WHEN** everything is exported with `include_access: true`
+- **THEN** `t` is under `tables`, `e` is listed under `skipped` with `reason` `failed`, `access.t` carries no `analytics-viewers`
+  entry, and the export preview lists `analytics-viewers` under `left_behind` with `error` `dependency_skipped`
+
+#### Scenario: A column policy naming a system enrichment
+
+- **GIVEN** `analytics-viewers`' entry on `dial_usage_log` names a column of `dial_usage_log_payload`
+- **WHEN** only `dial_usage_log` is exported with `include_access: true`
+- **THEN** `required_system_tables` is `["dial_usage_log", "dial_usage_log_payload"]`, the export preview gives
+  `dial_usage_log_payload` the reason `column policy of dial_usage_log`, `tables` is empty, and `access.dial_usage_log` carries the
+  entry
+
+#### Scenario: A selected system enrichment carries no access
+
+- **WHEN** the body selects only `{ "type": "table", "name": "dial_usage_log_payload" }` with `include_access: true`
+- **THEN** `required_system_tables` is `["dial_usage_log_payload"]`, `dial_usage_log` is neither required nor covered, and `access` is
+  `{}`
+
+#### Scenario: Leftover state stays behind
+
+- **GIVEN** an enrichment `e` that stores, for role `X`, `write` together with a leftover `read` and row policy written by an earlier
+  build
+- **WHEN** `e` is exported with `include_access: true`
+- **THEN** `access.e.X` is `{ "privileges": ["write"], "rows": null, "columns": null }`, and the export preview lists, for `e`, a
+  `left_behind` item for `X` whose `entry` carries `read` and the row policy and whose `error` is `enrichment_follows_source`
+
+#### Scenario: A write for everyone stays behind
+
+- **GIVEN** a user table `t` whose `*` entry stores `read` and `write`, written by an earlier build
+- **WHEN** `t` is exported with `include_access: true`
+- **THEN** `access.t."*"` carries only `read`, and the export preview lists `*` under `left_behind` with `write` and `error`
+  `validation_error`
+
+#### Scenario: A system table's write stays behind
+
+- **GIVEN** `dial_usage_log` stores, for role `X`, `read` together with a `write` written by an earlier build
+- **WHEN** everything is exported with `include_access: true`
+- **THEN** `access.dial_usage_log.X` carries only `read`, and the export preview lists `X` under `left_behind` with `write` and
+  `error` `table_is_system`
+
+#### Scenario: Security mode none exports access
+
+- **WHEN** security mode is `none` and a caller with no claims exports everything with `include_access: true`
+- **THEN** the response is `200` and the bundle carries `access`
+
+#### Scenario: A role a PUT refuses stays behind whole
+
+- **GIVEN** a table `t` that stores an entry for `READ_ONLY_ANALYTIC`, a bundle name, written by an earlier build, and one for
+  `analytics-viewers`
+- **WHEN** `t` is exported with `include_access: true`
+- **THEN** `access.t` holds only `analytics-viewers`, and the export preview lists `READ_ONLY_ANALYTIC` under `left_behind` with its
+  whole entry and `error` `validation_error`
+
+#### Scenario: An export with nothing to carry still says so
+
+- **WHEN** an export with `include_access: true` covers no table
+- **THEN** the bundle carries `access: {}`
+
+### Requirement: Access import
+
+Both import calls SHALL accept the optional boolean query parameter `include_access`, defaulting to `false`. Whatever its value, the
+bundle's `access` member SHALL be bound strictly in stage 2: a `null` table or role value under it SHALL be `400`, like any constraint
+violation, and an entry SHALL bind as a `PUT` body without `generation`, so `rows` takes `filter` or `where`. A top-level
+`"access": null` SHALL count as no `access` member. When the flag is false,
+the bound `access` member SHALL be ignored: no access entry is written on any table and the response's `access` list is empty. When it
+is true:
+
+- **Names.** Role keys SHALL be trimmed as a `PUT` trims its role, and table keys SHALL match a bundle table name or a target table
+  name exactly.
+- **Tables named only by access.** An `access` key MAY name a table that is neither under `tables` nor under
+  `required_system_tables` when that table exists on the target as a user table, as a bundle exported with `access_only` on a user table does (see
+  "Selective export"). Such a table has no object entry of its own: its access entries are planned, checked, applied and reported as
+  any other's, and the rule that refuses an entry with its table's refused object entry does not apply to them. A validation pass
+  or an apply that stops early still affects them as it affects every access entry.
+- **Bundle-level problems.** A bundle with no `access` member, an `access` key naming a table that is neither under `tables` nor under
+  `required_system_tables` and is not a user table on the target (it does not exist there, or is a system table there), a role key that is blank once trimmed, and two role keys of one table
+  that trim to the same role SHALL
+  each be reported under `validation_errors`, and `/import` SHALL answer `422` with `error` `catalog_import_invalid`. Every access
+  entry under such a problem SHALL be `FAIL` with a problem naming it, so none of them is checked or applied.
+- **Upsert.** Each role entry SHALL replace that role's entry on the target table; every role the bundle does not name on that table
+  SHALL keep its entry unchanged. Role names SHALL be copied as they are, with no mapping. The upsert SHALL apply to tables this import
+  creates, to existing user tables kept under `SKIP_IF_EXISTS`, to required system tables and to tables named only by access alike.
+  An import SHALL never remove an
+  entry: a bundle entry with no privilege and no policy SHALL be `FAIL` with `validation_error`, naming
+  `DELETE /v1/tables/{name}/access?role=` as the way to remove one.
+- **Validation.** The shared validation pass SHALL check each entry with the rules a `PUT /v1/tables/{name}/access?role=` applies to its
+  body, in the `PUT`'s order (see [table-access-control](../table-access-control/spec.md)), against the target table as it stands once
+  the import's tables exist, and without a client `generation`. An entry a `PUT` would refuse SHALL be `FAIL` with a problem that starts with
+  the `PUT`'s `error` code (`<code>: <message>`). An entry on a table whose own entry is refused, at planning or in the validation pass, SHALL be `FAIL`
+  naming it, except that a `FAIL_IF_EXISTS` conflict does not refuse it, as for every other dependent. When the pass stops before an entry is checked, that entry SHALL be `FAIL`
+  with a problem saying it was not checked. The pass SHALL check every entry before it applies any, and SHALL apply only `CREATE` and
+  `REPLACE` entries, so it locks no table whose entries all equal the target's. When applying the
+  access inside the pass still fails, for example on a lock timeout, every access entry SHALL be `FAIL` with a problem naming the
+  failure, and every pipeline SHALL carry the `not checked` arm problem instead of being armed, since the access may be partly
+  applied. Any `FAIL` SHALL make `/import` answer `422` with `error` `catalog_import_invalid`.
+- **Equality.** An entry SHALL count as equal to the target's when the entry a `PUT` of it would store equals the stored one, so the
+  order of `privileges` and `columns` does not matter.
+- **Apply.** `/import` SHALL write every access entry in one transaction, after every table and pipeline is created. A failure there SHALL run the compensation of "Best-effort compensation", so either every access entry is
+  written or none is, and the access of existing tables is then as it was. `/import` SHALL then answer `200` with that `ImportResult`,
+  as when an object fails during apply.
+- **Generation and audit.** Each entry written SHALL move the table's access `generation` on by one and set the role's last-change mark,
+  as a `PUT` does, and an equal entry SHALL write nothing and move neither. The access step SHALL be audited as at most one revision, none when no entry
+  changes, tagged with the import's `import_id`, so the activity feed records one `Update` per changed table, however many of its roles changed, each carrying that
+  `importId`.
+- **Authorization.** Both calls SHALL require global `TABLE_GRANT`, checked once the bundle is parsed and before the target's access
+  is read, so before the programmatic gates of "Import authorization" and the collision check. A caller without it SHALL receive `403` with `error` `forbidden`, and nothing SHALL be written.
+  `TABLE_CREATE` at the endpoint SHALL still be required, even for a bundle that carries only access. When security is not enforced,
+  this check SHALL be skipped.
+
+#### Scenario: Access lands on a created table
+
+- **GIVEN** a bundle holding table `t` and an entry for `analytics-viewers` on it
+- **WHEN** it is imported into a target without `t`, with `include_access=true`
+- **THEN** `t` is created and `GET /v1/tables/t/access` on the target returns the `analytics-viewers` entry as the bundle holds it
+
+#### Scenario: Roles the bundle does not name are kept
+
+- **GIVEN** a target whose `dial_usage_log` carries entries for `ops-readers` and `analytics-viewers`, and a bundle whose
+  `access.dial_usage_log` holds only `analytics-viewers` with a different entry
+- **WHEN** the bundle is imported with `include_access=true`
+- **THEN** `analytics-viewers`' entry is the bundle's, and `ops-readers`' entry is unchanged
+
+#### Scenario: An empty entry does not remove a role
+
+- **GIVEN** a target whose `t` carries an entry for `analytics-viewers`, and a bundle holding `t` under `tables` whose
+  `access.t.analytics-viewers` is `{ "privileges": [] }`
+- **WHEN** it is imported with `resolution_policy=SKIP_IF_EXISTS` and `include_access=true`
+- **THEN** that access entry is `FAIL` with `validation_error`, the response is `422` with `error` `catalog_import_invalid`, and
+  `analytics-viewers`' entry on the target is unchanged
+
+#### Scenario: Two keys naming one role
+
+- **WHEN** a bundle whose `access.t` has the keys `"analytics-viewers"` and `" analytics-viewers"` is imported with
+  `include_access=true`
+- **THEN** `/import/preview` reports it under `validation_errors`, and `/import` is `422` with `error` `catalog_import_invalid`
+
+#### Scenario: A blank role key
+
+- **WHEN** a bundle whose `access.t` has the key `" "` is imported with `include_access=true`
+- **THEN** `/import/preview` reports it under `validation_errors`, and `/import` is `422` with `error` `catalog_import_invalid`
+
+#### Scenario: Access for a table the bundle does not carry
+
+- **WHEN** a bundle whose `access` has a key `u` that is neither under `tables` nor under `required_system_tables` is imported with
+  `include_access=true` into a target that has no table `u`
+- **THEN** `/import/preview` reports it under `validation_errors`, every access entry on `u` is `FAIL` naming it, and `/import` is
+  `422` with `error` `catalog_import_invalid`
+
+#### Scenario: Access for a table only the target has
+
+- **GIVEN** a target whose user table `u` carries entries for `finance-owners` and `analytics-viewers`, and a bundle that carries no
+  table or pipeline and whose `access.u` holds a different entry for `analytics-viewers`
+- **WHEN** it is imported with `resolution_policy=FAIL_IF_EXISTS` and `include_access=true`
+- **THEN** the response is `200` with `outcome` `completed`, the `u`/`analytics-viewers` access entry has `import_action` `REPLACE`
+  and `status` `replaced`, `finance-owners`' entry is unchanged, `u`'s definition is unchanged, `u`'s access `generation` has moved
+  on by one, and exactly one `Update` of `u` records the change, carrying the import's `importId`
+- **AND WHEN** the bundle's entry names a column `u` lacks
+- **THEN** that access entry is `FAIL` with a problem naming the column, and `/import` is `422` with `error` `catalog_import_invalid`
+- **AND WHEN** the bundle also carries a pipeline `p` that is `FAIL` at planning, its input being in neither the bundle nor the
+  target, and the entry for `u` is valid
+- **THEN** `/import/preview` still reports the `u`/`analytics-viewers` access entry as `REPLACE`, and `/import` is `422` with `error`
+  `catalog_import_invalid`
+- **AND WHEN** the target's `u` is a system table instead
+- **THEN** `/import/preview` reports it under `validation_errors`, every access entry on `u` is `FAIL`, and `/import` is `422`
+  with `error` `catalog_import_invalid`
+
+#### Scenario: A null access value is refused at binding
+
+- **WHEN** a bundle whose `access.t` is `null`, or whose `access.t.analytics-viewers` is `null`, is uploaded to either import call,
+  with or without `include_access`
+- **THEN** the response is `400`
+
+#### Scenario: An access-only bundle still needs TABLE_CREATE
+
+- **WHEN** a caller holding `TABLE_GRANT` but not `TABLE_CREATE` imports, with `include_access=true`, a bundle that carries only access
+  for `dial_usage_log`
+- **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+
+#### Scenario: Access lands on a skipped existing table
+
+- **GIVEN** a target that already holds the bundle's table `t` with no entries
+- **WHEN** the bundle is imported with `resolution_policy=SKIP_IF_EXISTS` and `include_access=true`
+- **THEN** the `t` table entry is `SKIP`, its definition is unchanged, and its access holds the bundle's entries
+
+#### Scenario: Re-running the import writes no access
+
+- **WHEN** a bundle already imported with `resolution_policy=SKIP_IF_EXISTS` and `include_access=true` is imported again the same way
+- **THEN** every access entry is `SKIP`, and every covered table's access `generation` is unchanged
+
+#### Scenario: Access revisions carry the import id
+
+- **WHEN** an import with `include_access=true` that replaces an entry on the existing `dial_usage_log` completes with `import_id` `X`
+- **THEN** exactly one `Update` of `dial_usage_log` records that change, and it carries `importId` `X`
+
+#### Scenario: Access ignored without the flag
+
+- **WHEN** a bundle carrying `access` is imported without `include_access`
+- **THEN** no access entry is written on any table, and the response's `access` list is empty
+
+#### Scenario: The flag on a bundle without access
+
+- **WHEN** a bundle exported without `include_access` is imported with `include_access=true`
+- **THEN** `/import/preview` reports it under `validation_errors`, and `/import` is `422` with `error` `catalog_import_invalid`
+
+#### Scenario: A null access member counts as absent
+
+- **WHEN** a bundle whose top level carries `"access": null` is imported with `include_access=true`
+- **THEN** the response is `422` with `error` `catalog_import_invalid` and a validation error saying the bundle has no `access` member,
+  not `400`
+- **AND WHEN** it is imported without `include_access`
+- **THEN** it imports as a bundle without access
+
+#### Scenario: An entry the target table cannot take
+
+- **GIVEN** a bundle whose entry for `analytics-viewers` on `t` carries `columns` `["a", "z"]`, and a target `t` that has no column `z`
+- **WHEN** it is imported with `resolution_policy=SKIP_IF_EXISTS` and `include_access=true`
+- **THEN** that access entry is `FAIL` with a problem naming `z`, the response is `422` with `error` `catalog_import_invalid`, and
+  nothing is written
+
+#### Scenario: A column policy naming an enrichment the target lacks
+
+- **GIVEN** a bundle whose entry for `analytics-viewers` on `dial_usage_log` carries `columns` `["model", "usage_sentiment.label"]`,
+  holding no `usage_sentiment` (as an export selecting `dial_usage_log` with `access_only` writes it), and a target without
+  `usage_sentiment`
+- **WHEN** it is imported with `include_access=true`
+- **THEN** that access entry is `FAIL` with a problem naming `usage_sentiment.label`, and `/import` is `422` with `error`
+  `catalog_import_invalid`
+
+#### Scenario: Access on a refused table fails with it
+
+- **WHEN** a bundle table `t` is refused by the validation pass, and the bundle carries access for `t`, under `include_access=true`
+- **THEN** every access entry on `t` is `FAIL` naming `t`, and no access entry is applied in the pass
+
+#### Scenario: A conflicting table's access is not refused in preview
+
+- **WHEN** `/import/preview` runs with `resolution_policy=FAIL_IF_EXISTS` and `include_access=true` on a bundle holding a table `t` that
+  exists on the target, with access for `t`
+- **THEN** the `t` table entry is `FAIL` as a conflict, and the access entries on `t` are `CREATE`, `REPLACE` or `SKIP`, not `FAIL`
+
+#### Scenario: Access on a missing system table fails
+
+- **WHEN** a bundle carrying access for a required system table the target does not have is previewed with `include_access=true`
+- **THEN** that table's entry is `FAIL`, and every access entry on it is `FAIL` naming it
+
+#### Scenario: Equality ignores order
+
+- **GIVEN** a target `t` on which `analytics-viewers` stores `privileges` `["get", "read"]` and `columns` `["a", "b"]`
+- **WHEN** a bundle whose entry for it carries `["read", "get"]` and `["b", "a"]` is previewed with `include_access=true`
+- **THEN** that access entry is `SKIP`
+
+#### Scenario: Importing access needs TABLE_GRANT
+
+- **WHEN** a caller holding every privilege the bundle's objects need, but not `TABLE_GRANT`, imports with `include_access=true`
+- **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+
+#### Scenario: The TABLE_GRANT check precedes the collision check
+
+- **WHEN** a caller without `TABLE_GRANT` imports, with `resolution_policy=FAIL_IF_EXISTS` and `include_access=true`, a bundle holding
+  a table that already exists on the target
+- **THEN** the response is `403` with `error` `forbidden`, not `409`
+
+#### Scenario: The TABLE_GRANT check precedes the object gates
+
+- **WHEN** a caller holding `TABLE_CREATE` but neither `TABLE_GRANT` nor `TABLE_MODIFY` imports, with `include_access=true`, a
+  bundle holding a table the target lacks
+- **THEN** the response is `403` with `error` `forbidden` and a message naming `TABLE_GRANT`, not `TABLE_MODIFY`
+
+#### Scenario: Access lands whole or not at all
+
+- **GIVEN** a bundle that creates table `t` and carries access for `t` and for `dial_usage_log`
+- **WHEN** writing the access fails during `/import` with `include_access=true`
+- **THEN** the response is `200`, `t` is removed by compensation, the target's `dial_usage_log` access is as it was, and `outcome`
+  is `rolled_back`
+
+#### Scenario: The generation moves as a PUT moves it
+
+- **GIVEN** a target `dial_usage_log` at access `generation` `7`
+- **WHEN** an import with `include_access=true` replaces one role's entry on it and creates another's
+- **THEN** its `generation` is `9`, and a `PUT` of a different entry for either role carrying `generation` `7` is refused `409` with
+  `error` `access_conflict`
+
+#### Scenario: Security mode none imports access
+
+- **WHEN** security mode is `none` and a caller with no claims imports a valid bundle with `include_access=true`
+- **THEN** the import succeeds and the bundle's access entries are written
+
+
+### Requirement: Import entries
+
+`ImportPreview` and `ImportResult` SHALL group entries by type (`required_system_tables`, `tables`, `pipelines`, and `access`, whose entries
+"Access import entries" defines), each object entry being
+`{ name, import_action, prev, next, differs, metadata_only, problems[] }`. The rules below are about object
+entries; an access entry is not an object.
+
+- `import_action` SHALL be `CREATE` (new), `SKIP` (exists under `SKIP_IF_EXISTS`, or a required system table the target has)
+  or `FAIL` (exists under `FAIL_IF_EXISTS`, or fails validation under either policy, including a required system table the target lacks
+  and a pipeline whose target is held by a differently named pipeline).
+- `prev` SHALL be the target's existing object re-exported in bundle shape, or null when new; `next` SHALL be the bundle's object,
+  kept on `SKIP` entries too. `prev` SHALL follow the export's visibility rules for the caller: sensitive columns only with the
+  clearance, no column a column policy hides from the caller (see [table-access-control](../table-access-control/spec.md),
+  "Column visibility by caller role"), and null for a table the caller may not get or a pipeline without
+  `REGISTRY_READ`. `differs` is still computed from the full objects, so it MAY be `true` when only a column omitted from `prev`
+  differs, as for a sensitive column the caller cannot see.
+- An existing user table that is PENDING or FAILED SHALL be `FAIL` under either policy, telling the operator to delete it first; a
+  bundle table whose name is a system table on the target SHALL be `FAIL`. An object that depends on a refused object (an enrichment
+  of a refused source, a pipeline reading or targeting one) SHALL be `FAIL` naming that dependency.
+- An enrichment table to be created, or a pipeline to be created, that depends on a table the bundle neither carries under `tables`
+  nor lists under `required_system_tables` SHALL be `FAIL` naming that table when the target does not have it either, a name an SQL
+  statement's `FROM` reads excepted as "An SQL declaration's import dependencies are read from its statement" defines. A dependency
+  the bundle does not list SHALL also be ACTIVE on the target: one that is PENDING or FAILED there SHALL make the object `FAIL`
+  naming it and its state, since nothing over it could be armed, and a table a pipeline reads cannot be deleted for repair while
+  that pipeline exists. Its columns are left to the validation pass, and a system table among them is not checked as a required
+  system table.
+- `differs` SHALL compare the serialized `prev` and `next`, excluding `enabled`, state and timestamps; `metadata_only` SHALL be true
+  when only descriptions, display names or tags differ.
+- Pipeline entries SHALL also carry `armable`, `arm_problems[]` and `reused_name`.
+- `ImportResult` entries SHALL add `status`: `created`, `skipped`, `rolled_back`, `rollback_failed` or `failed`. An object not
+  attempted because the import stopped earlier SHALL be `skipped` with a problem naming where it stopped.
+- `import_action` SHALL be written in upper case, as deployment manager writes it.
+
+The top level SHALL carry `env_specific[]` and, on `ImportPreview`, `validation_errors[]` (bundle-level problems: limits, a name
+listed twice, a name listed both as a table and as a required system table, and the bundle-level access problems of "Access import"). `ImportResult` SHALL also carry `import_id` and `outcome`:
+`completed`; `rolled_back` when an object or the access step failed and compensation removed everything it had created; or `rollback_failed` when any
+entry ended `rollback_failed`.
+
+#### Scenario: Differing object under either policy in preview
+
+- **WHEN** `/import/preview` runs with a bundle whose table `t` differs from the target's `t`, under each policy
+- **THEN** both responses are `200`, and the `t` entry carries `prev`, `next` and `differs: true`
+
+#### Scenario: Description-only difference
+
+- **WHEN** the only difference between `prev` and `next` is a column description
+- **THEN** the entry has `differs: true` and `metadata_only: true`
+
+#### Scenario: A hidden column is omitted from prev
+
+- **GIVEN** a target table `t` with columns `a` and `c`, and a caller holding `TABLE_CREATE` and `get` on `t` whose only
+  governing role's `columns` on `t` is `["a"]`
+- **WHEN** the caller runs `/import/preview` with a bundle carrying `t`
+- **THEN** the `t` entry's `prev` lists column `a` and not `c`
+
+#### Scenario: A dependency in neither the bundle nor the target
+
+- **WHEN** `/import/preview` runs with `resolution_policy=SKIP_IF_EXISTS` and a bundle holding a form-mode pipeline `p` whose input
+  `usage_base` the bundle neither carries nor lists, and whose target the bundle carries, on a target without `usage_base`
+- **THEN** the `p` entry is `FAIL` naming `usage_base`, and `/import` is `422` with `error` `catalog_import_invalid`
+- **AND WHEN** the target has `usage_base`
+- **THEN** the `p` entry is `CREATE`
+- **AND WHEN** the target's `usage_base` is PENDING or FAILED
+- **THEN** the `p` entry is `FAIL` naming `usage_base` and its state, and `/import` is `422` with `error`
+  `catalog_import_invalid`
+
+
+### Requirement: An SQL declaration's import dependencies are read from its statement
+
+Import SHALL resolve an `aggregate` pipeline's dependencies in SQL mode from its `sql`: the input table its `FROM` names, plus every
+enrichment it references as a `"<enrichment>.<column>"` token, alongside its `target` and any `inputs` it declares. These are the
+tables the pipeline cannot be created or armed without, and they SHALL drive every rule that asks for a pipeline's dependencies exactly
+as a form-mode declaration's do: a pipeline depending on a refused object is `FAIL` naming that dependency, a dependency on a system
+table the bundle lists under `required_system_tables` is checked as a required system table, one the bundle neither carries nor lists
+is checked as "Import entries" defines, and the enrichments it reads are created before it under the import order.
+
+Without this an SQL-mode pipeline, which usually declares no `inputs` and carries its enrichment references inside one string, would
+look to the planner as if it depended on its target alone, and would be planned `CREATE` over a refused source, failing at apply rather
+than in the preview.
+
+The enrichment references SHALL be found by the qualified-token scan the export closure uses, which needs no parse. The input table
+SHALL be read from the statement where it can be; a statement that does not parse SHALL contribute its tokens only and SHALL NOT by
+itself make the pipeline `FAIL`, because the pipeline imports disabled and its own arming is what asks for a readable statement.
+
+A name the statement's `FROM` reads SHALL count as a dependency only when it names a table the bundle carries or lists (under `tables`
+or `required_system_tables`) or a table that exists on the target environment. Any other `FROM` name, a CTE's own name for instance,
+SHALL be left to the arm gate: it SHALL NOT make the pipeline `FAIL` at import, and the validation pass reports it through `armable`
+and `arm_problems`.
+
+Every name the statement contributes — a `FROM` table, a CTE name, an enrichment token — SHALL be compared lowercased, quoted or not,
+because the SQL front end resolves names case-insensitively: `FROM "Dial_Usage_Log"` reads `dial_usage_log`, and
+`"Usage_Sentiment.sentiment"` references `usage_sentiment`.
+
+#### Scenario: A pipeline whose statement reads a refused source fails in preview
+
+- **WHEN** `/import/preview` runs with a bundle whose table `usage_base` is refused and whose SQL-mode aggregate pipeline declares no
+  `inputs` and reads `usage_base` in its statement
+- **THEN** the pipeline entry is `FAIL` naming `usage_base` as its dependency
+
+#### Scenario: An enrichment referenced only in the statement is a dependency
+
+- **WHEN** a bundle's SQL-mode aggregate pipeline references `"usage_sentiment.sentiment"` only inside its `sql`, and `usage_sentiment`
+  is refused
+- **THEN** the pipeline entry is `FAIL` naming `usage_sentiment`
+
+#### Scenario: A system input read by the statement is a required system table
+
+- **WHEN** a bundle's SQL-mode aggregate pipeline reads `dial_usage_log` in its statement and declares no `inputs`, the bundle lists
+  `dial_usage_log` under `required_system_tables`, and the target environment lacks `dial_usage_log`
+- **THEN** the pipeline entry is `FAIL` naming `dial_usage_log`, as it is for a form-mode pipeline declaring it as `inputs`
+
+#### Scenario: A quoted mixed-case name is matched case-insensitively
+
+- **WHEN** a bundle's SQL-mode aggregate pipeline reads `FROM "Dial_Usage_Log"`, the bundle lists `dial_usage_log` under
+  `required_system_tables`, and the target environment lacks `dial_usage_log`
+- **THEN** the pipeline entry is `FAIL` naming `dial_usage_log`
+
+#### Scenario: A FROM name the bundle and the target do not know is left to the arm gate
+
+- **WHEN** a bundle's SQL-mode aggregate pipeline reads `usage_missing` in its `FROM`, the bundle neither carries nor lists
+  `usage_missing`, and the target environment has no such table
+- **THEN** the pipeline entry is not `FAIL` on account of `usage_missing`, and it reports `armable: false` with an `arm_problems`
+  entry
+
+#### Scenario: An unparseable statement does not fail the import by itself
+
+- **WHEN** a bundle's SQL-mode aggregate pipeline carries an `sql` that does not parse, and every table its tokens reference is
+  importable
+- **THEN** the pipeline entry is `CREATE`, it is imported disabled with its `sql` verbatim, and its `armable` is `false`
+
