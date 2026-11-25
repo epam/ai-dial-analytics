@@ -191,8 +191,8 @@ public class CompositeQueryBuilder {
             if (!marked) {
                 return null;
             }
-            // shortcut: an array or map output reads [] where its cell is absent or the subquery finds no row (which the plain
-            // form refuses); carry the bare flag into the statement's flags if a client needs the null.
+            // An array or map output reads its empty value where its cell is absent (marked) or the subquery finds no row, as
+            // the spec states for a scalar subquery over such a field; the plain form refuses the empty subquery.
             final SelectQuery<Record> select = render(subquery, LimitPolicy.NESTED, 0, MaskMarking.Mode.NESTED);
             final Flags flags = Flags.of(select);
             final Field<?> output = select.getSelect().getFirst();

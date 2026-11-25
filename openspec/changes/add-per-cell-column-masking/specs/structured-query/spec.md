@@ -30,7 +30,10 @@ through functions that read a null's underlying value or that fail for particula
 stored value of an absent cell (it differs from a stored null only in being marked, see "Masked inputs are reported
 per output cell"). For an `array`, `map` or `object` field, which the data store cannot make `NULL` inside an
 expression, the absent value SHALL be the type's empty value (`[]`, `{}`, `{}`) wherever the field is an operand, and
-an output cell that returns the bare field SHALL carry null, as a `NULL` cell does on that surface. Where rows are
+an output cell that returns the bare field SHALL carry null, as a `NULL` cell does on that surface. A scalar subquery
+whose output is such a field is an operand of the block that reads it: that block's output carries the empty value,
+marked, where the subquery's cell is absent, and the empty value, unmarked, where the subquery finds no row, which the
+same statement over no masked field refuses. Where rows are
 compared rather than computed on — a distinct projection, a grouping key, a `union` that removes duplicates — an
 absent cell of such a field SHALL differ from every stored value, the stored empty value included, as its null output
 cell differs from a stored `[]` or `{}`; absent cells SHALL equal one another. A computed field over a masked column

@@ -15,6 +15,7 @@ import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
+import com.epam.aidial.analytics.service.query.model.LambdaExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
 import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
@@ -164,10 +165,14 @@ public class FilterTranslator {
         return binding;
     }
 
-    /** Whether {@code expr} holds a subquery: a scalar one, or an {@code in} or {@code exists} in a {@code case} condition. */
+    /**
+     * Whether {@code expr} holds a subquery: a scalar one, or an {@code in} or {@code exists} in a {@code case} condition,
+     * a lambda body included, which {@link WindowExpressions#visit} does not enter.
+     */
     private static boolean holdsSubquery(Expr expr) {
         final boolean[] found = {false};
         WindowExpressions.visit(expr, visited -> found[0] |= visited instanceof ScalarSubqueryExpr
+                || visited instanceof LambdaExpr(List<String> params, Expr body) && holdsSubquery(body)
                 || visited instanceof CaseExpr(List<CaseBranch> when, Expr ignored) && when != null
                 && when.stream().anyMatch(branch -> branch != null && holdsSubquery(branch.when())));
         return found[0];

@@ -148,6 +148,12 @@ class MaskedStatementRenderTest {
         assertThat(marks.outputs()).containsExactly("p", "total");
         assertThat(marks.flags()).hasSize(1);
         assertThat(sql.substring(sql.lastIndexOf("order by"))).contains("desc").endsWith("limit 100");
+
+        // An output named like the derived table would capture its column references in the scope that reads it.
+        final StructuredQuery named = new StructuredQuery("t", null, QueryMode.ROW, true,
+                List.of(new OutputColumn(new FieldExpr("p"), "__adas_w"), new OutputColumn(total, "total")), null, null, null, null);
+        assertThat(render(build(named)).toLowerCase(Locale.ROOT)).contains(") \"__adas_w_\"", "\"__adas_w_\".\"__adas_w\"")
+                .doesNotContain(") \"__adas_w\" ");
     }
 
     @Test

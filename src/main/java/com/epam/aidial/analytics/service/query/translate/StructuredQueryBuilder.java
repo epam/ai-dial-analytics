@@ -107,7 +107,7 @@ public class StructuredQueryBuilder {
     /** Hard ceiling on a requested row limit; a request above it is rejected, never clamped. */
     public static final int MAX_LIMIT = 1000;
 
-    /** The derived table a marked distinct block with a window output computes in; callers cannot name {@code __adas_}. */
+    /** The derived table a marked distinct block with a window output computes in, suffixed apart from its outputs. */
     private static final String WINDOWED_ALIAS = "__adas_w";
 
     /**
@@ -644,21 +644,37 @@ public class StructuredQueryBuilder {
             }
         }
         final List<String> names = OutputColumnNaming.resolve(columns);
+        final String alias = windowedAlias(names);
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         for (int i = 0; i < names.size(); i++) {
             final String name = names.get(i);
             final Expr expr = columns.get(i).expr();
-            final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(WINDOWED_ALIAS, name), projected.get(name).getDataType()),
+            final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(alias, name), projected.get(name).getDataType()),
                     ExprFieldType.of(expr, model.bindings()), ExprFieldType.ofElement(expr, model.bindings()), false);
             final String mark = markFlags.get(i);
             final String bare = bareFlags.get(i);
-            bindings.put(name, mark == null ? binding : binding.marked(new ColumnMark(DSL.field(DSL.name(WINDOWED_ALIAS, mark), Integer.class),
-                    bare == null ? null : DSL.field(DSL.name(WINDOWED_ALIAS, bare), Integer.class))));
+            bindings.put(name, mark == null ? binding : binding.marked(new ColumnMark(DSL.field(DSL.name(alias, mark), Integer.class),
+                    bare == null ? null : DSL.field(DSL.name(alias, bare), Integer.class))));
         }
-        final QueryEntityModel derived = new QueryEntityModel(WINDOWED_ALIAS, inner.asTable(WINDOWED_ALIAS), bindings, List.of(), List.of());
+        final QueryEntityModel derived = new QueryEntityModel(alias, inner.asTable(alias), bindings, List.of(), List.of());
         final List<OutputColumn> select = outputs.keySet().stream().map(name -> new OutputColumn(new FieldExpr(name), null)).toList();
-        return render(dsl, derived, new StructuredQuery(WINDOWED_ALIAS, null, QueryMode.ROW, true, select, null, null, query.sort(), query.page(),
+        return render(dsl, derived, new StructuredQuery(alias, null, QueryMode.ROW, true, select, null, null, query.sort(), query.page(),
                 null), maxLimit, policy, LeafRestriction.NONE, Map.of(), false, false, List.of(), marks);
+    }
+
+    /**
+     * {@link #WINDOWED_ALIAS}, suffixed until no output is named so or begins with it followed by {@code .}: such an output,
+     * in the scope that reads the derived table, would capture the {@code "<alias>"."<column>"} references.
+     */
+    private static String windowedAlias(List<String> names) {
+        String alias = WINDOWED_ALIAS;
+        while (true) {
+            final String candidate = alias;
+            if (names.stream().noneMatch(name -> name.equals(candidate) || name.startsWith(candidate + "."))) {
+                return alias;
+            }
+            alias = alias + "_";
+        }
     }
 
     /** Whether {@code expr} reads a masked field of {@code model}. */
