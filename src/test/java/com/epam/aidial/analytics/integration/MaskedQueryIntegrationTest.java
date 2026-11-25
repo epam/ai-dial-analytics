@@ -55,6 +55,8 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
     private static final String BASE = "/v1/tables";
     private static final String TABLE = "mq_probe";
     private static final String MEMBER = "$masked";
+    /** The reserved name's refusal, word for word on every surface. */
+    private static final String RESERVED = "output name '$masked' is reserved";
 
     @Autowired
     private FlightSqlServerLifecycle lifecycle;
@@ -131,6 +133,67 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
         assertThat(union.get(1)).containsEntry("n", null).containsEntry(MEMBER, List.of("n"));
     }
 
+    /** "A distinct projection with a window output over a masked field runs", through the DSL and through SQL alike. */
+    @Test
+    void distinctWithWindowOutputAgreesAcrossDslAndSql() throws Exception {
+        final List<Map<String, Object>> viaSql = sqlRows(caller(), "SELECT DISTINCT project, sum(n) OVER (PARTITION BY project) AS total FROM " + TABLE
+                + " ORDER BY project");
+        final List<Map<String, Object>> viaDsl = JsonPath.read(send(post("/v1/queries/execute"), caller(), "{\"entity\":\"" + TABLE + "\","
+                + "\"mode\":\"row\",\"distinct\":true,\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"project\"}},"
+                + "{\"expr\":{\"type\":\"window\",\"fn\":{\"type\":\"fn\",\"name\":\"sum\",\"args\":[{\"type\":\"field\",\"name\":\"n\"}]},"
+                + "\"partition_by\":[{\"type\":\"field\",\"name\":\"project\"}]},\"as\":\"total\"}],"
+                + "\"sort\":[{\"field\":\"project\",\"dir\":\"asc\"}],\"page\":{\"type\":\"offset\",\"limit\":10}}")
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.rows");
+
+        for (final List<Map<String, Object>> rows : List.of(viaSql, viaDsl)) {
+            assertThat(rows).hasSize(2);
+            assertThat(rows.get(0)).containsEntry("project", "P1").containsEntry("total", 30).doesNotContainKey(MEMBER);
+            assertThat(rows.get(1)).containsEntry("project", "P2").containsEntry("total", null).containsEntry(MEMBER, List.of("total"));
+        }
+    }
+
+    /**
+     * "A masked UNION DISTINCT keeps the last branch's order under the row limit": the grouped form returns the rows, in
+     * order, that ClickHouse's own {@code UNION DISTINCT} returns over the same masked values, each marked when a row it
+     * collapses was absent.
+     */
+    @Test
+    void maskedUnionDistinctKeepsTheOrderOfClickHouseUnderTheRowLimit() throws Exception {
+        final String table = "mq_union";
+        send(post(BASE), admin(), "{\"name\":\"" + table + "\",\"type\":\"source\"}").andExpect(status().isCreated());
+        try {
+            send(post(BASE + "/" + table + "/schema"), admin(), "{\"columns\":[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},"
+                    + "{\"source_name\":\"project\",\"name\":\"project\",\"type\":\"string\"},"
+                    + "{\"source_name\":\"route\",\"name\":\"route\",\"type\":\"string\"}],\"ordering_key\":[\"k\"]}").andExpect(status().isOk());
+            // P1 holds 30 routes, P3 150 more, P2 20 that are absent for the caller.
+            final List<String> rows = new ArrayList<>();
+            for (int i = 0; i < 200; i++) {
+                final String project = i < 30 ? "P1" : i < 180 ? "P3" : "P2";
+                rows.add("{\"k\":\"k" + i + "\",\"project\":\"" + project + "\",\"route\":\"r" + String.format("%03d", 199 - i) + "\"}");
+            }
+            send(post(BASE + "/" + table + "/rows"), admin(), "{\"rows\":[" + String.join(",", rows) + "]}").andExpect(status().isOk());
+            entry(table, "mq-r", "[\"read\"]", "null", "{\"filter\":{\"op\":\"in\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                    + "{\"type\":\"array\",\"items\":[{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"P1\"},"
+                    + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"P3\"}]}]}}");
+            entry(table, "mq-u", "[\"read\"]", "[\"k\",\"project\"]", rowsOf("P2"));
+
+            // The first branch reads P1 and the absent rows of P2: 31 distinct values, null among them.
+            final List<Map<String, Object>> masked = sqlRows(caller(), "SELECT route FROM " + table + " WHERE project <> 'P3' UNION DISTINCT"
+                    + " SELECT route FROM " + table + " ORDER BY route");
+            final String absent = "CASE WHEN project IN ('P1', 'P3') THEN route END";
+            final List<Map<String, Object>> reference = sqlRows(admin(), "SELECT " + absent + " AS route FROM " + table + " WHERE project <> 'P3'"
+                    + " UNION DISTINCT SELECT " + absent + " AS route FROM " + table + " ORDER BY route");
+            assertThat(masked).hasSize(100);
+            // The first branch's values in the order it reads them, which neither statement fixes, then the rest in route order.
+            assertThat(values(masked).subList(0, 31)).containsExactlyInAnyOrderElementsOf(values(reference).subList(0, 31));
+            assertThat(values(masked).subList(31, 100)).isEqualTo(values(reference).subList(31, 100));
+            assertThat(masked).filteredOn(row -> row.containsKey(MEMBER)).singleElement()
+                    .satisfies(row -> assertThat(row).containsEntry("route", null).containsEntry(MEMBER, List.of("route")));
+        } finally {
+            mockMvc.perform(delete(BASE + "/" + table).header(HttpHeaders.AUTHORIZATION, bearer(admin())));
+        }
+    }
+
     @Test
     void csvAndFlightCarryAnAbsentCellAsNullWithNoMarks() throws Exception {
         final String csv = mockMvc.perform(post("/v1/queries/execute-sql-csv").header(HttpHeaders.AUTHORIZATION, bearer(caller()))
@@ -169,14 +232,14 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 send(post("/v1/queries/translate-sql"), admin(), sqlBody),
                 send(post("/v1/queries/execute-sql-csv"), admin(), sqlBody),
                 send(post("/v1/queries/execute-csv"), admin(), dslQuery))) {
-            refused(refused, "$masked");
+            refused(refused, RESERVED);
         }
         send(post("/v1/queries/validate-sql"), admin(), sqlBody)
                 .andExpect(status().isOk()).andExpect(jsonPath("$.valid").value(false))
-                .andExpect(jsonPath("$.issues[0].message").value(containsString("$masked")));
+                .andExpect(jsonPath("$.issues[0].message").value(containsString(RESERVED)));
         try (BufferAllocator allocator = new RootAllocator(); FlightSqlClient client = flight(allocator)) {
             assertThatThrownBy(() -> client.execute("SELECT k AS \"$masked\" FROM " + TABLE, bearerOption(admin())))
-                    .hasMessageContaining("$masked")
+                    .hasMessageContaining(RESERVED)
                     .isInstanceOfSatisfying(FlightRuntimeException.class,
                             ex -> assertThat(ex.status().code()).isEqualTo(FlightStatusCode.INVALID_ARGUMENT));
         }
@@ -208,7 +271,7 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
         statements.put("SELECT n AS " + TABLE + " FROM " + TABLE, tableNamed);
         statements.put("SELECT n AS \\\"" + TABLE + ".x\\\" FROM " + TABLE, tableNamed);
         statements.put("SELECT n FROM " + TABLE + " INTERSECT SELECT n FROM " + TABLE, "reads masked field 'n'");
-        statements.put("SELECT k AS \\\"$masked\\\" FROM " + TABLE, "$masked");
+        statements.put("SELECT k AS \\\"$masked\\\" FROM " + TABLE, RESERVED);
         try {
             for (final Map.Entry<String, String> entry : statements.entrySet()) {
                 final String statement = entry.getKey();
@@ -218,7 +281,7 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
                         + "\"row_limit\":10,\"layout\":{\"x\":0,\"y\":0,\"w\":6,\"h\":4},\"inline_query\":{\"name\":\"Raw\",\"sql\":\""
                         + statement + "\"}}]}"), entry.getValue());
             }
-            for (final Map.Entry<String, String> alias : Map.of(TABLE, tableNamed, "$masked", "$masked").entrySet()) {
+            for (final Map.Entry<String, String> alias : Map.of(TABLE, tableNamed, "$masked", RESERVED).entrySet()) {
                 refused(send(post("/v1/saved-queries"), writer, "{\"name\":\"Masked\",\"scope\":\"personal\",\"query\":{\"entity\":\"" + TABLE
                         + "\",\"mode\":\"row\",\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"n\"},\"as\":\"" + alias.getKey() + "\"}]}}"),
                         alias.getValue());
@@ -262,12 +325,22 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
 
     /** PUTs {@code role}'s whole entry on the probe, its rows those of {@code project}. */
     private void entry(String role, String privileges, String columns, String project) throws Exception {
-        final long generation = ((Number) JsonPath.read(mockMvc.perform(get(BASE + "/" + TABLE + "/access")
+        entry(TABLE, role, privileges, columns, rowsOf(project));
+    }
+
+    /** PUTs {@code role}'s whole entry on {@code table}, {@code rows} its row policy. */
+    private void entry(String table, String role, String privileges, String columns, String rows) throws Exception {
+        final long generation = ((Number) JsonPath.read(mockMvc.perform(get(BASE + "/" + table + "/access")
                 .header(HttpHeaders.AUTHORIZATION, bearer(admin()))).andExpect(status().isOk()).andReturn().getResponse()
                 .getContentAsString(), "$.generation")).longValue();
-        send(put(BASE + "/" + TABLE + "/access?role=" + role), admin(), "{\"generation\":" + generation + ",\"privileges\":" + privileges
-                + ",\"columns\":" + columns + ",\"rows\":{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
-                + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"" + project + "\"}]}}}").andExpect(status().isOk());
+        send(put(BASE + "/" + table + "/access?role=" + role), admin(), "{\"generation\":" + generation + ",\"privileges\":" + privileges
+                + ",\"columns\":" + columns + ",\"rows\":" + rows + "}").andExpect(status().isOk());
+    }
+
+    /** The row policy admitting the rows of {@code project}. */
+    private static String rowsOf(String project) {
+        return "{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"project\"},"
+                + "{\"type\":\"value\",\"value_type\":\"string\",\"value\":\"" + project + "\"}]}}";
     }
 
     /** Each row's cells without the {@code $masked} member, which the reference statement does not carry. */

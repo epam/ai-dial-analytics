@@ -211,11 +211,14 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
         final List<String> catalog = catalogSqlColumnNames(unconfined);
         final AccessEntries before = tableAccess.list("dial_usage_log");
         assertThat(before.roles()).doesNotContainKeys("viewer", "fm-u");
-        tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(),
-                new RowsRequest(null, "project_id = 'P1'"), List.of("event_id", "project_id", "request_time")));
-        tableAccess.put("dial_usage_log", "fm-u", new EntryRequest(LongNode.valueOf(tableAccess.list("dial_usage_log").generation()),
-                List.of("read"), new RowsRequest(null, "project_id = 'P2'"), null));
         try {
+            tableAccess.put("dial_usage_log", "viewer", new EntryRequest(LongNode.valueOf(before.generation()), List.of(),
+                    new RowsRequest(null, "project_id = 'P1'"), List.of("event_id", "project_id", "request_time")));
+            tableAccess.put("dial_usage_log", "fm-u", new EntryRequest(LongNode.valueOf(tableAccess.list("dial_usage_log").generation()),
+                    List.of("read"), new RowsRequest(null, "project_id = 'P2'"), null));
+            // The entries take: viewer alone is confined to its three columns.
+            assertThat(tableSchemaFields("dial_usage_log", unconfined)).containsExactlyInAnyOrder("event_id", "project_id", "request_time");
+
             final CallOption masked = bearerOption(JwtTestTokens.token(READONLY_ISSUER, AUDIENCE,
                     Map.of("sub", "fm-user", "roles", List.of("viewer", "fm-u"), "email", "fm@test")));
             assertThat(tableSchemaFields("dial_usage_log", masked)).contains("deployment").containsExactlyElementsOf(schema);
@@ -223,8 +226,11 @@ class FlightMetadataAuthIntegrationTest extends AbstractOidcAuthIntegrationTest 
             final FlightInfo info = sqlClient.execute("SELECT * FROM dial_usage_log LIMIT 1", masked);
             assertThat(info.getSchemaOptional().orElseThrow().getFields().stream().map(Field::getName).toList()).contains("deployment");
         } finally {
-            tableAccess.delete("dial_usage_log", "viewer", null);
-            tableAccess.delete("dial_usage_log", "fm-u", null);
+            for (final String role : List.of("viewer", "fm-u")) {
+                if (tableAccess.list("dial_usage_log").roles().containsKey(role)) {
+                    tableAccess.delete("dial_usage_log", role, null);
+                }
+            }
         }
     }
 

@@ -678,10 +678,16 @@ class ReadShapingRenderTest {
                 new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
         shapes.put("a late-materialized page and its outer statement", builder.build(ctx, masked, lastTenWithBodies(),
                 StructuredQueryBuilder.MAX_LIMIT));
+        // The body, and a conjunct or call the derived table computes over it and the statement reads back (__adas_c<n>).
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        final List<MaskedSqlAudit.Masked> audited = List.of(MaskedSqlAudit.Masked.of(body, mask),
+                new MaskedSqlAudit.Masked(Pattern.quote("\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX) + "\\d+\"", mask));
         shapes.forEach((shape, select) -> {
             final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
-            assertThat(sql).as(shape + " reads the body").contains(body);
-            assertThat(MaskedSqlAudit.unguarded(MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD), List.of(body))).as(shape + ": " + sql).isEmpty();
+            final String outer = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD);
+            assertThat(outer).as(shape + " reads the body or what is computed over it, outside the derived table: " + sql)
+                    .containsAnyOf(body, "\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX);
+            assertThat(MaskedSqlAudit.unguarded(outer, audited)).as(shape + ": " + sql).isEmpty();
         });
     }
 

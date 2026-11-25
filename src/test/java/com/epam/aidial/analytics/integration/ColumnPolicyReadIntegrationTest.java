@@ -277,6 +277,17 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 }
             }
 
+            // The mask binds the caller value outside the query's own caller-value scope: the DSL and discovery resolve it too.
+            final List<Map<String, Object>> dsl = JsonPath.read(execute(caller("u1", "cpm-v"), "{\"entity\":\"" + MASKED + "\",\"mode\":\"row\","
+                    + "\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"project\"}},{\"expr\":{\"type\":\"field\",\"name\":\"a\"}}],"
+                    + "\"page\":{\"type\":\"offset\",\"limit\":10}}").andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.rows");
+            assertThat(dsl).hasSize(4).filteredOn(row -> "P2".equals(row.get("project")))
+                    .allSatisfy(row -> assertThat(row).containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a")));
+            mockMvc.perform(get("/v1/queries/entities/schema/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u1", "cpm-v"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.fields[?(@.name == 'a')].masked", contains(true)))
+                    .andExpect(jsonPath("$.fields[?(@.name == 'project')].masked", contains(false)));
+
             final List<Map<String, Object>> unknown = rows(caller(null, "cpm-v"), statement);
             assertThat(unknown).extracting(row -> row.get("project")).containsExactly("P2", "P2");
             assertThat(unknown).allSatisfy(row -> assertThat(row).containsEntry("c", null).containsEntry(MASKED_MEMBER, List.of("a", "c")));

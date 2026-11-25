@@ -235,6 +235,12 @@ class MaskedStatementRenderTest {
         for (final Expr operand : List.of(new ScalarSubqueryExpr(null), inLambda, inCase)) {
             assertThat(FilterTranslator.prunable(compare(ComparisonOp.GT, "n", operand), bindings)).as(operand.toString()).isNull();
         }
+        // The same shapes holding no subquery take the form: the subquery, not the shape, is what keeps them out.
+        final Expr plainLambda = new FnExpr("arrayCount", false, List.of(new LambdaExpr(List.of("x"), new LambdaParamExpr("x")), new FieldExpr("labels")));
+        final Expr plainCase = new CaseExpr(List.of(new CaseBranch(compare(ComparisonOp.EQ, "p", new ValueExpr(ValueType.STRING, "a")), zero)), zero);
+        for (final Expr operand : List.of(plainLambda, plainCase)) {
+            assertThat(FilterTranslator.prunable(compare(ComparisonOp.GT, "n", operand), bindings)).as(operand.toString()).isNotNull();
+        }
     }
 
     private static FilterNode compare(ComparisonOp op, String field, Expr operand) {

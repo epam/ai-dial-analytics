@@ -26,7 +26,7 @@
 - [x] 2.2 ClickHouse test: over an absent scalar cell, a value-dependent failing expression (a `width_bucket` count
   computed from the cell) and a function reading the null's underlying value return the same result whatever the cell
   stores
-- [ ] 2.3 In `CatalogQueryService.buildModel`, translate each masked column's filters against the governed table's
+- [x] 2.3 In `CatalogQueryService.buildModel`, translate each masked column's filters against the governed table's
   physical bindings (the source's, for an enrichment column), binding caller values from the request's claims as
   `RowPolicyFilter.predicate` does rather than through the `CallerValues.resolving` scope (tests: a caller masked by an
   own-rows `*` policy succeeds on a DSL query, discovery and a pipeline preview), OR them and wrap the

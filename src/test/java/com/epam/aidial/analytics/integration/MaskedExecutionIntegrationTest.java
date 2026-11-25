@@ -8,8 +8,12 @@ import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
+import com.epam.aidial.analytics.service.query.model.CompositeQuery;
+import com.epam.aidial.analytics.service.query.model.EntityRelation;
 import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
@@ -17,12 +21,17 @@ import com.epam.aidial.analytics.service.query.model.FnExpr;
 import com.epam.aidial.analytics.service.query.model.FrameBound;
 import com.epam.aidial.analytics.service.query.model.FrameBoundKind;
 import com.epam.aidial.analytics.service.query.model.FrameUnit;
+import com.epam.aidial.analytics.service.query.model.LambdaExpr;
+import com.epam.aidial.analytics.service.query.model.LambdaParamExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
 import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.NullsOrder;
 import com.epam.aidial.analytics.service.query.model.OffsetPage;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
+import com.epam.aidial.analytics.service.query.model.RelationColumn;
+import com.epam.aidial.analytics.service.query.model.SetOpKind;
+import com.epam.aidial.analytics.service.query.model.SetOpRelation;
 import com.epam.aidial.analytics.service.query.model.SortDir;
 import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
@@ -31,6 +40,8 @@ import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.service.query.model.WindowFrame;
 import com.epam.aidial.analytics.service.query.model.WindowOrder;
+import com.epam.aidial.analytics.service.query.sql.ResultColumnKind;
+import com.epam.aidial.analytics.service.query.translate.CompositeQueryBuilder;
 import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
 import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
 import com.epam.aidial.analytics.service.query.translate.StructuredQueryBuilder;
@@ -68,17 +79,22 @@ class MaskedExecutionIntegrationTest {
     private static final String SOURCE = "mask_exec_src";
     private static final String PAYLOAD = "mask_exec_payload";
     private static final String BODY = PAYLOAD + ".body";
+    private static final String ARRAYS = "mask_exec_arrays";
+    private static final String WIDE = "mask_exec_wide";
+    private static final int WIDE_COLUMNS = 16;
 
     private final DSLContext dsl = new QueryDslConfiguration().clickhouseRenderContext();
     private final ExprTranslator expressions = new ExprTranslator(new ValueExprToObjectMapper());
     private final StructuredQueryBuilder builder = new StructuredQueryBuilder(expressions, new FilterTranslator(expressions));
+    private final CompositeQueryBuilder composite = new CompositeQueryBuilder(builder);
 
     @BeforeAll
     static void createProbes() {
         dropProbes();
         // The mask admits the rows of P1. kA and kB are absent and store different values; kC is present and stores null.
-        ClickHouseProbe.execute("CREATE TABLE " + VALUES + " (k String, p String, n Nullable(Int64)) ENGINE = ReplicatedMergeTree ORDER BY k");
-        ClickHouseProbe.execute("INSERT INTO " + VALUES + " VALUES ('k1', 'P1', 1), ('k2', 'P1', 2), ('kA', 'P2', 0), ('kB', 'P2', 5),"
+        ClickHouseProbe.execute("CREATE TABLE " + VALUES + " (k String, p String, n Nullable(Int64), opts Array(Int64) DEFAULT [0, 5])"
+                + " ENGINE = ReplicatedMergeTree ORDER BY k");
+        ClickHouseProbe.execute("INSERT INTO " + VALUES + " (k, p, n) VALUES ('k1', 'P1', 1), ('k2', 'P1', 2), ('kA', 'P2', 0), ('kB', 'P2', 5),"
                 + " ('kC', 'P1', NULL)");
         ClickHouseProbe.execute("CREATE TABLE " + SOURCE + " (event_id String, request_time DateTime64(3, 'UTC'), deployment String)"
                 + " ENGINE = ReplicatedReplacingMergeTree ORDER BY (event_id, request_time)");
@@ -86,14 +102,25 @@ class MaskedExecutionIntegrationTest {
                 + " ENGINE = ReplicatedReplacingMergeTree ORDER BY (event_id, request_time)");
         ClickHouseProbe.execute("INSERT INTO " + SOURCE + " VALUES ('e1', '2026-11-01 00:00:00', 'd1'), ('e2', '2026-11-01 00:00:00', 'd2'),"
                 + " ('e3', '2026-11-01 00:00:00', 'd1'), ('e4', '2026-11-01 00:00:00', 'd2')");
+        // e2 and e4 are absent and store different bodies; e4's sorts before every present one.
         ClickHouseProbe.execute("INSERT INTO " + PAYLOAD + " VALUES ('e1', '2026-11-01 00:00:00', 'has an error'),"
                 + " ('e2', '2026-11-01 00:00:00', 'has an error'), ('e3', '2026-11-01 00:00:00', 'fine'),"
                 + " ('e4', '2026-11-01 00:00:00', 'ERROR here')");
+        // a3 and a4 are absent; a2 is present and stores the empty array.
+        ClickHouseProbe.execute("CREATE TABLE " + ARRAYS + " (k String, p String, tags Array(String)) ENGINE = ReplicatedMergeTree ORDER BY k");
+        ClickHouseProbe.execute("INSERT INTO " + ARRAYS + " VALUES ('a1', 'P1', ['a']), ('a2', 'P1', []), ('a3', 'P2', ['z']), ('a4', 'P2', [])");
+        final StringBuilder wide = new StringBuilder();
+        for (int i = 0; i < WIDE_COLUMNS; i++) {
+            wide.append(", c").append(i).append(" Nullable(String)");
+        }
+        ClickHouseProbe.execute("CREATE TABLE " + WIDE + " (k String, p String, labels Array(String)" + wide + ") ENGINE = ReplicatedMergeTree ORDER BY k");
+        ClickHouseProbe.execute("INSERT INTO " + WIDE + " SELECT 'w' || toString(number), if(number = 0, 'P0001', 'Q'), ['v'],"
+                + " 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v', 'v' FROM numbers(2)");
     }
 
     @AfterAll
     static void dropProbes() {
-        for (final String table : List.of(VALUES, SOURCE, PAYLOAD)) {
+        for (final String table : List.of(VALUES, SOURCE, PAYLOAD, ARRAYS, WIDE)) {
             ClickHouseProbe.execute("DROP TABLE IF EXISTS " + table);
         }
     }
@@ -189,6 +216,161 @@ class MaskedExecutionIntegrationTest {
         assertThat(byKey(shaped, "event_id").get("e1")).containsEntry(BODY, "has an error").doesNotContainKey(MaskFlag.MEMBER);
     }
 
+    /**
+     * An enrichment field projected without {@code as} names its output after the field, and every reference to that name
+     * in its block reads the masked value, never the stored column the name also resolves to: sorted with a one-row page,
+     * grouped, kept by a {@code having}, collapsed by a distinct. e2 and e4 are absent and store different bodies.
+     */
+    @Test
+    void exemptEnrichmentOutputReadsTheMaskedValueWhereverItsNameIsReferenced() {
+        final QueryEntityModel model = enrichedModel();
+        final OutputColumn body = new OutputColumn(field(BODY), null);
+        final StructuredQuery first = new StructuredQuery(SOURCE, null, QueryMode.ROW, false, List.of(new OutputColumn(field("event_id"), null), body),
+                null, null, List.of(new SortItem(BODY, SortDir.ASC, null)), new OffsetPage(0, 1, false));
+        assertThat(run(builder.build(dsl, model, first))).singleElement().satisfies(row -> assertThat(row).containsEntry(BODY, "fine"));
+
+        final OutputColumn count = new OutputColumn(new FnExpr("count", false, List.of()), "rows");
+        final List<Map<String, Object>> groups = run(builder.build(dsl, model, new StructuredQuery(SOURCE, null, QueryMode.AGGREGATE, false,
+                List.of(body, count), List.of(BODY), null, List.of(new SortItem(BODY, SortDir.ASC, null)), new OffsetPage(0, 10, false))));
+        assertThat(groups).extracting(row -> row.get(BODY)).containsExactly("fine", "has an error", null);
+        assertThat(groups.get(2)).containsEntry(MaskFlag.MEMBER, List.of(BODY));
+        assertThat(((Number) groups.get(2).get("rows")).longValue()).as("the absent rows in one null group").isEqualTo(2L);
+
+        final List<Map<String, Object>> kept = run(builder.build(dsl, model, new StructuredQuery(SOURCE, null, QueryMode.AGGREGATE, false,
+                List.of(body, count), List.of(BODY), cmp(ComparisonOp.GT, field("rows"), new ValueExpr(ValueType.LONG, "1")), null,
+                new OffsetPage(0, 10, false))));
+        assertThat(kept).singleElement().satisfies(row -> assertThat(row).containsEntry(BODY, null));
+
+        final List<Map<String, Object>> distinct = run(builder.build(dsl, model, new StructuredQuery(SOURCE, null, QueryMode.ROW, true, List.of(body),
+                null, null, List.of(new SortItem(BODY, SortDir.ASC, null)), new OffsetPage(0, 10, false))));
+        assertThat(distinct).extracting(row -> row.get(BODY)).containsExactly("fine", "has an error", null);
+        assertThat(distinct.get(2)).containsEntry(MaskFlag.MEMBER, List.of(BODY));
+    }
+
+    /** Beside a masked field, an output named after a table the query reads (or beginning with it and '.') is refused. */
+    @Test
+    void tableNamedOutputBesideMaskedFieldIsRefusedAsGroupKeyAndSortKey() {
+        final OutputColumn named = new OutputColumn(field("deployment"), SOURCE + ".deployment");
+        final FilterNode having = cmp(ComparisonOp.GT, new FnExpr("count", false, List.of(field(BODY))), new ValueExpr(ValueType.LONG, "0"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.build(dsl, enrichedModel(), new StructuredQuery(SOURCE, null,
+                        QueryMode.AGGREGATE, false, List.of(named), List.of(SOURCE + ".deployment"), having, null, null)))
+                .hasMessageContaining("names a table the query reads");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.build(dsl, enrichedModel(), new StructuredQuery(SOURCE, null, QueryMode.ROW,
+                        false, List.of(named, new OutputColumn(field(BODY), null)), null, null, List.of(new SortItem(SOURCE + ".deployment", SortDir.ASC, null)),
+                        null)))
+                .hasMessageContaining("names a table the query reads");
+    }
+
+    /** A lambda parameter named like the mask's internal alias cannot capture it: the alias is chosen apart from it. */
+    @Test
+    void lambdaParameterNamedLikeInternalAliasReadsTheAbsentValue() {
+        final String param = "__adas_mcond_0";
+        // opts holds [0, 5], the values kA and kB store.
+        final Expr hit = new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of(param), new FnExpr("equals", false,
+                List.of(new LambdaParamExpr(param), field("n")))), field("opts")));
+        final StructuredQuery query = new StructuredQuery(VALUES, cmp(ComparisonOp.IN, field("k"), strings("kA", "kB")), QueryMode.ROW, false,
+                List.of(new OutputColumn(field("k"), null), new OutputColumn(hit, "hit")), null, null, null, new OffsetPage(0, 10, false));
+
+        final Map<String, Map<String, Object>> rows = byKey(run(builder.build(dsl, valuesModel(), query)));
+        for (final String absent : List.of("kA", "kB")) {
+            assertThat(String.valueOf(rows.get(absent).get("hit"))).as(absent + " stores a value in the list, but its cell is absent")
+                    .isIn("0", "false");
+            assertThat(rows.get(absent)).containsEntry(MaskFlag.MEMBER, List.of("hit"));
+        }
+    }
+
+    /**
+     * One policy near 16 KiB masking sixteen columns renders once per scope, so a wildcard over them, a lambda reading all
+     * sixteen and sixteen lambdas each reading one run under ClickHouse's default {@code max_query_size} and
+     * {@code max_ast_elements}.
+     */
+    @Test
+    void largePolicyRendersOncePerScopeAndRunsUnderTheDefaultLimits() {
+        final QueryEntityModel model = wideModel();
+        final List<Expr> reads = new ArrayList<>();
+        final List<OutputColumn> lambdas = new ArrayList<>();
+        for (int i = 0; i < WIDE_COLUMNS; i++) {
+            reads.add(new FnExpr("equals", false, List.of(new LambdaParamExpr("x"), field("c" + i))));
+            lambdas.add(new OutputColumn(new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of("x"), new FnExpr("equals", false,
+                    List.of(new LambdaParamExpr("x"), field("c" + i)))), field("labels"))), "l" + i));
+        }
+        final List<FilterNode> equalities = reads.stream().<FilterNode>map(read -> new ComparisonNode(ComparisonOp.EQ,
+                ((FnExpr) read).args())).toList();
+        final Expr all = new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of("x"), new CaseExpr(List.of(new CaseBranch(
+                new LogicalNode(LogicalOp.OR, equalities), new ValueExpr(ValueType.BOOLEAN, "true"))), new ValueExpr(ValueType.BOOLEAN, "false"))),
+                field("labels")));
+        final List<OutputColumn> select = new ArrayList<>(List.of(new OutputColumn(field("k"), null)));
+        select.addAll(lambdas);
+        select.add(new OutputColumn(all, "any_read"));
+        for (final StructuredQuery query : List.of(
+                new StructuredQuery(WIDE, null, QueryMode.ROW, false, List.of(), null, null, null, new OffsetPage(0, 10, false)),
+                new StructuredQuery(WIDE, null, QueryMode.ROW, false, select, null, null, null, new OffsetPage(0, 10, false)))) {
+            final SelectQuery<?> statement = builder.build(dsl, model, query);
+            final String sql = MaskRendering.render(() -> statement.getSQL(ParamType.INLINED));
+            assertThat(sql.length()).as("the policy is near 16 KiB").isGreaterThan(16_000).isLessThan(262_144);
+            assertThat(occurrences(sql, "'P1799'")).as("rendered once in the statement's one scope").isEqualTo(1);
+            final List<Map<String, Object>> rows = run(statement);
+            assertThat(rows).hasSize(2);
+            assertThat(byKey(rows).get("w0")).doesNotContainKey(MaskFlag.MEMBER);
+            assertThat(byKey(rows).get("w1")).containsKey(MaskFlag.MEMBER);
+        }
+    }
+
+    /**
+     * {@code union all} branches carry a mark flag and a bare-absent flag per position, so only the branch whose output is the
+     * bare absent array nulls it; the other branch's expression over it reads the empty value, marked.
+     */
+    @Test
+    void unionAllNullsOnlyTheBareAbsentCell() {
+        final RelationColumn k = new RelationColumn("k", QueryFieldType.STRING, ResultColumnKind.STRING);
+        final RelationColumn v = new RelationColumn("v", QueryFieldType.ARRAY, QueryFieldType.STRING, ResultColumnKind.ARRAY, ResultColumnKind.STRING);
+        final Expr slice = new FnExpr("array_slice", false, List.of(field("tags"), new ValueExpr(ValueType.INTEGER, "1"),
+                new ValueExpr(ValueType.INTEGER, "1")));
+        final CompositeQuery bare = arraysLeaf(List.of(new OutputColumn(field("k"), null), new OutputColumn(field("tags"), "v")), List.of(k, v));
+        final CompositeQuery sliced = arraysLeaf(List.of(new OutputColumn(field("k"), null), new OutputColumn(slice, "v")), List.of(k, v));
+        final CompositeQuery root = new CompositeQuery(new SetOpRelation(SetOpKind.UNION, true, List.of(bare, sliced), List.of(k, v)),
+                new StructuredQuery(ARRAYS, null, QueryMode.ROW, false, List.of(new OutputColumn(field("k"), null), new OutputColumn(field("v"), null)),
+                        null, null, null, null), List.of(k, v));
+
+        final List<Map<String, Object>> rows = run(composite.build(dsl, root, entity -> arraysModel(), 1000));
+        final List<String> a3 = rows.stream().filter(row -> "a3".equals(row.get("k"))).map(row -> show(row.get("v")) + " " + row.get(MaskFlag.MEMBER))
+                .sorted().toList();
+        assertThat(a3).containsExactly("[] [v]", "null [v]");
+        assertThat(rows.stream().filter(row -> "a2".equals(row.get("k"))).map(row -> show(row.get("v")) + " " + row.get(MaskFlag.MEMBER)).toList())
+                .containsExactly("[] null", "[] null");
+    }
+
+    /** A grouping key over a bare masked array keeps its absent cells apart from a stored empty array. */
+    @Test
+    void groupingKeyOverBareMaskedArrayKeepsAbsentCellsApartFromStoredEmpty() {
+        final List<Map<String, Object>> groups = run(builder.build(dsl, arraysModel(), new StructuredQuery(ARRAYS, null, QueryMode.AGGREGATE, false,
+                List.of(new OutputColumn(field("tags"), null), new OutputColumn(new FnExpr("count", false, List.of()), "rows")), List.of("tags"),
+                null, null, new OffsetPage(0, 10, false))));
+        assertThat(groups).hasSize(3);
+        final List<Map<String, Object>> absent = groups.stream().filter(row -> row.get("tags") == null).toList();
+        assertThat(absent).singleElement().satisfies(row -> assertThat(row).containsEntry(MaskFlag.MEMBER, List.of("tags")));
+        assertThat(((Number) absent.getFirst().get("rows")).longValue()).isEqualTo(2L);
+    }
+
+    /**
+     * An aggregate-mode distinct collapses the groups whose outputs are equal, an absent and a stored null among them, and
+     * marks the row when any group it collapses was marked; a row-mode distinct sorted by a key that is not an output runs.
+     */
+    @Test
+    void distinctCollapsesMarkedAndUnmarkedRowsAndMarksTheResult() {
+        final List<Map<String, Object>> tops = run(builder.build(dsl, valuesModel(), new StructuredQuery(VALUES, null, QueryMode.AGGREGATE, true,
+                List.of(new OutputColumn(new FnExpr("max", false, List.of(field("n"))), "top")), List.of("k"), null, null, new OffsetPage(0, 10, false))));
+        final List<Map<String, Object>> nulls = tops.stream().filter(row -> row.get("top") == null).toList();
+        assertThat(tops).hasSize(3);
+        assertThat(nulls).singleElement().satisfies(row -> assertThat(row).containsEntry(MaskFlag.MEMBER, List.of("top")));
+
+        final List<Map<String, Object>> projects = run(builder.build(dsl, valuesModel(), new StructuredQuery(VALUES, null, QueryMode.ROW, true,
+                List.of(new OutputColumn(field("p"), null), new OutputColumn(field("n"), null)), null, null,
+                List.of(new SortItem("k", SortDir.ASC, null)), new OffsetPage(0, 10, false))));
+        assertThat(projects).filteredOn(row -> "P2".equals(row.get("p"))).singleElement()
+                .satisfies(row -> assertThat(row).containsEntry("n", null).containsEntry(MaskFlag.MEMBER, List.of("n")));
+    }
+
     // --- helpers --------------------------------------------------------------------------------------
 
     /** The result of a statement whose only output is {@code v}: its value, or the error code ClickHouse refuses it with. */
@@ -231,6 +413,59 @@ class MaskedExecutionIntegrationTest {
         return byKey;
     }
 
+    /** {@code tags} masked to the rows of {@code P1}. */
+    private static QueryEntityModel arraysModel() {
+        final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(ARRAYS, "p"), String.class).eq("P1"));
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
+        bind(bindings, "k", ARRAYS, "k", QueryFieldType.STRING, false, null);
+        bind(bindings, "p", ARRAYS, "p", QueryFieldType.STRING, false, null);
+        bindings.put("tags", new QueryFieldBinding("tags", DSL.field(DSL.name(ARRAYS, "tags")), QueryFieldType.ARRAY, QueryFieldType.STRING)
+                .masked(mask));
+        return new QueryEntityModel(ARRAYS, DSL.table(DSL.name(ARRAYS)), bindings, List.of(), List.of());
+    }
+
+    private static CompositeQuery arraysLeaf(List<OutputColumn> select, List<RelationColumn> columns) {
+        final List<RelationColumn> entity = List.of(new RelationColumn("k", QueryFieldType.STRING, ResultColumnKind.STRING),
+                new RelationColumn("p", QueryFieldType.STRING, ResultColumnKind.STRING),
+                new RelationColumn("tags", QueryFieldType.ARRAY, QueryFieldType.STRING, ResultColumnKind.ARRAY, ResultColumnKind.STRING));
+        return new CompositeQuery(new EntityRelation(ARRAYS, entity), new StructuredQuery(ARRAYS, null, QueryMode.ROW, false, select, null, null,
+                null, null), columns);
+    }
+
+    /** Sixteen columns masked by one policy listing 1800 projects, near 16 KiB of text; {@code w0}'s project is among them. */
+    private static QueryEntityModel wideModel() {
+        final List<String> projects = new ArrayList<>();
+        for (int i = 0; i < 1800; i++) {
+            projects.add(String.format("P%04d", i));
+        }
+        final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(WIDE, "p"), String.class).in(projects));
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
+        bind(bindings, "k", WIDE, "k", QueryFieldType.STRING, false, null);
+        bind(bindings, "p", WIDE, "p", QueryFieldType.STRING, false, null);
+        bindings.put("labels", new QueryFieldBinding("labels", DSL.field(DSL.name(WIDE, "labels")), QueryFieldType.ARRAY, QueryFieldType.STRING));
+        for (int i = 0; i < WIDE_COLUMNS; i++) {
+            bind(bindings, "c" + i, WIDE, "c" + i, QueryFieldType.STRING, false, mask);
+        }
+        return new QueryEntityModel(WIDE, DSL.table(DSL.name(WIDE)), bindings, List.of(), List.of());
+    }
+
+    private static int occurrences(String text, String part) {
+        int count = 0;
+        for (int at = text.indexOf(part); at >= 0; at = text.indexOf(part, at + part.length())) {
+            count++;
+        }
+        return count;
+    }
+
+    /** A cell as text, an array cell whatever the client returns it as. */
+    private static String show(Object cell) {
+        return switch (cell) {
+            case com.clickhouse.client.api.data_formats.internal.BinaryStreamReader.ArrayValue array -> array.asList().toString();
+            case Object[] array -> java.util.Arrays.toString(array);
+            case null, default -> String.valueOf(cell);
+        };
+    }
+
     /** {@code n} masked to the rows of {@code P1}. */
     private static QueryEntityModel valuesModel() {
         final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(VALUES, "p"), String.class).eq("P1"));
@@ -238,6 +473,7 @@ class MaskedExecutionIntegrationTest {
         bind(bindings, "k", VALUES, "k", QueryFieldType.STRING, false, null);
         bind(bindings, "p", VALUES, "p", QueryFieldType.STRING, false, null);
         bind(bindings, "n", VALUES, "n", QueryFieldType.LONG, false, mask);
+        bindings.put("opts", new QueryFieldBinding("opts", DSL.field(DSL.name(VALUES, "opts")), QueryFieldType.ARRAY, QueryFieldType.LONG));
         return new QueryEntityModel(VALUES, DSL.table(DSL.name(VALUES)), bindings, List.of(), List.of());
     }
 

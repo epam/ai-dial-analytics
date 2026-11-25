@@ -816,9 +816,9 @@ class TableSchemaServiceTest {
 
         assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(null))))
                 .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
-                .hasMessageContaining("birth_date");
+                .hasMessageContaining("birth_date").hasMessageContaining("masks for the caller");
         assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("widget_id", 1, TtlUnit.DAY)))))
-                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class);
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class).hasMessageContaining("masks for the caller");
         verifyNoInteractions(ddlExecutor);
     }
 

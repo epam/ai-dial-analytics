@@ -55,6 +55,8 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
     private static final String RUNNER = "cpp-runner";
     private static final String CURSOR = "\"_ingested_at\",\"event_id\",\"request_time\"";
     private static final String SEEDED_EVENT = "00000000-0000-4000-8000-0000000000c1";
+    /** The guard's own words for a masked column, which a hidden one's refusal does not carry. */
+    private static final String MASKED_REFUSAL = "masks for the caller";
 
     @Autowired
     private ColumnMappingRepository columnMappings;
@@ -72,7 +74,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
 
     @AfterEach
     void tearDown() throws Exception {
-        for (final String role : List.of(RUNNER, "registry", "viewer", "cpp-x")) {
+        for (final String role : List.of(RUNNER, "registry", "viewer", "cpp-x", "*")) {
             revoke(USAGE, role);
         }
         for (final String pipeline : List.of("cpp-rollup", "cpp-unplannable", "cpp-labels", "cpp-up")) {
@@ -164,8 +166,43 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         send(post("/v1/pipelines"), registryWith("cpp-x"), enrichBody("cpp-masked-input", TARGET, boundTo("deployment"), ""))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("column_not_entitled"))
-                .andExpect(jsonPath("$.message").value(containsString("'deployment'")));
+                .andExpect(jsonPath("$.message").value(allOf(containsString("'deployment'"), containsString(MASKED_REFUSAL))));
         asAdmin(get("/v1/pipelines/cpp-masked-input")).andExpect(status().isNotFound());
+    }
+
+    /**
+     * A caller whose masks bind a caller value: {@code *} reads its own rows with every column, {@code registry} every row
+     * with a few, so the rest is masked to the rows whose {@code user_hash} is the caller's. The masks translate outside a
+     * query's caller-value scope, and a preview over the visible columns runs.
+     */
+    @Test
+    void callerMaskedByOwnRowsPolicyPreviewsPipelineOverVisibleColumns() throws Exception {
+        final String pipeline = register("cpp-own-rows", TARGET, boundTo("project_id"), "");
+        entry(USAGE, "registry", "\"columns\":[" + CURSOR + ",\"project_id\"]");
+        entry(USAGE, "*", "\"privileges\":[\"read\"],\"rows\":{\"filter\":{\"op\":\"eq\",\"args\":[{\"type\":\"field\",\"name\":\"user_hash\"},"
+                + "{\"type\":\"param\",\"name\":\"caller.user_hash\"}]}}");
+        entry(TARGET, "registry", "\"privileges\":[\"write\"]");
+
+        send(post("/v1/pipelines/" + pipeline + "/preview"), registry(), "").andExpect(status().isOk());
+    }
+
+    /**
+     * "A masked column is refused before an unentitled sensitive one": {@code cpp-x} reads every row with the cursor and the
+     * sensitive body, which neither role clears, and {@code registry}'s rows alone allow {@code deployment}, so it is masked.
+     */
+    @Test
+    void maskedBindingWinsOverUnentitledSensitiveBindingInEitherOrder() throws Exception {
+        entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
+        entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"columns\":[" + CURSOR + ",\"dial_usage_log_payload.request_body\"]");
+        final String body = "dial_usage_log_payload.request_body";
+        for (final List<String> columns : List.of(List.of(body, "deployment"), List.of("deployment", body))) {
+            final String transform = Transforms.llm().requestTemplate("{\"messages\":[{\"role\":\"user\",\"content\":\"{{a}} {{b}}\"}]}")
+                    .input("a", columns.get(0)).input("b", columns.get(1)).proseOutputs("tox_score").member();
+            send(post("/v1/pipelines"), registryWith("cpp-x"), enrichBody("cpp-mixed", TARGET, transform, ""))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.error").value("column_not_entitled"))
+                    .andExpect(jsonPath("$.message").value(allOf(containsString("'deployment'"), containsString(MASKED_REFUSAL))));
+        }
     }
 
     /** "A confined caller is refused for its confinement first": both roles carry rows, so the author is confined. */
@@ -184,14 +221,15 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
         entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"columns\":[" + CURSOR + ",\"project_id\",\"user_hash\"]");
         rollup("SELECT deployment, sum(project_id) FROM dial_usage_log GROUP BY 1", false);
-        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "").andExpect(status().isUnprocessableContent());
+        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "").andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value(not("column_not_entitled")));
 
         asAdmin(delete("/v1/pipelines/cpp-rollup")).andExpect(status().isNoContent());
         rollup("SELECT deployment, count(DISTINCT user_hash) FROM dial_usage_log GROUP BY 1", false);
         send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "")
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("column_not_entitled"))
-                .andExpect(jsonPath("$.message").value(containsString("deployment")));
+                .andExpect(jsonPath("$.message").value(allOf(containsString("deployment"), containsString(MASKED_REFUSAL))));
     }
 
     // --- the runner's scan ------------------------------------------------------------------------------
@@ -401,6 +439,14 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         send(post("/v1/pipelines/cpp-labels/preview"), registry(), "")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath(behind + ".message", contains(matchesPattern(isoInstant))));
+
+        // "A preview's note omits the instants of a masked version column": cpp-x alone allows it, on the rows of P1.
+        entry(USAGE, "registry", "\"columns\":[\"event_id\",\"project_id\",\"request_time\",\"" + TARGET + ".tox_score\"]");
+        entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"rows\":{\"where\":\"project_id = 'P1'\"}");
+        send(post("/v1/pipelines/cpp-labels/preview"), registryWith("cpp-x"), "")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath(behind + ".message", contains(allOf(containsString("materialized position of enrichment '" + TARGET + "'"),
+                        not(matchesPattern(isoInstant))))));
     }
 
     // --- aggregates -------------------------------------------------------------------------------------

@@ -504,7 +504,8 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         snapshot(SOURCE, revision, callerWith("grev-ra", "grev-rb"))
                 .andExpect(jsonPath("$.columns[*].name", hasItem("project")))
                 .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
-        live(SOURCE, callerWith("grev-ra", "grev-rb")).andExpect(jsonPath("$.columns[*].name", hasItem("project")));
+        live(SOURCE, callerWith("grev-ra", "grev-rb")).andExpect(jsonPath("$.columns[*].name", hasItem("project")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
     }
 
     @Test
@@ -517,6 +518,9 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
 
             snapshot(USAGE, revision, callerWith("sysrev-mask-a", "sysrev-mask-b"))
                     .andExpect(jsonPath("$.columns").doesNotExist())
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+            // Masked, not hidden: the live read lists a column only sysrev-mask-a allows.
+            live(USAGE, callerWith("sysrev-mask-a", "sysrev-mask-b")).andExpect(jsonPath("$.columns[*].name", hasItem("deployment")))
                     .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
         } finally {
             removeEntry(USAGE, "sysrev-mask-a");

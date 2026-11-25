@@ -57,6 +57,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class MaskedRenderedSqlSafetyTest {
 
+    private static final String P1 = "\"t\".\"p\" = 'P1'";
+    private static final String P2 = "\"t\".\"p\" = 'P2'";
+    // Two masks, so a read behind another column's mask is told apart from one behind its own.
+    private static final List<MaskedSqlAudit.Masked> MASKED = List.of(MaskedSqlAudit.Masked.of("\"t\".\"secret\"", P1),
+            MaskedSqlAudit.Masked.of("\"t\".\"n\"", P2), MaskedSqlAudit.Masked.of("\"t\".\"tags\"", P1), MaskedSqlAudit.Masked.of("\"t\".\"meta\"", P1));
     private static final List<String> PHYSICAL = List.of("\"t\".\"secret\"", "\"t\".\"n\"", "\"t\".\"tags\"", "\"t\".\"meta\"");
     private static final List<RelationColumn> T = List.of(new RelationColumn("p", QueryFieldType.STRING, ResultColumnKind.STRING),
             new RelationColumn("secret", QueryFieldType.STRING, ResultColumnKind.STRING),
@@ -72,11 +77,12 @@ class MaskedRenderedSqlSafetyTest {
 
     private static QueryEntityModel model() {
         final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name("t", "p"), String.class).eq("P1"));
+        final ColumnMask other = ColumnMask.of(DSL.field(DSL.name("t", "p"), String.class).eq("P2"));
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         bindings.put("p", new QueryFieldBinding("p", DSL.field(DSL.name("t", "p"), String.class), QueryFieldType.STRING));
         bindings.put("secret", new QueryFieldBinding("secret", DSL.field(DSL.name("t", "secret"), String.class), QueryFieldType.STRING)
                 .masked(mask));
-        bindings.put("n", new QueryFieldBinding("n", DSL.field(DSL.name("t", "n"), Long.class), QueryFieldType.LONG).masked(mask));
+        bindings.put("n", new QueryFieldBinding("n", DSL.field(DSL.name("t", "n"), Long.class), QueryFieldType.LONG).masked(other));
         bindings.put("tags", new QueryFieldBinding("tags", DSL.field(DSL.name("t", "tags")), QueryFieldType.ARRAY, QueryFieldType.STRING)
                 .masked(mask));
         bindings.put("labels", new QueryFieldBinding("labels", DSL.field(DSL.name("t", "labels")), QueryFieldType.ARRAY,
@@ -96,7 +102,8 @@ class MaskedRenderedSqlSafetyTest {
                 List.of(cmp(ComparisonOp.EQ, field("n"), new ValueExpr(ValueType.NULL, null)), cmp(ComparisonOp.EQ, field("p"), str("P2")))))));
         shapes.put("group and having", () -> render(new StructuredQuery("t", null, QueryMode.AGGREGATE, false,
                 List.of(out(field("secret")), new OutputColumn(sum(field("n")), "total")), List.of("secret"),
-                cmp(ComparisonOp.GT, field("total"), number("0")), null, null)));
+                and(cmp(ComparisonOp.GT, field("total"), number("0")), cmp(ComparisonOp.LT, new FnExpr("max", false, List.of(field("n"))),
+                        number("9"))), null, null)));
         shapes.put("order", () -> render(new StructuredQuery("t", null, QueryMode.ROW, false, List.of(out(field("p"))), null, null,
                 List.of(new SortItem("n", SortDir.DESC, null), new SortItem("secret", SortDir.ASC, null)), new OffsetPage(0, 10, false))));
         shapes.put("window", () -> render(row(List.of(out(field("p")), new OutputColumn(new WindowExpr(sum(field("n")), List.of(field("secret")),
@@ -129,10 +136,12 @@ class MaskedRenderedSqlSafetyTest {
         shapes.put("join", () -> {
             final RelationColumn left = new RelationColumn("lp", QueryFieldType.STRING, ResultColumnKind.STRING);
             final RelationColumn secret = new RelationColumn("s", QueryFieldType.STRING, ResultColumnKind.STRING);
+            // A masked field on each side of the ON.
             final JoinRelation join = new JoinRelation(new EntityRelation("t", T), new EntityRelation("t", T), JoinKind.LEFT,
-                    cmp(ComparisonOp.EQ, field("lp"), field("rp")),
+                    and(cmp(ComparisonOp.EQ, field("lp"), field("rp")), cmp(ComparisonOp.EQ, field("ls"), field("s"))),
                     List.of(new JoinRelation.JoinColumn(left, true, "p"), new JoinRelation.JoinColumn(
                             new RelationColumn("rp", QueryFieldType.STRING, ResultColumnKind.STRING), false, "p"),
+                            new JoinRelation.JoinColumn(new RelationColumn("ls", QueryFieldType.STRING, ResultColumnKind.STRING), true, "secret"),
                             new JoinRelation.JoinColumn(secret, false, "secret")));
             return render(new CompositeQuery(join, block(List.of(out(field("lp")), out(field("s"))), null), List.of(left, secret)));
         });
@@ -158,15 +167,24 @@ class MaskedRenderedSqlSafetyTest {
         shapes.forEach((shape, sql) -> {
             final String rendered = sql.get();
             assertThat(PHYSICAL.stream().anyMatch(rendered::contains)).as(shape + " reads a masked column: " + rendered).isTrue();
-            assertThat(MaskedSqlAudit.unguarded(rendered, PHYSICAL)).as(shape + ": " + rendered).isEmpty();
+            assertThat(MaskedSqlAudit.unguarded(rendered, MASKED)).as(shape + ": " + rendered).isEmpty();
         });
     }
 
     @Test
-    void auditFindsTheStoredValueReadOutsideItsMask() {
-        assertThat(MaskedSqlAudit.unguarded("select \"t\".\"secret\" from \"t\"", PHYSICAL)).hasSize(1);
-        assertThat(MaskedSqlAudit.unguarded(render(row(List.of(out(field("secret"))), null)) + " where \"t\".\"n\" > 0", PHYSICAL))
+    void auditFindsTheStoredValueReadOutsideItsOwnMask() {
+        assertThat(MaskedSqlAudit.unguarded("select \"t\".\"secret\" from \"t\"", MASKED)).hasSize(1);
+        assertThat(MaskedSqlAudit.unguarded(render(row(List.of(out(field("secret"))), null)) + " where \"t\".\"n\" > 0", MASKED))
                 .singleElement().asString().contains("where \"t\".\"n\"");
+        // A raw read before the definition a guarded conjunct opens is not folded into it.
+        assertThat(MaskedSqlAudit.unguarded("select toBool(ifNull(has(\"t\".\"tags\", 'x'), false)) \"seen\" from \"t\" where ((ifNull(" + P2
+                + ", 0) AS \"__adas_mcond_0\") and \"t\".\"n\" > 0)", MASKED)).singleElement().asString().contains("has(\"t\".\"tags\"");
+        // Behind another column's mask.
+        assertThat(MaskedSqlAudit.unguarded("select if((ifNull(" + P2 + ", 0) AS \"__adas_mcond_0\"), if(\"__adas_mcond_0\", \"t\".\"secret\","
+                + " defaultValueOfArgumentType(assumeNotNull(\"t\".\"secret\"))), NULL) from \"t\"", MASKED)).hasSize(2);
+        // Under a negated mask, which admits exactly the rows it should reject.
+        assertThat(MaskedSqlAudit.unguarded("select 1 from \"t\" where (not (ifNull(" + P2 + ", 0) AS \"__adas_mcond_0\") and \"t\".\"n\" > 0)",
+                MASKED)).hasSize(1);
     }
 
     // --- helpers --------------------------------------------------------------------------------------

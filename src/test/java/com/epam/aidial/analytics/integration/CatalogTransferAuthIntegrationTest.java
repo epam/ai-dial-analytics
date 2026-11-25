@@ -118,6 +118,10 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         export(roles(EXPORTER, "cxa-g2"), COLUMNS)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tables[0].schema.columns[*].name", org.hamcrest.Matchers.hasItem("c")));
+        // Masked, not visible: the same caller's catalog read lists it and reports the restriction.
+        mockMvc.perform(get("/v1/tables/" + COLUMNS).header(HttpHeaders.AUTHORIZATION, bearer(roles(EXPORTER, "cxa-g2"))))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.hasItem("c")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
     }
 
     @Test
