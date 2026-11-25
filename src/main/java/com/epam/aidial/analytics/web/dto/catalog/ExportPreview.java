@@ -11,7 +11,8 @@ public record ExportPreview(
         List<ExportEntry> objects,
 
         @Schema(description = "System tables the bundle would require on the target by name, never carrying their "
-                + "definitions: those its objects depend on and, with include_access, those whose access it carries")
+                + "definitions: those the carried closure reaches or the selection names and, with include_access, those "
+                + "whose access it carries")
         @JsonProperty("required_system_tables") List<ExportEntry> requiredSystemTables,
 
         @Schema(description = "Objects an export-everything leaves out")
@@ -25,7 +26,8 @@ public record ExportPreview(
      * One table's access in the export.
      *
      * @param roles      the roles the bundle carries for the table, sorted
-     * @param leftBehind each part of a stored entry the bundle does not carry, by role and then in reduction order
+     * @param leftBehind each part of a candidate entry the bundle does not carry, by role and then in reduction order; a
+     *                   role a selection's {@code roles} does not list is neither carried nor listed
      */
     public record AccessItem(
             String table,

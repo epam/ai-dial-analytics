@@ -1934,7 +1934,9 @@ Every path that refuses `403 sensitive_column_not_entitled` SHALL also refuse a 
 identity, with HTTP 403 and machine code `column_not_entitled`, naming the column, and SHALL NOT report it as an
 unknown column. Those paths refuse `sensitive_column_not_entitled` for a sensitive column the calling identity may not
 read or see: pipeline authoring (`enrich` and `aggregate` registration, enable, patch and preview, and an aggregate's
-refresh on request), the runner's data-plane endpoints under the calling identity, and catalog export. A column that
+refresh on request), the runner's data-plane endpoints under the calling identity, and catalog export of a table the bundle
+carries under `tables` (an export of only a table's access carries none of its columns; see
+[catalog-export-import](../catalog-export-import/spec.md), "Selective export"). A column that
 is both hidden and sensitive without the clearance
 SHALL be refused `column_not_entitled`. Every column a request references SHALL be judged for a column policy before
 any is judged for the clearance: on `enrich` registration, enable and patch the column-policy check SHALL run where
@@ -2108,8 +2110,10 @@ the `422` it is today, for a column-restricted caller too.
 
 #### Scenario: An export with a hidden column is refused
 
-- **WHEN** a caller holding `REGISTRY_READ` and `get` on a table, from whom one of its columns is hidden, exports it
+- **WHEN** a caller holding `REGISTRY_READ` and `get` on a table, from whom one of its columns is hidden, exports it under `tables`
 - **THEN** the response is `403 column_not_entitled`
+- **AND WHEN** the caller, also holding `TABLE_GRANT`, exports only the table's access (`access_only` with `include_access`)
+- **THEN** the response is `200`
 
 #### Scenario: A scheduled refresh is unaffected
 
@@ -2221,4 +2225,3 @@ access is its source's.
 - **WHEN** a bundle whose `access` gives `*` the `write` privilege on a user table `t` is imported with `include_access=true`
 - **THEN** that access entry is `FAIL` with a problem naming `validation_error`, the import is `422` with `error`
   `catalog_import_invalid`, and `t`'s access is unchanged
-

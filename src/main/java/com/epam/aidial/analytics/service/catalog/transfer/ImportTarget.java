@@ -13,7 +13,8 @@ import java.util.Set;
  * What the import planner needs to know about the target environment, read up front so the planner itself
  * touches no repository. Only the objects the bundle names or depends on are read, plus the table count.
  *
- * @param tables                the target's tables the bundle names or depends on, system tables included, by name
+ * @param tables                the target's tables the bundle names or depends on, system tables included, by name, and,
+ *                              for an import with {@code include_access}, those its {@code access} keys name
  * @param pipelines             the target's pipelines the bundle names, in bundle shape, by name
  * @param pipelinesVisible      whether the caller may see a pipeline declaration ({@code REGISTRY_READ}), and so
  *                              whether an entry reports one as {@code prev}
