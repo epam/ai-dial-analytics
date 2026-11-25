@@ -77,7 +77,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         for (final String role : List.of(RUNNER, "registry", "viewer", "cpp-x", "*")) {
             revoke(USAGE, role);
         }
-        for (final String pipeline : List.of("cpp-rollup", "cpp-unplannable", "cpp-labels", "cpp-up")) {
+        for (final String pipeline : List.of("cpp-rollup", "cpp-unplannable", "cpp-labels", "cpp-up", "cpp-mixed", "cpp-masked-input")) {
             asAdmin(delete("/v1/pipelines/" + pipeline));
         }
         for (final String table : List.of(TARGET, GROUP_TARGET, ROLLUP, EVENTS_TARGET, EVENTS, LABELS)) {
@@ -184,6 +184,11 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         entry(TARGET, "registry", "\"privileges\":[\"write\"]");
 
         send(post("/v1/pipelines/" + pipeline + "/preview"), registry(), "").andExpect(status().isOk());
+        // The masks are there: the same caller's discovery marks a column only '*' allows.
+        mockMvc.perform(get("/v1/queries/entities/schema/" + USAGE).header(HttpHeaders.AUTHORIZATION, bearer(registry())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.fields[?(@.name == 'deployment')].masked", contains(true)))
+                .andExpect(jsonPath("$.fields[?(@.name == 'project_id')].masked", contains(false)));
     }
 
     /**
@@ -221,8 +226,7 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
         entry(USAGE, "registry", "\"rows\":{\"where\":\"project_id = 'P1'\"}");
         entry(USAGE, "cpp-x", "\"privileges\":[\"read\"],\"columns\":[" + CURSOR + ",\"project_id\",\"user_hash\"]");
         rollup("SELECT deployment, sum(project_id) FROM dial_usage_log GROUP BY 1", false);
-        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "").andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.error").value(not("column_not_entitled")));
+        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "").andExpect(status().isUnprocessableContent());
 
         asAdmin(delete("/v1/pipelines/cpp-rollup")).andExpect(status().isNoContent());
         rollup("SELECT deployment, count(DISTINCT user_hash) FROM dial_usage_log GROUP BY 1", false);

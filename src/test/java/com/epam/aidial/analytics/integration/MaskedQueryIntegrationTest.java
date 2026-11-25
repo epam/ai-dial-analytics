@@ -180,13 +180,21 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
             // The first branch reads P1 and the absent rows of P2: 31 distinct values, null among them.
             final List<Map<String, Object>> masked = sqlRows(caller(), "SELECT route FROM " + table + " WHERE project <> 'P3' UNION DISTINCT"
                     + " SELECT route FROM " + table + " ORDER BY route");
-            final String absent = "CASE WHEN project IN ('P1', 'P3') THEN route END";
-            final List<Map<String, Object>> reference = sqlRows(admin(), "SELECT " + absent + " AS route FROM " + table + " WHERE project <> 'P3'"
-                    + " UNION DISTINCT SELECT " + absent + " AS route FROM " + table + " ORDER BY route");
-            assertThat(masked).hasSize(100);
-            // The first branch's values in the order it reads them, which neither statement fixes, then the rest in route order.
-            assertThat(values(masked).subList(0, 31)).containsExactlyInAnyOrderElementsOf(values(reference).subList(0, 31));
-            assertThat(values(masked).subList(31, 100)).isEqualTo(values(reference).subList(31, 100));
+            // P1's routes are r199 down to r170, P3's r169 down to r020. ClickHouse's own UNION DISTINCT emits the branches in
+            // either order on several threads, so the expected page is stated, not read back from it.
+            final List<Object> first = new ArrayList<>();
+            for (int i = 170; i < 200; i++) {
+                first.add("r" + i);
+            }
+            first.add(null);
+            final List<Object> rest = new ArrayList<>();
+            for (int i = 20; i < 89; i++) {
+                rest.add(String.format("r%03d", i));
+            }
+            final List<Object> routes = masked.stream().map(row -> row.get("route")).toList();
+            assertThat(routes).hasSize(100);
+            assertThat(routes.subList(0, 31)).as("the first branch's values, in the order it reads them").containsExactlyInAnyOrderElementsOf(first);
+            assertThat(routes.subList(31, 100)).as("then the last branch's new values in route order").isEqualTo(rest);
             assertThat(masked).filteredOn(row -> row.containsKey(MEMBER)).singleElement()
                     .satisfies(row -> assertThat(row).containsEntry("route", null).containsEntry(MEMBER, List.of("route")));
         } finally {

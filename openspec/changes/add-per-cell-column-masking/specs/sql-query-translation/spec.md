@@ -150,7 +150,7 @@ A set-operation statement is a **composite** statement: it executes on every SQL
 #### Scenario: A masked UNION DISTINCT keeps the last branch's order under the row limit
 - **GIVEN** a caller for whom `route_name` is masked
 - **WHEN** it submits `SELECT route_name FROM t WHERE project_id = 'P1' UNION DISTINCT SELECT route_name FROM t ORDER BY route_name` over REST, and the distinct values exceed the default limit of 100 while the first branch holds fewer than 100
-- **THEN** the rows are the first branch's distinct values followed by the last branch's new values in `route_name` order, as ClickHouse returns `UNION DISTINCT` over the same masked values, each marked when any row it collapses had the cell absent
+- **THEN** the rows are the first branch's distinct values followed by the last branch's new values in `route_name` order — the first-occurrence order ClickHouse's `UNION DISTINCT` returns over the same masked values on one thread, and returns on several threads only in some runs — each marked when any row it collapses had the cell absent
 
 #### Scenario: Bare INTERSECT means ALL, not DISTINCT
 - **WHEN** a client submits a set operation whose two branches each yield the same value twice, combined with a bare `INTERSECT`

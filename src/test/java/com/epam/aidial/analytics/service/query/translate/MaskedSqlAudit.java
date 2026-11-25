@@ -12,15 +12,9 @@ import java.util.regex.Pattern;
 /**
  * Finds a masked column's stored value read outside its own mask in rendered SQL (see
  * {@code openspec/specs/structured-query/spec.md}, "A masked field reads as absent at every reference"). Every reference
- * to the column must sit in one of the forms that read it behind the mask of that column:
- *
- * <ul>
- *   <li>the masked scalar {@code if(m, if(m, c, defaultValueOfArgumentType(assumeNotNull(c))), NULL)}, and the same form
- *       around a pushed call read back from an enrichment's derived table, whose last branch is the call's absent value;</li>
- *   <li>the then-branch of an {@code if} on the mask, {@code if(m, c, …)}: a masked composite, an object path inside a
- *       masked {@code object}, a pushed call read back from an enrichment's derived table;</li>
- *   <li>a conjunct in the pruning form, {@code … and m and <comparison on c>}, the mask a conjunct of its own.</li>
- * </ul>
+ * to the column must sit in the form its {@link Kind} reads it in behind the mask of that column, or in a conjunct in the
+ * pruning form, {@code … and m and <comparison on c>}, the mask a conjunct of its own. A single {@code if(m, c, NULL)}
+ * over a scalar is not such a form: a function reading a null's underlying value reads the stored one through it.
  *
  * <p>Each mask condition renders once per scope as {@code (ifNull(<condition>, 0) AS "__adas_mcond_<i>")} and is referenced by
  * its alias elsewhere. Only the definitions of the conditions the caller names are folded to their alias, and each column is
@@ -34,12 +28,27 @@ final class MaskedSqlAudit {
     private MaskedSqlAudit() {
     }
 
+    /** What a masked column holds, which decides the one form that reads it behind its mask. */
+    enum Kind {
+        /** A scalar (or a pushed call's read-back): only {@code if(m, if(m, c, defaultValueOfArgumentType(assumeNotNull(c))), …)}. */
+        SCALAR,
+        /** An {@code array} or {@code map}: {@code if(m, c, []|map())}. */
+        COMPOSITE,
+        /** An {@code object}: {@code if(m, c, CAST('{}', 'JSON'))} bare, {@code if(m, c."<path>", NULL)} for a path in it. */
+        OBJECT,
+        /**
+         * A column an enrichment's derived table computes ({@code __adas_c<n>}): a pushed call read back as a scalar, or a
+         * pushed conjunct, a boolean the statement reads as {@code m and c}.
+         */
+        PUSHED
+    }
+
     /** A masked column: {@code column}, a pattern matching its physical name, read behind {@code condition}'s mask. */
-    record Masked(String column, String condition) {
+    record Masked(String column, String condition, Kind kind) {
 
         /** A column by its literal physical name. */
-        static Masked of(String physical, String condition) {
-            return new Masked(Pattern.quote(physical), condition);
+        static Masked of(String physical, String condition, Kind kind) {
+            return new Masked(Pattern.quote(physical), condition, kind);
         }
     }
 
@@ -67,11 +76,18 @@ final class MaskedSqlAudit {
             final Set<String> own = aliases.get(column.condition());
             final String mask = own.isEmpty() ? NONE : "(" + String.join("|", own.stream().map(Pattern::quote).toList()) + ")";
             final String c = "(?:" + column.column() + ")";
-            // The scalar form, and a pushed call's read-back, whose absent branch is the call over an absent value.
-            text = text.replaceAll("if\\(" + mask + ", if\\(\\1, " + c + ", defaultValueOfArgumentType\\(assumeNotNull\\(" + c + "\\)\\)\\)",
-                    "<masked>");
-            text = text.replaceAll("if\\(" + mask + ", " + c + "(?:\\.\"[^\"]*\")*(?=[,)])", "<masked>");
-            text = text.replaceAll("(?<=\\(| and )" + mask + " and " + c, "<guarded>");
+            text = switch (column.kind()) {
+                // The scalar form, and a pushed call's read-back, whose absent branch is the call over an absent value.
+                case SCALAR, PUSHED -> text.replaceAll("if\\(" + mask + ", if\\(\\1, " + c + ", defaultValueOfArgumentType\\(assumeNotNull\\(" + c
+                        + "\\)\\)\\)", "<masked>");
+                case COMPOSITE -> text.replaceAll("if\\(" + mask + ", " + c + ", (?:\\[\\]|map\\(\\))\\)", "<masked>");
+                case OBJECT -> text.replaceAll("if\\(" + mask + ", " + c + ", CAST\\('\\{\\}', 'JSON'\\)\\)", "<masked>")
+                        .replaceAll("if\\(" + mask + ", " + c + "(?:\\.\"[^\"]*\")+, NULL\\)", "<masked>");
+            };
+            // A conjunct of its own, the mask beside a comparison on the stored column, or beside a pushed conjunct's boolean.
+            final String after = column.kind() == Kind.PUSHED ? "(?=\\)| and )"
+                    : "(?= (?:=|!=|<>|<=|>=|<|>|in \\(|not in \\(|like |ilike |not like |not ilike |is not null))";
+            text = text.replaceAll("(?<=\\(| and )" + mask + " and " + c + after, "<guarded>");
         }
         final List<String> leaks = new ArrayList<>();
         for (final Masked column : masked) {

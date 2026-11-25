@@ -281,8 +281,12 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
             final List<Map<String, Object>> dsl = JsonPath.read(execute(caller("u1", "cpm-v"), "{\"entity\":\"" + MASKED + "\",\"mode\":\"row\","
                     + "\"select\":[{\"expr\":{\"type\":\"field\",\"name\":\"project\"}},{\"expr\":{\"type\":\"field\",\"name\":\"a\"}}],"
                     + "\"page\":{\"type\":\"offset\",\"limit\":10}}").andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), "$.rows");
-            assertThat(dsl).hasSize(4).filteredOn(row -> "P2".equals(row.get("project")))
+            assertThat(dsl).hasSize(4);
+            assertThat(dsl).filteredOn(row -> "P2".equals(row.get("project"))).hasSize(2)
                     .allSatisfy(row -> assertThat(row).containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a")));
+            // The caller's own rows read the value: a mask left unbound would make them absent too.
+            assertThat(dsl).filteredOn(row -> !"P2".equals(row.get("project"))).hasSize(2)
+                    .allSatisfy(row -> assertThat(row).doesNotContainKey(MASKED_MEMBER).doesNotContainEntry("a", null));
             mockMvc.perform(get("/v1/queries/entities/schema/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u1", "cpm-v"))))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.fields[?(@.name == 'a')].masked", contains(true)))

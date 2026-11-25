@@ -680,8 +680,9 @@ class ReadShapingRenderTest {
                 StructuredQueryBuilder.MAX_LIMIT));
         // The body, and a conjunct or call the derived table computes over it and the statement reads back (__adas_c<n>).
         final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
-        final List<MaskedSqlAudit.Masked> audited = List.of(MaskedSqlAudit.Masked.of(body, mask),
-                new MaskedSqlAudit.Masked(Pattern.quote("\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX) + "\\d+\"", mask));
+        final List<MaskedSqlAudit.Masked> audited = List.of(MaskedSqlAudit.Masked.of(body, mask, MaskedSqlAudit.Kind.SCALAR),
+                new MaskedSqlAudit.Masked(Pattern.quote("\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX) + "\\d+\"", mask,
+                        MaskedSqlAudit.Kind.PUSHED));
         shapes.forEach((shape, select) -> {
             final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
             final String outer = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD);
@@ -712,6 +713,41 @@ class ReadShapingRenderTest {
                 .contains("'mask-trace'").contains("\"dial_usage_log\".\"deployment\" = 'd1'");
         final int definitions = sql.split("'mask-trace'", -1).length - 1;
         assertThat(definitions).as("once per scope that reads it: " + sql).isBetween(2, sql.toLowerCase().split("select ", -1).length - 1);
+    }
+
+    /**
+     * The readers that read a masked key's stored value on purpose — the grain join's keys, the page keys and the key
+     * subqueries' selected keys — are the only ones that do: cut out explicitly, nothing else reads it outside its mask.
+     */
+    @Test
+    void maskedGrainKeyIsReadStoredOnlyByTheKeyReaders() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        bindings.put("event_id", bindings.get("event_id").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class)
+                .eq("d1"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final String key = "\"dial_usage_log\".\"event_id\"";
+        final Map<String, org.jooq.Select<?>> shapes = new LinkedHashMap<>();
+        shapes.put("a late-materialized page projecting the key", builder.build(ctx, masked, row(WINDOW, List.of(col(field("event_id")),
+                col(field(BODY))), newestFirst(), new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a count over a body search", builder.buildCount(ctx, masked, countingWhere(and(WINDOW, cmp(ComparisonOp.ICO, field(BODY),
+                str("error"))))));
+        shapes.put("a filter on the key", builder.build(ctx, masked, row(and(WINDOW, cmp(ComparisonOp.EQ, field("event_id"),
+                new ValueExpr(ValueType.STRING, "00000000-0000-4000-8000-000000000001"))), List.of(col(field("trace_id")), col(field(BODY))),
+                newestFirst(), new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.forEach((shape, select) -> {
+            final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+            final String readers = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD)
+                    .replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
+                    .replace(key + " \"" + ReadShaping.PAGE_KEY + "\"", "<page key>")
+                    // The page restriction: the stored keys in the page's, and a row whose stored key the tuple cannot match.
+                    .replaceAll("(?i)\\(" + Pattern.quote(key) + ", \"dial_usage_log\"\\.\"request_time\"\\) in \\(select", "<key subquery>")
+                    .replaceAll("(?i)" + Pattern.quote(key) + " in \\(select", "<key subquery>")
+                    .replace(" or " + key + " is null", " <page key>");
+            assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
+                    .as(shape + ": " + sql).isEmpty();
+        });
     }
 
     /** The test model with the body masked to the rows of deployment {@code d1}. */

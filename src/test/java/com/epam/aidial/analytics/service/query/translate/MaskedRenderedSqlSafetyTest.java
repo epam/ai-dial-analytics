@@ -60,8 +60,10 @@ class MaskedRenderedSqlSafetyTest {
     private static final String P1 = "\"t\".\"p\" = 'P1'";
     private static final String P2 = "\"t\".\"p\" = 'P2'";
     // Two masks, so a read behind another column's mask is told apart from one behind its own.
-    private static final List<MaskedSqlAudit.Masked> MASKED = List.of(MaskedSqlAudit.Masked.of("\"t\".\"secret\"", P1),
-            MaskedSqlAudit.Masked.of("\"t\".\"n\"", P2), MaskedSqlAudit.Masked.of("\"t\".\"tags\"", P1), MaskedSqlAudit.Masked.of("\"t\".\"meta\"", P1));
+    private static final List<MaskedSqlAudit.Masked> MASKED = List.of(MaskedSqlAudit.Masked.of("\"t\".\"secret\"", P1, MaskedSqlAudit.Kind.SCALAR),
+            MaskedSqlAudit.Masked.of("\"t\".\"n\"", P2, MaskedSqlAudit.Kind.SCALAR),
+            MaskedSqlAudit.Masked.of("\"t\".\"tags\"", P1, MaskedSqlAudit.Kind.COMPOSITE),
+            MaskedSqlAudit.Masked.of("\"t\".\"meta\"", P1, MaskedSqlAudit.Kind.OBJECT));
     private static final List<String> PHYSICAL = List.of("\"t\".\"secret\"", "\"t\".\"n\"", "\"t\".\"tags\"", "\"t\".\"meta\"");
     private static final List<RelationColumn> T = List.of(new RelationColumn("p", QueryFieldType.STRING, ResultColumnKind.STRING),
             new RelationColumn("secret", QueryFieldType.STRING, ResultColumnKind.STRING),
@@ -185,6 +187,18 @@ class MaskedRenderedSqlSafetyTest {
         // Under a negated mask, which admits exactly the rows it should reject.
         assertThat(MaskedSqlAudit.unguarded("select 1 from \"t\" where (not (ifNull(" + P2 + ", 0) AS \"__adas_mcond_0\") and \"t\".\"n\" > 0)",
                 MASKED)).hasSize(1);
+        // A scalar behind a single if: assumeNotNull reads the stored value under the NULL.
+        assertThat(MaskedSqlAudit.unguarded("select assumeNotNull(if((ifNull(" + P2 + ", 0) AS \"__adas_mcond_0\"), \"t\".\"n\", NULL)) from \"t\"",
+                MASKED)).hasSize(1);
+        // A conjunct that does not compare the stored column on its own.
+        assertThat(MaskedSqlAudit.unguarded("select 1 from \"t\" where ((ifNull(" + P2 + ", 0) AS \"__adas_mcond_0\") and \"t\".\"n\" % 0 = 1)",
+                MASKED)).hasSize(1);
+    }
+
+    @Test
+    void rewrittenFilterTakesThePruningForm() {
+        final String sql = render(row(List.of(out(field("p"))), cmp(ComparisonOp.GT, field("n"), number("0"))));
+        assertThat(sql).as("the audit's <guarded> case is exercised").containsPattern("\"__adas_mcond_\\d+\"\\)? and \"t\"\\.\"n\" > 0");
     }
 
     // --- helpers --------------------------------------------------------------------------------------

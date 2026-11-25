@@ -295,10 +295,11 @@ Where rows collapse, the flags do not take part in the comparison:
     block sorts by `min((ordinal, row))`.
   - The stateful row number keeps a branch's own `ORDER BY` in the plan, which ClickHouse otherwise removes under a
     `GROUP BY`.
-  - The rows are then those `UNION DISTINCT` returns for the same text (probed on 26.3 and 26.8). So is which of them
-    the default limit keeps where the cut falls in an ordered last branch. A cut through an unordered branch is no
-    more determined than in ClickHouse's own `UNION DISTINCT`, which returned different rows across runs at 8
-    threads.
+  - The rows are then in first-occurrence order, deterministically: each branch's new values in the order the branch
+    reads them, the branches in order. That is the order ClickHouse's own `UNION DISTINCT` returns on one thread
+    (probed on 26.3 and 26.8). On several threads it emits the branches in either order, and so keeps a different
+    page under the default limit from run to run. The grouped form is the stabler of the two. A cut through an
+    unordered branch is no more determined in either.
   - A windowed `DISTINCT` over the union was rejected: it re-sorts by the partition, and returned other rows that
     changed with the thread count.
 
@@ -459,11 +460,12 @@ refuses it explicitly as a column the path reads.
 - **A row-mode distinct with a page limit no longer stops early.** The mark ORs every collapsed row, so the whole
   filtered range is read. This is the cost of exact marks, and the grouped form keeps it bounded in memory.
   Benchmarked on synthetic data (millions of rows, four threads, 26.3 and 26.8), the collapsing forms against the
-  `DISTINCT` they replace: without a sort, the grouped form stays within a small factor of `DISTINCT` at low and high
-  cardinality alike (both finish in hundredths of a second); with a sort at high cardinality it is faster, since
-  `DISTINCT` then sorts every distinct value; over a JSON output it is within about half again. The aggregate-mode
-  window costs up to a few times the plain aggregate-mode `DISTINCT` it extends, over many groups. None changes the
-  order of magnitude of the statement.
+  `DISTINCT` they replace. Where `DISTINCT` reaches its page limit early, the grouped form is an order of magnitude
+  slower or more, and the gap grows with the range the filter leaves, since it reads all of it: that is this cost.
+  Where the limit is not reached early (few distinct values, or a sort, which makes `DISTINCT` read the whole range
+  too), the grouped form stays within a small factor: faster with a sort at high cardinality, since `DISTINCT` then
+  sorts every distinct value, and within about half again over a JSON output. The aggregate-mode window costs up to a
+  few times the plain aggregate-mode `DISTINCT` it extends, over many groups.
 - **Row order discloses masked ordering-key values.** Without a total order, and inside order-sensitive aggregates,
   ClickHouse returns rows in roughly storage order, which follows the stored ordering-key and partition values. An
   absent key cell between present ones can be read from its neighbours, often exactly. This was probed on 26.3. The

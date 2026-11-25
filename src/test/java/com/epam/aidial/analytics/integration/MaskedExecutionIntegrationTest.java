@@ -155,7 +155,8 @@ class MaskedExecutionIntegrationTest {
         final WindowFrame current = new WindowFrame(FrameUnit.ROWS, new FrameBound(FrameBoundKind.CURRENT_ROW, null),
                 new FrameBound(FrameBoundKind.CURRENT_ROW, null));
         final List<WindowOrder> byN = List.of(new WindowOrder(field("n"), SortDir.ASC, NullsOrder.FIRST));
-        final StructuredQuery query = new StructuredQuery(VALUES, cmp(ComparisonOp.IN, field("k"), strings("k1", "k2", "kA")), QueryMode.ROW,
+        // kB is absent and stores 5, which would sort it last were the window ordered by the stored value.
+        final StructuredQuery query = new StructuredQuery(VALUES, cmp(ComparisonOp.IN, field("k"), strings("k1", "k2", "kB")), QueryMode.ROW,
                 false, List.of(new OutputColumn(field("k"), null),
                         new OutputColumn(new WindowExpr(new FnExpr("row_number", false, List.of()), null, byN, current), "rn"),
                         new OutputColumn(new WindowExpr(new FnExpr("max", false, List.of(field("n"))), null, byN, current), "top")),
@@ -165,8 +166,8 @@ class MaskedExecutionIntegrationTest {
         for (final String present : List.of("k1", "k2")) {
             assertThat(rows.get(present).get(MaskFlag.MEMBER)).as(present).isEqualTo(List.of("rn"));
         }
-        assertThat(rows.get("kA").get(MaskFlag.MEMBER)).isEqualTo(List.of("rn", "top"));
-        assertThat(((Number) rows.get("kA").get("rn")).longValue()).as("the absent row sorts first").isEqualTo(1L);
+        assertThat(rows.get("kB").get(MaskFlag.MEMBER)).isEqualTo(List.of("rn", "top"));
+        assertThat(((Number) rows.get("kB").get("rn")).longValue()).as("the absent row sorts first").isEqualTo(1L);
     }
 
     /**
@@ -214,6 +215,18 @@ class MaskedExecutionIntegrationTest {
         assertThat(byKey(shaped, "event_id").get("e2")).containsEntry(BODY, null).containsEntry("size", null)
                 .containsEntry(MaskFlag.MEMBER, List.of(BODY, "size"));
         assertThat(byKey(shaped, "event_id").get("e1")).containsEntry(BODY, "has an error").doesNotContainKey(MaskFlag.MEMBER);
+
+        // A call over the body in a filter is pushed into the derived table and read back through the mask, absent as the
+        // call's value over an absent cell: e2 and e4 store long bodies but are absent, e3's is short.
+        final FilterNode longBody = new LogicalNode(LogicalOp.AND, List.of(window,
+                cmp(ComparisonOp.GT, new FnExpr("length", false, List.of(field(BODY))), new ValueExpr(ValueType.LONG, "5"))));
+        final StructuredQuery calls = new StructuredQuery(SOURCE, longBody, QueryMode.ROW, false, List.of(new OutputColumn(field("event_id"), null)),
+                null, null, List.of(new SortItem("event_id", SortDir.ASC, null)), new OffsetPage(0, 10, false));
+        final SelectQuery<?> pushed = builder.build(dsl, model, calls);
+        assertThat(MaskRendering.render(() -> pushed.getSQL(ParamType.INLINED))).as("the call is computed in the derived table").contains("__adas_c0");
+        final List<Map<String, Object>> found = run(pushed);
+        assertThat(found).isEqualTo(run(unshaped.build(dsl, model, calls)));
+        assertThat(found).extracting(row -> row.get("event_id")).containsExactly("e1");
     }
 
     /**
@@ -299,6 +312,18 @@ class MaskedExecutionIntegrationTest {
                 .hasMessageContaining("names a table the query reads");
     }
 
+    /** A caller output named like a flag column keeps its value, and its mark: the flag is named apart from it. */
+    @Test
+    void callerOutputNamedLikeFlagColumnKeepsItsMark() {
+        final String name = MaskFlag.NAME_PREFIX + "0";
+        final List<OutputColumn> select = List.of(new OutputColumn(field("k"), null), new OutputColumn(field("n"), name));
+        final Map<String, Map<String, Object>> rows = byKey(run(builder.build(dsl, valuesModel(), new StructuredQuery(VALUES,
+                cmp(ComparisonOp.IN, field("k"), strings("k1", "kA")), QueryMode.ROW, false, select, null, null, null, new OffsetPage(0, 10, false)))));
+        assertThat(((Number) rows.get("k1").get(name)).longValue()).isEqualTo(1L);
+        assertThat(rows.get("k1")).doesNotContainKey(MaskFlag.MEMBER);
+        assertThat(rows.get("kA")).containsEntry(name, null).containsEntry(MaskFlag.MEMBER, List.of(name));
+    }
+
     /** A lambda parameter named like the mask's internal alias cannot capture it: the alias is chosen apart from it. */
     @Test
     void lambdaParameterNamedLikeInternalAliasReadsTheAbsentValue() {
@@ -345,8 +370,8 @@ class MaskedExecutionIntegrationTest {
                 new StructuredQuery(WIDE, null, QueryMode.ROW, false, select, null, null, null, new OffsetPage(0, 10, false)))) {
             final SelectQuery<?> statement = builder.build(dsl, model, query);
             final String sql = MaskRendering.render(() -> statement.getSQL(ParamType.INLINED));
-            assertThat(sql.length()).as("the policy is near 16 KiB").isGreaterThan(16_000).isLessThan(262_144);
-            assertThat(occurrences(sql, "'P1799'")).as("rendered once in the statement's one scope").isEqualTo(1);
+            assertThat(sql.length()).as("the policy is tens of KiB, once").isGreaterThan(16_000).isLessThan(262_144);
+            assertThat(occurrences(sql, "'P0999'")).as("rendered once in the statement's one scope").isEqualTo(1);
             final List<Map<String, Object>> rows = run(statement);
             assertThat(rows).hasSize(2);
             assertThat(byKey(rows).get("w0")).doesNotContainKey(MaskFlag.MEMBER);
@@ -376,6 +401,23 @@ class MaskedExecutionIntegrationTest {
         assertThat(a3).containsExactly("[] [v]", "null [v]");
         assertThat(rows.stream().filter(row -> "a2".equals(row.get("k"))).map(row -> show(row.get("v")) + " " + row.get(MaskFlag.MEMBER)).toList())
                 .containsExactly("[] null", "[] null");
+    }
+
+    /** A row-mode distinct and a union distinct over a bare masked array keep its absent cells apart from a stored empty one. */
+    @Test
+    void distinctAndUnionDistinctKeepAbsentArrayApartFromStoredEmpty() {
+        final List<Map<String, Object>> distinct = run(builder.build(dsl, arraysModel(), new StructuredQuery(ARRAYS, null, QueryMode.ROW, true,
+                List.of(new OutputColumn(field("tags"), null)), null, null, null, new OffsetPage(0, 10, false))));
+        assertThat(distinct.stream().map(row -> show(row.get("tags")) + " " + row.get(MaskFlag.MEMBER)).sorted().toList())
+                .containsExactly("[] null", "[a] null", "null [tags]");
+
+        final RelationColumn v = new RelationColumn("v", QueryFieldType.ARRAY, QueryFieldType.STRING, ResultColumnKind.ARRAY, ResultColumnKind.STRING);
+        final CompositeQuery branch = arraysLeaf(List.of(new OutputColumn(field("tags"), "v")), List.of(v));
+        final CompositeQuery union = new CompositeQuery(new SetOpRelation(SetOpKind.UNION, false, List.of(branch, branch), List.of(v)),
+                new StructuredQuery(ARRAYS, null, QueryMode.ROW, false, List.of(new OutputColumn(field("v"), null)), null, null, null, null), List.of(v));
+        final List<Map<String, Object>> unioned = run(composite.build(dsl, union, entity -> arraysModel(), 1000));
+        assertThat(unioned.stream().map(row -> show(row.get("v")) + " " + row.get(MaskFlag.MEMBER)).sorted().toList())
+                .containsExactly("[] null", "[a] null", "null [v]");
     }
 
     /** A grouping key over a bare masked array keeps its absent cells apart from a stored empty array. */
@@ -470,13 +512,17 @@ class MaskedExecutionIntegrationTest {
                 null, null), columns);
     }
 
-    /** Sixteen columns masked by one policy listing 1800 projects, near 16 KiB of text; {@code w0}'s project is among them. */
+    /**
+     * Sixteen columns masked by one policy of 1000 OR-ed project equalities: tens of KiB and thousands of AST elements, which
+     * one copy per reference would take past {@code max_query_size} and {@code max_ast_elements}. {@code w0}'s project is among them.
+     */
     private static QueryEntityModel wideModel() {
         final List<String> projects = new ArrayList<>();
-        for (int i = 0; i < 1800; i++) {
+        for (int i = 0; i < 1000; i++) {
             projects.add(String.format("P%04d", i));
         }
-        final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(WIDE, "p"), String.class).in(projects));
+        final Field<String> project = DSL.field(DSL.name(WIDE, "p"), String.class);
+        final ColumnMask mask = ColumnMask.of(DSL.or(projects.stream().map(project::eq).toList()));
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         bind(bindings, "k", WIDE, "k", QueryFieldType.STRING, false, null);
         bind(bindings, "p", WIDE, "p", QueryFieldType.STRING, false, null);
