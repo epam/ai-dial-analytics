@@ -405,6 +405,7 @@ class MaskedExecutionIntegrationTest {
         final String keySubquery = sql.substring(opened.start(), close);
         assertThat(occurrences(keySubquery, "'f0997'")).as("the copied lambda carries the policy once: " + keySubquery).isEqualTo(1);
         assertThat(keySubquery.indexOf(" AS \"" + MaskRendering.ALIAS_PREFIX)).as("defined in the lambda body").isGreaterThan(keySubquery.indexOf("->"));
+        assertThat(occurrences(sql, "'f0997'")).as("once per scope: the statement and the payload's two key subqueries").isEqualTo(3);
         assertThat(sql.length()).as("the policy is tens of KiB").isGreaterThan(16_000).isLessThan(262_144);
         assertThat(count(select)).as("e2 only: e4's stored d2 is absent").isEqualTo(1L);
         assertThat(count(builder.buildCount(dsl, enrichedModel(null, null), counted))).as("unmasked, e4 matches too").isEqualTo(2L);
