@@ -30,7 +30,7 @@ final class MaskedSqlAudit {
 
     /** What a masked column holds, which decides the one form that reads it behind its mask. */
     enum Kind {
-        /** A scalar (or a pushed call's read-back): only {@code if(m, if(m, c, defaultValueOfArgumentType(assumeNotNull(c))), …)}. */
+        /** A scalar: only {@code if(m, if(m, c, defaultValueOfArgumentType(assumeNotNull(c))), NULL)}. */
         SCALAR,
         /** An {@code array} or {@code map}: {@code if(m, c, []|map())}. */
         COMPOSITE,

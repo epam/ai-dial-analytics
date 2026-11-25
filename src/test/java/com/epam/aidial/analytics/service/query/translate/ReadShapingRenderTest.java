@@ -716,8 +716,9 @@ class ReadShapingRenderTest {
     }
 
     /**
-     * The readers that read a masked key's stored value on purpose — the grain join's keys, the page keys and the key
-     * subqueries' selected keys — are the only ones that do: cut out explicitly, nothing else reads it outside its mask.
+     * The readers that read a masked key's stored value on purpose are the only ones that do: the grain join's keys, the
+     * page block's key and the page restriction are cut out where they read, and the payload's derived table (its key
+     * subqueries included) as a whole; nothing else reads the key outside its mask.
      */
     @Test
     void maskedGrainKeyIsReadStoredOnlyByTheKeyReaders() {
@@ -738,13 +739,19 @@ class ReadShapingRenderTest {
                 newestFirst(), new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
         shapes.forEach((shape, select) -> {
             final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+            if (!shape.startsWith("a count")) {
+                assertThat(sql).as(shape + " is a late-materialized page, so the page readers are exercised: " + sql)
+                        .contains(key + " \"" + ReadShaping.PAGE_KEY + "\"");
+            }
+            // Each reader cut where it reads, never elsewhere: the grain join's keys, the page block's key, and the page
+            // restriction, the stored keys in the page's and a row whose stored key the tuple cannot match.
+            final String pageKeys = "\\) in \\(select \"" + ReadShaping.PAGE_KEY + "\"";
             final String readers = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD)
                     .replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
                     .replace(key + " \"" + ReadShaping.PAGE_KEY + "\"", "<page key>")
-                    // The page restriction: the stored keys in the page's, and a row whose stored key the tuple cannot match.
-                    .replaceAll("(?i)\\(" + Pattern.quote(key) + ", \"dial_usage_log\"\\.\"request_time\"\\) in \\(select", "<key subquery>")
-                    .replaceAll("(?i)" + Pattern.quote(key) + " in \\(select", "<key subquery>")
-                    .replace(" or " + key + " is null", " <page key>");
+                    .replaceAll("(?i)\\(" + Pattern.quote(key) + ", \"dial_usage_log\"\\.\"request_time\"" + pageKeys, "<page restriction>")
+                    .replaceAll("(?i)" + Pattern.quote(key) + pageKeys.substring(2), "<page restriction>")
+                    .replaceAll("(\"" + ReadShaping.PAGE_ALIAS + "\"\\)\\)) or " + Pattern.quote(key) + " is null", "$1 <page restriction>");
             assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
                     .as(shape + ": " + sql).isEmpty();
         });

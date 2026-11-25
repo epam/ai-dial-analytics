@@ -343,7 +343,7 @@ class MaskedExecutionIntegrationTest {
     }
 
     /**
-     * One policy near 16 KiB masking sixteen columns renders once per scope, so a wildcard over them, a lambda reading all
+     * One policy of tens of KiB masking sixteen columns renders once per scope, so a wildcard over them, a lambda reading all
      * sixteen and sixteen lambdas each reading one run under ClickHouse's default {@code max_query_size} and
      * {@code max_ast_elements}.
      */
@@ -513,8 +513,8 @@ class MaskedExecutionIntegrationTest {
     }
 
     /**
-     * Sixteen columns masked by one policy of 1000 OR-ed project equalities: tens of KiB and thousands of AST elements, which
-     * one copy per reference would take past {@code max_query_size} and {@code max_ast_elements}. {@code w0}'s project is among them.
+     * Sixteen columns masked by one policy of 1000 OR-ed project equalities: tens of KiB, which a copy per
+     * reference would take past {@code max_query_size}, and then past {@code max_ast_elements}. {@code w0}'s project is among them.
      */
     private static QueryEntityModel wideModel() {
         final List<String> projects = new ArrayList<>();

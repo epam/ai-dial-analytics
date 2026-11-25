@@ -273,7 +273,7 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                 if ("P2".equals(row.get("project"))) {
                     assertThat(row).as("a P2 row is not u1's").containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a", "c"));
                 } else {
-                    assertThat(row).as("u1's own row").doesNotContainKey(MASKED_MEMBER).doesNotContainEntry("a", null);
+                    assertThat(row).as("u1's own row").doesNotContainKey(MASKED_MEMBER).extractingByKey("a").isNotNull();
                 }
             }
 
@@ -286,7 +286,7 @@ class ColumnPolicyReadIntegrationTest extends AbstractOidcAuthIntegrationTest {
                     .allSatisfy(row -> assertThat(row).containsEntry("a", null).containsEntry(MASKED_MEMBER, List.of("a")));
             // The caller's own rows read the value: a mask left unbound would make them absent too.
             assertThat(dsl).filteredOn(row -> !"P2".equals(row.get("project"))).hasSize(2)
-                    .allSatisfy(row -> assertThat(row).doesNotContainKey(MASKED_MEMBER).doesNotContainEntry("a", null));
+                    .allSatisfy(row -> assertThat(row).doesNotContainKey(MASKED_MEMBER).extractingByKey("a").isNotNull());
             mockMvc.perform(get("/v1/queries/entities/schema/" + MASKED).header(HttpHeaders.AUTHORIZATION, bearer(caller("u1", "cpm-v"))))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.fields[?(@.name == 'a')].masked", contains(true)))

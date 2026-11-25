@@ -153,12 +153,11 @@ class MaskedQueryIntegrationTest extends AbstractOidcAuthIntegrationTest {
     }
 
     /**
-     * "A masked UNION DISTINCT keeps the last branch's order under the row limit": the grouped form returns the rows, in
-     * order, that ClickHouse's own {@code UNION DISTINCT} returns over the same masked values, each marked when a row it
-     * collapses was absent.
+     * "A masked UNION DISTINCT keeps the last branch's order under the row limit": the first branch's distinct values,
+     * then the last branch's new values in route order, each marked when a row it collapses was absent.
      */
     @Test
-    void maskedUnionDistinctKeepsTheOrderOfClickHouseUnderTheRowLimit() throws Exception {
+    void maskedUnionDistinctKeepsTheLastBranchOrderUnderTheRowLimit() throws Exception {
         final String table = "mq_union";
         send(post(BASE), admin(), "{\"name\":\"" + table + "\",\"type\":\"source\"}").andExpect(status().isCreated());
         try {

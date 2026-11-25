@@ -369,7 +369,7 @@ public class CompositeQueryBuilder {
          * each output's bare-absent flag, with {@code max} of each mark flag, so the marks of the rows that collapse
          * combine instead of splitting the row. Each branch also projects its ordinal and {@code rowNumberInAllBlocks()}
          * over the branch as rendered, and the grouped rows are ordered by {@code min((ordinal, row))}: each group's first
-         * occurrence, the rows ClickHouse's own {@code UNION DISTINCT} returns for the same text.
+         * occurrence, the order ClickHouse's own {@code UNION DISTINCT} returns for the same text on one thread.
          */
         private SetOpTable distinctUnion(List<SelectQuery<Record>> branches) {
             final SelectQuery<Record> first = branches.getFirst();

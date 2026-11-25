@@ -150,9 +150,10 @@ scope: the key subquery receives the outer filter (`StructuredQueryBuilder.keyPr
 subquery or page block is its own scope and defines the alias again, so
 the text grows with scopes × conditions, plus one copy per outermost lambda body only in a scope that references the
 condition nowhere outside lambdas. It does not grow with references. Two server limits bound it, and ADAS sets neither:
-`max_query_size` (256 KiB) and `max_ast_elements` (50 000). An OR-shaped policy reaches the AST limit first, at about a
-dozen inlined copies of a 1 000-term filter (probed). A statement over either limit fails as any oversized statement
-does today. The flag column names are chosen around the same
+`max_query_size` (256 KiB) and `max_ast_elements` (50 000). With the qualified column names ADAS renders, an OR-shaped
+policy reaches the text limit first: a 1 000-term filter (tens of KiB) fits a handful of copies, and the AST limit
+comes only a few copies later (probed on 26.8). A statement over either limit fails as any oversized statement does
+today. The flag column names are chosen around the same
 declared names.
 
 **Rows-only entries narrow what they add.** Today a role whose entry carries `rows` but has no read path adds its rows
@@ -295,11 +296,12 @@ Where rows collapse, the flags do not take part in the comparison:
     block sorts by `min((ordinal, row))`.
   - The stateful row number keeps a branch's own `ORDER BY` in the plan, which ClickHouse otherwise removes under a
     `GROUP BY`.
-  - The rows are then in first-occurrence order, deterministically: each branch's new values in the order the branch
-    reads them, the branches in order. That is the order ClickHouse's own `UNION DISTINCT` returns on one thread
-    (probed on 26.3 and 26.8). On several threads it emits the branches in either order, and so keeps a different
-    page under the default limit from run to run. The grouped form is the stabler of the two. A cut through an
-    unordered branch is no more determined in either.
+  - The rows are then in first-occurrence order: the branches in order, each branch's new values in the order the
+    branch reads them, which its own `ORDER BY` fixes and which otherwise varies with the read. That is the order
+    ClickHouse's own `UNION DISTINCT` returns on one thread (probed on 26.3 and 26.8). On several threads it can emit
+    the branches in another order, or interleave them, and so keep a different page under the default limit from run
+    to run. The grouped form keeps the branches in order. A cut through an unordered branch is no more determined in
+    either.
   - A windowed `DISTINCT` over the union was rejected: it re-sorts by the partition, and returned other rows that
     changed with the thread count.
 

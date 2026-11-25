@@ -253,7 +253,8 @@ An output cell SHALL be **marked** when its value was computed with an absent in
   from, or references a masked field of its own as above;
 - under a distinct projection, or a `union` that removes duplicates, when the cell is marked on at least one of the
   rows that collapse into the returned row. Marks SHALL NOT take part in deciding which rows are equal, so the rows
-  returned are those the reference returns, and `sort`, paging and `having` apply as they do without masking. A
+  returned are those the reference returns, and `sort`, paging and `having` apply as they do without masking (where a
+  page limit cuts through rows nothing orders, which of them it keeps is no more determined than in the reference). A
   distinct projection that projects a window output SHALL run as a window computed before the rows are collapsed,
   as the SQL surface plans it, and SHALL be marked by the same rule.
 
