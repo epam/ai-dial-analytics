@@ -380,6 +380,37 @@ class MaskedExecutionIntegrationTest {
     }
 
     /**
+     * A filter whose only reference to a large policy's mask is inside a lambda, copied into the payload's key subquery,
+     * defines the mask there in the lambda body and runs under the default limits. e4 is absent, stores {@code d2} and an
+     * error body; e2 is present with both.
+     */
+    @Test
+    void filterOnlyLambdaInKeySubqueryUnderLargePolicyRunsUnderTheDefaultLimits() {
+        final Expr inD2 = new FnExpr("arrayExists", false, List.of(new LambdaExpr(List.of("x"), new FnExpr("equals", false,
+                List.of(new LambdaParamExpr("x"), field("deployment")))), new FnExpr("split_string", false, List.of(str("d2"), str(",")))));
+        final FilterNode window = cmp(ComparisonOp.GE, field("request_time"), new ValueExpr(ValueType.TIMESTAMP, "1791590400000"));
+        final StructuredQuery counted = new StructuredQuery(SOURCE, new LogicalNode(LogicalOp.AND, List.of(window,
+                cmp(ComparisonOp.EQ, inD2, new ValueExpr(ValueType.BOOLEAN, "true")), cmp(ComparisonOp.ICO, field(BODY), str("error")))),
+                QueryMode.ROW, false, List.of(new OutputColumn(field("event_id"), null)), null, null, null, new OffsetPage(0, 10, true));
+        final SelectQuery<?> select = builder.buildCount(dsl, largePolicyEnrichedModel(), counted);
+        final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+
+        final Matcher opened = Pattern.compile("(?i)in \\(select " + Pattern.quote("\"" + SOURCE + "\".\"event_id\"") + " from \"" + SOURCE + "\"")
+                .matcher(sql);
+        assertThat(opened.find()).as("a key subquery over the source: " + sql).isTrue();
+        int close = opened.start() + "in (".length();
+        for (int depth = 1; depth > 0; close++) {
+            depth += sql.charAt(close) == '(' ? 1 : sql.charAt(close) == ')' ? -1 : 0;
+        }
+        final String keySubquery = sql.substring(opened.start(), close);
+        assertThat(occurrences(keySubquery, "'f0997'")).as("the copied lambda carries the policy once: " + keySubquery).isEqualTo(1);
+        assertThat(keySubquery.indexOf(" AS \"" + MaskRendering.ALIAS_PREFIX)).as("defined in the lambda body").isGreaterThan(keySubquery.indexOf("->"));
+        assertThat(sql.length()).as("the policy is tens of KiB").isGreaterThan(16_000).isLessThan(262_144);
+        assertThat(count(select)).as("e2 only: e4's stored d2 is absent").isEqualTo(1L);
+        assertThat(count(builder.buildCount(dsl, enrichedModel(null, null), counted))).as("unmasked, e4 matches too").isEqualTo(2L);
+    }
+
+    /**
      * {@code union all} branches carry a mark flag and a bare-absent flag per position, so only the branch whose output is the
      * bare absent array nulls it; the other branch's expression over it reads the empty value, marked.
      */
@@ -563,16 +594,32 @@ class MaskedExecutionIntegrationTest {
 
     /** The source and its aligned payload, the heavy body masked to the source rows of deployment {@code d1}. */
     private static QueryEntityModel enrichedModel() {
-        final ColumnMask mask = ColumnMask.of(DSL.field(DSL.name(SOURCE, "deployment"), String.class).eq("d1"));
+        return enrichedModel(null, ColumnMask.of(DSL.field(DSL.name(SOURCE, "deployment"), String.class).eq("d1")));
+    }
+
+    private static QueryEntityModel enrichedModel(ColumnMask deploymentMask, ColumnMask bodyMask) {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         bind(bindings, "event_id", SOURCE, "event_id", QueryFieldType.STRING, false, null);
         bind(bindings, "request_time", SOURCE, "request_time", QueryFieldType.TIMESTAMP, false, null);
-        bind(bindings, "deployment", SOURCE, "deployment", QueryFieldType.STRING, false, null);
-        bind(bindings, BODY, PAYLOAD, "body", QueryFieldType.STRING, true, mask);
+        bind(bindings, "deployment", SOURCE, "deployment", QueryFieldType.STRING, false, deploymentMask);
+        bind(bindings, BODY, PAYLOAD, "body", QueryFieldType.STRING, true, bodyMask);
         final EnrichmentJoin payload = EnrichmentJoin.keyed(DSL.table(DSL.name(PAYLOAD)), DSL.field(DSL.name(SOURCE, "event_id")),
                 DSL.field(DSL.name(PAYLOAD, "event_id")), DSL.field(DSL.name(SOURCE, "request_time")), DSL.field(DSL.name(PAYLOAD, "request_time")),
                 Set.of(BODY), null);
         return new QueryEntityModel(SOURCE, DSL.table(DSL.name(SOURCE)), bindings, List.of(payload), List.of(), null, true, true);
+    }
+
+    /**
+     * The source and its aligned payload, the source's deployment masked by one policy of 1000 OR-ed event equalities, tens
+     * of KiB, that admits {@code e1} and {@code e2}.
+     */
+    private static QueryEntityModel largePolicyEnrichedModel() {
+        final List<String> events = new ArrayList<>(List.of("e1", "e2"));
+        for (int i = 0; i < 998; i++) {
+            events.add(String.format("f%04d", i));
+        }
+        final Field<String> event = DSL.field(DSL.name(SOURCE, "event_id"), String.class);
+        return enrichedModel(ColumnMask.of(DSL.or(events.stream().map(event::eq).toList())), null);
     }
 
     private static void bind(Map<String, QueryFieldBinding> bindings, String name, String table, String column, QueryFieldType type,

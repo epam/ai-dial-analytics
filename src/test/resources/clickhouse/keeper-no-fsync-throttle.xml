@@ -2,8 +2,8 @@
 <!--
   A throwaway Keeper: every Keeper write otherwise waits out the fsync throttle, and a replicated DDL makes a dozen or
   more of them in sequence. Durability does not matter to the suite. Merged over clickhouse/keeper.xml and
-  clickhouse/replicas/keeper.xml only from ClickHouse 26.x (ClickHouseTestVersion): 25.x has no throttle and refuses
-  the setting as unknown.
+  clickhouse/replicas/keeper.xml only from ClickHouse 26.8 (ClickHouseTestVersion): 25.3 and 26.3 refuse the setting as
+  unknown.
 -->
 <clickhouse>
     <keeper_server>

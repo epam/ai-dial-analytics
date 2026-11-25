@@ -52,7 +52,7 @@
   and for `row_number`/`rank`/`dense_rank` the same over `W`'s partition and order with `ROWS BETWEEN UNBOUNDED
   PRECEDING AND CURRENT ROW` whatever frame `W` declares (test: a ranking window with a one-row frame behind an absent
   row is marked) — record each output's flag set, and propagate a leaf's flags through composite blocks as flag-only bindings
-- [ ] 3.4 Name the flag columns per statement so they differ from every output name of the query (`__adas_mask_<i>`,
+- [x] 3.4 Name the flag columns per statement so they differ from every output name of the query (`__adas_mask_<i>`,
   suffix advanced past a caller's output of that name); leave the shipped `__adas_` reservation unchanged; render each
   condition once per SELECT scope as `(ifNull(<or>, 0) AS __adas_mcond_<i>)` and reference the alias elsewhere,
   inside lambda bodies too, deciding definition versus reference while each scope renders (one `Condition` can render
