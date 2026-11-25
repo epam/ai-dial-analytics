@@ -15,6 +15,8 @@ import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
 import com.epam.aidial.analytics.service.query.model.LambdaExpr;
 import com.epam.aidial.analytics.service.query.model.LambdaParamExpr;
+import com.epam.aidial.analytics.service.query.model.LogicalNode;
+import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.OutputColumn;
 import com.epam.aidial.analytics.service.query.model.QueryMode;
 import com.epam.aidial.analytics.service.query.model.SortDir;
@@ -141,6 +143,26 @@ class MaskedStatementRenderTest {
                 .as("reserved for every caller").isInstanceOf(QueryValidationException.class).hasMessageContaining("reserved");
         build(row(List.of(new OutputColumn(new FieldExpr("p"), "t")), null));
         build(row(List.of(new OutputColumn(new FieldExpr("p"), "$Masked")), null));
+    }
+
+    @Test
+    void filterOnMaskedScalarComparesTheStoredColumnBehindItsMask() {
+        final String greater = render(build(row(List.of(column(new FieldExpr("p"))),
+                new ComparisonNode(ComparisonOp.GT, List.of(new FieldExpr("n"), new ValueExpr(ValueType.INTEGER, "0"))))));
+        assertThat(greater).as(greater).contains("\"t\".\"n\" > 0");
+
+        final String notNull = render(build(row(List.of(column(new FieldExpr("p"))),
+                new ComparisonNode(ComparisonOp.NE, List.of(new FieldExpr("n"), new ValueExpr(ValueType.NULL, null))))));
+        assertThat(notNull).as(notNull).contains("\"t\".\"n\" is not null");
+
+        final String isNull = render(build(row(List.of(column(new FieldExpr("p"))),
+                new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("n"), new ValueExpr(ValueType.NULL, null))))));
+        assertThat(isNull).as("an absent cell satisfies is null, so it reads the masked value").doesNotContain("\"t\".\"n\" is null");
+
+        final String orFilter = render(build(row(List.of(column(new FieldExpr("p"))), new LogicalNode(LogicalOp.OR, List.of(
+                new ComparisonNode(ComparisonOp.GT, List.of(new FieldExpr("n"), new ValueExpr(ValueType.INTEGER, "0"))),
+                new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("p"), new ValueExpr(ValueType.STRING, "P2"))))))));
+        assertThat(orFilter).as("only a top-level conjunct takes the form").doesNotContain("\"t\".\"n\" > 0");
     }
 
     @Test

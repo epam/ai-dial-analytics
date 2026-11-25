@@ -405,12 +405,14 @@ final class ReadShaping {
         }
         final Map<String, QueryFieldBinding> rebound = new HashMap<>(model.bindings());
         final Set<String> partitionNames = new HashSet<>();
+        final Set<String> maskedNames = new HashSet<>();
         for (final Map.Entry<String, QueryFieldBinding> entry : model.bindings().entrySet()) {
             final QueryFieldBinding binding = entry.getValue();
-            // A masked partition field transfers nothing: a bound over its masked value can admit absent rows whose stored
-            // partition the image would exclude (`request_time is null`), and the image reads the stored column.
-            if (!binding.isMasked() && binding.physicalField().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
+            if (binding.physicalField().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
                 partitionNames.add(entry.getKey());
+                if (binding.isMasked()) {
+                    maskedNames.add(entry.getKey());
+                }
                 rebound.put(entry.getKey(), new QueryFieldBinding(binding.name(),
                         DSL.field(join.enrichmentPartition().getQualifiedName(), binding.physicalField().getDataType()),
                         binding.type(), binding.elementType(), binding.heavy()));
@@ -423,6 +425,11 @@ final class ReadShaping {
         for (final FilterNode conjunct : StructuredQueryBuilder.sourceOnlyConjuncts(model, filter)) {
             final Set<String> reads = StructuredQueryBuilder.referencedFields(conjunct);
             if (!(conjunct instanceof ComparisonNode) || reads.isEmpty() || !partitionNames.containsAll(reads)) {
+                continue;
+            }
+            // A masked partition field transfers only a conjunct of the pruning form, which rejects every row whose stored
+            // partition fails the comparison; any other (`request_time is null`) admits absent rows the image would exclude.
+            if (reads.stream().anyMatch(maskedNames::contains) && FilterTranslator.prunable(conjunct, model.bindings()) == null) {
                 continue;
             }
             final boolean[] subquery = {false};
