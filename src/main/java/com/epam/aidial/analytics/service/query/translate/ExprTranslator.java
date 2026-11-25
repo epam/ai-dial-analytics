@@ -2472,6 +2472,11 @@ public class ExprTranslator {
         if (scalar.subquery() == null) {
             throw new QueryValidationException("a scalar subquery requires a query");
         }
+        // Over a masked field the subquery returns its value with its own mark, which the outputs reading it carry.
+        final SubqueryRenderer.ScalarSubquery marked = subqueries.renderScalar(scalar.subquery());
+        if (marked != null) {
+            return marked.value();
+        }
         final Select select = subqueries.render(scalar.subquery());
         return DSL.field(select);
     }

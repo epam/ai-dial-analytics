@@ -40,6 +40,9 @@ import java.util.Set;
  * {@code absent} — {@code NULL}, or the empty value of a composite type — elsewhere. {@code physicalField} is always the
  * stored column, for the readers that read it on purpose (an enrichment's derived table, the grain join's keys, a
  * rewritten conjunct guarded by the mask); every reference a query makes reads {@link #value()}.
+ *
+ * <p>{@code mark} is set on the binding of an operand column of a composite plan whose value the operand already masked:
+ * the column reads as itself, and only its marks travel ({@link ColumnMark}).
  */
 public record QueryFieldBinding(
         String name,
@@ -51,7 +54,8 @@ public record QueryFieldBinding(
         ComputedField computed,
         List<Field<?>> reads,
         ColumnMask mask,
-        Field<?> absent) {
+        Field<?> absent,
+        ColumnMark mark) {
 
     public QueryFieldBinding {
         prunedPaths = prunedPaths == null ? Set.of() : Set.copyOf(prunedPaths);
@@ -61,7 +65,7 @@ public record QueryFieldBinding(
     /** An unmasked binding. */
     public QueryFieldBinding(String name, Field<?> field, QueryFieldType type, QueryFieldType elementType, boolean heavy,
             Set<List<String>> prunedPaths, ComputedField computed, List<Field<?>> reads) {
-        this(name, field, type, elementType, heavy, prunedPaths, computed, reads, null, null);
+        this(name, field, type, elementType, heavy, prunedPaths, computed, reads, null, null, null);
     }
 
     /** A catalog binding with statement-specific pruned paths. */
@@ -106,12 +110,47 @@ public record QueryFieldBinding(
     /** This binding masked by {@code columnMask}: its cell is the stored value where the mask is true, else absent. */
     public QueryFieldBinding masked(ColumnMask columnMask) {
         return new QueryFieldBinding(name, physicalField, type, elementType, heavy, prunedPaths, computed, reads, columnMask,
-                absentValue(type));
+                absentValue(type), mark);
+    }
+
+    /** This operand column's binding carrying {@code columnMark}, the marks its operand computed for it. */
+    public QueryFieldBinding marked(ColumnMark columnMark) {
+        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, prunedPaths, computed, reads, mask, absent,
+                columnMark);
+    }
+
+    /**
+     * What a mark over this field is keyed by — its mask, or the operand column's marks — or {@code null} when nothing
+     * this field reads can be absent. Two fields with the same source share one flag.
+     */
+    public Object markSource() {
+        return mask != null ? mask : mark;
+    }
+
+    /** Nonzero where this field's cell was absent, or computed from an absent input; {@code null} without a mark source. */
+    public Field<?> absentIndicator() {
+        if (mask != null) {
+            return DSL.field("(NOT {0})", Integer.class, mask.reference());
+        }
+        return mark == null ? null : mark.flag();
+    }
+
+    /**
+     * Nonzero where this field's cell, projected bare, is an absent composite value and so is returned as {@code null}:
+     * a masked {@code array}, {@code map} or {@code object} field, or an operand column that is one. {@code null} for any
+     * other field.
+     */
+    public Field<?> bareIndicator() {
+        if (mask != null) {
+            return computed == null && absent != null ? absentIndicator() : null;
+        }
+        final boolean composite = type == QueryFieldType.ARRAY || type == QueryFieldType.MAP || type == QueryFieldType.OBJECT;
+        return mark == null || !composite ? null : mark.bare();
     }
 
     /** This binding as the statement renders it once its grain join projects {@code paths} as subcolumns. */
     public QueryFieldBinding prunedTo(Set<List<String>> paths) {
-        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, paths, computed, reads, mask, absent);
+        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, paths, computed, reads, mask, absent, mark);
     }
 
     /**

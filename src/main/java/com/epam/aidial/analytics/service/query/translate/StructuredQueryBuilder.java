@@ -292,7 +292,17 @@ public class StructuredQueryBuilder {
      */
     SelectQuery<Record> build(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, List<Condition> keyConjuncts) {
-        return render(dsl, model, query, maxLimit, policy, LeafRestriction.NONE, Map.of(), false, true, keyConjuncts, false);
+        return build(dsl, model, query, maxLimit, policy, keyConjuncts, MaskMarking.Mode.NONE);
+    }
+
+    /**
+     * As {@link #build(DSLContext, QueryEntityModel, StructuredQuery, int, LimitPolicy, List)}, projecting the flags
+     * {@code marks} asks for: the composite renderer's, for a plan that reads a masked field — the statement's own
+     * outputs' marks on its root block, and on every block nested in it each output's marks for the block reading it.
+     */
+    SelectQuery<Record> build(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
+            LimitPolicy policy, List<Condition> keyConjuncts, MaskMarking.Mode marks) {
+        return render(dsl, model, query, maxLimit, policy, LeafRestriction.NONE, Map.of(), false, true, keyConjuncts, marks);
     }
 
     /**
@@ -308,12 +318,13 @@ public class StructuredQueryBuilder {
             LimitPolicy policy, LeafRestriction extra) {
         ComputedFieldUse.requirePlainProjection(model, query);
         final StructuredQueryBuilder renderer = windowTransfer ? withoutWindowTransfer() : this;
-        return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of(), false);
+        return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of(), MaskMarking.Mode.NONE);
     }
 
     /** The single-entity read path's statement unshaped, marking its outputs' masked inputs. */
     private SelectQuery<Record> unshaped(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
-        return render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, LeafRestriction.NONE, Map.of(), false, true, List.of(), true);
+        return render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, LeafRestriction.NONE, Map.of(), false, true, List.of(),
+                MaskMarking.Mode.ROOT);
     }
 
     /**
@@ -470,7 +481,8 @@ public class StructuredQueryBuilder {
      */
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock) {
-        return render(dsl, model, query, maxLimit, policy, extra, shaping, pageBlock, true, List.of(), !pageBlock);
+        return render(dsl, model, query, maxLimit, policy, extra, shaping, pageBlock, true, List.of(),
+                pageBlock ? MaskMarking.Mode.NONE : MaskMarking.Mode.ROOT);
     }
 
     /**
@@ -479,12 +491,12 @@ public class StructuredQueryBuilder {
      * clause is rendered against the model {@link EnrichmentJoins#addReferenced} returns — the only model whose
      * bindings know a pruned path lives under an alias of that derived table. The key predicates are translated
      * against {@code model} itself: they render inside the key subquery, over the source, and name no enrichment
-     * column for pruning to change. With {@code marks} the block's outputs are the statement's: it projects a flag column
-     * per masked input context its outputs read ({@link MaskMarking}), which the executor turns into {@code $masked}.
+     * column for pruning to change. {@code marks} says which flags the block projects ({@link MaskMarking}): the
+     * statement's outputs' marks, which the executor turns into {@code $masked}, or a nested block's per-output ones.
      */
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock,
-            boolean declarePaths, List<Condition> keyConjuncts, boolean marks) {
+            boolean declarePaths, List<Condition> keyConjuncts, MaskMarking.Mode marks) {
         final boolean finalRead = readsFinal(model, query);
         final SelectQuery<Record> select = dsl.selectQuery();
         // The source takes FINAL only when its own engine collapses; ClickHouse refuses it on a plain MergeTree,
@@ -529,28 +541,30 @@ public class StructuredQueryBuilder {
         // rows it compares, so an absent cell, whose expression reads the empty value, never merges with a stored empty one.
         final List<Field<?>> bareFlags = new ArrayList<>();
         outputs.values().forEach(expr -> {
-            final QueryFieldBinding bare = MaskMarking.bareComposite(expr, effective.bindings());
+            final Field<?> bare = MaskMarking.bareIndicator(expr, effective.bindings());
             if (bare != null) {
-                final Field<?> absent = DSL.field("(NOT {0})", Integer.class, bare.mask().reference());
-                bareFlags.add(mode == QueryMode.AGGREGATE ? DSL.field("max({0})", Integer.class, absent) : absent);
+                bareFlags.add(mode == QueryMode.AGGREGATE ? DSL.field("max({0})", Integer.class, bare) : bare);
             }
         });
-        if (marks) {
-            final List<Field<?>> partition = new ArrayList<>(outputFields.values());
-            partition.addAll(bareFlags);
-            flags = MaskMarking.flags(exprTranslator, effective.bindings(), mode, outputs,
-                    !query.distinct() ? MaskMarking.Collapse.NONE : grouped ? MaskMarking.Collapse.GROUPED : MaskMarking.Collapse.WINDOWED,
-                    partition);
-            if (query.distinct() && !flags.isEmpty() && outputs.values().stream().anyMatch(WindowExpressions::containsWindow)) {
+        final boolean marked = marks != MaskMarking.Mode.NONE
+                && MaskMarking.readsMarks(exprTranslator, effective.bindings(), outputs);
+        if (marks != MaskMarking.Mode.NONE) {
+            if (query.distinct() && marked && outputs.values().stream().anyMatch(WindowExpressions::containsWindow)) {
                 // shortcut: a distinct block with a window output cannot collapse its marked rows in the block that computes the
                 // window; it is refused until it is planned as an inner window block under an outer grouped one. Such a query
                 // reads a masked field, which it could not name before masking.
                 throw new QueryValidationException("a distinct projection with a window output is not supported yet beside a"
                         + " masked field; drop 'distinct' or the window");
             }
+            final List<Field<?>> partition = new ArrayList<>(outputFields.values());
+            partition.addAll(bareFlags);
+            flags = MaskMarking.flags(exprTranslator, effective.bindings(), mode, outputs,
+                    !query.distinct() || !marked ? MaskMarking.Collapse.NONE
+                            : grouped ? MaskMarking.Collapse.GROUPED : MaskMarking.Collapse.WINDOWED,
+                    partition, marks);
             select.addSelect(flags);
         }
-        final boolean collapsed = grouped && !flags.isEmpty();
+        final boolean collapsed = grouped && marked;
         if (collapsed) {
             // A distinct whose rows carry marks is grouped by every output, by its expression and never its name, so the
             // collapsed rows' flags combine instead of splitting the row.
@@ -912,9 +926,9 @@ public class StructuredQueryBuilder {
             groupFields.add(resolveGroupKey(key, bindings, selectAliases, shadowingAliases));
             // A bare masked composite key reads its empty value where it is absent; its row flag keeps those rows out of
             // the group of the rows that store an empty value.
-            final QueryFieldBinding bare = MaskMarking.bareComposite(new FieldExpr(key), bindings);
+            final Field<?> bare = MaskMarking.bareIndicator(new FieldExpr(key), bindings);
             if (bare != null) {
-                groupFields.add(DSL.field("(NOT {0})", Integer.class, bare.mask().reference()));
+                groupFields.add(bare);
             }
         }
 

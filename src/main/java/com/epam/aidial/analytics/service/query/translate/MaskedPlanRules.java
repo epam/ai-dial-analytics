@@ -84,6 +84,16 @@ public final class MaskedPlanRules {
         rules.refuseNames();
     }
 
+    /**
+     * Whether {@code query} reads a field {@code maskedFields} names anywhere — any block, any clause, a subquery's
+     * included — so its rendering carries marks.
+     */
+    public static boolean readsMaskedField(CompositeQuery query, Function<String, Set<String>> maskedFields) {
+        final MaskedPlanRules rules = new MaskedPlanRules(maskedFields, entity -> Set.of());
+        rules.outputs(query);
+        return rules.readsMasked;
+    }
+
     /** By position, the masked fields each output of {@code query} depends on. */
     private List<Set<String>> outputs(CompositeQuery query) {
         return block(query.block(), input(query.source()), query.columns());
