@@ -23,7 +23,7 @@
   `if(mask, if(mask, f, defaultValueOfArgumentType(assumeNotNull(f))), NULL)` for a scalar, `if(mask, f, <empty>)` for
   a composite, a computed stand-in left unwrapped — and review every former `field()` call site, recording in the
   commit which read the physical name on purpose
-- [ ] 2.2 ClickHouse test: over an absent scalar cell, a value-dependent failing expression (a `width_bucket` count
+- [x] 2.2 ClickHouse test: over an absent scalar cell, a value-dependent failing expression (a `width_bucket` count
   computed from the cell) and a function reading the null's underlying value return the same result whatever the cell
   stores
 - [ ] 2.3 In `CatalogQueryService.buildModel`, translate each masked column's filters against the governed table's
@@ -47,7 +47,7 @@
   reduction on stored keys (the join's `ON` compares masked outputs); keep the grain join on stored keys, translate its
   key sets through the same masked or rewritten conjunct forms as the outer filter, and transfer partition bounds from
   a masked partition field only for rewritten null-rejecting conjuncts
-- [ ] 3.3 Project one flag per (condition, context) pair the outputs need — `NOT mask` per row, `max(NOT mask)` per
+- [x] 3.3 Project one flag per (condition, context) pair the outputs need — `NOT mask` per row, `max(NOT mask)` per
   group, `max(NOT mask) OVER W` for a row-mode window output and `max(max(NOT mask)) OVER W` for an aggregate-mode one,
   and for `row_number`/`rank`/`dense_rank` the same over `W`'s partition and order with `ROWS BETWEEN UNBOUNDED
   PRECEDING AND CURRENT ROW` whatever frame `W` declares (test: a ranking window with a one-row frame behind an absent
@@ -109,7 +109,7 @@
   block's `WHERE` filter only, so the main filter, the count, the key subqueries, composite key reduction and each
   composite leaf get it and `having`, `case` conditions, join `ON` and flag-only bindings do not; never rewrite `eq null`; the 3.9 equivalence test covers literal, relative-time and
   caller-value operands and `eq null`
-- [ ] 3.7 Keep read-shaping for masked fields: copy a qualifying conjunct over the stored value into the enrichment's
+- [x] 3.7 Keep read-shaping for masked fields: copy a qualifying conjunct over the stored value into the enrichment's
   derived table while the outer `WHERE` keeps the masked or rewritten form (`<mask> AND "__adas_c<n>"` where the
   derived table computes it); push an allow-listed call over a masked heavy field and read the pushed column in the
   outer statement through the field's mask, with the call's value on an absent cell as the absent value (the scalar
