@@ -4347,8 +4347,12 @@ service's other statements, its bound paths and event ids counted rather than pr
 `request_body` SHALL keep its meaning on every surface, so enabling `SYNC_REQUEST_BODY_MODE=delta` changes what
 every existing reader of `dial_usage_log_payload.request_body` receives for a later chat turn, and for a copy (see
 "A large request body equal to an earlier one is stored once"), whose `request_body` is the empty string. The
-upgrade notes of the release that introduces copies SHALL say so, for deployments already running `delta`. The release
-notes for the request-delta storage SHALL tell operators to re-point every pipeline whose `transform.inputs` binds
+upgrade notes of the release that introduces copies SHALL say so, for deployments already running `delta`, and SHALL
+say that an instance of an earlier release re-ingesting a carrier removes its hash, so a whole UTC day is
+re-ingested on one release, and that an earlier release reads every copy as `partial` with an empty body, so a
+deployment holding copies rolls back to `whole-with-path` on the release that introduces them, not to an earlier
+release. The release notes for
+the request-delta storage SHALL tell operators to re-point every pipeline whose `transform.inputs` binds
 `dial_usage_log_payload.request_body`, and every saved query or other consumer that needs a turn's whole request, to
 `dial_usage_log_payload.request_body_full` before enabling `delta`. ADAS SHALL NOT rewrite a stored pipeline or
 saved query to do so.
@@ -4361,8 +4365,9 @@ saved query to do so.
 #### Scenario: The upgrade notes name the empty body of a copy
 
 - **WHEN** an operator running `delta` reads the upgrade notes of the release that introduces copies
-- **THEN** they say that a repeated large non-JSON request body is stored with an empty `request_body`, and name
-  `dial_usage_log_payload.request_body_full` as the field that returns it
+- **THEN** they say that a repeated large non-JSON request body is stored with an empty `request_body`, name
+  `dial_usage_log_payload.request_body_full` as the field that returns it, say that a UTC day holding copies
+  is re-ingested whole, on one release, and name `whole-with-path` on that release as the rollback
 
 ### Requirement: A value that fails to coerce to its column's kind is counted and falls back like an absent one
 

@@ -53,7 +53,13 @@ None of these need action during the upgrade. They are available once all three 
   example a chat body cut at the size limit) and repeats an earlier one exactly is stored once. Later rows that
   repeat it have an empty `request_body`; the full body is in `request_body_full`. This matters to SQL and to
   pipelines that read `request_body` as text (`length`, `LIKE`, regular expressions); `json_extract_*` reads as
-  before.
+  before. Once you run `delta` on 0.24, two rules apply:
+  - **Re-ingest a UTC day whole, on one release and one configuration.** Re-ingesting part of a day on 0.23,
+    under `whole`, with `request_body` left out of ingest, or after changing `SYNC_INLINE_FILES_DROP_TRUNCATED` or
+    `SYNC_INLINE_FILES_MAX_SIZE` leaves the empty rows of that day reading `partial` with an empty body until the
+    whole day is re-ingested.
+  - **To roll back, switch to `whole-with-path` on 0.24, do not go back to 0.23.** 0.23 reads every such row as
+    `partial` with an empty body.
 - **The recommended catalog** detects the DIAL CLI harness from the new `X-DIAL-CLI-Harness` header (post-deploy
   step A4).
 - **A pipeline whose outputs cannot be turned into a model response schema is refused when you enable it**, or
