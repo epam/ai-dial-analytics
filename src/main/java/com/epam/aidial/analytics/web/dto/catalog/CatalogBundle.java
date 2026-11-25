@@ -11,9 +11,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A catalog bundle: user tables and pipelines in request shape, the names of the system tables they depend on
- * or whose access the bundle carries, and, when exported with {@code include_access}, the covered tables' access
- * entries. {@code format_version} is raised whenever the shape of any member changes, a new enum value
+ * A catalog bundle: user tables and pipelines in request shape, the names of the system tables that the carried closure
+ * reaches, that the selection names, or whose access the bundle carries, and, when exported with {@code include_access}, the
+ * covered tables' access entries. A pipeline exported alone, or a table's access exported alone, brings none of its
+ * tables in: import finds them on the target. {@code format_version} is raised whenever the shape of any member changes, a new enum value
  * included, so an older ADAS refuses a newer bundle by version rather than by an unknown field.
  */
 public record CatalogBundle(
@@ -29,8 +30,9 @@ public record CatalogBundle(
         @Schema(description = "Objects an export-everything left out")
         List<@NotNull @Valid SkippedObject> skipped,
 
-        @Schema(description = "System tables the bundle's objects depend on or whose access it carries, by name: import "
-                + "requires each to exist on the target and never creates one or changes its definition",
+        @Schema(description = "System tables, by name, that the carried closure reaches, that the selection names, or "
+                + "whose access the bundle carries; a pipeline exported with dependencies false brings none in. Import requires "
+                + "each to exist on the target and never creates one or changes its definition",
                 example = "[\"dial_usage_log\"]")
         @JsonProperty("required_system_tables") List<@NotBlank String> requiredSystemTables,
 
@@ -41,7 +43,8 @@ public record CatalogBundle(
         List<@NotNull @Valid BundlePipeline> pipelines,
 
         @Schema(description = "Present only when exported with include_access: table -> role -> entry, for every covered "
-                + "table, system tables included. Imported only with include_access=true")
+                + "table, system tables included. A key may name a table the bundle does not carry, which import then "
+                + "requires on the target. Imported only with include_access=true")
         Map<String, @NotNull Map<String, @NotNull @Valid BundleAccessEntry>> access) {
 
     /** A bundle with no {@code access} member. */

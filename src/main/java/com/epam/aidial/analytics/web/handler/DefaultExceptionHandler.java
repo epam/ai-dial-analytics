@@ -11,6 +11,7 @@ import com.epam.aidial.analytics.exception.BackfillNotFoundException;
 import com.epam.aidial.analytics.exception.BackfillRangeException;
 import com.epam.aidial.analytics.exception.CatalogBundleMalformedException;
 import com.epam.aidial.analytics.exception.CatalogBundleVersionUnsupportedException;
+import com.epam.aidial.analytics.exception.CatalogExportEmptyException;
 import com.epam.aidial.analytics.exception.CatalogExportInvalidException;
 import com.epam.aidial.analytics.exception.CatalogImportConflictException;
 import com.epam.aidial.analytics.exception.CatalogImportInvalidException;
@@ -184,10 +185,10 @@ public class DefaultExceptionHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     @ExceptionHandler(InvalidRequestParameterException.class)
     public ErrorView handleInvalidRequestParameter(HttpServletRequest req, InvalidRequestParameterException ex) {
-        // The type reaches here two ways and both echo the message, for the reason
-        // authoredParameterMessage() below sets out: only hand-written code throws it, and that code names
-        // the accepted set rather than repeating what the caller sent. Wrapped in a binding failure when an
-        // @InitBinder editor refuses a value; bare when a handler refuses a combination of parameters that
+        // The type is echoed wherever it surfaces, for the reason authoredParameterMessage() below sets out:
+        // only hand-written code throws it, and that code names the accepted set rather than repeating what
+        // the caller sent. Wrapped in a binding failure when an @InitBinder editor or a request record's
+        // constructor refuses a value; bare (here) when a handler refuses a combination of parameters that
         // each bound fine on their own.
         log.debug("[{}] Request: {} - rejected as an invalid request parameter",
                 req.getMethod(), req.getServletPath(), ex);
@@ -200,14 +201,17 @@ public class DefaultExceptionHandler {
      * <p>The <b>second</b> carve-out in the never-echo rule, and it holds for the same reason as the first:
      * what is echoed did not come from the caller's input. A field name did not, because it is matched
      * against our own type; this message did not, because only hand-written code throws that type — an
-     * {@code @InitBinder} editor, or a handler refusing a combination of parameters that each bound fine on
-     * their own — and that code names the accepted set rather than repeating what was sent. Every other
+     * {@code @InitBinder} editor, a request record's constructor, or a handler refusing a combination of
+     * parameters that each bound fine on their own — and that code names the accepted set rather than
+     * repeating what was sent. Every other
      * binding failure — Spring's converters, Jackson's — still gets the generic sentence, which is the
      * whole point of keeping the marker type narrow. The bare throw is handled by
      * {@link #handleInvalidRequestParameter}; this method covers the wrapped one.
      *
      * <p>Read from the chain rather than the exception at hand: Spring wraps a {@code PropertyEditor}'s
-     * refusal in {@code MethodArgumentTypeMismatchException}, so the marker is never the top-level type.
+     * refusal in {@code MethodArgumentTypeMismatchException}, and a constructor's refusal reaches here inside
+     * Jackson's {@code ValueInstantiationException} inside {@code HttpMessageNotReadableException}, so the
+     * marker is never the top-level type.
      */
     private static String authoredParameterMessage(Exception ex) {
         Throwable cause = ex;
@@ -690,6 +694,12 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(CatalogExportInvalidException.class)
     public ErrorView handleCatalogExportInvalid(HttpServletRequest req, CatalogExportInvalidException ex) {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_export_invalid", ex.getMessage());
+    }
+
+    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
+    @ExceptionHandler(CatalogExportEmptyException.class)
+    public ErrorView handleCatalogExportEmpty(HttpServletRequest req, CatalogExportEmptyException ex) {
+        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_export_empty", ex.getMessage());
     }
 
     @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)

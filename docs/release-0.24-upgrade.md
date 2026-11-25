@@ -211,9 +211,15 @@ carries.
   Upgrade the target before importing a bundle exported by 0.24.
 - **Older bundles still import.** A version `1`, `2` or `3` bundle imports into 0.24 unchanged.
 - **Access travels only on request.** `include_access: true` in the export body and `include_access=true` on the
-  import, each requiring `TABLE_GRANT`, carry every covered table's role entries, system tables included, and upsert
-  them per role on the target, never removing one. Without them nothing about access changes. The runbook is
-  [`catalog-promotion.md`](catalog-promotion.md).
+  import, each requiring `TABLE_GRANT`, carry every covered table's role entries (or only the roles a component's
+  `roles` lists), system tables included, and upsert them per role on the target, never removing one. Without them
+  nothing about access changes. The runbook is [`catalog-promotion.md`](catalog-promotion.md).
+- **An export can carry less than a closure.** A pipeline component with `"dependencies": false` exports the pipeline
+  alone; a table component with `"access_only": true` exports only the table's access, with `"roles"` narrowing it to
+  some roles. Both are for an environment that already has the tables: the import finds them there and never creates
+  a missing one. The preview reports a table a pipeline needs that is missing, PENDING or FAILED as `FAIL` on the
+  pipeline entry (a missing table an SQL statement's `FROM` reads only as an arm problem), and a missing table an
+  access key names under `validation_errors`.
 - **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
   `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
 

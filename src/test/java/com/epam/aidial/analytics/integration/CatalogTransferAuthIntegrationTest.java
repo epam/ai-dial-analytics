@@ -326,6 +326,56 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
                         org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("row policy")))));
     }
 
+    @Test
+    void selectorsKeepTheirAuthorizationOrder() throws Exception {
+        // A pipeline alone needs no get on what it reads or targets: a read already shows its whole declaration.
+        send(post("/v1/pipelines"), fullAdmin(), "{\"name\":\"cxa-alone\",\"kind\":\"aggregate\",\"target\":\"" + HIDDEN + "\","
+                + "\"inputs\":[\"" + PLAIN + "\"]}")
+                .andExpect(status().isCreated());
+        try {
+            send(post("/v1/catalog/export"), caller(EXPORTER), "{\"components\":[{\"type\":\"pipeline\",\"name\":\"cxa-alone\"}]}")
+                    .andExpect(status().isNotFound());
+            send(post("/v1/catalog/export"), caller(EXPORTER),
+                    "{\"components\":[{\"type\":\"pipeline\",\"name\":\"cxa-alone\",\"dependencies\":false}]}")
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.pipelines[0].pipeline.name").value("cxa-alone"));
+        } finally {
+            mockMvc.perform(delete("/v1/pipelines/cxa-alone").header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())));
+        }
+
+        // An access-only export carries no columns, so a column policy hiding one does not refuse it.
+        table(COLUMNS, "[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},{\"source_name\":\"c\",\"name\":\"c\",\"type\":\"string\"}]");
+        entry(COLUMNS, EXPORTER, "\"privileges\":[\"get\"],\"columns\":[\"k\"]");
+        final String granting = roles(EXPORTER, "granter");
+        send(post("/v1/catalog/export"), granting,
+                "{\"components\":[{\"type\":\"table\",\"name\":\"" + COLUMNS + "\"}],\"include_access\":true}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("column_not_entitled"));
+        send(post("/v1/catalog/export"), granting,
+                "{\"components\":[{\"type\":\"table\",\"name\":\"" + COLUMNS + "\",\"access_only\":true}],\"include_access\":true}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables").isEmpty())
+                .andExpect(jsonPath("$.access." + COLUMNS + "." + EXPORTER + ".columns[*]").value(org.hamcrest.Matchers.contains("k")));
+
+        // A malformed selector is refused while the body is read, before REGISTRY_READ; an access selector without
+        // include_access only after it.
+        send(post("/v1/catalog/export"), caller("importer"), "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\",\"roles\":[]}]}")
+                .andExpect(status().isBadRequest());
+        send(post("/v1/catalog/export"), caller("importer"),
+                "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\",\"access_only\":true}]}")
+                .andExpect(status().isForbidden());
+        // One object selected two ways with access still needs TABLE_GRANT first.
+        send(post("/v1/catalog/export"), caller(EXPORTER), "{\"components\":[{\"type\":\"table\",\"name\":\"" + PLAIN + "\"},"
+                + "{\"type\":\"table\",\"name\":\"" + PLAIN + "\",\"access_only\":true}],\"include_access\":true}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"));
+        // A table the caller may not get is a 404 that names no role.
+        send(post("/v1/catalog/export"), granting, "{\"components\":[{\"type\":\"table\",\"name\":\"" + HIDDEN
+                + "\",\"access_only\":true,\"roles\":[\"does-not-exist\"]}],\"include_access\":true}")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("does-not-exist"))));
+    }
+
     private ResultActions upload(String path, String bundle, String token, String policy, boolean includeAccess) throws Exception {
         return mockMvc.perform(multipart(path)
                 .file(new MockMultipartFile("file", "b.json", MediaType.APPLICATION_JSON_VALUE, bundle.getBytes(StandardCharsets.UTF_8)))

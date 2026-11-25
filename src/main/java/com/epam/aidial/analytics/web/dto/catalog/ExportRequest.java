@@ -8,13 +8,14 @@ import jakarta.validation.constraints.NotNull;
 import java.util.List;
 
 /**
- * The export selection: the objects to export by kind and name. Each pulls in its dependency closure; an
- * empty or absent list exports every exportable object. {@code include_access} adds the covered tables' access
- * entries, system tables included.
+ * The export selection: the objects to export by kind and name. Each pulls in its dependency closure unless a selector
+ * narrows it ({@link ExportComponent}); an empty or absent list exports every exportable object. {@code include_access}
+ * adds the covered tables' access entries, system tables included.
  */
 public record ExportRequest(
-        @Schema(description = "Objects to export; empty or absent exports everything exportable. With include_access, a "
-                + "system table may be named to export its access")
+        @Schema(description = "Objects to export; empty or absent exports everything exportable. Each brings its dependency "
+                + "closure unless a selector narrows it: dependencies false on a pipeline, access_only or roles on a table. "
+                + "With include_access, a system table may be named to export its access")
         List<@NotNull @Valid ExportComponent> components,
 
         @Schema(description = "Also carry every covered table's access entries (privileges, row and column policies), "
