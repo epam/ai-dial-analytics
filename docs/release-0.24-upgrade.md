@@ -1,308 +1,391 @@
-# ADAS 0.24 — upgrade notes
+# ADAS 0.24 — upgrade guide
 
-What an environment has to do to move from **0.23.3** to **0.24**. An environment on an earlier build first
-follows [`release-0.23-upgrade.md`](release-0.23-upgrade.md), through its 0.23.3 section (§9).
+This guide covers moving from **ADAS 0.23.3** to **0.24**. If you run an older build, first follow
+[`release-0.23-upgrade.md`](release-0.23-upgrade.md) up to 0.23.3.
 
-This release runs ADAS on replicated ClickHouse storage, on every deployment, a single server included
-([`clickhouse-replication.md`](clickhouse-replication.md)). That makes it more than a redeploy:
+Three components ship together in this release and are deployed in one window:
 
-- **ClickHouse Keeper and a `Replicated` database are required.** An `Atomic` database is refused at startup,
-  before any change, until an operator changes its engine (§2).
-- **Plain tables convert automatically on the first start**, with a deploy that stops the previous version
-  first (§3).
-- **`CLICKHOUSE_HOST` must reach only the primary replica** (§5).
-- **Four new writer grants** (§1).
-- **Chart `y_field` is an array** in saved-query and dashboard responses (§6).
-- **A coordinated deploy with the Enrichment Runner**: the contract version rises from `4` to `7`, and a runner on
-  any other version is refused, so enrichment pauses until both sides match (§7, §10, §15).
-- **The recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness`**: a deployment that already
-  registered `usage-client-identity-live` applies it by hand (§8).
-- **Under `SYNC_REQUEST_BODY_MODE=delta`, a repeated large request body that is not JSON is stored once**, so later
-  rows repeating it have an empty `request_body` (§9).
-- **A group pipeline may set its own input token budget** with `advanced.input_token_budget` (§10).
-- **Catalog bundles are `format_version` `4`**, which a 0.23 ADAS refuses to import, and carry table access on
-  request (§11).
-- **Arming an `llm` pipeline composes its response schema**, so one that does not compose is refused when enabled;
-  route outputs may bind `object` and `map` columns (§12).
-- **A chart may carry a `legend`**, so deploy ADAS before a client that sends it (§13).
-- **With Keeper down, row writes, pipeline runs and the data-sync requeue answer `503` in about ten seconds**, and the writer user must be
-  allowed two `insert_keeper_*` settings (§14).
-- **The Enrichment Runner can try an `llm` pipeline against its model** through a new runner-only read,
-  `POST /v1/pipelines/{name}/trial-input` (§15).
+- **ADAS 0.24**
+- **[Enrichment Runner](https://github.com/epam/ai-dial-analytics-enrichment-runner) 0.24**
+  for its side
+- **[Admin UI](https://github.com/epam/ai-dial-admin-frontend) 0.24**
+
+Every API-level step in this guide is done in the **Admin UI**. Steps on ClickHouse and Kubernetes are done with
+`clickhouse-client` and your deploy configuration.
 
 ---
 
-## 1. Before you deploy
+## 1. Breaking changes
 
-- **Keeper.** Embedded in the server on a single node, or a three-member ensemble. Each server also needs
-  the `shard` and `replica` macros.
-- **Server settings.** In the default profile, `database_replicated_allow_only_replicated_engine = 1`. In
-  `<merge_tree>`, `execute_merges_on_single_replica_time_threshold = 1800` and
-  `wait_for_unique_parts_send_before_shutdown_ms = 60000`. The reasons are in
-  [`clickhouse-replication.md`](clickhouse-replication.md#clickhouse-requirements).
-- **Writer grants.**
-
-  ```sql
-  GRANT SYSTEM SYNC REPLICA ON <database>.* TO <writer>;
-  GRANT SYSTEM SYNC DATABASE REPLICA ON <database>.* TO <writer>;
-  GRANT SELECT ON system.clusters TO <writer>;
-  GRANT SYSTEM MERGES ON <database>.* TO <writer>;
-  ```
-
-  Startup fails naming a missing `SYSTEM SYNC` grant: without them every pipeline run and every ingest cycle
-  would be refused with `503`.
-  Without `SELECT ON system.clusters` ADAS starts, logs a WARN and routes everything to the primary.
-  Without `SYSTEM MERGES` the first-start table conversion (§3) compares row counts with merges running, so a merge
-  that collapses rows between the two reads can make it give a table up and fail startup, which a restart retries.
-- **NTP** on every ClickHouse node and every ADAS pod: the pipeline safety lag covers clock skew among them.
-- **New optional keys.** `CLICKHOUSE_ROUTING_QUERIES`, `CLICKHOUSE_ROUTING_PIPELINES`,
-  `CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL`, `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT` and `CLICKHOUSE_DDL_TASK_TIMEOUT`
-  ([`configuration.md`](configuration.md#clickhouse-replicas-and-routing)). The defaults fit most deployments.
-
-## 2. An `Atomic` database
-
-Startup fails before issuing any DDL or writing any catalog row, naming the database and its engine. ADAS
-never changes a database engine. Follow
-[the manual procedure](clickhouse-replication.md#changing-an-atomic-database-to-replicated), then redeploy.
-
-## 3. A `Replicated` database with plain tables
-
-This is the usual starting point for a deployment managed by ClickHouse's Kubernetes operator: Keeper and a
-`Replicated` database already exist, and every ADAS table in it is plain. The first start with this
-version converts them in place, before the migrations run. The data moves by hardlink and is not
-rewritten. A table larger than `max_table_size_to_drop` needs no server change: the conversion lifts that
-limit for its own drops.
-
-- **Stop the previous version first.** Use a `Recreate` strategy or scale to zero before deploying. A
-  previous-version instance writing during the conversion would lose those rows.
-- **With several registered replicas,** make sure only one of them ever held ADAS data, and drop the others
-  with `SYSTEM DROP DATABASE REPLICA` or empty their copies. Otherwise the conversion refuses, naming each
-  table and replica.
-- **While it runs,** readiness is down, `/v1` answers `503` and no scheduled job runs. Liveness keeps
-  answering.
-- **With `CLICKHOUSE_MIGRATIONS_ENABLED=false`** nothing is converted and startup fails naming each plain
-  table.
-- **An interrupted conversion** leaves an `_adas_replicate_<table>` table. Every start fails naming it until a
-  start with migrations enabled resumes the conversion.
-
-**Rollback.** A build older than 0.24 reads and writes the converted tables normally, but its table creates
-render plain engines, which `database_replicated_allow_only_replicated_engine = 1` refuses.
-
-## 4. ClickHouse unreachable at startup
-
-With `CLICKHOUSE_MIGRATIONS_ENABLED=false`, an instance that cannot reach ClickHouse at startup no longer
-serves unverified. It starts with readiness down, `/v1` answering `503` (the PostgreSQL-only endpoints
-included) and no scheduled job running, and retries the storage checks every
-`CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL` until they pass. A probe on `/actuator/health/readiness` keeps
-traffic away meanwhile; liveness is unaffected. With migrations enabled startup still fails, as before.
-
-## 5. `CLICKHOUSE_HOST`
-
-It now means the primary replica: ingest, API writes and DDL run there. A headless Service over every
-ClickHouse pod keeps working while there is one replica. Replace it with an endpoint that reaches only the
-primary pod before a second replica joins: startup refuses a host that resolves to several addresses, or
-that different replicas answer over fresh connections.
-
-## 6. Multi-series charts
-
-A chart's `y_field` — on a saved query and on a dashboard widget's `inline_query` — is now an array of result
-columns, one per series (see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). Responses always carry the
-array, so a client that reads `y_field` as a string must move to the array; a one-element array is the old
-single-series chart. Requests may still send a string, and charts stored before the upgrade are returned as a
-one-element array without a migration.
-
-- **Rollback.** A build older than 0.24 cannot read a chart stored as an array: reading that saved query, the
-  scope list it appears in, its revision snapshot, or a dashboard holding such a widget fails. Before rolling back,
-  rewrite each stored `y_field` array to its first element in `saved_query.chart`, `saved_query_aud.chart` and
-  `dashboard.widgets` (the nested `inline_query.chart`).
-
-## 7. Enrichment pipelines calling a DIAL application route
-
-An `llm` transform may now call a DIAL application's custom route instead of chat completions, with
-`preset: dial_app_route` and a `route`. Each output may name a `source`, a JSONata expression over the route's
-response such as `intent_counts.check`, and otherwise reads the response member of its own name; outputs bound to
-nullable columns may be absent from the response (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)). Request templates
-also accept `{{name:json}}`, which inserts a value as JSON instead of an escaped string.
-
-- **Deploy ADAS and the Enrichment Runner together.** The runner contract version moves from `4` to `7` in this
-  release (the route preset, the input token budget of §10 and the trial input of §15), and a runner on any other version is refused
-  until both sides match, so enrichment pauses during the skew.
-- **Allow each route first.** A route pipeline can be enabled only when its `(deployment, route)` pair is listed
-  in `PUT /v1/settings/app-routes` (see [`instance-settings`](../openspec/specs/instance-settings/spec.md)). The
-  setting starts absent, which allows no route. A write that drops a pair an enabled pipeline calls is refused
-  with `409 app_route_in_use`.
-- **Moving a pipeline off a chat-completions shim.** Allow the pair, disable the pipeline, patch `preset`,
-  `route`, `request_template` and each nested output's `source`, then enable it again.
-- **Rollback.** A build older than 0.24 cannot read a stored `preset: dial_app_route`, so listing, `GET` and the
-  sync feed fail on that row even while it is disabled. Before rolling back, re-declare each route pipeline as
-  `chat_completion`, clearing `route` and each output's `source`, or delete it. Then roll ADAS and the runner
-  back together. For the same reason, store no route pipeline, disabled draft included, until every ADAS pod
-  runs 0.24. The migration that admits the setting name stays applied and is harmless to an older build.
-
-## 8. Recommended catalog: DIAL CLI harness header
-
-The `usage-client-identity-live` pipeline in [`recommended-catalog`](recommended-catalog/README.md) now reads
-`dial_cli_harness_name` from the `X-DIAL-CLI-Harness` header, falling back to the second token of a legacy combined
-`X-DIAL-CLI-Version`, and decides `client_type` `dialcli` on either header. A DIAL CLI that sends the two headers
-separately leaves `dial_cli_harness_name` empty under the earlier expression.
-
-Importing the bundle again does not apply this: import never changes an object that exists, so the preview reports
-the pipeline as `SKIP` with `differs: true` (see [`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)).
-A deployment that already registered the pipeline applies it by hand:
-
-1. Re-declare `usage-client-identity-live` with the bundle's `client_type` and `dial_cli_harness_name` expressions.
-2. Update the `client_type`, `dial_cli_version` and `dial_cli_harness_name` column descriptions of
-   `usage_client_identity` from the bundle (a schema patch `update`). Descriptions only; no data changes.
-3. Backfill the pipeline over the period in which the separate header was sent. Rows whose payload is still
-   retained get their harness; rows past the payload retention window keep it empty.
-
-The backfill is recorded as a re-derivation (see [`class1-enrichment`](../openspec/specs/class1-enrichment/spec.md)),
-so a rollup that reads `usage_client_identity`, such as `sessions_rollup`, may be flagged for a rebuild.
-
-## 9. Request-delta storage: a repeated large body is stored once
-
-This applies only under `SYNC_REQUEST_BODY_MODE=delta` or `whole-with-path`.
-
-Under `delta`, a request body of 65,536 characters (UTF-16 code units) or more that is not JSON, such as a chat body cut at the 4 MiB
-limit, is now stored once per project, user and UTC day. A later request repeating it exactly is stored with an
-empty `request_body`. Read `dial_usage_log_payload.request_body_full` for the body, as for a later chat turn (see
-[`data-sync`](../openspec/specs/data-sync/spec.md), "A large request body equal to an earlier one is stored once").
-A JSON body is never stored empty, so `json_extract_*` over `request_body` reads as before. A text function over
-`request_body` (`length`, `LIKE`, a regular expression) sees the empty string on such a row, where it saw the cut
-text before.
-
-Such an empty row holds nothing of its own, so two rules matter once any exist:
-
-- **Re-ingest a UTC day whole, on one release and one configuration.** A row holding a body that is re-ingested
-  by a 0.23 instance, under `whole`, with `request_body` left out of ingest (`SYNC_SENSITIVE_COLUMNS`, see
-  [`release-0.23-upgrade.md`](release-0.23-upgrade.md) §8), or after a change of
-  `SYNC_INLINE_FILES_DROP_TRUNCATED` or `SYNC_INLINE_FILES_MAX_SIZE` no longer answers for the rows stored empty
-  after it; they read `partial` with an empty body until the day is re-ingested.
-- **Roll back to `whole-with-path` on 0.24, not to 0.23.** A 0.23 build reads every such row as `partial` with an
-  empty body.
-
-## 10. Per-pipeline input token budget for group pipelines
-
-The Enrichment Runner trims a group pipeline's assembled input to an approximate token budget before the call, and
-that budget was one runner-wide setting. A `group` pipeline may now declare its own with
-`advanced.input_token_budget` (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
-
-- **`0` switches the runner's trimming off** for that pipeline, for example a `dial_app_route` application that
-  counts tokens and decides what to keep itself. A positive value is the pipeline's own ceiling. Absent keeps the
-  runner's configured default.
-- **Group pipelines only.** On a `schedule` pipeline the member is refused with `422 pipeline_validation_failed`
-  on every write, a disabled draft included, as `trigger.member_select` is. A patch that moves a pipeline from
-  `group` to `schedule` leaves it out of `advanced`. A negative value is refused the same way.
-- **Restate it on every declaration patch.** `advanced` is replaced, not merged, so a `PATCH` that re-declares the
-  pipeline without `advanced.input_token_budget` clears it, and the runner's default trimming applies again.
-- **Contract `7`.** The member is part of the runner contract, so the runner must be the 0.24 release that reads
-  it (§7).
-- **Rollback.** An older build ignores the stored member and drops it on the next rewrite of the pipeline, so the
-  runner's default trimming applies again. Roll ADAS and the runner back together.
-
-## 11. Catalog bundle format version 4, and access on request
-
-`POST /v1/catalog/export` now writes `format_version: 4`, because a bundle may carry an `enrich` transform's `route`
-(§7), `advanced.input_token_budget` (§10) and, exported with `include_access: true`, the covered tables' access (see
-[`catalog-export-import`](../openspec/specs/catalog-export-import/spec.md)). Every export writes `4`, whatever it
-carries.
-
-- **Import into 0.24 first.** A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`.
-  Upgrade the target before importing a bundle exported by 0.24.
-- **Older bundles still import.** A version `1`, `2` or `3` bundle imports into 0.24 unchanged.
-- **Access travels only on request.** `include_access: true` in the export body and `include_access=true` on the
-  import, each requiring `TABLE_GRANT`, carry every covered table's role entries, system tables included, and upsert
-  them per role on the target, never removing one. Without them nothing about access changes. The runbook is
-  [`catalog-promotion.md`](catalog-promotion.md).
-- **Import responses always carry an `access` list**, empty without `include_access=true`, and an access entry's
-  `import_action` may be `REPLACE`. A client that parses these responses strictly must accept both.
-
-## 12. Route outputs may bind `object` and `map` columns; arming composes the schema
-
-A `dial_app_route` output may now bind an `object` column, stored as the JSON document the route's `source`
-yields, or a `map` column of strings. Neither column can be nullable, so such an output is always required. A
-`source` that filters members, for example dropping zero counts, must still yield `{}`, and should yield nothing
-when the response lacks the member:
-`$exists(intent_counts) ? $merge([{}, $sift(intent_counts, function($v){ $v != 0 })])`. `$sift` alone yields
-nothing when every member is zero, and the unit is then dead-lettered. Without the `$exists` guard, a response
-missing `intent_counts` would be stored as `{}` instead. A `chat_completion` output bound to either type is
-refused (see [`enrichment-registry`](../openspec/specs/enrichment-registry/spec.md)).
-
-Arming now composes each `llm` pipeline's response schema, so a declaration whose schema cannot be composed is
-refused with `422 pipeline_validation_failed` when it is enabled or its declaration is patched while enabled. A
-draft is still stored. Before, such a pipeline was accepted when armed, was then left out of the runner's feed and refused
-on a compiled read, so it never ran. Nothing that runs today starts failing: the refusal moves to arming, where the
-author sees it.
-
-- **Before upgrading, find armed pipelines that never ran for this reason.** Compare the names in
-  `GET /v1/pipelines?kind=enrich&enabled=true` with those in `GET /v1/pipelines?kind=enrich&enabled=true&view=compiled`.
-  The missing names include these pipelines, and incomplete declarations too. Confirm each with
-  `GET /v1/pipelines/{name}?view=compiled`, which answers `422` saying its outputs compose to no response schema,
-  or with `POST /v1/pipelines/{name}/preview`, which names the output and the column. ADAS also logs
-  an ERROR containing `compose to no response schema` for each one. Fix the output or the column before the
-  pipeline's next patch; a catalog import preview reports such a pipeline as `armable: false`, unless the target already has it enabled.
-- **Rollback.** A build older than 0.24 cannot read a `dial_app_route` pipeline at all (§7), so follow §7:
-  re-declare each route pipeline as `chat_completion` on scalar columns, or delete it, before rolling back.
-
-## 13. Chart legend
-
-A chart, on a saved query and on a dashboard widget's `inline_query`, may now carry `legend` `{ visible, position }`
-(see [`saved-queries`](../openspec/specs/saved-queries/spec.md)). The member is additive: a chart stored without it
-reads back without it, and no row is migrated.
-
-- **Deploy ADAS before the client sends `legend`.** A build older than 0.24 refuses every chart save that carries it
-  with `400 bad_request`.
-- **Rollback.** A build older than 0.24 refuses chart saves carrying `legend` again. It reads a stored `legend` but
-  leaves it out of its responses, so a client that reads a chart and saves it back, even without touching the
-  legend, deletes the stored `legend`. Stop the client sending `legend` before rolling back, and expect each chart's
-  legend to be lost on its next save.
-
-## 14. Writes with Keeper down
-
-ClickHouse's default Keeper retries held an insert into a replicated table whose replica had lost Keeper for about
-two minutes. `POST /v1/tables/{name}/rows`, the pipeline write-back `POST /v1/pipelines/{name}/rows`, OTel ingest,
-pipeline runs and `POST /v1/data-sync/failures/retry` now cap those retries and answer `503 clickhouse_unavailable`
-in about ten seconds once the replica has noticed the lost session; the requeue answered `500` before. Data-sync
-ingest and enrichment relayout copies keep ClickHouse's defaults and pause through a short Keeper outage (see
-[`clickhouse-replication`](../openspec/specs/clickhouse-replication/spec.md)).
-
-- **Settings.** Those inserts, and no other statement, now send `insert_keeper_max_retries` and
-  `insert_keeper_retry_max_backoff_ms` on the writer user. A settings profile constraint that makes either
-  read-only, or whose `min`/`max` excludes the value sent (`8`, `2000`), refuses those inserts; startup, DDL and
-  ingest are unaffected. Allow both before deploying.
-- **Callers** of `POST …/rows`, the OTel endpoints and the enrichment runner's write-back get the `503` they
-  already handle, sooner. Fewer retries also mean a Keeper blip during an insert's commit more often ends in
-  `UNKNOWN_STATUS_OF_INSERT`, whose retry on an `append` table can store the rows twice (at-least-once, as before).
-- **Rollback.** An earlier build sends neither setting and waits out ClickHouse's defaults again.
-
-## 15. Trial input for the runner's dry run
-
-The Enrichment Runner can now call a pipeline's model or application on a sampled row or group and show what it
-answered, before the pipeline is armed. It reads its input through `POST /v1/pipelines/{name}/trial-input`, which
-runs the same checks as `POST /v1/pipelines/{name}/preview`, under the identity of the person who asked for the dry
-run, and returns the preview together with the declaration and the uncapped rows the model would receive (see
-[`enrichment-runtime`](../openspec/specs/enrichment-runtime/spec.md)). `/preview` itself is unchanged and still
-calls no model.
-
-- **Contract `7`.** The endpoint is part of the runner contract, so the runner must be the 0.24 release that calls
-  it (§7).
-- **Who may use it.** `REGISTRY_ADMIN` in addition to `read` on the source and `write` on the target, with the
-  preview's own column and row checks, all against the caller. The runner's service grants alone do not admit it.
-- **Rollback.** Roll ADAS and the runner back together. Nothing is stored, so there is nothing to undo.
-
-## Summary
-
-| Change | Effect | Action |
+| # | What changed | What you have to do |
 |---|---|---|
-| Replicated ClickHouse storage required | An `Atomic` database is refused at startup; plain tables in a `Replicated` database convert on the first start | Set up Keeper, server settings and writer grants (§1); change an `Atomic` engine by hand (§2); stop the previous version before deploying (§3) |
-| `CLICKHOUSE_HOST` means the primary replica | Startup refuses a host that resolves to several addresses or that several replicas answer | Point it at an endpoint that reaches only the primary pod before a second replica joins (§5) |
-| Chart `y_field` is an array (breaking response shape) | Saved-query and dashboard responses return `y_field` as an array; a string is still accepted on write | Move clients that read `y_field` to the array; before a rollback, rewrite stored arrays (§6) |
-| Transform preset `dial_app_route` and the `app-routes` setting; runner contract `7` | A runner on any contract other than `7` is refused | Deploy the matching Enrichment Runner in the same window; allow each route before enabling its pipeline; before a rollback, re-declare or delete route pipelines (§7) |
-| Recommended catalog reads the DIAL CLI harness from `X-DIAL-CLI-Harness` | A registered `usage-client-identity-live` keeps the earlier expression; a bundle import skips it | Re-declare the pipeline, patch the column descriptions, backfill (§8) |
-| Under `delta`, a repeated large request body that is not JSON is stored once | Later rows repeating it have an empty `request_body` | Read `request_body_full`; re-ingest whole UTC days on one release and configuration; roll back to `whole-with-path` on 0.24 (§9) |
-| `advanced.input_token_budget` on `group` pipelines | `0` switches the runner's trimming off for that pipeline; refused on a `schedule` pipeline | Optional: declare it where the runner's trimming is unwanted; nothing is lost on a rollback but the setting (§10) |
-| Catalog bundles are `format_version` `4`; access travels on request | A 0.23 ADAS refuses a 0.24 bundle with `422 catalog_bundle_version_unsupported`; import responses carry an `access` list | Upgrade an import target before promoting to it from 0.24; accept `access` and `REPLACE` in import responses (§11) |
-| Route outputs bind `object` / `map` columns; arming composes the response schema | A `chat_completion` output on either type, or any schema that does not compose, is refused `422 pipeline_validation_failed` when armed | Find enabled `llm` pipelines missing from `view=compiled` (they never ran) and fix them before their next patch; before a rollback, follow §7 for route pipelines (§12) |
-| Chart `legend` on saved queries and dashboard inline queries | Additive; a build older than 0.24 refuses a chart save carrying it with `400` and drops a stored legend on the chart's next save | Deploy ADAS before the client sends `legend`; stop the client sending it before a rollback (§13) |
-| Row writes, pipeline runs and the data-sync requeue cap ClickHouse's Keeper retries | With Keeper down they answer `503 clickhouse_unavailable` in about ten seconds, not two minutes; data-sync ingest and relayout copies are unchanged | Let the writer user set `insert_keeper_max_retries` and `insert_keeper_retry_max_backoff_ms` (§14) |
-| `POST /v1/pipelines/{name}/trial-input` for the runner's dry run | Additive, runner-only; contract `7` | Deploy the matching Enrichment Runner in the same window (§15) |
+| B1 | **ClickHouse must be replicated.** ADAS needs ClickHouse Keeper and a `Replicated` database, on every deployment, a single server included. It refuses to start on an `Atomic` database. | Check the database engine, and convert it if needed (step P1). |
+| B2 | **The first start converts every ADAS table** to its replicated form. API and ingest are down while it runs, and anything the old version writes during it can be lost. | Stop the old ADAS before the new one starts (step P5, deploy step D2). |
+| B3 | **`CLICKHOUSE_HOST` must point at the primary ClickHouse pod only.** A Service over all ClickHouse pods works while there is one pod, and stops ADAS from starting once a second replica appears. | Point it at the pod's own host name (step P3). |
+| B4 | **The ClickHouse writer user needs four new grants.** Without two of them ADAS does not start. | Add the grants (step P2). |
+| B5 | **ADAS and Enrichment Runner must both be 0.24.** Each refuses the other's previous release, so enrichment stops until both match. | Upgrade both in the same window (deploy steps D1 and D4). |
+| B6 | **Chart `y_field` is now a list** in saved-query and dashboard API responses. An older Admin UI cannot show charts from ADAS 0.24. | Deploy Admin UI 0.24 right after ADAS (deploy step D5). |
+| B7 | **Catalog export files are format version 4.** An ADAS 0.23 refuses to import them. | Upgrade an environment before you import an export from 0.24 into it. |
+
+## 2. What else is new
+
+None of these need action during the upgrade. They are available once all three components run 0.24.
+
+- **Enrichment pipelines can call a DIAL application route** instead of a model. An administrator first allows the
+  route in **System Properties → Enrichment routes**; a pipeline can be enabled only for an allowed route.
+- **Dry run of a model pipeline.** The Enrichment Runner can send a sample row or group to a pipeline's model or
+  application and show what it answers, before the pipeline is enabled. Each dry run counts towards the
+  pipeline's daily spend.
+- **Per-pipeline input token budget** for group pipelines, set on the pipeline's page. `0` turns the runner's input
+  trimming off for that pipeline.
+- **Route pipeline outputs** can fill `object` and `map` columns.
+- **Charts** can show several series and a legend.
+- **Catalog export and import can carry table access** (role grants) when you tick the option in
+  **Export Config** / **Import Config**.
+- **Faster failure when Keeper is down.** Row writes, pipeline runs and data-sync retries fail with `503` in about
+  ten seconds instead of hanging for about two minutes.
+- **Smaller payload storage under `SYNC_REQUEST_BODY_MODE=delta`.** A large request body that is not JSON (for
+  example a chat body cut at the size limit) and repeats an earlier one exactly is stored once. Later rows that
+  repeat it have an empty `request_body`; the full body is in `request_body_full`. This only matters to people who
+  write SQL over `request_body` with text functions (`length`, `LIKE`, regular expressions).
+- **The recommended catalog** detects the DIAL CLI harness from the new `X-DIAL-CLI-Harness` header (post-deploy
+  step A4).
+- **A pipeline whose outputs cannot be turned into a model response schema is refused when you enable it**, with a
+  message naming the output. Before, it was accepted and then silently never ran (post-deploy step A3).
+
+---
+
+## 3. Before you deploy
+
+Do these on the running 0.23.3 deployment. None of them changes how 0.23.3 behaves, so they can be done days
+ahead. In the commands below, `<db>` is the ADAS ClickHouse database (`default` unless `CLICKHOUSE_DATABASE` is
+set) and `<writer>` is the user in `CLICKHOUSE_USER`.
+
+**Where each change goes.** In a Kubernetes deployment, configuration changes are made in the deployment's Helm
+values (or the ClickHouse operator's `ClickHouseInstallation` resource), not inside a running server or pod. A change
+made only inside ClickHouse or with `kubectl edit` is lost on the next redeploy.
+
+| Step | Where |
+|---|---|
+| P1 checks | Read-only SQL on the ClickHouse server, nothing changes. Fixes go to the ClickHouse values. |
+| P2 grants, A5 server settings | The ClickHouse values: the chart's users and server configuration, or the operator resource. |
+| P3 host, P4 probes, P5 strategy | The ADAS values (for example the `dial-extension` chart release that deploys ADAS). |
+
+### P1. Check ClickHouse: Keeper, macros, database engine
+
+Run on the ClickHouse server:
+
+```sql
+SELECT engine FROM system.databases WHERE name = '<db>';                      -- 1
+SELECT * FROM system.macros;                                                  -- 2
+SELECT count() FROM system.zookeeper WHERE path = '/';                        -- 3
+SELECT count() FROM system.clusters WHERE cluster = '<db>';                   -- 4
+SELECT name FROM system.tables WHERE database = '<db>' AND name LIKE '\_adas\_replicate\_%';   -- 5
+```
+
+| Query | Expected | If not |
+|---|---|---|
+| 1 | `Replicated` | `Atomic`: convert the database by hand, see [Appendix A](#appendix-a-convert-an-atomic-database-to-replicated). This is the only manual data step. |
+| 2 | rows for `shard` and `replica` | Add both macros to the ClickHouse server configuration in its values. The ClickHouse operator sets them by itself. |
+| 3 | a number, no error | Keeper is not configured. Add it in the ClickHouse values: embedded in the server on a single node, or a three-member ensemble. |
+| 4 | `1` | More than one replica is registered. Make sure only one of them holds ADAS data, and drop the others with `SYSTEM DROP DATABASE REPLICA`. Otherwise the conversion refuses to start. |
+| 5 | no rows | A conversion was started before. It resumes on the next start, nothing to do. |
+
+A deployment managed by the ClickHouse Kubernetes operator usually already passes all five.
+
+Also make sure the ClickHouse disk has room to spare. The conversion moves data by hardlink and needs no extra space
+for the data itself.
+
+### P2. Add four grants to the writer user
+
+Add them next to the user's existing grants, wherever the user is defined. Keep the existing grants: the list is
+replaced, not merged.
+
+**In the ClickHouse Helm values** (a chart that renders a `users.d` file, often under a key such as `users_xml`):
+
+```xml
+<adas_writer>   <!-- the writer user's name -->
+  <grants>
+    <!-- keep the existing grants -->
+    <query>GRANT SYSTEM SYNC REPLICA ON <db>.*</query>
+    <query>GRANT SYSTEM SYNC DATABASE REPLICA ON <db>.*</query>
+    <query>GRANT SELECT ON system.clusters</query>
+    <query>GRANT SYSTEM MERGES ON <db>.*</query>
+  </grants>
+</adas_writer>
+```
+
+**In a `ClickHouseInstallation`** (ClickHouse operator):
+
+```yaml
+spec:
+  configuration:
+    users:
+      <writer>/grants/query:
+        - GRANT SELECT, INSERT, ALTER, CREATE TABLE, DROP TABLE ON <db>.*   # existing grants, as they are now
+        - GRANT SYSTEM SYNC REPLICA ON <db>.*
+        - GRANT SYSTEM SYNC DATABASE REPLICA ON <db>.*
+        - GRANT SELECT ON system.clusters
+        - GRANT SYSTEM MERGES ON <db>.*
+```
+
+**Only if the user was created with SQL** (`CREATE USER`), not in configuration, run instead:
+
+```sql
+GRANT SYSTEM SYNC REPLICA ON <db>.* TO <writer>;
+GRANT SYSTEM SYNC DATABASE REPLICA ON <db>.* TO <writer>;
+GRANT SELECT ON system.clusters TO <writer>;
+GRANT SYSTEM MERGES ON <db>.* TO <writer>;
+```
+
+Roll out the ClickHouse change. It is safe on 0.23.3.
+
+**Check:** `SHOW GRANTS FOR <writer>` on the ClickHouse server lists all four.
+
+| Missing grant | What happens |
+|---|---|
+| `SYSTEM SYNC REPLICA`, `SYSTEM SYNC DATABASE REPLICA` | ADAS refuses to start and names the grant. Nothing is changed. |
+| `SELECT ON system.clusters` | ADAS starts, logs a WARN every discovery cycle and sends every query to the primary. |
+| `SYSTEM MERGES` | The table conversion can give up on a table and fail startup. A restart retries. |
+
+**Only if** the writer user's settings profile has `<constraints>` in the ClickHouse values: allow
+`insert_keeper_max_retries` (value `8`) and `insert_keeper_retry_max_backoff_ms` (value `2000`). Without that, row
+writes and pipeline runs fail. A profile with no constraints needs nothing.
+
+### P3. Point `CLICKHOUSE_HOST` at the ClickHouse pod
+
+In the ADAS Helm values, set it to the pod's own DNS name, not to a Service over all ClickHouse pods. For a
+StatefulSet behind a headless Service the name looks like:
+
+```yaml
+- name: CLICKHOUSE_HOST
+  value: <clickhouse-pod>.<headless-service>.<namespace>.svc.cluster.local
+```
+
+Use the same name the server reports for itself: `SELECT host_name FROM system.clusters WHERE cluster = '<db>'`.
+
+**Check** from the ADAS pod; exactly one address must be printed:
+
+```bash
+kubectl exec deploy/<adas-deployment> -- getent hosts <the host name above>
+```
+
+This change is safe on 0.23.3 and can be rolled out ahead of the upgrade.
+
+### P4. Split the ADAS health probes
+
+While the conversion runs, the general `/actuator/health` reports DOWN. A startup or liveness probe on it kills the
+pod in the middle of the conversion. In the ADAS Helm values, use the dedicated endpoints, and keep the existing
+delays and thresholds:
+
+```yaml
+startupProbe:
+  httpGet: { path: /actuator/health/liveness, port: http }
+livenessProbe:
+  httpGet: { path: /actuator/health/liveness, port: http }
+readinessProbe:
+  httpGet: { path: /actuator/health/readiness, port: http }
+```
+
+Safe on 0.23.3, and the right setup long term.
+
+### P5. Set the ADAS deploy strategy to `Recreate`
+
+A rolling update keeps the old pod writing while the new one converts tables. In the ADAS Helm values, set
+`strategy.type: Recreate` for this deploy, or plan to scale ADAS to 0 by hand in deploy step D2.
+
+### P6. Do not change the ClickHouse server settings yet
+
+0.24 recommends three server settings, but ADAS starts without them. Leave them until post-deploy step A5.
+
+### Optional configuration
+
+Five new ADAS keys tune replica routing (`CLICKHOUSE_ROUTING_QUERIES`, `CLICKHOUSE_ROUTING_PIPELINES`,
+`CLICKHOUSE_REPLICAS_DISCOVERY_INTERVAL`, `CLICKHOUSE_REPLICAS_SYNC_TIMEOUT`, `CLICKHOUSE_DDL_TASK_TIMEOUT`). The
+defaults fit a single ClickHouse server; leave them unset. The runner has no required configuration changes.
+
+---
+
+## 4. Deploy
+
+Expect a short outage of ingest, the analytics API and the Admin UI analytics pages, for as long as the conversion
+takes. Ingest catches up on its own afterwards, and no usage data is lost.
+
+**D1. Scale the Enrichment Runner to 0** and wait until its pod is gone.
+
+**D2. Stop ADAS 0.23.3.** With `Recreate` this happens by itself in D3. Otherwise scale ADAS to 0 and wait until
+every pod is gone. No old ADAS pod may run while 0.24 starts.
+
+**D3. Deploy ADAS 0.24** with the P3–P5 changes and follow its log:
+
+```bash
+kubectl logs -f deploy/<adas-deployment> | grep -iE "convert|replicat|ERROR"
+```
+
+You should see a pair of lines per table:
+
+```
+Converting plain table '<table>' (<engine>) to its replicated form
+Converted '<table>' to its replicated form: <N> rows in <M> ms
+```
+
+The pod turns Ready once every table is converted. If it does not, see [Troubleshooting](#6-troubleshooting).
+
+**D4. Deploy Enrichment Runner 0.24 and scale it back to 1.** Its pod becomes Ready only after it has synced
+pipelines from ADAS, so a Ready runner confirms both sides match.
+
+**D5. Deploy Admin UI 0.24.**
+
+---
+
+## 5. After the deploy
+
+### A1. Check the ClickHouse tables
+
+```sql
+SELECT engine, count() FROM system.tables WHERE database = '<db>' GROUP BY engine;   -- only Replicated… engines
+SELECT name FROM system.tables WHERE database = '<db>' AND name LIKE '\_adas\_replicate\_%';  -- no rows
+```
+
+### A2. Check the service in the Admin UI
+
+- **Table 'dial_usage_log'** contains logs from the last few minutes: ingest is running.
+- **Pipelines**: the last runs of your scheduled pipelines are successful, and a manual refresh of one succeeds.
+- **Tables → Ingest failures** does not grow, and the pipelines' **Failures** do not grow.
+- **Dashboards** and **Queries** open, and their charts render.
+
+In the ADAS log there is no WARN about `system.clusters` and no error about `clickhouse.host`.
+
+### A3. Find enrichment pipelines that never ran
+
+Search the ADAS log for:
+
+```
+omitting pipeline '<name>' from the enrich feed
+```
+
+Each name is an enabled pipeline that the runner never received: its declaration is incomplete, or its outputs do
+not match its target columns. This was already true on 0.23; 0.24 only makes it visible. For each one, open it in
+**Pipelines**, run **Preview** — it names the output and column at fault — and fix the declaration, or disable the
+pipeline. ADAS 0.24 refuses to save such a pipeline while it is enabled.
+
+### A4. Update `usage-client-identity-live` (only if you imported the recommended catalog)
+
+Skip this if the pipeline does not exist, or if your DIAL CLI does not send the `X-DIAL-CLI-Harness` header.
+Re-importing the catalog does not update an existing pipeline, so this is done by hand:
+
+1. **Pipelines → `usage-client-identity-live`**, edit the outputs `client_type` and `dial_cli_harness_name`. Copy
+   both expressions from the pipeline of the same name in
+   [`recommended-catalog/adas-catalog.json`](recommended-catalog/adas-catalog.json). Save.
+2. **Tables → `usage_client_identity`**, update the descriptions of the columns `client_type`, `dial_cli_version`
+   and `dial_cli_harness_name` from the same file. Descriptions only; no data changes.
+3. Optionally, **Pipelines → `usage-client-identity-live` → Backfill**, over the period since the DIAL CLI started sending the
+   header. Rows older than the payload retention keep an empty harness.
+
+Afterwards `sessions_rollup`, which reads this table, may show **Rebuild needed** on its pipeline page.
+
+### A5. ClickHouse server settings
+
+After some time of stable work, add three settings to the ClickHouse values and roll them out:
+
+| Setting | Where | Value |
+|---|---|---|
+| `database_replicated_allow_only_replicated_engine` | default profile (`users.d`) | `1` |
+| `execute_merges_on_single_replica_time_threshold` | `<merge_tree>` (`config.d`) | `1800` |
+| `wait_for_unique_parts_send_before_shutdown_ms` | `<merge_tree>` (`config.d`) | `60000` |
+
+In a chart that renders configuration files:
+
+```xml
+<!-- users.d -->
+<clickhouse><profiles><default>
+  <database_replicated_allow_only_replicated_engine>1</database_replicated_allow_only_replicated_engine>
+</default></profiles></clickhouse>
+
+<!-- config.d -->
+<clickhouse><merge_tree>
+  <execute_merges_on_single_replica_time_threshold>1800</execute_merges_on_single_replica_time_threshold>
+  <wait_for_unique_parts_send_before_shutdown_ms>60000</wait_for_unique_parts_send_before_shutdown_ms>
+</merge_tree></clickhouse>
+```
+
+In a `ClickHouseInstallation`:
+
+```yaml
+spec:
+  configuration:
+    profiles:
+      default/database_replicated_allow_only_replicated_engine: 1
+    settings:
+      merge_tree/execute_merges_on_single_replica_time_threshold: 1800
+      merge_tree/wait_for_unique_parts_send_before_shutdown_ms: 60000
+```
+
+The last two matter once a second replica is added.
+
+### A6. Optional
+
+- **Deploy strategy.** You may switch ADAS back to `RollingUpdate`. The conversion runs only once, and later starts
+  take a lock so two pods never set up storage at the same time.
+- **Before adding a second ClickHouse replica**, keep `CLICKHOUSE_HOST` on the primary pod (P3) and make sure the
+  writer user and its grants exist on the new replica too.
+- **Catalog promotion between environments.** Upgrade the target environment to 0.24 before importing an export
+  made on 0.24.
+
+---
+
+## 6. Troubleshooting
+
+| Symptom | Cause | Action |
+|---|---|---|
+| Startup fails naming a database engine `Atomic` | P1 | Follow [Appendix A](#appendix-a-convert-an-atomic-database-to-replicated), then redeploy. Nothing was changed. |
+| Startup fails naming a `SYSTEM SYNC` grant | P2 not applied | Add the grants and restart. Nothing was changed. |
+| Startup fails: `clickhouse.host … resolves to several addresses` | P3 not applied | Use the pod host name from P3. |
+| The pod restarts during the conversion | P4 not applied | Split the probes. The next start resumes the conversion. |
+| Startup fails naming `_adas_replicate_<table>` | The conversion was interrupted | Restart. It resumes and finishes. |
+| Startup fails: a row count differed twice for a table | Something wrote during the conversion, or `SYSTEM MERGES` is missing | Make sure only one ADAS pod runs, check P2, restart. |
+| ERROR `Could not restart merges on '<table>'` | ClickHouse refused to restart merges | Run `SYSTEM START MERGES <db>.<table>` on ClickHouse, then restart ADAS. |
+| Startup fails listing plain tables | `CLICKHOUSE_MIGRATIONS_ENABLED=false` | Enable migrations for the first start, so the tables are converted. |
+| Runner stays not Ready | The runner or ADAS is not 0.24 | Check both image versions. |
+| Charts do not render | The Admin UI is older than ADAS 0.24 | Deploy Admin UI 0.24 (D5). |
+
+---
+
+## Appendix A. Convert an `Atomic` database to `Replicated`
+
+Only when step P1 query 1 returned `Atomic`. ADAS never changes a database engine itself. Do this with **ADAS
+stopped**, on the ClickHouse server, after Keeper and the macros are in place.
+
+1. Create a `Replicated` database beside the current one:
+
+   ```sql
+   CREATE DATABASE <db>_replicated ENGINE = Replicated('/clickhouse/databases/<db>', '{shard}', '{replica}');
+   ```
+
+2. Copy every table into it. The data is attached by hardlink, not copied. This loop creates each table's
+   replicated twin, attaches its data and prints both row counts, which must match:
+
+   ```bash
+   q() { clickhouse-client -q "$1"; }
+   for t in $(q "SELECT name FROM system.tables WHERE database = '<db>' AND engine LIKE '%MergeTree' AND engine NOT LIKE 'Replicated%'"); do
+     ddl=$(q "SELECT create_table_query FROM system.tables WHERE database = '<db>' AND name = '$t' FORMAT TSVRaw" \
+       | sed -E "s/^CREATE TABLE <db>\./CREATE TABLE <db>_replicated./; s/ENGINE = ([A-Za-z]*)MergeTree/ENGINE = Replicated\1MergeTree/; \
+                 s/ SETTINGS / SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0, /")
+     case "$ddl" in *SETTINGS*) ;; *) ddl="$ddl SETTINGS replicated_deduplication_window = 0, replicated_deduplication_window_for_async_inserts = 0";; esac
+     q "$ddl"
+     q "ALTER TABLE <db>_replicated.\`$t\` ATTACH PARTITION ALL FROM <db>.\`$t\`"
+     echo "$t: $(q "SELECT count() FROM <db>.\`$t\`") -> $(q "SELECT count() FROM <db>_replicated.\`$t\`")"
+   done
+   ```
+
+3. Swap the names:
+
+   ```sql
+   RENAME DATABASE <db> TO <db>_atomic;
+   RENAME DATABASE <db>_replicated TO <db>;
+   ```
+
+4. Continue with step P2. Drop `<db>_atomic` once the upgrade is verified.
+
+Background on replicated storage: [`clickhouse-replication.md`](clickhouse-replication.md). Exact behaviour of each
+change: the specs under [`openspec/specs/`](../openspec/specs/).
