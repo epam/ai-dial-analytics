@@ -117,7 +117,8 @@ public class CatalogTransferController {
             description = "Runs the import's validation pass — the real create services inside a rolled-back "
                     + "transaction, then the arm-time pipeline checks — and returns what an import would do with each "
                     + "object, and with `include_access=true` with each access entry under `access`. Answers 200 "
-                    + "whenever the bundle parses, problems included.")
+                    + "whenever the bundle parses, problems included, except 409 table_busy when another change holds a "
+                    + "table an OVERWRITE update needs past the lock timeout (retry).")
     public ImportPreview importPreview(
             @Parameter(description = "The bundle file, as exported") @RequestPart("file") MultipartFile file,
             @Parameter(description = POLICY_DESCRIPTION, required = true)
@@ -138,7 +139,8 @@ public class CatalogTransferController {
                     + "`include_access=true`, the bundle's access entries last, in one transaction; without it no access "
                     + "is written. On a failure part-way it deletes again what it created. 409 catalog_import_conflict "
                     + "under FAIL_IF_EXISTS when an object exists; 422 catalog_import_invalid when the pass finds a "
-                    + "problem — the preview reports each one.")
+                    + "problem — the preview reports each one; 409 table_busy when another change holds a table an "
+                    + "OVERWRITE update needs past the lock timeout (retry).")
     public ImportResult importBundle(
             @Parameter(description = "The bundle file, as exported") @RequestPart("file") MultipartFile file,
             @Parameter(description = POLICY_DESCRIPTION, required = true)

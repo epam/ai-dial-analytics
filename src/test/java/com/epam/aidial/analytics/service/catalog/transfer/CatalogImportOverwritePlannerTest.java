@@ -6,6 +6,7 @@ import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.pipeline.PipelineKind;
 import com.epam.aidial.analytics.service.table.TableStatus;
 import com.epam.aidial.analytics.service.table.TableType;
+import com.epam.aidial.analytics.service.table.TableWriteMode;
 import com.epam.aidial.analytics.service.table.TtlUnit;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
@@ -168,7 +169,7 @@ class CatalogImportOverwritePlannerTest {
         final BundleTable stored = source(column("id"), sensitive(column("pii"), true));
         final BundleTable visible = source(column("id"));
         final ImportTarget.Table hidden = new ImportTarget.Table("t", TableType.SOURCE, false, TableStatus.ACTIVE, stored,
-                visible, Map.of());
+                visible, Map.of(), false);
 
         final PlannedObject changed = plan(bundle(List.of(new BundleTable(create("t", TableType.SOURCE, null, "changed", null),
                 stored.schema())), List.of()), ResolutionPolicy.OVERWRITE, target(Map.of("t", hidden), Map.of(), Map.of()))
@@ -252,9 +253,9 @@ class CatalogImportOverwritePlannerTest {
     @Test
     void everyTargetOwnedMemberIsKept() {
         final BundlePipeline stored = enrich(llm(TransformPreset.CHAT_COMPLETION, "model-b", null, "same"),
-                new AdvancedRequest(100, 1, 20, 0.5, null), true, "0 */30 * * * *");
+                new AdvancedRequest(100, 1, 20, 0.5, null), true, "group", "0 */30 * * * *");
         final BundlePipeline bundled = enrich(llm(TransformPreset.CHAT_COMPLETION, "model-a", null, "same"),
-                new AdvancedRequest(500, 2, 60, 1.0, 8000), false, "0 */10 * * * *");
+                new AdvancedRequest(500, 2, 60, 1.0, 8000), false, "group", "0 */10 * * * *");
 
         final ImportPlan plan = plan(bundle(List.of(), List.of(bundled)), ResolutionPolicy.OVERWRITE,
                 target(Map.of(), Map.of("p", stored), Map.of()));
@@ -356,6 +357,192 @@ class CatalogImportOverwritePlannerTest {
         assertThat(plan.envSpecific()).noneMatch(EnvSpecificValue::kept);
     }
 
+    // --- what a caller who cannot see the object is told -------------------------------------------------------------
+
+    @Test
+    void tableTheCallerMayNotGetReportsNothingItWouldChange() {
+        final BundleTable stored = withTtl(source(column("id"), column("ts"), sensitive(column("ssn"), true)), 30);
+        final BundleTable bundled = source(column("id"), column("ts"), column("added"));
+
+        final ImportPlan plan = plan(bundle(List.of(bundled), List.of()), ResolutionPolicy.SKIP_IF_EXISTS,
+                target(Map.of("t", existing(stored, null, false)), Map.of(), Map.of()));
+        final PlannedObject planned = plan.tables().getFirst();
+
+        assertThat(planned.toEntry().changes()).isEmpty();
+        assertThat(planned.toEntry().notApplied()).isEmpty();
+        assertThat(plan.envSpecific()).singleElement().satisfies(value -> assertThat(value.targetValue()).isNull());
+    }
+
+    @Test
+    void refusalOnTableTheCallerMayNotGetNamesNoStoredValueAndAsksForUpdatePrivileges() {
+        final BundleTable stored = source(column("id"), column("ssn"));
+        final BundleTable retyped = source(column("id"), typed(column("ssn"), QueryFieldType.LONG));
+
+        final PlannedObject planned = plan(bundle(List.of(retyped), List.of()), ResolutionPolicy.OVERWRITE,
+                target(Map.of("t", existing(stored, null, false)), Map.of(), Map.of())).tables().getFirst();
+
+        assertThat(planned.action()).isEqualTo(ImportAction.FAIL);
+        assertThat(planned.intendsUpdate()).isTrue();
+        assertThat(planned.problems()).singleElement().asString().contains("the caller may not read it")
+                .doesNotContain("ssn").doesNotContain("STRING");
+    }
+
+    @Test
+    void hiddenColumnIsNeitherListedNorEchoed() {
+        final BundleTable stored = source(column("id"), sensitive(column("ssn"), true), column("local"));
+        final BundleTable visible = source(column("id"), column("local"));
+        final BundleTable retyped = source(column("id"), sensitive(typed(column("ssn"), QueryFieldType.LONG), true));
+
+        final PlannedObject planned = plan(bundle(List.of(retyped), List.of()), ResolutionPolicy.OVERWRITE,
+                target(Map.of("t", existing(stored, visible, false)), Map.of(), Map.of())).tables().getFirst();
+
+        assertThat(planned.action()).isEqualTo(ImportAction.FAIL);
+        assertThat(planned.toEntry().notApplied()).extracting(NotApplied::name).containsExactly("local");
+        assertThat(planned.problems()).singleElement().asString().contains("hidden from the caller")
+                .doesNotContain("STRING");
+    }
+
+    @Test
+    void pipelineTheCallerMayNotReadReportsNoTargetValue() {
+        final BundlePipeline stored = enrich(llm(TransformPreset.CHAT_COMPLETION, "m-internal", null, "old"),
+                new AdvancedRequest(null, null, 20, null, null), true, "schedule", "0 */30 * * * *");
+        final BundlePipeline bundled = enrich(llm(TransformPreset.CHAT_COMPLETION, "m", null, "new"), null, false);
+
+        final ImportPlan plan = plan(bundle(List.of(), List.of(bundled)), ResolutionPolicy.SKIP_IF_EXISTS,
+                target(Map.of(), Map.of("p", stored), Map.of(), false, Set.of(), Set.of()));
+        final PlannedObject planned = plan.pipelines().getFirst();
+
+        assertThat(planned.toEntry().changes()).isEmpty();
+        assertThat(planned.toEntry().notApplied()).isEmpty();
+        assertThat(plan.envSpecific()).filteredOn(value -> value.field().startsWith("transform.")
+                || value.field().startsWith("advanced.") || value.field().startsWith("trigger."))
+                .isNotEmpty().allSatisfy(value -> assertThat(value.targetValue()).isNull());
+    }
+
+    @Test
+    void columnAddedUnderColumnPolicyFails() {
+        final BundleTable stored = source(column("id"), column("a"));
+
+        final PlannedObject added = plan(bundle(List.of(source(column("id"), column("a"), column("x"))), List.of()),
+                ResolutionPolicy.OVERWRITE, target(Map.of("t", existing(stored, stored, true)), Map.of(), Map.of()))
+                .tables().getFirst();
+        final PlannedObject described = plan(bundle(List.of(source(column("id"), described(column("a"), "new"))), List.of()),
+                ResolutionPolicy.OVERWRITE, target(Map.of("t", existing(stored, stored, true)), Map.of(), Map.of()))
+                .tables().getFirst();
+
+        assertThat(added.action()).isEqualTo(ImportAction.FAIL);
+        assertThat(added.problems().getFirst()).contains("column policy");
+        assertThat(described.action()).isEqualTo(ImportAction.UPDATE);
+    }
+
+    // --- the bundle compared in stored form ---------------------------------------------------------------------------
+
+    @Test
+    void defaultsAndUntrimmedMetadataLeftImplicitConverge() {
+        final BundleTable stored = source(column("id"), described(column("score"), "points"));
+        final ColumnRequest implicit = new ColumnRequest("score", "score", QueryFieldType.STRING, null, null, null,
+                "points ", " ", null, false, false);
+        final BundleTable bundled = new BundleTable(stored.table(), new DefineSchemaRequest(List.of(column("id"), implicit),
+                List.of("id"), null, null, null, null, null, null, null));
+
+        final PlannedObject planned = overwrite(new BundleTable(new CreateTableRequest("t", "desc", TableType.SOURCE, null,
+                TableWriteMode.APPEND, null, null, null, null, null, null, null, null),
+                stored.schema()), bundled);
+
+        assertThat(planned.action()).isEqualTo(ImportAction.SKIP);
+        assertThat(planned.changes()).isEmpty();
+    }
+
+    @Test
+    void anAggregateTriggerWithoutKindConverges() {
+        final BundlePipeline stored = aggregate("a > 1", true);
+        final BundlePipeline.Declaration d = stored.pipeline();
+        final BundlePipeline implicit = new BundlePipeline(new BundlePipeline.Declaration(d.name(), d.kind(), d.target(),
+                d.inputs(), d.filter(), new TriggerRequest(null, "0 * * * * *", null, null, null), d.groupBy(), d.measures(),
+                d.sql(), d.transform(), d.advanced()), false);
+
+        assertThat(overwrite(stored, implicit).action()).isEqualTo(ImportAction.SKIP);
+    }
+
+    @Test
+    void reorderedOutputsRedeclare() {
+        final LinkedHashMap<String, OutputSpec> first = new LinkedHashMap<>();
+        first.put("summary", new OutputSpec("s", null));
+        first.put("reasoning", new OutputSpec("r", null));
+        final LinkedHashMap<String, OutputSpec> second = new LinkedHashMap<>();
+        second.put("reasoning", new OutputSpec("r", null));
+        second.put("summary", new OutputSpec("s", null));
+
+        final PlannedObject planned = overwrite(enrich(withOutputs(llm(TransformPreset.CHAT_COMPLETION, "m", null, "x"), first),
+                null, false), enrich(withOutputs(llm(TransformPreset.CHAT_COMPLETION, "m", null, "x"), second), null, false));
+
+        assertThat(planned.action()).isEqualTo(ImportAction.UPDATE);
+        assertThat(planned.changes()).containsExactly(
+                new PlannedChange(PlannedChange.Op.REDECLARE, null, List.of("transform.outputs")));
+    }
+
+    // --- pipelines an update could not restore or would not apply ----------------------------------------------------
+
+    @Test
+    void budgetIsKeptOnlyWhileBothTriggersAreGroup() {
+        final BundlePipeline stored = enrich(llm(TransformPreset.CHAT_COMPLETION, "m", null, "x"),
+                new AdvancedRequest(null, null, 20, null, 8000), false, "group", null);
+        final BundlePipeline bundled = enrich(llm(TransformPreset.CHAT_COMPLETION, "m", null, "x"), null, false,
+                "schedule", "0 * * * * *");
+
+        final ImportPlan plan = plan(bundle(List.of(), List.of(bundled)), ResolutionPolicy.OVERWRITE,
+                target(Map.of(), Map.of("p", stored), Map.of()));
+        final PlannedObject planned = plan.pipelines().getFirst();
+
+        assertThat(planned.redeclaration().advanced()).isEqualTo(new AdvancedRequest(null, null, 20, null, null));
+        assertThat(planned.toEntry().notApplied()).extracting(NotApplied::name).doesNotContain("advanced.input_token_budget");
+        assertThat(plan.envSpecific()).filteredOn(value -> "advanced.input_token_budget".equals(value.field()))
+                .singleElement().satisfies(value -> assertThat(value.kept()).isFalse());
+    }
+
+    @Test
+    void bareDeclarationOrIncompleteDraftIsNotUpdated() {
+        final BundlePipeline complete = aggregate("a > 1", false);
+        final BundlePipeline bare = new BundlePipeline(new BundlePipeline.Declaration("p", PipelineKind.AGGREGATE, "rollup",
+                null, null, null, null, null, null, null, null), false);
+
+        final PlannedObject clearing = overwrite(complete, bare);
+        final PlannedObject completing = plan(bundle(List.of(), List.of(complete)), ResolutionPolicy.OVERWRITE,
+                target(Map.of("rollup", existing(source(column("id")))), Map.of("p", aggregate("a > 2", false)),
+                        Map.of("rollup", "p"), true, Set.of(), Set.of("p"))).pipelines().getFirst();
+
+        assertThat(clearing.action()).isEqualTo(ImportAction.FAIL);
+        assertThat(clearing.problems().getFirst()).contains("declares no member");
+        assertThat(completing.action()).isEqualTo(ImportAction.FAIL);
+        assertThat(completing.problems().getFirst()).contains("incomplete draft");
+    }
+
+    @Test
+    void columnChangeBumpsNoClass1Pipeline() {
+        final PlannedObject planned = plan(bundle(List.of(enrichment(column("label"), column("extra"))), List.of()),
+                ResolutionPolicy.OVERWRITE, target(Map.of("e", existing(enrichment(column("label")))), Map.of(),
+                        Map.of("e", "e-sql"), true, Set.of(), Set.of())).tables().getFirst();
+
+        assertThat(planned.action()).isEqualTo(ImportAction.UPDATE);
+        assertThat(planned.toEntry().effects()).isEmpty();
+    }
+
+    @Test
+    void enrichmentUpdateOverRefusedSourceFails() {
+        final BundleTable storedSource = new BundleTable(create("src", TableType.SOURCE, null, "desc", null),
+                source(column("id"), column("score")).schema());
+        final BundleTable retypedSource = new BundleTable(storedSource.table(),
+                source(column("id"), typed(column("score"), QueryFieldType.LONG)).schema());
+
+        final ImportPlan plan = plan(bundle(List.of(retypedSource, enrichment(described(column("label"), "new"))), List.of()),
+                ResolutionPolicy.OVERWRITE, target(Map.of("src", existing(storedSource), "e", existing(enrichment(column("label")))),
+                        Map.of(), Map.of()));
+
+        assertThat(plan.tables()).extracting(PlannedObject::name, PlannedObject::action)
+                .containsExactly(tuple("src", ImportAction.FAIL), tuple("e", ImportAction.FAIL));
+        assertThat(plan.tables().get(1).problems()).anyMatch(problem -> problem.contains("source_table 'src'"));
+    }
+
     // --- fixtures ----------------------------------------------------------------------------------------------------
 
     private PlannedObject overwrite(BundleTable stored, BundleTable bundled) {
@@ -378,16 +565,28 @@ class CatalogImportOverwritePlannerTest {
         return new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(), List.of(), tables, pipelines);
     }
 
+    /** A target on which every pipeline targeting a bundle table is an llm one, and every declaration complete. */
     private static ImportTarget target(Map<String, ImportTarget.Table> tables, Map<String, BundlePipeline> pipelines,
             Map<String, String> byTarget) {
+        return target(tables, pipelines, byTarget, true, Set.copyOf(byTarget.values()), Set.of());
+    }
+
+    private static ImportTarget target(Map<String, ImportTarget.Table> tables, Map<String, BundlePipeline> pipelines,
+            Map<String, String> byTarget, boolean pipelinesVisible, Set<String> bumped, Set<String> incomplete) {
         final Map<String, ImportTarget.Table> all = new LinkedHashMap<>(tables);
         all.putIfAbsent("src", existing(source(column("id"))));
-        return new ImportTarget(all, pipelines, true, byTarget, Set.of(), all.size(), 100, 256);
+        return new ImportTarget(all, pipelines, pipelinesVisible, byTarget, bumped, incomplete, Set.of(), all.size(), 100, 256);
     }
 
     private static ImportTarget.Table existing(BundleTable table) {
         return new ImportTarget.Table(table.table().name(), table.table().type(), false, TableStatus.ACTIVE, table, table,
-                Map.of());
+                Map.of(), false);
+    }
+
+    /** A table the caller sees as {@code visible}, or not at all when it is null, under an optional column policy. */
+    private static ImportTarget.Table existing(BundleTable table, BundleTable visible, boolean columnPolicy) {
+        return new ImportTarget.Table(table.table().name(), table.table().type(), false, TableStatus.ACTIVE, table, visible,
+                Map.of(), columnPolicy);
     }
 
     private static BundleTable source(ColumnRequest... columns) {
@@ -426,6 +625,11 @@ class CatalogImportOverwritePlannerTest {
                 description, c.displayName(), c.tag(), c.sensitive(), c.heavy());
     }
 
+    private static ColumnRequest typed(ColumnRequest c, QueryFieldType type) {
+        return new ColumnRequest(c.sourceName(), c.name(), type, c.elementType(), c.enumValues(), c.nullable(),
+                c.description(), c.displayName(), c.tag(), c.sensitive(), c.heavy());
+    }
+
     private static ColumnRequest sensitive(ColumnRequest c, boolean value) {
         return new ColumnRequest(c.sourceName(), c.name(), c.type(), c.elementType(), c.enumValues(), c.nullable(),
                 c.description(), c.displayName(), c.tag(), value, c.heavy());
@@ -437,19 +641,24 @@ class CatalogImportOverwritePlannerTest {
         return new PatchTransformRequest(TransformType.LLM, preset, model, route, null, "{}", null, outputs, null, null);
     }
 
+    private static PatchTransformRequest withOutputs(PatchTransformRequest t, LinkedHashMap<String, OutputSpec> outputs) {
+        return new PatchTransformRequest(t.type(), t.preset(), t.model(), t.route(), t.params(), t.requestTemplate(), t.inputs(),
+                outputs, t.outputVars(), t.responseSchema());
+    }
+
     private static PatchTransformRequest withParams(PatchTransformRequest t, Map<String, Object> params) {
         return new PatchTransformRequest(t.type(), t.preset(), t.model(), t.route(), params, t.requestTemplate(), t.inputs(),
                 t.outputs(), t.outputVars(), t.responseSchema());
     }
 
     private static BundlePipeline enrich(PatchTransformRequest transform, AdvancedRequest advanced, boolean enabled) {
-        return enrich(transform, advanced, enabled, "0 * * * * *");
+        return enrich(transform, advanced, enabled, "schedule", "0 * * * * *");
     }
 
     private static BundlePipeline enrich(PatchTransformRequest transform, AdvancedRequest advanced, boolean enabled,
-            String cron) {
+            String triggerKind, String cron) {
         return new BundlePipeline(new BundlePipeline.Declaration("p", PipelineKind.ENRICH, "e", null, null,
-                new TriggerRequest("schedule", cron, null, null, null), null, null, null, transform, advanced), enabled);
+                new TriggerRequest(triggerKind, cron, null, null, null), null, null, null, transform, advanced), enabled);
     }
 
     private static BundlePipeline aggregate(String filter, boolean enabled) {

@@ -128,6 +128,11 @@ final class PlannedObject {
         this.redeclaration = diff.redeclaration();
     }
 
+    /** Marks an object {@code OVERWRITE} set out to update but refused, so authorization still asks the update's privileges. */
+    void intendUpdate() {
+        this.updateIntended = true;
+    }
+
     /** Records what {@code OVERWRITE} would change and keep, without changing the action. */
     void diff(ObjectDiff.Result diff) {
         this.changes = diff.changes();

@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
@@ -253,6 +254,28 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         upload("/v1/catalog/import", bundle, caller("importer"), "OVERWRITE", false)
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    @Test
+    void previewShowsNothingOfTableTheCallerMayNotGet() throws Exception {
+        final ObjectNode bundle = (ObjectNode) JsonMapper.builder().build()
+                .readTree(export(fullAdmin(), SECRET).andReturn().getResponse().getContentAsString());
+        final ArrayNode columns = (ArrayNode) bundle.get("tables").get(0).get("schema").get("columns");
+        ((ObjectNode) columns.get(1)).put("type", "long");
+        columns.addObject().put("source_name", "added").put("name", "added").put("type", "string");
+
+        final String preview = upload("/v1/catalog/import/preview", bundle.toString(), caller("importer"), "SKIP_IF_EXISTS",
+                false).andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].prev").doesNotExist())
+                .andExpect(jsonPath("$.tables[0].changes").isEmpty())
+                .andExpect(jsonPath("$.tables[0].not_applied").isEmpty())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(preview).doesNotContain("STRING");
+
+        // Under OVERWRITE a refused update still asks the update's privileges first.
+        upload("/v1/catalog/import/preview", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_MODIFY")));
     }
 
     private static String withDescription(String bundle, String table, String description) throws Exception {

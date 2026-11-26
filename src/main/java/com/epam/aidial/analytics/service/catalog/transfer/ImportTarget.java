@@ -20,6 +20,9 @@ import java.util.Set;
  *                              whether an entry reports one as {@code prev}
  * @param pipelineByTarget      the name of the pipeline targeting each bundle pipeline's target, and each bundle table, that
  *                              has one
+ * @param bumpedPipelines       those of {@code pipelineByTarget}'s pipelines whose generation a column change of their
+ *                              target bumps: the {@code enrich} pipelines with an {@code llm} transform
+ * @param incompletePipelines   the bundle pipeline names whose stored declaration is an incomplete draft
  * @param reusedPipelineNames   bundle pipeline names {@code pipeline_aud} records as deleted after having been
  *                              enabled at some revision: only a pipeline that ran left runner state behind
  * @param tableCount            how many tables the target holds
@@ -31,6 +34,8 @@ record ImportTarget(
         Map<String, BundlePipeline> pipelines,
         boolean pipelinesVisible,
         Map<String, String> pipelineByTarget,
+        Set<String> bumpedPipelines,
+        Set<String> incompletePipelines,
         Set<String> reusedPipelineNames,
         int tableCount,
         int maxTables,
@@ -45,6 +50,8 @@ record ImportTarget(
      *                     {@code TABLE_GET} it
      * @param access       its stored access entries by role, system tables included; read only for an import with
      *                     {@code include_access}, and empty otherwise
+     * @param columnPolicy whether a column policy limits the columns the caller sees, so that a column added now may be
+     *                     hidden from it
      */
     record Table(
             String name,
@@ -53,6 +60,7 @@ record ImportTarget(
             TableStatus status,
             BundleTable bundle,
             BundleTable prev,
-            Map<String, AccessEntry> access) {
+            Map<String, AccessEntry> access,
+            boolean columnPolicy) {
     }
 }

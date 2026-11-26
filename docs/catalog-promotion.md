@@ -86,7 +86,7 @@ The preview runs the same validation pass as the import and writes nothing. Chec
 - **`env_specific`.** Every value that is likely to mean something else here: the deployment binding
   (`transform.preset`, `transform.model`, `transform.route`), every `advanced` member, `trigger.cron`, table `ttl`, and
   absolute dates in filters and statements. Each item carries the bundle's `value`, this environment's `target_value`
-  on an existing object, and `kept`: whether this environment's value stays (see step 7). **A model must exist on the
+  on an existing object you may read, and `kept`: whether this environment's value stays (see step 7). **A model must exist on the
   target**: nothing checks `transform.model` at arm time, so a missing deployment shows up only as the runner's
   call failures.
 - **`required_system_tables`.** Each must exist here as an ACTIVE system table. Its columns are not compared:
@@ -112,7 +112,8 @@ The preview runs the same validation pass as the import and writes nothing. Chec
 
 While a preview with access runs, it holds locks on the covered tables whose access it would change (`CREATE` or
 `REPLACE`), system tables included, so do not edit or import access on them at the same time: such a write waits up
-to `tables.lock-timeout` and then answers `409 table_busy`.
+to `tables.lock-timeout` and then answers `409 table_busy`. An `OVERWRITE` preview likewise locks the tables it would
+update; when one is held by another change it answers `409 table_busy` itself, and is safe to retry.
 
 ## 3. Import
 
@@ -187,14 +188,23 @@ An existing object that differs is `UPDATE`, through the services its own endpoi
   `disable` and `redeclare` (a pipeline's declaration, the members that change named).
 - **`not_applied`**: what it keeps, and why. A column only this environment has (`extra_column`, never dropped), a
   different column order (`column_order`), a `sensitive` flag the bundle would clear (`sensitive_loosening`, never
-  widened), and each target-owned field (`target_owned`): every `advanced` member, `trigger.cron`, table `ttl`, and the
-  deployment binding while the preset is the same. A changed preset takes the bundle's whole binding.
+  widened), and each target-owned field (`target_owned`): every `advanced` member (`input_token_budget` only while both
+  triggers are `group`), `trigger.cron`, table `ttl`, and the deployment binding while the preset is the same. A
+  changed preset takes the bundle's whole binding.
 - **`effects`**: what the change sets off, left to you. `generation_bump` (dependent rollups wait for that pipeline's
-  next write), `rebuild_from_zero` (an aggregate rescans its input), `rearm_required` and `existing_rows_not_rederived`.
+  next write; a column change bumps only an `llm` pipeline), `rebuild_from_zero` (an aggregate rescans its input),
+  `rearm_required` and `existing_rows_not_rederived`.
+
+The bundle is compared in the form this environment stores it: a `nullable` or `write` left out means the default, and
+metadata is trimmed, so a hand-edited bundle converges. A preview shows nothing of an object you may not read (a table
+without `TABLE_GET`, a pipeline without `REGISTRY_READ`) beyond whether it is refused.
 
 A difference the import cannot apply — a column's type, nullability or enum values, a table's write mode or frozen
-keys, a pipeline's kind or target, or a change to a table with a column hidden from you — is `FAIL`, and the import answers `422`:
-delete the object and import it again, or change it by hand. An object whose only differences are kept is `SKIP`, so
+keys, a pipeline's kind or target, a change to a table with a column hidden from you, a column added under a column
+policy of yours, an incomplete pipeline draft here — is `FAIL`, and the import answers `422`: delete the object and
+import it again, or change it by hand. So is an update that would stop a running pipeline for good: an enabled
+aggregate it disables that could not be re-armed, or a table change that fails the arm gate of an enabled pipeline
+reading or writing that table, in the bundle or not. An object whose only differences are kept is `SKIP`, so
 re-running the bundle with `OVERWRITE` changes nothing. Updating needs `TABLE_MODIFY` on each updated table,
 `REGISTRY_ADMIN` for a pipeline, and `TABLE_SENSITIVE` on the table to mark one of its columns sensitive.
 

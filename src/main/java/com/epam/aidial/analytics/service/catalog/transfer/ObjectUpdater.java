@@ -1,8 +1,10 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
+import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
+import com.epam.aidial.analytics.service.pipeline.model.PipelineRegistration;
 import com.epam.aidial.analytics.service.table.Change;
 import com.epam.aidial.analytics.service.table.PatchInput;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
@@ -19,6 +21,7 @@ import com.epam.aidial.analytics.web.mapper.table.TableMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -33,7 +36,7 @@ import java.util.stream.Collectors;
  *
  * <p>Each step is marked {@linkplain PlannedObject#applied applied} once it commits, and a revert undoes only the marked
  * steps, from the target's object as the plan read it: a re-declaration with the previous declaration, the previous
- * {@code enabled} state, the previous metadata, and a drop of the columns the update added.
+ * metadata, a drop of the columns the update added, and, last, the previous {@code enabled} state.
  */
 @Component
 @RequiredArgsConstructor
@@ -67,8 +70,8 @@ class ObjectUpdater {
         final BundleTable bundle = planned.table();
         final List<String> tableFields = fields(planned, PlannedChange.Op.UPDATE_TABLE);
         if (!tableFields.isEmpty()) {
-            catalog.updateMetadata(planned.name(),
-                    tableFields.contains("description") ? bundle.table().description() : null,
+            catalog.replaceMetadata(planned.name(),
+                    tableFields.contains("description") ? Change.set(bundle.table().description()) : Change.leave(),
                     tableFields.contains("tag_order") ? Change.set(orEmpty(bundle.table().tagOrder())) : Change.leave());
             planned.applied(METADATA);
         }
@@ -82,40 +85,65 @@ class ObjectUpdater {
                 .map(change -> metadata(bundled.get(change.name()), change.fields()))
                 .toList();
         if (!add.isEmpty() || !update.isEmpty()) {
+            // The void form returns once the patch committed, so the step is marked exactly when there is one to revert.
             final PatchInput input = tableMapper.toPatchInput(patch(add, List.of(), update));
             if (executor == null) {
-                schemas.patchSchema(planned.name(), input);
+                schemas.applyPatch(planned.name(), input);
             } else {
-                schemas.patchSchema(planned.name(), input, executor);
+                schemas.applyPatch(planned.name(), input, executor);
             }
             planned.applied(SCHEMA);
         }
     }
 
     /**
-     * Reverts the table's applied steps from the target's object as the plan read it: drops the columns the update
-     * added and restores the column metadata in one schema patch, then restores the table metadata. A description the
-     * target left unset is restored blank, since the metadata update reads a null description as "keep".
+     * Reverts the table's applied steps from the target's object as the plan read it, each step its own write and each
+     * attempted even when an earlier one failed: the column metadata, then the table metadata, then a drop of the
+     * columns the update added, last because a drop is the step most likely to be refused, and a refusal must not cost
+     * the restores. The first failure is thrown once every step was tried.
      */
     void revertTable(PlannedObject planned) {
         final BundleTable existing = (BundleTable) planned.existing();
+        final List<Runnable> steps = new ArrayList<>();
         if (planned.wasApplied(SCHEMA)) {
             final Map<String, ColumnRequest> stored = byName(existing.schema().columns());
-            final List<String> drop = planned.changes().stream()
-                    .filter(change -> change.op() == PlannedChange.Op.ADD_COLUMN)
-                    .map(PlannedChange::name)
-                    .toList();
             final List<ColumnMetadataUpdate> restore = planned.changes().stream()
                     .filter(change -> change.op() == PlannedChange.Op.UPDATE_COLUMN)
                     .map(change -> metadata(stored.get(change.name()), change.fields()))
                     .toList();
-            schemas.patchSchema(planned.name(), tableMapper.toPatchInput(patch(List.of(), drop, restore)));
+            if (!restore.isEmpty()) {
+                steps.add(() -> schemas.applyPatch(planned.name(), tableMapper.toPatchInput(patch(List.of(), List.of(), restore))));
+            }
         }
         if (planned.wasApplied(METADATA)) {
             final List<String> tableFields = fields(planned, PlannedChange.Op.UPDATE_TABLE);
-            catalog.updateMetadata(planned.name(),
-                    tableFields.contains("description") ? orBlank(existing.table().description()) : null,
-                    tableFields.contains("tag_order") ? Change.set(orEmpty(existing.table().tagOrder())) : Change.leave());
+            steps.add(() -> catalog.replaceMetadata(planned.name(),
+                    tableFields.contains("description") ? Change.set(existing.table().description()) : Change.leave(),
+                    tableFields.contains("tag_order") ? Change.set(orEmpty(existing.table().tagOrder())) : Change.leave()));
+        }
+        if (planned.wasApplied(SCHEMA)) {
+            final List<String> drop = planned.changes().stream()
+                    .filter(change -> change.op() == PlannedChange.Op.ADD_COLUMN)
+                    .map(PlannedChange::name)
+                    .toList();
+            if (!drop.isEmpty()) {
+                steps.add(() -> schemas.applyPatch(planned.name(), tableMapper.toPatchInput(patch(List.of(), drop, List.of()))));
+            }
+        }
+        RuntimeException first = null;
+        for (final Runnable step : steps) {
+            try {
+                step.run();
+            } catch (RuntimeException ex) {
+                if (first == null) {
+                    first = ex;
+                } else {
+                    first.addSuppressed(ex);
+                }
+            }
+        }
+        if (first != null) {
+            throw first;
         }
     }
 
@@ -151,23 +179,39 @@ class ObjectUpdater {
         planned.applied(PlannedChange.Op.REDECLARE);
     }
 
-    /** Re-declares the pipeline's previous declaration, then restores its previous {@code enabled} state. */
-    void revertPipeline(PlannedObject planned) {
-        final BundlePipeline existing = (BundlePipeline) planned.existing();
+    /**
+     * Re-declares the pipeline's previous declaration. Its previous {@code enabled} state is restored separately
+     * ({@link #restoreEnabled}), once the tables are reverted too: arming runs the gate against the target, which a
+     * column the same import added fails until that column is dropped again.
+     */
+    void revertDeclaration(PlannedObject planned) {
         if (planned.wasApplied(PlannedChange.Op.REDECLARE)) {
-            redeclare(planned.name(), existing.pipeline());
+            redeclare(planned.name(), ((BundlePipeline) planned.existing()).pipeline());
         }
-        if (planned.wasApplied(PlannedChange.Op.DISABLE) && existing.exportedEnabled()) {
+    }
+
+    /** Re-enables a pipeline the update disabled, the last step of its revert. */
+    void restoreEnabled(PlannedObject planned) {
+        if (planned.wasApplied(PlannedChange.Op.DISABLE) && ((BundlePipeline) planned.existing()).exportedEnabled()) {
             pipelineService.patch(planned.name(), null, true);
         }
     }
 
-    /** A declaration patch keeping the stored {@code enabled} state, mapped exactly as the endpoint maps one. */
+    /**
+     * A declaration patch keeping the stored {@code enabled} state, mapped exactly as the endpoint maps one. A patch
+     * naming no declaration member would be an enable-only patch that changes nothing, so it is refused rather than
+     * reported as applied.
+     */
     private void redeclare(String name, BundlePipeline.Declaration declaration) {
         final PipelineEntity stored = pipelineService.get(name);
         final PatchPipelineRequest request = pipelineMapper.toRedeclaration(declaration);
-        pipelineService.patch(name, pipelineMapper.toRegistration(stored, request,
-                () -> pipelineService.patchedTargetParentOf(stored, request.target())), null);
+        final PipelineRegistration registration = pipelineMapper.toRegistration(stored, request,
+                () -> pipelineService.patchedTargetParentOf(stored, request.target()));
+        if (registration == null) {
+            throw new PipelineValidationException("the declaration to re-declare pipeline '" + name + "' with names no "
+                    + "member beside name, kind and target, so a patch would change nothing");
+        }
+        pipelineService.patch(name, registration, null);
     }
 
     // --- helpers -----------------------------------------------------------------------------------------------------

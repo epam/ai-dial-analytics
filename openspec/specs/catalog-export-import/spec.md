@@ -425,8 +425,16 @@ table, or as a pipeline, with the target's full object (not the caller-visible `
 changes listed below, each applied through the service the matching endpoint uses. An object with at least one change SHALL be
 `UPDATE`; an object with none SHALL be `SKIP`, whatever it keeps, so a bundle re-imported under `OVERWRITE` converges and its
 second run writes no revision. Every other planning rule applies to an `UPDATE` object as it does to a `CREATE` one: an object
-depending on a refused object is `FAIL`, a PENDING or FAILED existing table is `FAIL`, and a bundle table whose name is a system
-table on the target is `FAIL`.
+depending on a refused object is `FAIL` (an updated enrichment whose bundled source is refused included), a PENDING or FAILED
+existing table is `FAIL`, and a bundle table whose name is a system table on the target is `FAIL`.
+
+The bundle's side SHALL be compared in the form the write paths store it, so a hand-edited bundle that leaves a default implicit
+converges on its second run: a column's `nullable` left out resolves to its kind's default, a source's `write` left out is
+`append`, a column's `description`, `display_name` and `tag` are trimmed with blank read as unset, enum values and `tag_order`
+entries are trimmed, and an `aggregate` trigger's `kind` left out is `schedule`, any `kind` compared lowercased. `cardinality` SHALL
+NOT be compared: it has one legal value and is not stored. A pipeline's members SHALL be compared as JSON values, an object as a
+map, except `transform.outputs` and `transform.inputs`, whose entry order is stored and used (the output order is the composed
+response schema's property order), so a bundle that only reorders them is a `redeclare` of that member.
 
 A table SHALL change as follows, the columns matched by exposed `name`:
 
@@ -444,17 +452,28 @@ never drops a column; a column order that differs from the bundle's (`column_ord
 
 A pipeline whose declaration differs from the bundle's, once the target-owned members are taken from the target, SHALL be
 re-declared from the bundle's `view=source` projection (`redeclare`, through the `PATCH /v1/pipelines/{name}` path), listing the
-declaration members that change. Its `enabled` state SHALL be kept, except that an enabled `aggregate` pipeline SHALL be disabled
+declaration members that change. An `enrich` declaration without `inputs` follows its target's parent, and SHALL be re-declared with
+`inputs: []`, the patch's spelling of that, so a target declaring that parent as its source converges on it. Its `enabled` state SHALL be kept, except that an enabled `aggregate` pipeline SHALL be disabled
 first (`disable`), because a declaration patch on an enabled aggregate is refused, and SHALL stay disabled (see "Pipelines are
 imported disabled").
 
 A difference no listed change reaches SHALL make the entry `FAIL`, naming the field and saying the object must be deleted and
 re-imported or changed by hand: a column's `source_name`, `type`, `element_type`, `nullable` or enum values; a table's `type` or
-`write`; `ordering_key`, `partition_by`, `grain_key`, `cardinality`, `source_table`, `identity_column` or `version_column`; and a
+`write`; `ordering_key`, `partition_by`, `grain_key`, `source_table`, `identity_column` or `version_column`; and a
 pipeline's `kind` or `target`. An object with a change SHALL also be `FAIL` when the target table holds a column hidden from the
 caller, by sensitivity or by a column policy, or when the caller may not get the table, because the schema patch resolves the
-caller's visible columns only. The update's privileges ("Import authorization") are checked before this refusal, so a caller
-lacking them is answered `403`.
+caller's visible columns only; and a table update that adds a column SHALL be `FAIL` when a column policy limits the columns the
+caller sees, since a column it adds could be hidden from the caller and the drop that reverts it on rollback could not name it. A
+pipeline update SHALL be `FAIL` when the bundle's declaration names no member beside `name`, `kind` and `target` (a patch could not
+clear the stored one), and when the target's declaration is an incomplete draft, which a rollback could not restore; the draft is
+deleted and the bundle imported again instead. The update's privileges ("Import authorization") are checked before any of these
+refusals, a refused object counting as one the import set out to update, so a caller lacking them is answered `403`.
+
+What an entry reports of an existing object SHALL be the caller's view of it, never the full object the decisions use: for a
+table the caller may not get, or a pipeline it may not read (`REGISTRY_READ`), `changes`, `not_applied` and `effects` SHALL be
+empty and a refusal SHALL only say there is one; for a table with columns hidden from the caller, they SHALL be those of the
+caller's view against the bundle without the hidden columns, and a refusal on a hidden column SHALL name neither its stored value
+nor what differs.
 
 Each object entry SHALL carry `changes[]`, `not_applied[]` and `effects[]`:
 
@@ -464,7 +483,9 @@ Each object entry SHALL carry `changes[]`, `not_applied[]` and `effects[]`:
 - `effects`: `{ kind, pipeline }`, consequences the import reports and does not act on. `kind` is one of `generation_bump`,
   `rebuild_from_zero`, `rearm_required` and `existing_rows_not_rederived`, and `pipeline` names the pipeline affected:
   - a re-declaration bumps that pipeline's `generation` (`generation_bump`);
-  - so does a change to an enrichment's columns or column descriptions, which bumps the generation of the pipeline targeting it;
+  - so does a change to an enrichment's columns or column descriptions, which bumps the generation of the pipeline targeting it
+    when that is an `enrich` pipeline with an `llm` transform; a Class-1 (`sql`) pipeline re-resolves on each materialize and is
+    not bumped, and a disabled draft whose output mapping does not derive keeps its generation;
   - a re-declared `aggregate` rebuilds its target from zero (`rebuild_from_zero`);
   - an `aggregate` the import disabled must be re-armed (`rearm_required`);
   - a re-declared `enrich` pipeline leaves the rows it already wrote with their previous values until a backfill re-derives them
@@ -537,6 +558,64 @@ give it and SHALL write none of them. Under `FAIL_IF_EXISTS`, and on `CREATE` en
 
 - **WHEN** the bundle of "A new column and changed descriptions are applied" is imported with `SKIP_IF_EXISTS`
 - **THEN** the `usage_identity` entry is `SKIP` and lists the `add_column` and `update_column` changes, and the target is unchanged
+
+#### Scenario: Defaults left implicit converge
+
+- **GIVEN** a target source table whose column `score` is stored `nullable: false` with description `points`
+- **WHEN** a bundle declares `score` without `nullable`, with description `points ` and a blank `display_name`, leaves the table's
+  `write` out, and is imported with `OVERWRITE`
+- **THEN** the table entry is `SKIP` with no change
+
+#### Scenario: An aggregate trigger without a kind converges
+
+- **WHEN** a bundle declares an existing `aggregate` pipeline's trigger as `{"cron": ...}` with the target's cron, and is imported
+  with `OVERWRITE`
+- **THEN** the pipeline entry is `SKIP`
+
+#### Scenario: Reordered outputs are re-declared
+
+- **GIVEN** an `enrich` pipeline whose `transform.outputs` are `{summary, reasoning}` on the target
+- **WHEN** a bundle carrying the same outputs as `{reasoning, summary}` is imported with `OVERWRITE`
+- **THEN** the entry is `UPDATE` with a `redeclare` change naming `transform.outputs`
+
+#### Scenario: A declaration following its parent converges on one declaring it
+
+- **GIVEN** an `enrich` pipeline that declares `inputs: [usage_base]`, its target's parent source
+- **WHEN** a bundle in which the pipeline leaves `inputs` out is imported with `OVERWRITE`, and then again
+- **THEN** the first run re-declares it with a `redeclare` change naming `inputs`, and the second run is `SKIP` and leaves its
+  `generation` unchanged
+
+#### Scenario: A Class-1 pipeline is not reported bumped
+
+- **WHEN** a bundle adds a column to an enrichment whose pipeline has a `sql` transform, and is imported with `OVERWRITE`
+- **THEN** the table entry is `UPDATE` and its `effects` are empty
+
+#### Scenario: An enrichment update over a refused source is refused
+
+- **WHEN** an `OVERWRITE` bundle retypes a column of source `base` and changes a column description of its enrichment `sent`
+- **THEN** both entries are `FAIL`, `sent`'s naming `source_table 'base'`
+
+#### Scenario: A bare declaration or an incomplete draft is not updated
+
+- **WHEN** a bundle declares an existing complete pipeline with only `name`, `kind` and `target`, or declares in full a pipeline
+  that is an incomplete draft on the target, and is imported with `OVERWRITE`
+- **THEN** the pipeline entry is `FAIL`, saying the declaration names no member, or that the target's is an incomplete draft
+
+#### Scenario: A column added under a column policy is refused
+
+- **GIVEN** a caller whose role on table `t` carries a column policy naming every column of `t`
+- **WHEN** the caller imports with `OVERWRITE` a bundle adding column `x` to `t`
+- **THEN** the `t` entry is `FAIL`, naming the column policy
+- **AND WHEN** the bundle only rewords a column description of `t`
+- **THEN** the `t` entry is `UPDATE`
+
+#### Scenario: A table the caller may not get is reported without its differences
+
+- **GIVEN** a caller holding `TABLE_CREATE` and no grant on table `t`, which has a sensitive column `s` of type `string`
+- **WHEN** the caller previews with `SKIP_IF_EXISTS` a bundle retyping `s` and adding a column to `t`
+- **THEN** the `t` entry has no `prev`, empty `changes` and `not_applied`, and the response names no stored type
+- **AND WHEN** the caller previews the same bundle with `OVERWRITE`
+- **THEN** the response is `403` with `error` `forbidden`, naming `TABLE_MODIFY`
 
 ### Requirement: Import entries
 
@@ -622,6 +701,17 @@ arm-time pipeline checks on each pipeline it created or updated and left disable
 `include_access=true` and no access entry is `FAIL`, every access entry of the bundle is applied in the same transaction (see
 "Access import"), to fill `armable` and `arm_problems`. An updated pipeline that stays enabled SHALL be checked by its own
 re-declaration, which runs the arm-time gate because it leaves the pipeline enabled, and a refusal there SHALL make its entry `FAIL`.
+An enabled pipeline the update disables (an `aggregate`) SHALL be `FAIL` too when the arm-time checks refuse it as the import
+leaves it, since the import would stop a running pipeline that could not be armed again. Every enabled pipeline that reads or writes
+a table the import updates, and that the import does not re-declare, in the bundle or not, SHALL be disabled and armed again inside
+the pass, so the arm-time gate judges it against the tables as the import leaves them: a refusal SHALL make each updated table it
+depends on `FAIL`, naming the pipeline, and a bundle pipeline among them `armable: false`. A pipeline reads or writes a table when
+it targets it, declares it as its input, follows it as its target's parent, or reads it as an enrichment through its input's grain
+join.
+
+Before writing anything the pass SHALL lock every table it updates, enrichments first and otherwise by name, the order the table
+services lock an enrichment and its source in, and SHALL hold the locks until it rolls back. A lock not granted within
+`tables.lock-timeout` SHALL answer both calls `409` with `error` `table_busy` (retryable), never a refused bundle.
 `armable`, `arm_problems` and each access entry's `ineffective_grants` SHALL
 therefore describe the target as the import would leave it, its access included. When an access entry is `FAIL` before the access
 is applied (an entry the checks refuse, or a bundle-level problem), none SHALL be applied: arming SHALL still run, against the target
@@ -634,6 +724,23 @@ the remaining pipelines with a `not checked` arm problem.
 The pass SHALL check identifier rules, reserved names, `max-tables` against the total after import, and `max-columns-per-table`
 including injected provenance columns and the columns an update adds. It SHALL list every Java-side refusal; a SQL-level failure SHALL stop the pass at that object
 and be reported on it.
+
+#### Scenario: An update leaving an enabled aggregate unarmable is refused
+
+- **GIVEN** an enabled `aggregate` `cx-rollup` writing measures `total` and `events` into `cx_roll`
+- **WHEN** a bundle dropping the `events` measure is previewed with `OVERWRITE`, `cx_roll` keeping its `events` column
+- **THEN** the pipeline entry is `FAIL`, saying it could not be armed again, `/import` is `422`, and `cx-rollup` stays enabled
+
+#### Scenario: A table update breaking an enabled pipeline outside the bundle is refused
+
+- **GIVEN** an enabled `aggregate` `cx-rollup` that sums `cx_base.score` into the non-sensitive `cx_roll.total`
+- **WHEN** a bundle carrying only `cx_base`, with `score` marked sensitive, is previewed with `OVERWRITE`
+- **THEN** the `cx_base` entry is `FAIL`, saying the update would break enabled pipeline `cx-rollup`, and `/import` is `422`
+
+#### Scenario: A held table lock is a retryable conflict
+
+- **WHEN** another transaction holds the row lock of a table an `OVERWRITE` preview updates past `tables.lock-timeout`
+- **THEN** the preview answers `409` with `error` `table_busy`
 
 #### Scenario: Armable reported on a fresh target
 
@@ -772,10 +879,13 @@ enforced. Import SHALL NOT arm a pipeline: the order in which pipelines are arme
 `/import` SHALL apply each object as its own committed step and, on the first failure, SHALL delete what this import created and
 revert what it updated, in reverse order (pipelines, then enrichments, then sources). Compensation is best effort, not a guarantee.
 
-An updated pipeline SHALL be reverted by re-declaring its previous declaration and restoring its previous `enabled` state; an
-updated table by restoring its previous `description`, `tag_order` and column metadata and dropping the columns this import added.
-A revert that is refused or fails SHALL mark the entry `rollback_failed`; a reverted entry SHALL be `rolled_back`. A revert of a
-re-declaration bumps the pipeline's `generation` once more.
+An updated pipeline SHALL be reverted by re-declaring its previous declaration, and an updated table by restoring its previous
+column metadata, then its previous `description` (none, when it had none) and `tag_order`, then dropping the columns this import
+added, each step attempted even when an earlier one fails. Only once every pipeline and table is reverted SHALL a pipeline the
+import disabled be enabled again, since arming runs the gate against its target, which a column the import added fails until it is
+dropped. A revert that is refused or fails SHALL mark the entry `rollback_failed`; a reverted entry SHALL be `rolled_back`. A revert
+of a re-declaration bumps the pipeline's `generation` once more. A schema patch SHALL count as applied as soon as it commits, so
+a failure after the commit is still reverted.
 
 Before deleting a table, import SHALL check that any pipeline targeting it was created by this import; otherwise it SHALL leave the
 table and mark it `rollback_failed`. A crash mid-import, or a ClickHouse drop that succeeds before the catalog delete fails, MAY leave
@@ -798,8 +908,16 @@ mid-import left behind, is recoverable from the feed and not only from the log.
 
 - **WHEN** an `OVERWRITE` import updates table `a`, adding column `x` and changing a description, and ClickHouse DDL then fails on
   the second table
-- **THEN** `a` no longer has `x` and carries its previous description, its entry is `rolled_back`, the `outcome` is
-  `rolled_back`, and re-running with `OVERWRITE` after the cause is removed updates both
+- **THEN** `a` no longer has `x` and carries its previous description, no description when it had none, its entry is
+  `rolled_back`, the `outcome` is `rolled_back`, and re-running with `OVERWRITE` after the cause is removed updates both
+
+#### Scenario: A disabled aggregate is re-enabled after the tables are reverted
+
+- **GIVEN** an `OVERWRITE` import that added column `cost` to `sessions` and disabled and re-declared the enabled aggregate
+  `sessions_rollup` writing it
+- **WHEN** a later step fails
+- **THEN** compensation re-declares `sessions_rollup`'s previous declaration, reverts `sessions`, dropping `cost`, and only then
+  enables `sessions_rollup` again
 
 #### Scenario: Import revisions carry the import id
 
@@ -819,10 +937,12 @@ The import preview and result SHALL list under `env_specific` every environment-
 One rule set SHALL decide both what this list reports and what an `OVERWRITE` update keeps.
 
 An item SHALL be listed for each such field whose bundle value is set and, on an existing object, for each whose target value is set.
-`value` is the bundle's value and `target_value` the target's, null on a new object. `kept` SHALL be `true` when the target's value
+`value` is the bundle's value and `target_value` the target's, null on a new object and null when the caller may not read the
+target's object (a table it may not get, a pipeline without `REGISTRY_READ`). `kept` SHALL be `true` when the target's value
 stays in place of the bundle's: on an existing object, for a target-owned field. The deployment binding is the exception: under
 `OVERWRITE`, when the bundle's `transform.preset` differs from the target's, the bundle's whole binding is taken and its three
-items are `kept: false`. A target-owned `advanced` member the target leaves unset stays unset. A date literal, and every field of a new
+items are `kept: false`. So is `advanced.input_token_budget` unless both triggers are `group`, the one kind the budget is valid on:
+a bundle moving a pipeline to another trigger takes its own budget (none), and the item is `kept: false`. A target-owned `advanced` member the target leaves unset stays unset. A date literal, and every field of a new
 object, SHALL be `kept: false`.
 
 Import SHALL NOT validate `transform.model` against the target. A date literal in `sql` SHALL be reported under the field

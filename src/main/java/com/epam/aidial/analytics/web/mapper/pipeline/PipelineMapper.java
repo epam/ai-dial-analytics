@@ -264,10 +264,16 @@ public abstract class PipelineMapper {
      * out so the patch keeps the stored state. Mapped through {@link #toRegistration(PipelineEntity, PatchPipelineRequest,
      * Supplier)} like any other patch, so every rule of that path applies; the transform is the {@code PATCH} shape, so a
      * folded legacy declaration's {@code output_vars} and an aggregate's {@code sql} pass through verbatim.
+     *
+     * <p>An enrich declaration without {@code inputs} follows its target's parent, which a patch spells {@code []}: a
+     * patch leaving {@code inputs} out keeps a declared source instead, or is refused for one that is not the parent
+     * ({@link #patchedInput}).
      */
     public PatchPipelineRequest toRedeclaration(BundlePipeline.Declaration declaration) {
+        final List<String> inputs = declaration.kind() == PipelineKind.ENRICH && declaration.inputs() == null
+                ? List.of() : declaration.inputs();
         return new PatchPipelineRequest(declaration.name(), declaration.kind(), null, declaration.target(),
-                declaration.inputs(), declaration.filter(), declaration.groupBy(), declaration.measures(), declaration.sql(),
+                inputs, declaration.filter(), declaration.groupBy(), declaration.measures(), declaration.sql(),
                 declaration.trigger(), declaration.transform(), declaration.advanced());
     }
 

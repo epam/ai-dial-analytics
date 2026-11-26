@@ -125,8 +125,22 @@ public class TableSchemaService {
      * primary is never probed for an {@code ALTER} that was not sent. Every other caller uses the two-argument form.
      */
     public TableView patchSchema(String name, PatchInput patch, DdlExecutor executor) {
-        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch, executor));
+        applyPatch(name, patch, executor);
         return catalogService.get(name);
+    }
+
+    /**
+     * {@link #patchSchema(String, PatchInput, DdlExecutor)} without reading the table back: it returns once the patch
+     * committed, so a caller recording what it changed — the catalog import, which reverts it — never mistakes a failed
+     * read after the commit for a patch that did not happen.
+     */
+    public void applyPatch(String name, PatchInput patch) {
+        applyPatch(name, patch, ddlExecutor);
+    }
+
+    /** {@link #applyPatch(String, PatchInput)} with the {@code ALTER} run through {@code executor}. */
+    public void applyPatch(String name, PatchInput patch, DdlExecutor executor) {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch, executor));
     }
 
     private void patchLocked(String name, PatchInput patch, DdlExecutor executor) {

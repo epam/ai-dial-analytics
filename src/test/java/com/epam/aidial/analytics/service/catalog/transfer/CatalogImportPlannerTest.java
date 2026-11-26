@@ -153,7 +153,7 @@ class CatalogImportPlannerTest {
     @Test
     void tableLimitIsCountedOnTheTotal() {
         final ImportTarget nearlyFull = new ImportTarget(Map.of("other", existing(source("other"))), Map.of(), true,
-                Map.of(), Set.of(), 1, 2, 256);
+                Map.of(), Set.of(), Set.of(), Set.of(), 1, 2, 256);
 
         final ImportPlan plan = plan(bundle(List.of(source("a"), source("b")), List.of()), ResolutionPolicy.FAIL_IF_EXISTS,
                 nearlyFull);
@@ -165,7 +165,7 @@ class CatalogImportPlannerTest {
     @Test
     void columnLimitCountsInjectedProvenance() {
         final ImportTarget narrow = new ImportTarget(Map.of("usage_base", existing(source("usage_base"))), Map.of(), true,
-                Map.of(), Set.of(), 1, 100, 3);
+                Map.of(), Set.of(), Set.of(), Set.of(), 1, 100, 3);
 
         final ImportPlan plan = plan(bundle(List.of(enrichment("usage_sentiment", "usage_base")), List.of()),
                 ResolutionPolicy.SKIP_IF_EXISTS, narrow);
@@ -178,8 +178,8 @@ class CatalogImportPlannerTest {
     void reusedNameFailsUnlessAcknowledged() {
         final Map<String, ImportTarget.Table> tables = Map.of("usage_base", existing(source("usage_base")),
                 "rollup_target", existing(source("rollup_target")));
-        final ImportTarget target = new ImportTarget(tables, Map.of(), true, Map.of(), Set.of("rollup"), tables.size(), 100,
-                256);
+        final ImportTarget target = new ImportTarget(tables, Map.of(), true, Map.of(), Set.of(), Set.of(), Set.of("rollup"),
+                tables.size(), 100, 256);
         final CatalogBundle bundle = bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target")));
 
         final PlannedObject refused = planner.plan(bundle, false, ResolutionPolicy.SKIP_IF_EXISTS, target, false)
@@ -198,7 +198,7 @@ class CatalogImportPlannerTest {
         final Map<String, ImportTarget.Table> tables = Map.of("usage_base", existing(source("usage_base")),
                 "rollup_target", existing(source("rollup_target")));
         final ImportTarget target = new ImportTarget(tables, Map.of(), true, Map.of("rollup_target", "someone_else"),
-                Set.of(), tables.size(), 100, 256);
+                Set.of(), Set.of(), Set.of(), tables.size(), 100, 256);
 
         final PlannedObject planned = plan(bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target"))),
                 ResolutionPolicy.SKIP_IF_EXISTS, target).pipelines().getFirst();
@@ -230,8 +230,8 @@ class CatalogImportPlannerTest {
         // The reader lists only names deleted after being enabled; one compensation deleted is absent.
         final Map<String, ImportTarget.Table> tables = Map.of("usage_base", existing(source("usage_base")),
                 "rollup_target", existing(source("rollup_target")));
-        final ImportTarget target = new ImportTarget(tables, Map.of(), true, Map.of(), Set.of("other"), tables.size(), 100,
-                256);
+        final ImportTarget target = new ImportTarget(tables, Map.of(), true, Map.of(), Set.of(), Set.of(), Set.of("other"),
+                tables.size(), 100, 256);
 
         final PlannedObject planned = plan(bundle(List.of(), List.of(aggregate("rollup", "usage_base", "rollup_target"))),
                 ResolutionPolicy.SKIP_IF_EXISTS, target).pipelines().getFirst();
@@ -265,7 +265,7 @@ class CatalogImportPlannerTest {
     void hiddenPrevIsReportedAsAbsentButStillCompared() {
         final BundleTable stored = source("usage_base");
         final ImportTarget.Table hidden = new ImportTarget.Table("usage_base", TableType.SOURCE, false, TableStatus.ACTIVE,
-                stored, null, Map.of());
+                stored, null, Map.of(), false);
 
         final PlannedObject planned = plan(bundle(List.of(withColumnDescription(stored, "changed")), List.of()),
                 ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of("usage_base", hidden))).tables().getFirst();
@@ -384,7 +384,7 @@ class CatalogImportPlannerTest {
     @Test
     void accessEntriesAreSortedAndCarryTheTargetsEntry() {
         final ImportTarget.Table stored = new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null,
-                Map.of("viewers", new AccessEntry(List.of(), null, List.of("a"))));
+                Map.of("viewers", new AccessEntry(List.of(), null, List.of("a"))), false);
         final ImportPlan plan = planner.plan(withAccess(Map.of(SYSTEM, Map.of("viewers", entry("read"), " admins", entry("get")))),
                 false, ResolutionPolicy.SKIP_IF_EXISTS, target(Map.of(SYSTEM, stored)), true);
 
@@ -414,7 +414,7 @@ class CatalogImportPlannerTest {
     void accessMayNameTableOnlyTheTargetHas() {
         final BundleTable base = source("usage_base");
         final ImportTarget.Table stored = new ImportTarget.Table("usage_base", TableType.SOURCE, false, TableStatus.ACTIVE, base,
-                base, Map.of("viewers", new AccessEntry(List.of(), null, List.of("id"))));
+                base, Map.of("viewers", new AccessEntry(List.of(), null, List.of("id"))), false);
         final CatalogBundle policiesOnly = new CatalogBundle(CatalogBundle.FORMAT, CatalogBundle.FORMAT_VERSION, null, List.of(),
                 List.of(), List.of(), List.of(), Map.of("usage_base", Map.of("viewers", entry("read"))));
 
@@ -433,7 +433,7 @@ class CatalogImportPlannerTest {
 
         // A same-named system table here is not the table the bundle's access was exported from.
         final ImportTarget.Table system = new ImportTarget.Table("usage_base", TableType.SOURCE, true, TableStatus.ACTIVE, null,
-                null, Map.of());
+                null, Map.of(), false);
         final ImportPlan clash = planner.plan(policiesOnly, false, ResolutionPolicy.FAIL_IF_EXISTS,
                 target(Map.of("usage_base", system)), true);
         assertThat(clash.validationErrors()).anyMatch(error -> error.contains("is a system table on this environment"));
@@ -475,7 +475,7 @@ class CatalogImportPlannerTest {
     }
 
     private static ImportTarget target(Map<String, ImportTarget.Table> tables) {
-        return new ImportTarget(tables, Map.of(), true, Map.of(), Set.of(), tables.size(), 100, 256);
+        return new ImportTarget(tables, Map.of(), true, Map.of(), Set.of(), Set.of(), Set.of(), tables.size(), 100, 256);
     }
 
     private static BundleTable source(String name) {
@@ -515,11 +515,11 @@ class CatalogImportPlannerTest {
     }
 
     private static ImportTarget.Table existing(BundleTable table, TableStatus status) {
-        return new ImportTarget.Table(table.table().name(), table.table().type(), false, status, table, table, Map.of());
+        return new ImportTarget.Table(table.table().name(), table.table().type(), false, status, table, table, Map.of(), false);
     }
 
     private static ImportTarget.Table system() {
-        return new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null, Map.of());
+        return new ImportTarget.Table(SYSTEM, TableType.SOURCE, true, TableStatus.ACTIVE, null, null, Map.of(), false);
     }
 
     private static CatalogBundle requiring(String systemTable) {

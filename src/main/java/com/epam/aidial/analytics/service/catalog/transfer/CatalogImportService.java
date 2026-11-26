@@ -31,6 +31,7 @@ import org.springframework.stereotype.Service;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
@@ -366,28 +367,45 @@ public class CatalogImportService {
     /**
      * Undoes what this import wrote, pipelines first and then tables, each in reverse apply order (enrichments before
      * their sources, as delete requires): a created object is deleted, an updated one reverted to the target's object as
-     * the plan read it ({@link ObjectUpdater}). A created table that a pipeline still targets is left in place, since
-     * deleting the table would delete that pipeline with it: either the pipeline was not created by this import, or it
-     * was and its own rollback failed.
+     * the plan read it ({@link ObjectUpdater}). An updated pipeline the import disabled is re-enabled only after the
+     * tables are reverted, since arming runs the gate against its target as it then is. A created table that a pipeline
+     * still targets is left in place, since deleting the table would delete that pipeline with it: either the pipeline
+     * was not created by this import, or it was and its own rollback failed.
      *
      * @param writtenPipelines the pipelines this import created or updated, in apply order
      * @param writtenTables    the tables this import created or updated, in apply order
      */
     private void compensate(List<PlannedObject> writtenPipelines, List<PlannedObject> writtenTables,
             PlannedObject failedAt) {
+        final Map<PlannedObject, String> pipelineFailures = new HashMap<>();
         for (final PlannedObject pipeline : writtenPipelines.reversed()) {
             try {
                 if (pipeline.updates()) {
-                    updater.revertPipeline(pipeline);
+                    updater.revertDeclaration(pipeline);
                 } else {
                     pipelineService.delete(pipeline.name());
                 }
-                markRollback(pipeline, failedAt, true, null);
             } catch (RuntimeException ex) {
                 log.warn("Catalog import: rolling back pipeline '{}' failed", pipeline.name(), ex);
-                markRollback(pipeline, failedAt, false, "rollback failed: " + describe(ex));
+                pipelineFailures.put(pipeline, "rollback failed: " + describe(ex));
             }
         }
+        revertTables(writtenTables, writtenPipelines, failedAt);
+        for (final PlannedObject pipeline : writtenPipelines.reversed()) {
+            if (pipeline.updates() && !pipelineFailures.containsKey(pipeline)) {
+                try {
+                    updater.restoreEnabled(pipeline);
+                } catch (RuntimeException ex) {
+                    log.warn("Catalog import: re-enabling pipeline '{}' failed", pipeline.name(), ex);
+                    pipelineFailures.put(pipeline, "rollback failed: re-enabling it failed: " + describe(ex));
+                }
+            }
+            markRollback(pipeline, failedAt, !pipelineFailures.containsKey(pipeline), pipelineFailures.get(pipeline));
+        }
+    }
+
+    /** The table half of {@link #compensate}. */
+    private void revertTables(List<PlannedObject> writtenTables, List<PlannedObject> writtenPipelines, PlannedObject failedAt) {
         for (final PlannedObject table : writtenTables.reversed()) {
             if (table.updates()) {
                 try {
