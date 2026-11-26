@@ -891,6 +891,13 @@ class TableSchemaServiceTest {
         assertThatThrownBy(() -> service.patchSchema("widget_metrics", reused))
                 .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
                 .hasMessageContaining("label");
+        // As does a name a renamed column carried.
+        final PatchInput renamedAway = new PatchInput(
+                List.of(new ColumnInput("label", "label", QueryFieldType.TIMESTAMP, null, null, null, null, null, null, false, false)),
+                List.of(), List.of(new PatchInput.Rename("label", "old_label")), List.of(), Change.set(new TtlInput("label", 1, TtlUnit.DAY)));
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", renamedAway))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("label");
         verifyNoInteractions(ddlExecutor);
     }
 

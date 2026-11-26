@@ -45,8 +45,8 @@ import java.util.function.Function;
  *   <li>an {@code INTERSECT} or {@code EXCEPT} branch with an output that depends on a masked field, traced through
  *       derived tables, joins and set operations: the rows they compare have no single source a mark could come from;</li>
  *   <li>in a statement that reads a masked field anywhere, an output name at any level or a lambda parameter that equals
- *       a table the statement reads, or begins with it followed by {@code .}, except an output named after the field it
- *       projects bare.</li>
+ *       a table the statement reads, or begins with it followed by {@code .}, except an enrichment field projected bare
+ *       under its qualified flat name.</li>
  * </ul>
  */
 public final class MaskedPlanRules {
