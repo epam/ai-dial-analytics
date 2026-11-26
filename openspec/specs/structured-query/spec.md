@@ -4152,6 +4152,10 @@ A reduction SHALL go one hop. A side that is restricted only by a reduction SHAL
 and no reduction SHALL be carried through a nested join. When both sides of an `INNER` join carry moved
 source-only conjuncts, each SHALL be reduced by the other's own moved conjuncts.
 
+Neither side SHALL be reduced when either key is masked for the caller (see "A masked field reads as absent at every
+reference"). The key set would hold the stored values of absent cells, so what the reduced side reads, and whether the
+statement stays within its budget, would depend on values absent to the caller.
+
 A reduction SHALL NOT change the statement's rows. A row of the reduced side whose key the restricted side cannot
 produce has no partner, so the join drops it in every allowed position. A `NULL` key never satisfies the
 equality, so excluding it changes nothing.
@@ -4190,6 +4194,12 @@ second and a fraction of the budget, returning the rows of an independently writ
 - **WHEN** the statement is rendered
 - **THEN** the conjunct moves into `a`'s operand block
 - **AND** `b` is not reduced, because `a` carries no moved source-only conjunct
+
+#### Scenario: A join on a masked key is not reduced
+
+- **GIVEN** `a JOIN b ON a.k = b.k WHERE b.x = 1`, for a caller for whom `k` is masked
+- **WHEN** the statement is rendered
+- **THEN** neither operand block carries a restriction built from the other's keys
 
 #### Scenario: NULL and duplicate keys keep the unreduced result
 
@@ -4867,7 +4877,9 @@ rewritten conjunct takes the form the next requirement gives it.
 A query that references a masked field SHALL be refused `400 bad_request`, on every surface that resolves it, when it
 carries a name that equals, case-sensitively, the name of a table it reads (its source or an enrichment), or begins
 with that name followed by `.`. An output whose name is the qualified flat name of the field it projects, referenced
-bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt. Within the block
+bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt. A source field's
+name is not qualified, so a source column exposed under the name of a table the query reads is not exempt, projected
+bare or through a wildcard. Within the block
 that defines such an output, the data store can resolve its name to the stored column instead of the output, in any
 clause. So every reference the service renders to the output inside that block — a sort, grouping, `having`, distinct
 or window key, a flag, or another output — SHALL be the output's masked expression, never its name. A block that
@@ -4938,6 +4950,9 @@ SHALL be refused `400 bad_request`.
 - **AND WHEN** it projects the enrichment field `dial_usage_log_payload.request_body` without `as`, beside a masked
   field
 - **THEN** the query runs, the output keyed `dial_usage_log_payload.request_body`
+- **AND WHEN** a table `orders` exposes a source column under the name `orders`, stored under another name, and the
+  caller projects that field without `as` beside a field masked for it
+- **THEN** the query is refused `400 bad_request`
 
 #### Scenario: References to an enrichment field's own name read its masked value
 
@@ -4982,6 +4997,10 @@ SHALL be refused `400 bad_request`.
 - **AND WHEN** it projects `execution_path` with `distinct`, and a row of `P1` stores an empty array
 - **THEN** the response carries one row with an empty `execution_path`, unmarked, and one with a null
   `execution_path`, marked
+- **AND WHEN** it projects `execution_path` as `path` in aggregate mode with `count()`, grouped by `path`
+- **THEN** the same two groups come back, each counting only its own rows
+- **AND WHEN** the distinct projection also outputs the integer literal `3`
+- **THEN** the query runs and returns the same two rows, each with `3`
 
 ### Requirement: A comparison on a masked field keeps the table's pruning
 

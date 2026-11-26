@@ -502,7 +502,10 @@ public class CompositeQueryBuilder {
                     StructuredQueryBuilder.sourceOnlyConjuncts(restricted, OperandPushdown.and(restrictedConjuncts));
             final QueryFieldBinding reducedBinding = reduced.bindings().get(reducedKey);
             final QueryFieldBinding restrictedBinding = restricted.bindings().get(restrictedKey);
+            // A masked key is not reduced: the set holds stored values, absent cells' included, so what the reduced side
+            // reads, and whether the statement fits its budget, would turn on values absent to the caller.
             if (sourceOnly.isEmpty() || reducedBinding == null || restrictedBinding == null
+                    || reducedBinding.isMasked() || restrictedBinding.isMasked()
                     || !EnrichmentJoins.referencesSourceOnly(reduced, Set.of(reducedKey))
                     || !EnrichmentJoins.referencesSourceOnly(restricted, Set.of(restrictedKey))) {
                 return;
@@ -638,8 +641,14 @@ public class CompositeQueryBuilder {
             String alias;
             do {
                 alias = "t" + aliases++;
-            } while (declared.contains(alias));
+            } while (captured(alias));
             return alias;
+        }
+
+        /** Whether a declared name equals {@code alias} or begins with it and '.': either can capture its qualified columns. */
+        private boolean captured(String alias) {
+            final String qualified = alias + ".";
+            return declared.contains(alias) || declared.stream().anyMatch(name -> name.startsWith(qualified));
         }
 
         private record Operand(Table<?> table, Map<String, Field<?>> fields, Map<String, ColumnMark> marks) {}

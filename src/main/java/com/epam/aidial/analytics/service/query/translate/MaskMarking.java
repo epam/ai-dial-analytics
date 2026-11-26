@@ -84,6 +84,23 @@ final class MaskMarking {
     /** The bare-absent flag of the output it keys, apart from every mark key. */
     private record BareKey(Object source) {}
 
+    /**
+     * A scalar subquery as one occurrence: each is rendered and flagged apart, so two equal ones are two sources, as the
+     * renderer's identity-keyed flags have them.
+     */
+    private record Occurrence(Object subquery) {
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Occurrence(Object that) && that == subquery;
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(subquery);
+        }
+    }
+
     private MaskMarking() {
     }
 
@@ -231,9 +248,10 @@ final class MaskMarking {
      * the field it projects bare (an enrichment field projected without {@code as}) is exempt, and the builder renders
      * every reference to it as the field's masked expression, never its name.
      *
-     * @param names the block's resolved output names, in projection order (one per {@code query.select()} entry)
+     * @param outputs by output name, in projection order, what each output of the block computes (a wildcard's columns
+     *                included)
      */
-    static void refuseCapturingNames(QueryEntityModel model, StructuredQuery query, List<String> names, boolean wildcardMasked) {
+    static void refuseCapturingNames(QueryEntityModel model, StructuredQuery query, Map<String, Expr> outputs, boolean wildcardMasked) {
         if (!wildcardMasked && StructuredQueryBuilder.referencedFields(query).stream()
                 .map(name -> model.bindings().get(name))
                 .noneMatch(binding -> binding != null && binding.isMasked())) {
@@ -243,10 +261,9 @@ final class MaskMarking {
         tables.add(model.table().getName());
         model.enrichments().forEach(join -> tables.add(join.table().getName()));
         final List<OutputColumn> select = query.select() == null ? List.of() : query.select();
-        for (int i = 0; i < select.size() && i < names.size(); i++) {
-            final String name = names.get(i);
-            final boolean exempt = select.get(i).expr() instanceof FieldExpr(String field) && field.equals(name);
-            if (!exempt && captures(name, tables)) {
+        for (final Map.Entry<String, Expr> output : outputs.entrySet()) {
+            final String name = output.getKey();
+            if (!exemptOutput(name, output.getValue()) && captures(name, tables)) {
                 throw new QueryValidationException("output name '" + name + "' is refused: it names a table the query reads"
                         + " (or begins with one followed by '.'), and the query reads a masked field, whose mask such a name"
                         + " could capture. Alias the output to another name");
@@ -263,6 +280,15 @@ final class MaskMarking {
                         + " parameter otherwise");
             }
         }
+    }
+
+    /**
+     * Whether an output named {@code name} computing {@code expr} is exempt from the table-name rule: an enrichment field
+     * projected without {@code as}, named by its qualified flat name. A bare name never is, so a source column exposed
+     * under a table's name is refused beside a masked field like any other output so named.
+     */
+    static boolean exemptOutput(String name, Expr expr) {
+        return expr instanceof FieldExpr(String field) && field.equals(name) && name.indexOf('.') > 0;
     }
 
     /** Refuses a top-level output named {@code $masked}, the reserved row member. */
@@ -319,8 +345,9 @@ final class MaskMarking {
             case ScalarSubqueryExpr scalar -> {
                 final Field<?> flag = scalar.subquery() == null ? null : subqueries.scalarFlag(scalar.subquery());
                 if (flag != null) {
-                    indicators.putIfAbsent(scalar.subquery(), flag);
-                    into.add(new Key(scalar.subquery(), window));
+                    final Occurrence source = new Occurrence(scalar.subquery());
+                    indicators.putIfAbsent(source, flag);
+                    into.add(new Key(source, window));
                 }
             }
             case FnExpr fn -> {

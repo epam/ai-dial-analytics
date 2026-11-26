@@ -162,6 +162,56 @@ class MaskedCompositeRenderTest {
         assertThat(MaskFlag.Marks.of(select.getSelect()).outputs()).containsExactly("p", "share");
     }
 
+    /** Two equal scalar subqueries are rendered and evaluated apart, so each output is marked by its own one's flag. */
+    @Test
+    void equalScalarSubqueriesEachMarkFromTheirOwnFlag() {
+        final List<OutputColumn> outputs = List.of(new OutputColumn(new ScalarSubqueryExpr(highest()), "a"),
+                new OutputColumn(new ScalarSubqueryExpr(highest()), "b"));
+        final SelectQuery<Record> select = build(new CompositeQuery(new EntityRelation("t", T), block(outputs, null),
+                List.of(column("a"), column("b"))));
+
+        assertThat(MaskFlag.Marks.of(select.getSelect()).flags()).as(render(select)).hasSize(2);
+    }
+
+    private static CompositeQuery highest() {
+        return new CompositeQuery(new EntityRelation("t", T), new StructuredQuery("t", null, QueryMode.AGGREGATE, false,
+                List.of(new OutputColumn(new FnExpr("max", false, List.of(new FieldExpr("secret"))), "top")), List.of(), null, null, null),
+                List.of(column("top")));
+    }
+
+    /** A declared name led by an operand alias and '.' could capture that operand's flag columns, so the alias avoids it. */
+    @Test
+    void operandAliasAvoidsDeclaredNameLedByIt() {
+        final CompositeQuery inner = leaf(List.of(new OutputColumn(new FieldExpr("secret"), "cost")), List.of(column("cost")));
+        final String plain = render(build(over(new DerivedRelation(inner), "cost")));
+        assertThat(plain).as("the operand is t0 when nothing is in the way").contains("\"t0\".\"__adas_mf_0\"");
+
+        final CompositeQuery root = new CompositeQuery(new DerivedRelation(inner), block(List.of(new OutputColumn(new FieldExpr("cost"), null),
+                new OutputColumn(new ValueExpr(ValueType.INTEGER, "0"), "t0.__adas_mf_0")), null), List.of(column("cost"), column("t0.__adas_mf_0")));
+        final String sql = render(build(root));
+        assertThat(sql).as(sql).contains("\"__adas_mf_0\"").doesNotContain("\"t0\".");
+    }
+
+    /** A join on a masked key reduces neither side: the key set would hold the stored values of absent cells. */
+    @Test
+    void joinOnMaskedKeyIsNotReduced() {
+        final List<JoinRelation.JoinColumn> columns = List.of(new JoinRelation.JoinColumn(column("lp"), true, "p"),
+                new JoinRelation.JoinColumn(column("ls"), true, "secret"), new JoinRelation.JoinColumn(column("rp"), false, "p"),
+                new JoinRelation.JoinColumn(column("rs"), false, "secret"));
+        final FilterNode bounded = new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("rp"), new ValueExpr(ValueType.STRING, "x")));
+        final List<OutputColumn> select = List.of(new OutputColumn(new FieldExpr("lp"), null));
+
+        final String plain = render(build(new CompositeQuery(new JoinRelation(new EntityRelation("t", T), new EntityRelation("t", T),
+                JoinKind.INNER, new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("lp"), new FieldExpr("rp"))), columns),
+                block(select, bounded), List.of(column("lp"))))).toLowerCase(Locale.ROOT);
+        assertThat(plain).as("a join on a visible key is reduced: " + plain).contains(" in (select ");
+
+        final String masked = render(build(new CompositeQuery(new JoinRelation(new EntityRelation("t", T), new EntityRelation("t", T),
+                JoinKind.INNER, new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("ls"), new FieldExpr("rs"))), columns),
+                block(select, bounded), List.of(column("lp"))))).toLowerCase(Locale.ROOT);
+        assertThat(masked).as(masked).doesNotContain(" in (select ");
+    }
+
     @Test
     void planOverNoMaskedFieldProjectsNoFlag() {
         final CompositeQuery inner = leaf(List.of(new OutputColumn(new FieldExpr("p"), "v")), List.of(column("v")));

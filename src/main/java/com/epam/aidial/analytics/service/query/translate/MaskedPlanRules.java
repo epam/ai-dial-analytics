@@ -119,7 +119,7 @@ public final class MaskedPlanRules {
         if (select.isEmpty()) {
             for (final RelationColumn column : columns) {
                 outputs.add(input.apply(column.name()));
-                names.merge(column.name(), true, Boolean::logicalAnd);
+                names.merge(column.name(), MaskMarking.exemptOutput(column.name(), new FieldExpr(column.name())), Boolean::logicalAnd);
             }
             return outputs;
         }
@@ -132,7 +132,7 @@ public final class MaskedPlanRules {
             }
             visitExpr(expr, depends);
             outputs.add(depends);
-            names.merge(resolved.get(i), expr instanceof FieldExpr(String field) && field.equals(resolved.get(i)), Boolean::logicalAnd);
+            names.merge(resolved.get(i), MaskMarking.exemptOutput(resolved.get(i), expr), Boolean::logicalAnd);
         }
         return outputs;
     }

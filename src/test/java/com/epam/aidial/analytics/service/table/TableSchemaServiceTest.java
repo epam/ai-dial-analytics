@@ -835,6 +835,46 @@ class TableSchemaServiceTest {
         verifyNoInteractions(ddlExecutor);
     }
 
+    /** Without the clearance a sensitive column is hidden, whatever the column policies decide: never named as masked. */
+    @Test
+    void maskedSensitiveColumnWithoutTheClearanceIsHiddenForTtl() {
+        final ColumnMappingEntity birth = column("widget_metrics", "birth_date", QueryFieldType.TIMESTAMP, 1);
+        birth.setSensitive(true);
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0), birth);
+        withdrawClearance();
+        maskByColumnPolicy("birth_date", "widget_id");
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(new TtlInput("birth_date", 1, TtlUnit.DAY)))))
+                .as("unknown, as a hidden column is: a 403 naming it would confirm it exists")
+                .isInstanceOf(TableValidationException.class)
+                .hasMessageNotContaining("masks");
+        widgetMetricsWithTtlOn(birth);
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", ttlPatch(Change.set(null))))
+                .isInstanceOf(com.epam.aidial.analytics.exception.SensitiveClearanceRequiredException.class);
+        verifyNoInteractions(ddlExecutor);
+    }
+
+    /** A column added in the same request is named by no policy list, so the policies' decision for unnamed columns masks it. */
+    @Test
+    void ttlOnColumnAddedInTheSameRequestThatPoliciesMaskIsColumnNotEntitled() {
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0));
+        final com.epam.aidial.analytics.service.query.model.FilterNode p1 = new com.epam.aidial.analytics.service.query.model.ComparisonNode(
+                com.epam.aidial.analytics.service.query.model.ComparisonOp.EQ,
+                List.of(new com.epam.aidial.analytics.service.query.model.FieldExpr("project"),
+                        new com.epam.aidial.analytics.service.query.model.ValueExpr(com.epam.aidial.analytics.service.query.model.ValueType.STRING, "P1")));
+        given(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .willReturn(new com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility(java.util.Set.of("widget_id"),
+                        java.util.Map.of(), java.util.Set.of("widget_id"), List.of(p1)));
+        final PatchInput addWithTtl = new PatchInput(
+                List.of(new ColumnInput("expires_at", "expires_at", QueryFieldType.TIMESTAMP, null, null, null, null, null, null, false, false)),
+                List.of(), List.of(), List.of(), Change.set(new TtlInput("expires_at", 1, TtlUnit.DAY)));
+
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", addWithTtl))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("expires_at");
+        verifyNoInteractions(ddlExecutor);
+    }
+
     @Test
     void renameRewritesTheListsAndBumpsTheGenerationAndDropPrunesThem() {
         final TableDefinitionEntity def = source("widget_metrics", TableStatus.ACTIVE);

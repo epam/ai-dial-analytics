@@ -36,6 +36,7 @@ import com.epam.aidial.analytics.service.query.model.SortDir;
 import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.service.query.model.WindowOrder;
 import org.jooq.Condition;
@@ -570,7 +571,7 @@ public class StructuredQueryBuilder {
             MaskMarking.refuseReservedName(List.copyOf(outputs.keySet()));
         }
         final boolean wildcard = query.select() == null || query.select().isEmpty();
-        MaskMarking.refuseCapturingNames(model, query, wildcard ? List.of() : OutputColumnNaming.resolve(query.select()),
+        MaskMarking.refuseCapturingNames(model, query, outputs,
                 wildcard && !pageBlock && outputs.values().stream().anyMatch(expr -> referencesMasked(expr, model)));
 
         List<Field<?>> flags = List.of();
@@ -602,8 +603,14 @@ public class StructuredQueryBuilder {
         final boolean collapsed = grouped && marked;
         if (collapsed) {
             // A distinct whose rows carry marks is grouped by every output, by its expression and never its name, so the
-            // collapsed rows' flags combine instead of splitting the row.
-            final List<Field<?>> groupKeys = new ArrayList<>(outputFields.values());
+            // collapsed rows' flags combine instead of splitting the row. A constant output splits no group and is left
+            // out: ClickHouse reads a bare integer key as a projection position.
+            final List<Field<?>> groupKeys = new ArrayList<>();
+            outputFields.forEach((name, field) -> {
+                if (!(outputs.get(name) instanceof ValueExpr)) {
+                    groupKeys.add(field);
+                }
+            });
             groupKeys.addAll(bareFlags);
             select.addGroupBy(groupKeys);
         } else if (query.distinct()) {
@@ -1022,8 +1029,10 @@ public class StructuredQueryBuilder {
         for (final String key : groupBy) {
             groupFields.add(resolveGroupKey(key, bindings, selectAliases, shadowingAliases));
             // A bare masked composite key reads its empty value where it is absent; its row flag keeps those rows out of
-            // the group of the rows that store an empty value.
-            final Field<?> bare = MaskMarking.bareIndicator(new FieldExpr(key), bindings);
+            // the group of the rows that store an empty value. A key naming an output reads that output's expression.
+            final Expr keyExpr = exprTranslator.resolveFieldOrNull(key, bindings) != null ? new FieldExpr(key)
+                    : outputs.getOrDefault(key, new FieldExpr(key));
+            final Field<?> bare = MaskMarking.bareIndicator(keyExpr, bindings);
             if (bare != null) {
                 groupFields.add(bare);
             }

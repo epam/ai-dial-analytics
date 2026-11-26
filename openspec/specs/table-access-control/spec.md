@@ -1945,11 +1945,13 @@ naming it SHALL be refused as naming an unknown column (`422`), while an `add` o
 still refused `422` as a name that already exists, as for a hidden sensitive column (see
 [table-management](../table-management/spec.md), "Modify table schema via PATCH"). A `ttl.column` SHALL resolve
 against the columns visible to the caller only, so naming a hidden column fails as naming an undeclared one (`422`)
-and TTL validation never reveals its type or nullability; a `ttl.column` naming a column masked for the caller SHALL be
-refused `403 column_not_entitled` naming it, before that validation; and while the stored TTL is on a column hidden from the
-caller by a column policy, or masked for it, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled`
-naming that column, and the TTL left unchanged — where the column is also sensitive and the caller lacks the
-clearance, the response is `403 column_not_entitled` too. The list item's `column_count` SHALL not
+and TTL validation never reveals its type or nullability; a `ttl.column` naming a column masked for the caller, or one
+the same request adds that the caller's column policies would mask, SHALL be refused `403 column_not_entitled` naming
+it, before that validation; and while the stored TTL is on a column hidden from the caller by a column policy, or
+masked for it, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled` naming that column,
+and the TTL left unchanged — where a column a column policy hides is also sensitive and the caller lacks the
+clearance, the response is `403 column_not_entitled` too. A sensitive column the caller lacks the clearance for is
+hidden, not masked, whatever the column policies decide, so the TTL rules of a hidden sensitive column apply to it. The list item's `column_count` SHALL not
 count it (see [table-management](../table-management/spec.md), "Read and list table definitions"), and an import
 entry's `prev` SHALL omit it (see [catalog-export-import](../catalog-export-import/spec.md), "Import entries"). No
 response SHALL mark a hidden column as withheld or carry a placeholder for it; as for an unentitled sensitive column,
@@ -2441,6 +2443,9 @@ one.
 - **THEN** the response is the `422` planning diagnostic
 - **AND WHEN** it previews an aggregate whose SQL statement plans and reads `deployment`
 - **THEN** the response is `403 column_not_entitled` naming `deployment`
+- **AND WHEN** that statement also names an output after its input table, which a query beside a masked field may not
+- **THEN** the response is still `403 column_not_entitled` naming `deployment`: a pipeline reads without the mask, so
+  the name rule a mask brings does not apply to it
 
 #### Scenario: A preview's note omits the instants of a masked version column
 

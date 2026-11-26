@@ -491,13 +491,15 @@ collides on the exposed name or on the physical one, and before any `ALTER` is i
 the name is taken, and it is the accepted limit of hiding (see `authentication`). The per-table column
 limit SHALL count hidden columns too. A column masked for the caller (see
 [table-access-control](../table-access-control/spec.md), "Column visibility by caller role") is among the visible
-columns here, except that a TTL cannot be over it. A `ttl.column` SHALL resolve against the visible columns, so naming
+columns here, except that a TTL cannot be over it. A sensitive column the caller lacks the clearance for is hidden, not
+masked, whatever the column policies decide. A `ttl.column` SHALL resolve against the visible columns, so naming
 a hidden column fails as naming an undeclared one (422); naming a masked one SHALL be refused `403 column_not_entitled`
-naming it, before the TTL's type and nullability are validated. While the stored TTL
+naming it, before the TTL's type and nullability are validated, and so SHALL naming a column the same request adds
+when the caller's column policies would mask it. While the stored TTL
 is on a column hidden from the caller or masked for it, any `ttl` member (set, replace or remove) SHALL be refused and
-the TTL left unchanged: with `403 column_not_entitled` naming that column when a column policy hides or masks it for
-the caller, whether or not it is also sensitive, and otherwise, where it is sensitive and the caller lacks the
-clearance, with `403 forbidden`. A TTL decides which rows are removed, so one over a masked column would disclose its
+the TTL left unchanged: with `403 column_not_entitled` naming that column when a column policy hides it from the
+caller, whether or not it is also sensitive, or masks it for the caller, and otherwise, where it is sensitive and the
+caller lacks the clearance, with `403 forbidden`. A TTL decides which rows are removed, so one over a masked column would disclose its
 stored values on the rows where the caller reads it absent. A caller from which neither the clearance nor a column
 policy hides or masks any column resolves against every column and MAY make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
 of a system column (reserved `_`-prefix), the grain key, or an ordering-key column (422); a `drop`
@@ -913,6 +915,18 @@ materialization what declaration enforces.
 - **THEN** each response is `403 column_not_entitled` naming that column, and no `ALTER` is issued
 - **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
 - **THEN** the response is `403 column_not_entitled` naming `c`, and the TTL is unchanged
+- **AND WHEN** the caller's column policies would mask a column no list names, and one request adds `timestamp` column
+  `z` and sets a TTL on it
+- **THEN** the response is `403 column_not_entitled` naming `z`, and no `ALTER` is issued
+
+#### Scenario: A masked sensitive column is hidden from a caller without the clearance
+
+- **GIVEN** an `ACTIVE` table whose sensitive `timestamp` column `c` the column policies mask for a caller holding
+  `TABLE_MODIFY` but not the clearance
+- **WHEN** the caller sends a full `ttl` object naming `c`
+- **THEN** the response is the `422` of an undeclared column, as for any hidden column
+- **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
+- **THEN** the response is `403 forbidden`, as for a hidden sensitive column, and the TTL is unchanged
 
 ### Requirement: Grain-based enrichment join with enforced cardinality
 

@@ -234,6 +234,15 @@ class ColumnPolicyPipelineIntegrationTest extends AbstractOidcAuthIntegrationTes
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("column_not_entitled"))
                 .andExpect(jsonPath("$.message").value(allOf(containsString("deployment"), containsString(MASKED_REFUSAL))));
+
+        // An output named after the input table, which a query beside a masked field may not carry: a pipeline reads
+        // without the mask, so the name rule does not apply, and the masked column is what refuses it.
+        asAdmin(delete("/v1/pipelines/cpp-rollup")).andExpect(status().isNoContent());
+        rollup("SELECT deployment, count(DISTINCT user_hash) AS dial_usage_log FROM dial_usage_log GROUP BY 1", false);
+        send(post("/v1/pipelines/cpp-rollup/preview"), registryWith("cpp-x"), "")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("column_not_entitled"))
+                .andExpect(jsonPath("$.message").value(allOf(containsString("deployment"), containsString(MASKED_REFUSAL))));
     }
 
     // --- the runner's scan ------------------------------------------------------------------------------

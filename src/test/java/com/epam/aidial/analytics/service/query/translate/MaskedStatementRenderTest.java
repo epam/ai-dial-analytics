@@ -178,6 +178,56 @@ class MaskedStatementRenderTest {
         build(row(List.of(new OutputColumn(new FieldExpr("p"), "$Masked")), null));
     }
 
+    /** A source column exposed under the table's name is not exempt projected bare: only a qualified enrichment name is. */
+    @Test
+    void sourceFieldExposedUnderTheTableNameIsRefusedBesideMaskedField() {
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(model.bindings());
+        bindings.put("t", new QueryFieldBinding("t", DSL.field(DSL.name("t", "t_ref"), String.class), QueryFieldType.STRING));
+        final QueryEntityModel exposed = new QueryEntityModel("t", model.table(), bindings, List.of(), List.of());
+
+        assertThatThrownBy(() -> builder.build(dsl, exposed, row(List.of(column(new FieldExpr("t")), column(new FieldExpr("secret"))), null)))
+                .isInstanceOf(QueryValidationException.class).hasMessageContaining("output name 't'");
+        builder.build(dsl, exposed, row(List.of(column(new FieldExpr("t")), column(new FieldExpr("p"))), null));
+    }
+
+    /** Grouped by an output's name, a bare masked composite output still keeps its absent cells apart from stored empty ones. */
+    @Test
+    void groupKeyNamingAnOutputOfBareMaskedCompositeAlsoGroupsByItsRowFlag() {
+        final OutputColumn rows = new OutputColumn(new FnExpr("count", false, List.of()), "rows");
+        final String byField = clause(render(build(new StructuredQuery("t", null, QueryMode.AGGREGATE, false,
+                List.of(column(new FieldExpr("tags")), rows), List.of("tags"), null, null, null))), "group by");
+        final String byOutput = clause(render(build(new StructuredQuery("t", null, QueryMode.AGGREGATE, false,
+                List.of(new OutputColumn(new FieldExpr("tags"), "path"), rows), List.of("path"), null, null, null))), "group by");
+
+        assertThat(byOutput).as(byOutput).startsWith("\"path\", ");
+        assertThat(byField).as("the same row flag follows each key").endsWith(byOutput.substring("\"path\", ".length()));
+    }
+
+    /** A constant output splits no group, and a bare integer key would read as a projection position. */
+    @Test
+    void distinctWithMarksLeavesConstantOutputsOutOfItsGroupKeys() {
+        final StructuredQuery query = new StructuredQuery("t", null, QueryMode.ROW, true,
+                List.of(new OutputColumn(new ValueExpr(ValueType.INTEGER, "3"), "k"), column(new FieldExpr("tags"))), null, null, null, null);
+        final String sql = render(build(query));
+
+        assertThat(sql).contains("3 \"k\"");
+        assertThat(clause(sql, "group by")).as(sql).doesNotContainPattern("(^|,\\s*)-?\\d+\\s*(,|$)");
+    }
+
+    /** What follows {@code keyword} in {@code sql}, up to the next clause. */
+    private static String clause(String sql, String keyword) {
+        final String lower = sql.toLowerCase(Locale.ROOT);
+        final int start = lower.lastIndexOf(keyword + " ") + keyword.length() + 1;
+        int end = sql.length();
+        for (final String next : List.of(" having ", " order by ", " limit ")) {
+            final int at = lower.indexOf(next, start);
+            if (at >= 0 && at < end) {
+                end = at;
+            }
+        }
+        return sql.substring(start, end).trim();
+    }
+
     @Test
     void filterOnMaskedScalarComparesTheStoredColumnBehindItsMask() {
         final String greater = render(build(row(List.of(column(new FieldExpr("p"))),

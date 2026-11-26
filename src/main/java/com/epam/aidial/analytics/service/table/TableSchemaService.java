@@ -161,7 +161,8 @@ public class TableSchemaService {
             final boolean policyHidden = !visibility.allows(col.getName());
             if (policyHidden) {
                 policyHiddenPhysical.put(col.getSourceName(), col.getName());
-            } else if (!visibility.visible(col.getName())) {
+            } else if (!visibility.visible(col.getName()) && !(col.isSensitive() && !cleared)) {
+                // Without the clearance a sensitive column is hidden, whatever the column policies decide.
                 maskedPhysical.put(col.getSourceName(), col.getName());
             }
             if (col.isSensitive() && !cleared || policyHidden) {
@@ -396,6 +397,12 @@ public class TableSchemaService {
                 final String exposedName = maskedAfter.remove(rename.fromSourceName());
                 if (exposedName != null) {
                     maskedAfter.put(rename.to(), exposedName);
+                }
+            }
+            // A column added here is named by no policy list, so the policies' decision for unnamed columns masks it or not.
+            for (final ResolvedAdd add : adds) {
+                if (visibility.masks(add.column().name()) != null) {
+                    maskedAfter.put(add.column().sourceName(), add.column().name());
                 }
             }
             final String ttlColumn = patch.ttl().value().column();

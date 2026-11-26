@@ -443,6 +443,13 @@ class MaskedExecutionIntegrationTest {
         assertThat(distinct.stream().map(row -> show(row.get("tags")) + " " + row.get(MaskFlag.MEMBER)).sorted().toList())
                 .containsExactly("[] null", "[a] null", "null [tags]");
 
+        // A constant output beside it: left out of the group keys, where a bare integer would read as a position.
+        final List<Map<String, Object>> withConstant = run(builder.build(dsl, arraysModel(), new StructuredQuery(ARRAYS, null, QueryMode.ROW, true,
+                List.of(new OutputColumn(new ValueExpr(ValueType.LONG, "2"), "k"), new OutputColumn(field("tags"), null)), null, null, null,
+                new OffsetPage(0, 10, false))));
+        assertThat(withConstant.stream().map(row -> row.get("k") + " " + show(row.get("tags")) + " " + row.get(MaskFlag.MEMBER)).sorted().toList())
+                .containsExactly("2 [] null", "2 [a] null", "2 null [tags]");
+
         final RelationColumn v = new RelationColumn("v", QueryFieldType.ARRAY, QueryFieldType.STRING, ResultColumnKind.ARRAY, ResultColumnKind.STRING);
         final CompositeQuery branch = arraysLeaf(List.of(new OutputColumn(field("tags"), "v")), List.of(v));
         final CompositeQuery union = new CompositeQuery(new SetOpRelation(SetOpKind.UNION, false, List.of(branch, branch), List.of(v)),
@@ -455,13 +462,16 @@ class MaskedExecutionIntegrationTest {
     /** A grouping key over a bare masked array keeps its absent cells apart from a stored empty array. */
     @Test
     void groupingKeyOverBareMaskedArrayKeepsAbsentCellsApartFromStoredEmpty() {
-        final List<Map<String, Object>> groups = run(builder.build(dsl, arraysModel(), new StructuredQuery(ARRAYS, null, QueryMode.AGGREGATE, false,
-                List.of(new OutputColumn(field("tags"), null), new OutputColumn(new FnExpr("count", false, List.of()), "rows")), List.of("tags"),
-                null, null, new OffsetPage(0, 10, false))));
-        assertThat(groups).hasSize(3);
-        final List<Map<String, Object>> absent = groups.stream().filter(row -> row.get("tags") == null).toList();
-        assertThat(absent).singleElement().satisfies(row -> assertThat(row).containsEntry(MaskFlag.MEMBER, List.of("tags")));
-        assertThat(((Number) absent.getFirst().get("rows")).longValue()).isEqualTo(2L);
+        // Grouped by the field, and by an output projecting it under another name.
+        for (final String key : List.of("tags", "path")) {
+            final List<Map<String, Object>> groups = run(builder.build(dsl, arraysModel(), new StructuredQuery(ARRAYS, null, QueryMode.AGGREGATE,
+                    false, List.of(new OutputColumn(field("tags"), key.equals("tags") ? null : key), new OutputColumn(new FnExpr("count", false,
+                    List.of()), "rows")), List.of(key), null, null, new OffsetPage(0, 10, false))));
+            assertThat(groups).as(key).hasSize(3);
+            final List<Map<String, Object>> absent = groups.stream().filter(row -> row.get(key) == null).toList();
+            assertThat(absent).as(key).singleElement().satisfies(row -> assertThat(row).containsEntry(MaskFlag.MEMBER, List.of(key)));
+            assertThat(((Number) absent.getFirst().get("rows")).longValue()).as(key).isEqualTo(2L);
+        }
     }
 
     /**

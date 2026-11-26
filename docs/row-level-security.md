@@ -100,8 +100,6 @@ A **rows-only entry**, one carrying `rows` on a role with no read path, adds its
   an output name or lambda parameter that equals a table the query reads or begins with `<table>.`. An output named
   after the enrichment field it projects, as one projected without `as` is, is allowed. A wildcard query can meet either
   refusal once a masked column joins the wildcard.
-- A DSL `distinct` projection with a window output is refused `400` when an output reads a masked field, until it is
-  supported; the SQL surface runs it.
 - `$masked` is refused as an output name on every surface, for every caller.
 
 **Hiding instead of masking.** On a table where the source, or one of its enrichments, stores a column whose physical
