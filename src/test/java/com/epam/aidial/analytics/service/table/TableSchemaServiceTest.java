@@ -872,6 +872,25 @@ class TableSchemaServiceTest {
         assertThatThrownBy(() -> service.patchSchema("widget_metrics", addWithTtl))
                 .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
                 .hasMessageContaining("expires_at");
+
+        // Hidden by the same decision: no list names it, and the policies hide what no list names.
+        hideByColumnPolicy("widget_id");
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", addWithTtl))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("expires_at");
+
+        // A name a dropped column carried leaves the lists with it: the new column is judged as no list names it.
+        givenActiveWidgetMetrics(column("widget_metrics", "widget_id", QueryFieldType.STRING, 0),
+                column("widget_metrics", "label", QueryFieldType.STRING, 1));
+        given(sensitiveAccess.visibleColumns(org.mockito.ArgumentMatchers.any(TableDefinitionEntity.class)))
+                .willReturn(new com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility(java.util.Set.of("widget_id", "label"),
+                        java.util.Map.of(), java.util.Set.of("widget_id", "label"), List.of(p1)));
+        final PatchInput reused = new PatchInput(
+                List.of(new ColumnInput("label", "label", QueryFieldType.TIMESTAMP, null, null, null, null, null, null, false, false)),
+                List.of("label"), List.of(), List.of(), Change.set(new TtlInput("label", 1, TtlUnit.DAY)));
+        assertThatThrownBy(() -> service.patchSchema("widget_metrics", reused))
+                .isInstanceOf(com.epam.aidial.analytics.exception.ColumnNotEntitledException.class)
+                .hasMessageContaining("label");
         verifyNoInteractions(ddlExecutor);
     }
 

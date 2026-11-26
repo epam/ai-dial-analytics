@@ -2049,8 +2049,8 @@ endpoint SHALL continue to reject cursor pagination (that surface stays deferred
 
 A select entry's `as` key SHALL be optional for every expression kind and in both query modes; no
 query SHALL be rejected for omitting it, except that a query referencing a masked field is refused when a resolved
-name, given or derived, equals a table it reads or begins with that name followed by `.`, other than an output named
-after the field it projects bare (see "A masked field reads as absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
+name, given or derived, equals a table it reads or begins with that name followed by `.`, other than an enrichment
+field projected bare under its qualified flat name (see "A masked field reads as absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
 output column name the way PostgreSQL derives an unnamed target-list name, restricted to the
 expressions this DSL can express:
 

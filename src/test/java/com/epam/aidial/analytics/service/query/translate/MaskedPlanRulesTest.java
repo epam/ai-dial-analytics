@@ -89,6 +89,17 @@ class MaskedPlanRulesTest {
                 .doesNotThrowAnyException();
     }
 
+    /** Only a qualified enrichment name is exempt: a source field exposed under the table's name is refused projected bare. */
+    @Test
+    void bareSourceFieldNamedLikeTheTableIsNotExempt() {
+        final List<OutputColumn> exposedAsTable = List.of(new OutputColumn(new FieldExpr("t"), null), new OutputColumn(new FieldExpr("secret"), null));
+        assertThatThrownBy(() -> MaskedPlanRules.check(new StructuredQuery("t", null, QueryMode.ROW, false, exposedAsTable, null, null, null, null),
+                MASKED, TABLES)).isInstanceOf(QueryValidationException.class).hasMessageContaining("'t'");
+        final List<OutputColumn> enrichment = List.of(new OutputColumn(new FieldExpr("e.c"), null), new OutputColumn(new FieldExpr("secret"), null));
+        assertThatCode(() -> MaskedPlanRules.check(new StructuredQuery("t", null, QueryMode.ROW, false, enrichment, null, null, null, null),
+                MASKED, TABLES)).doesNotThrowAnyException();
+    }
+
     private static void check(CompositeQuery query) {
         MaskedPlanRules.check(query, MASKED, TABLES);
     }

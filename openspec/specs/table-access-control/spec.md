@@ -1946,7 +1946,7 @@ still refused `422` as a name that already exists, as for a hidden sensitive col
 [table-management](../table-management/spec.md), "Modify table schema via PATCH"). A `ttl.column` SHALL resolve
 against the columns visible to the caller only, so naming a hidden column fails as naming an undeclared one (`422`)
 and TTL validation never reveals its type or nullability; a `ttl.column` naming a column masked for the caller, or one
-the same request adds that the caller's column policies would mask, SHALL be refused `403 column_not_entitled` naming
+the same request adds that the caller's column policies would hide or mask, SHALL be refused `403 column_not_entitled` naming
 it, before that validation; and while the stored TTL is on a column hidden from the caller by a column policy, or
 masked for it, any `ttl` member (set, replace or remove) SHALL be refused `403 column_not_entitled` naming that column,
 and the TTL left unchanged — where a column a column policy hides is also sensitive and the caller lacks the

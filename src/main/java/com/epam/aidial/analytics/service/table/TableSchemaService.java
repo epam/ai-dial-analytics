@@ -399,17 +399,24 @@ public class TableSchemaService {
                     maskedAfter.put(rename.to(), exposedName);
                 }
             }
-            // A column added here is named by no policy list, so the policies' decision for unnamed columns masks it or not.
-            for (final ResolvedAdd add : adds) {
-                if (visibility.masks(add.column().name()) != null) {
-                    maskedAfter.put(add.column().sourceName(), add.column().name());
-                }
-            }
             final String ttlColumn = patch.ttl().value().column();
             if (maskedAfter.containsKey(ttlColumn)) {
                 throw new ColumnNotEntitledException("a TTL on column '" + maskedAfter.get(ttlColumn) + "' of table '" + name
                         + "' is refused: a column policy masks it for the caller on some rows, and which rows a TTL removes"
                         + " would disclose its stored values there");
+            }
+            // A column added here is judged as the policies leave it after the request. A name a dropped or renamed column
+            // carried leaves the lists with it, so the new column falls to the decision for a column no list names.
+            final Set<String> renamedAway = new HashSet<>();
+            renamedExposed.forEach(rename -> renamedAway.add(rename.from()));
+            for (final ResolvedAdd add : adds) {
+                final String exposedName = add.column().name();
+                final boolean unnamed = droppedExposed.contains(exposedName) || renamedAway.contains(exposedName);
+                if (add.column().sourceName().equals(ttlColumn) && !(unnamed ? visibility.isAll() : visibility.visible(exposedName))) {
+                    throw new ColumnNotEntitledException("a TTL on column '" + exposedName + "' of table '" + name + "' is refused:"
+                            + " a column policy hides or masks it for the caller, and which rows a TTL removes would disclose its"
+                            + " stored values");
+                }
             }
         }
         final Map<String, TableTtlRules.PhysicalColumn> physicalTypes = new LinkedHashMap<>();

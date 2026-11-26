@@ -495,7 +495,8 @@ columns here, except that a TTL cannot be over it. A sensitive column the caller
 masked, whatever the column policies decide. A `ttl.column` SHALL resolve against the visible columns, so naming
 a hidden column fails as naming an undeclared one (422); naming a masked one SHALL be refused `403 column_not_entitled`
 naming it, before the TTL's type and nullability are validated, and so SHALL naming a column the same request adds
-when the caller's column policies would mask it. While the stored TTL
+when the caller's column policies would hide or mask it once the request is applied (a name a column dropped or renamed
+in the same request carried leaves the policies' lists with it). While the stored TTL
 is on a column hidden from the caller or masked for it, any `ttl` member (set, replace or remove) SHALL be refused and
 the TTL left unchanged: with `403 column_not_entitled` naming that column when a column policy hides it from the
 caller, whether or not it is also sensitive, or masks it for the caller, and otherwise, where it is sensitive and the
@@ -915,8 +916,8 @@ materialization what declaration enforces.
 - **THEN** each response is `403 column_not_entitled` naming that column, and no `ALTER` is issued
 - **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
 - **THEN** the response is `403 column_not_entitled` naming `c`, and the TTL is unchanged
-- **AND WHEN** the caller's column policies would mask a column no list names, and one request adds `timestamp` column
-  `z` and sets a TTL on it
+- **AND WHEN** the caller's column policies would hide or mask a column no list names, and one request adds `timestamp`
+  column `z` and sets a TTL on it, or drops visible column `z` and adds a new `z` with a TTL on it
 - **THEN** the response is `403 column_not_entitled` naming `z`, and no `ALTER` is issued
 
 #### Scenario: A masked sensitive column is hidden from a caller without the clearance
