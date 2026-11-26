@@ -13,9 +13,7 @@ The surface lives under `/v1/tables`: create source and enrichment tables, read 
 update descriptions, evolve column schema via PATCH, write rows, and delete definitions. Enrichment
 columns resolve into a source's flat schema through a single-key grain join with enforced 0..1
 cardinality.
-
 ## Requirements
-
 ### Requirement: Table definition catalog
 
 The system SHALL maintain a Postgres-backed catalog of table definitions, each carrying a `name`
@@ -491,13 +489,20 @@ not exist at all. A caller that does not hold `TABLE_SENSITIVE` on the table SHA
 `rename.to` whose name collides with a hidden column SHALL still be rejected (422, already exists), whether it
 collides on the exposed name or on the physical one, and before any `ALTER` is issued. That discloses that
 the name is taken, and it is the accepted limit of hiding (see `authentication`). The per-table column
-limit SHALL count hidden columns too. A `ttl.column` SHALL resolve against the visible columns only, so
-naming a hidden column fails as naming an undeclared one. While the stored TTL is on a column hidden from the
-caller, any `ttl` member (set, replace or remove) SHALL be refused and the TTL left unchanged: with
-`403 column_not_entitled` naming that column when a column policy hides it from the caller, whether or not it is
-also sensitive, and otherwise, where it is sensitive and the caller lacks the clearance, with `403 forbidden`. A
-caller from which neither the clearance nor a column policy hides any column resolves against every column and MAY
-make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
+limit SHALL count hidden columns too. A column masked for the caller (see
+[table-access-control](../table-access-control/spec.md), "Column visibility by caller role") is among the visible
+columns here, except that a TTL cannot be over it. A sensitive column the caller lacks the clearance for is hidden, not
+masked, whatever the column policies decide. A `ttl.column` SHALL resolve against the visible columns, so naming
+a hidden column fails as naming an undeclared one (422); naming a masked one SHALL be refused `403 column_not_entitled`
+naming it, before the TTL's type and nullability are validated, and so SHALL naming a column the same request adds
+when the caller's column policies would hide or mask it once the request is applied (a name a column dropped or renamed
+in the same request carried leaves the policies' lists with it). While the stored TTL
+is on a column hidden from the caller or masked for it, any `ttl` member (set, replace or remove) SHALL be refused and
+the TTL left unchanged: with `403 column_not_entitled` naming that column when a column policy hides it from the
+caller, whether or not it is also sensitive, or masks it for the caller, and otherwise, where it is sensitive and the
+caller lacks the clearance, with `403 forbidden`. A TTL decides which rows are removed, so one over a masked column would disclose its
+stored values on the rows where the caller reads it absent. A caller from which neither the clearance nor a column
+policy hides or masks any column resolves against every column and MAY make any of these changes. The system SHALL reject: a type-change of an existing column (422); a drop or rename
 of a system column (reserved `_`-prefix), the grain key, or an ordering-key column (422); a `drop`
 of the column the table's stored TTL references (422 — remove or repoint the TTL in a prior
 request first, even if the same request also carries a `ttl` member); an `update` of a column that
@@ -902,6 +907,27 @@ materialization what declaration enforces.
 - **AND WHEN** `c` is also sensitive and a caller holding `TABLE_MODIFY` but not `TABLE_SENSITIVE`, from which the
   same policy hides `c`, sends `{"ttl":{}}`
 - **THEN** the response is still `403 column_not_entitled`, not `403 forbidden`
+
+#### Scenario: A TTL cannot be set on or kept changing a masked column
+
+- **GIVEN** an `ACTIVE` table on which a caller holding `TABLE_MODIFY` has `timestamp` column `c` and `string` column
+  `s` masked and no column hidden
+- **WHEN** the caller sends a full `ttl` object naming `c`, and separately one naming `s`
+- **THEN** each response is `403 column_not_entitled` naming that column, and no `ALTER` is issued
+- **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
+- **THEN** the response is `403 column_not_entitled` naming `c`, and the TTL is unchanged
+- **AND WHEN** the caller's column policies would hide or mask a column no list names, and one request adds `timestamp`
+  column `z` and sets a TTL on it, or drops visible column `z` and adds a new `z` with a TTL on it
+- **THEN** the response is `403 column_not_entitled` naming `z`, and no `ALTER` is issued
+
+#### Scenario: A masked sensitive column is hidden from a caller without the clearance
+
+- **GIVEN** an `ACTIVE` table whose sensitive `timestamp` column `c` the column policies mask for a caller holding
+  `TABLE_MODIFY` but not the clearance
+- **WHEN** the caller sends a full `ttl` object naming `c`
+- **THEN** the response is the `422` of an undeclared column, as for any hidden column
+- **AND WHEN** the table's stored TTL is on `c` and the caller sends `{"ttl":{}}`
+- **THEN** the response is `403 forbidden`, as for a hidden sensitive column, and the TTL is unchanged
 
 ### Requirement: Grain-based enrichment join with enforced cardinality
 
@@ -2274,7 +2300,8 @@ caller-effective permissions rules of
 booleans (never null/absent). The object grew from two flags to five with the per-table grants, to
 six with row policies, to seven with column policies, and to eight with `grant`; the earlier names keep their spelling and meaning, so a
 client reading only those is unaffected. `rows_restricted` reports whether row policies confine the caller's reads of
-the table, and `columns_restricted` whether column policies hide any of its columns from the caller.
+the table, and `columns_restricted` whether column policies hide or mask any of its columns from the caller (a masked
+column is listed, and absent on the rows no role allowing it admits).
 `grant` reports whether the caller may manage the table's access configuration.
 `sensitive` reports the clearance (see `table-access-control`) and replaces the former `read_sensitive`
 flag, which SHALL NOT be emitted.
@@ -2299,6 +2326,12 @@ SHALL carry the same object.
   privilege, and `false` for any the caller does not hold, since `TABLE_CREATE` alone confers none of
   them; `grant` is `true` exactly when the creator holds `TABLE_GRANT` — and `rows_restricted = false` and
   `columns_restricted = false`, because a new table carries no entry
+
+#### Scenario: A masked column sets columns_restricted
+
+- **GIVEN** a table on which the caller's governing roles mask a column and hide none
+- **WHEN** it calls `GET /v1/tables/{name}`
+- **THEN** the response lists every column and carries `permissions.columns_restricted = true`
 
 ### Requirement: Seeded column sensitivity on the built-in source tables
 
@@ -4029,3 +4062,4 @@ A table registered over hand-written DDL SHALL use a replicated engine, or the s
 
 - **WHEN** a materialized `upsert_by_key` source is read back
 - **THEN** it reports `write: "upsert_by_key"`, matching its `ReplicatedReplacingMergeTree(_updated_at)` engine
+

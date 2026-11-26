@@ -104,6 +104,26 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         assertThat(bundle).doesNotContain("column_policies").doesNotContain("row_policies").doesNotContain(EXPORTER);
     }
 
+    /**
+     * "An export carries a masked column": the exporter gets the rows of {@code P1} with every column, {@code cxa-g2} the
+     * rows of {@code P2} with {@code k} and {@code project}, so {@code c} is masked, not hidden, and travels in the bundle.
+     */
+    @Test
+    void exportCarriesMaskedColumn() throws Exception {
+        table(COLUMNS, "[{\"source_name\":\"k\",\"name\":\"k\",\"type\":\"string\"},{\"source_name\":\"c\",\"name\":\"c\",\"type\":\"string\"},"
+                + "{\"source_name\":\"project\",\"name\":\"project\",\"type\":\"string\"}]");
+        entry(COLUMNS, EXPORTER, "\"privileges\":[\"get\"],\"rows\":{\"where\":\"project = 'P1'\"}");
+        entry(COLUMNS, "cxa-g2", "\"privileges\":[\"get\"],\"rows\":{\"where\":\"project = 'P2'\"},\"columns\":[\"k\",\"project\"]");
+
+        export(roles(EXPORTER, "cxa-g2"), COLUMNS)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].schema.columns[*].name", org.hamcrest.Matchers.hasItem("c")));
+        // Masked, not visible: the same caller's catalog read lists it and reports the restriction.
+        mockMvc.perform(get("/v1/tables/" + COLUMNS).header(HttpHeaders.AUTHORIZATION, bearer(roles(EXPORTER, "cxa-g2"))))
+                .andExpect(jsonPath("$.columns[*].name", org.hamcrest.Matchers.hasItem("c")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+    }
+
     @Test
     void importRepeatsTheDefineSchemaGate() throws Exception {
         final String bundle = export(fullAdmin(), PLAIN).andReturn().getResponse().getContentAsString();

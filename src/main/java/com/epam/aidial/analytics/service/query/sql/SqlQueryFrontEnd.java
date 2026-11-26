@@ -1,8 +1,11 @@
 package com.epam.aidial.analytics.service.query.sql;
 
+import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.exception.SqlTranslationException;
 import com.epam.aidial.analytics.observability.SqlLog;
+import com.epam.aidial.analytics.service.query.MaskFlag;
 import com.epam.aidial.analytics.service.query.model.SetOpKind;
+import com.epam.aidial.analytics.service.query.translate.MaskedPlanRules;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -149,10 +152,12 @@ public class SqlQueryFrontEnd {
      * statement against {@code INFORMATION_SCHEMA} has no DSL equivalent and is rejected here rather
      * than returned in another shape: the enrichment validators build their own SQL and call this,
      * and must never receive catalog rows in place of a translation. A composite statement is rejected on
-     * the same terms: it executes through {@link #plan}, but the DSL cannot carry it.
+     * the same terms: it executes through {@link #plan}, but the DSL cannot carry it. It plans without the refusals a
+     * masked field brings ({@link MaskedPlanRules}): a pipeline declaration reads without the mask, and the pipeline
+     * refuses every masked column it reads {@code 403 column_not_entitled}.
      */
     public SqlTranslation translate(String sql) {
-        return translate(sql, Privilege.TABLE_READ);
+        return single(plan(sql, Privilege.TABLE_READ, false, false));
     }
 
     /**
@@ -169,7 +174,11 @@ public class SqlQueryFrontEnd {
      * condition pass; a pipeline declaration never does, so a caller value there stays an unknown function.
      */
     public SqlTranslation translate(String sql, Privilege bar, boolean callerValues) {
-        return switch (plan(sql, bar, callerValues)) {
+        return single(plan(sql, bar, callerValues));
+    }
+
+    private static SqlTranslation single(SqlStatementPlan plan) {
+        return switch (plan) {
             case SqlTranslation translation -> translation;
             // Executes, but has no DSL document: a join, a derived table or a subquery is more than one block.
             case SqlCompositeTranslation ignored -> throw new SqlTranslationException(
@@ -214,6 +223,15 @@ public class SqlQueryFrontEnd {
      * itself is refused.
      */
     public SqlStatementPlan plan(String rawSql, Privilege bar, boolean callerValues) {
+        return plan(rawSql, bar, callerValues, true);
+    }
+
+    /**
+     * As {@link #plan(String, Privilege, boolean)}; {@code maskRules} off skips the refusals a masked field brings
+     * ({@link MaskedPlanRules}), for a pipeline statement, which reads without the mask and is refused for any masked
+     * column it reads by the pipeline's own check.
+     */
+    private SqlStatementPlan plan(String rawSql, Privilege bar, boolean callerValues, boolean maskRules) {
         // FINAL is rewritten into a table hint before anything parses the text: Babel has no FINAL modifier
         // and reads `FROM t FINAL` as an alias (see SqlFinalModifier).
         final String finalRewritten = SqlFinalModifier.rewrite(stripTrailingSeparator(rawSql));
@@ -284,6 +302,12 @@ public class SqlQueryFrontEnd {
             parsed = SqlLambdaRewriter.rewrite(parsed);
             final SqlNode validated = planner.validate(parsed);
             final RelRoot root = planner.rel(validated);
+            // `$masked` is the row member a JSON response lists absent cells under, reserved on every surface for the
+            // statement's own outputs; a nested block's column may carry the name.
+            if (root.fields.rightList().contains(MaskFlag.MEMBER)) {
+                throw new SqlTranslationException("output name '" + MaskFlag.MEMBER + "' is reserved: a JSON row lists its"
+                        + " absent and partial cells under it. Alias the output to another name");
+            }
             // The catalog relations live in ADAS, not ClickHouse, so a statement over them is evaluated
             // here instead of being translated into a query against an entity that does not exist.
             if (InformationSchemaExecutor.isMetadataStatement(root)) {
@@ -294,7 +318,11 @@ public class SqlQueryFrontEnd {
                 }
                 return InformationSchemaExecutor.execute(root);
             }
-            return RelToStructuredQueryTranslator.translate(root, snapshot);
+            final SqlStatementPlan plan = RelToStructuredQueryTranslator.translate(root, snapshot);
+            if (maskRules) {
+                refuseOverMaskedFields(plan, snapshot);
+            }
+            return plan;
         } catch (SqlParseException e) {
             throw parseError(sql, e);
         } catch (ValidationException e) {
@@ -377,7 +405,7 @@ public class SqlQueryFrontEnd {
         if (cut <= 0 || cut > sql.length() || sql.charAt(cut - 1) != ')' || !sql.regionMatches(0, rewritten, 0, cut)) {
             throw new SqlTranslationException("could not locate the end of the INSERT column list");
         }
-        final SqlStatementPlan planned = plan(blankHead(sql, cut), bar);
+        final SqlStatementPlan planned = plan(blankHead(sql, cut), bar, false, false);
         return switch (planned) {
             case SqlTranslation translation -> new SqlInsertPlan(targetId.getSimple(), columns, translation);
             case SqlCompositeTranslation composite -> throw compositeRefusal(composite);
@@ -480,6 +508,22 @@ public class SqlQueryFrontEnd {
 
     private static String normalized(SqlNode node) {
         return node.toString().replaceAll("\\s+", " ").toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * The refusals a masked field brings to a planned statement ({@link MaskedPlanRules}): here, where every SQL surface
+     * plans, so validation and a saved query's save refuse what the statement's execution would.
+     */
+    private static void refuseOverMaskedFields(SqlStatementPlan plan, CalciteQueryCatalog.Snapshot snapshot) {
+        try {
+            if (plan instanceof SqlTranslation translation) {
+                MaskedPlanRules.check(translation.query(), snapshot::maskedFields, snapshot::tables);
+            } else if (plan instanceof SqlCompositeTranslation composite) {
+                MaskedPlanRules.check(composite.query(), snapshot::maskedFields, snapshot::tables);
+            }
+        } catch (QueryValidationException e) {
+            throw new SqlTranslationException(e.getMessage(), e);
+        }
     }
 
     /** A parse failure of an INSERT, with the two known non-grammar causes — backticks, SETTINGS — named. */

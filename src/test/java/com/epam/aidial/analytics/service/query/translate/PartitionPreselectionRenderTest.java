@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
+import com.epam.aidial.analytics.service.query.ColumnMask;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.JooqTypes;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
@@ -158,6 +159,23 @@ class PartitionPreselectionRenderTest {
         assertThat(sql).contains("toYYYYMMDD(\"events\".\"day\") IN (SELECT DISTINCT toYYYYMMDD(\"ident\".\"day\") FROM \"ident\" "
                 + "WHERE \"ident\".\"session\" = 's1' SETTINGS final = 0)");
         // One evaluation: ClickHouse carries the source's restriction into the aligned join through day = day.
+        assertThat(occurrences(sql, PRESELECTION)).isEqualTo(1);
+    }
+
+    /** Over a masked lookup field the pre-selection reads the stored value; the statement keeps the mask. */
+    @Test
+    void maskedLookupPreselectsOverTheStoredValueAndTheStatementKeepsTheMask() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put(SESSION, bindings.get(SESSION).masked(ColumnMask.of(DSL.field(DSL.name("events", "deployment"), String.class).eq("d1"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null,
+                true, false);
+
+        final String sql = builder.build(ctx, masked, query(cmp(ComparisonOp.EQ, SESSION, str("s1")), "event_id"),
+                StructuredQueryBuilder.MAX_LIMIT).getSQL(ParamType.INLINED);
+
+        assertThat(sql).contains("FROM \"ident\" WHERE \"ident\".\"session\" = 's1' SETTINGS final = 0)")
+                .contains("\"events\".\"deployment\" = 'd1'");
         assertThat(occurrences(sql, PRESELECTION)).isEqualTo(1);
     }
 

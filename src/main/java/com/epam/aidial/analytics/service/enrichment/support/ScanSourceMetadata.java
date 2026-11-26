@@ -143,7 +143,7 @@ public class ScanSourceMetadata {
     public static Field<?> projected(QueryEntityModel model, Map<String, QueryFieldBinding> bindings, String name) {
         QueryFieldBinding binding = bindings.get(name);
         if (binding != null) {
-            return binding.field();
+            return binding.physicalField();
         }
         if (name != null && name.indexOf('.') > 0) {
             // The fallback is for a column of the base table the role-filtered model omitted. A qualified

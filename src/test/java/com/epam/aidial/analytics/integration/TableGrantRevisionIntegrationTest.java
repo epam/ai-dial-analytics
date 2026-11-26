@@ -490,6 +490,44 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
         }
     }
 
+    /**
+     * "An older revision lists a masked column": {@code grev-ra} reads the rows of {@code P1} with every column, and
+     * {@code grev-rb}, added later, those of {@code P2} with {@code k}, so {@code project} is masked now and listed in the
+     * revision recorded before {@code grev-rb}'s column policy existed.
+     */
+    @Test
+    void olderRevisionListsMaskedColumn() throws Exception {
+        putEntry(SOURCE, "grev-ra", "\"privileges\":[\"read\"],\"rows\":" + projectIn("P1")).andExpect(status().isOk());
+        final int revision = tableUpdates(SOURCE).getFirst();
+        putEntry(SOURCE, "grev-rb", "\"privileges\":[\"read\"],\"rows\":" + projectIn("P2") + ",\"columns\":[\"k\"]").andExpect(status().isOk());
+
+        snapshot(SOURCE, revision, callerWith("grev-ra", "grev-rb"))
+                .andExpect(jsonPath("$.columns[*].name", hasItem("project")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+        live(SOURCE, callerWith("grev-ra", "grev-rb")).andExpect(jsonPath("$.columns[*].name", hasItem("project")))
+                .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+    }
+
+    @Test
+    void systemTableSnapshotReportsColumnsRestrictedForMaskedOnlyCaller() throws Exception {
+        try {
+            putEntry(USAGE, "sysrev-mask-a", "\"privileges\":[\"read\"],\"rows\":{\"where\":\"project_id = 'P1'\"}").andExpect(status().isOk());
+            putEntry(USAGE, "sysrev-mask-b", "\"privileges\":[\"read\"],\"rows\":{\"where\":\"project_id = 'P2'\"},\"columns\":[\"event_id\"]")
+                    .andExpect(status().isOk());
+            final int revision = tableUpdates(USAGE).getFirst();
+
+            snapshot(USAGE, revision, callerWith("sysrev-mask-a", "sysrev-mask-b"))
+                    .andExpect(jsonPath("$.columns").doesNotExist())
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+            // Masked, not hidden: the live read lists a column only sysrev-mask-a allows.
+            live(USAGE, callerWith("sysrev-mask-a", "sysrev-mask-b")).andExpect(jsonPath("$.columns[*].name", hasItem("deployment")))
+                    .andExpect(jsonPath("$.permissions.columns_restricted").value(true));
+        } finally {
+            removeEntry(USAGE, "sysrev-mask-a");
+            removeEntry(USAGE, "sysrev-mask-b");
+        }
+    }
+
     @Test
     void systemTableSnapshotIsTheRecordedStateAndNotFoundBeforeIt() throws Exception {
         final String table = "sysrev_seeded";
@@ -603,6 +641,12 @@ class TableGrantRevisionIntegrationTest extends AbstractOidcAuthIntegrationTest 
     private static String caller(String role) {
         return JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
                 Map.of("sub", role + "-user", "roles", List.of(role), "email", role + "@test"));
+    }
+
+    /** A caller carrying the unmapped provider roles {@code roles}, together. */
+    private static String callerWith(String... roles) {
+        return JwtTestTokens.token(FULL_ISSUER, AUDIENCE,
+                Map.of("sub", String.join("-", roles) + "-user", "roles", List.of(roles), "email", "multi@test"));
     }
 
     private static String fullAdmin() {

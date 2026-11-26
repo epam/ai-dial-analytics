@@ -2,6 +2,14 @@ package com.epam.aidial.analytics.service.query;
 
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
+import com.epam.aidial.analytics.service.query.model.ComparisonNode;
+import com.epam.aidial.analytics.service.query.model.ComparisonOp;
+import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.model.ValueType;
+import com.epam.aidial.analytics.service.query.translate.ExprTranslator;
+import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
+import com.epam.aidial.analytics.service.query.translate.ValueExprToObjectMapper;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
@@ -16,6 +24,7 @@ import com.epam.aidial.analytics.service.table.TableWriteMode;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
 import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
 import com.epam.aidial.analytics.service.table.grant.TableAccessEvaluator;
+import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicy;
 import com.epam.aidial.analytics.service.table.rowpolicy.RowPolicyCodec;
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
@@ -36,6 +45,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,6 +60,8 @@ import static org.mockito.Mockito.mock;
 @ExtendWith(MockitoExtension.class)
 class CatalogQueryServiceTest {
 
+    private static final FilterTranslator FILTERS = new FilterTranslator(new ExprTranslator(new ValueExprToObjectMapper()));
+
     private final DSLContext ctx = new QueryDslConfiguration().clickhouseRenderContext();
 
     @Mock
@@ -60,7 +72,7 @@ class CatalogQueryServiceTest {
     private CatalogQueryService service() {
         // security.mode=none → both filters fail open, so these model-assembly tests see every table and
         // every column.
-        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.NONE));
+        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.NONE), FILTERS, new SecurityClaimsExtractor());
     }
 
     /** Every table readable, with sensitivity answered uniformly — the pre-per-table-grant policy shape. */
@@ -71,7 +83,7 @@ class CatalogQueryServiceTest {
         lenient().when(access.mayRead(anyString())).thenReturn(true);
         lenient().when(access.maySeeSensitive(anyString())).thenReturn(maySeeSensitive);
         lenient().when(access.visibleColumns(any(TableDefinitionEntity.class))).thenReturn(ColumnVisibility.ALL);
-        return new CatalogQueryService(definitions, columns, access);
+        return new CatalogQueryService(definitions, columns, access, FILTERS, new SecurityClaimsExtractor());
     }
 
     /** The real evaluator and column-visibility decision over the mocked catalog, for the current security context. */
@@ -81,7 +93,7 @@ class CatalogQueryServiceTest {
         final SecurityClaimsExtractor claims = new SecurityClaimsExtractor();
         return new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims),
                 new SecurityModeResolver(mode.code()), definitions, governing, claims, mock(ProviderRolePrivileges.class),
-                new RowPolicyCodec(jsonMapper), new ColumnPolicyCodec(jsonMapper));
+                new RowPolicyCodec(jsonMapper), new ColumnPolicyCodec(jsonMapper), columns);
     }
 
     private static TableDefinitionEntity definition(
@@ -476,7 +488,7 @@ class CatalogQueryServiceTest {
     private CatalogQueryService oidcService(String... roles) {
         SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
                 "caller", "n/a", CallerAuthorities.build(EnumSet.noneOf(Privilege.class), List.of(roles))));
-        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.OIDC));
+        return new CatalogQueryService(definitions, columns, realAccess(SecurityMode.OIDC), FILTERS, new SecurityClaimsExtractor());
     }
 
     @AfterEach
@@ -576,7 +588,7 @@ class CatalogQueryServiceTest {
         final QueryFieldBinding full = model.bindings().get("dial_usage_log_payload.request_body_full");
         assertThat(full.isComputed()).isTrue();
         assertThat(full.heavy()).isTrue();
-        assertThat(ComputedField.standInOf(full.field().as("x"))).isNotNull();
+        assertThat(ComputedField.standInOf(full.physicalField().as("x"))).isNotNull();
         assertThat(full.reads()).extracting(field -> field.getUnqualifiedName().last())
                 .containsExactly("request_body", "request_parent_hash", "request_ancestor_hashes", "request_cache_control", "request_time");
         assertThat(model.ownerOf("dial_usage_log_payload.request_body_rebuild")).isNotNull();
@@ -646,6 +658,79 @@ class CatalogQueryServiceTest {
                 .containsExactly("widget_id", "facts.label");
         assertThat(service().findModel("events", Privilege.TABLE_READ).orElseThrow().bindings().keySet())
                 .as("none mode shows every column").containsExactly("widget_id", "secret", "facts.label");
+    }
+
+    /**
+     * A column a confined role allows, but another governing role does not, enters the model masked by the allowing
+     * role's row policy, an enrichment column by the same condition, and discovery marks it.
+     */
+    @Test
+    void columnsMaskedByColumnPolicyStayInTheModelWithTheirMask() {
+        appendSourceWithEnrichment(Privilege.TABLE_READ, "X");
+        final TableDefinitionEntity source = definitions.findById("events").orElseThrow();
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("X", "Y"));
+        lenient().when(columns.findByTableNameOrderByOrdinal("events")).thenReturn(List.of(
+                column("events", "widget_id", QueryFieldType.STRING, 0), column("events", "secret", QueryFieldType.STRING, 1)));
+        final RowPolicyCodec codec = new RowPolicyCodec(new JsonMapperConfiguration().jsonMapper());
+        source.setRowPolicies(codec.write(Map.of("X", widgetIs("w1"), "Y", widgetIs("w2"))));
+        source.setColumnPolicies("{\"X\": [\"widget_id\"]}");
+
+        final QueryEntityModel model = oidcService("X", "Y").findModel("events", Privilege.TABLE_READ).orElseThrow();
+        assertThat(model.bindings().keySet()).containsExactly("widget_id", "secret", "facts.label");
+        assertThat(model.bindings().get("widget_id").isMasked()).isFalse();
+        assertThat(model.bindings().get("secret").isMasked()).isTrue();
+        assertThat(model.bindings().get("facts.label").mask()).as("columns sharing allowing roles share one condition")
+                .isSameAs(model.bindings().get("secret").mask());
+        assertThat(model.baseSchema()).extracting(QuerySchemaFieldDto::name, QuerySchemaFieldDto::masked)
+                .containsExactly(tuple("widget_id", false), tuple("secret", true), tuple("facts.label", true));
+        assertThat(ctx.renderInlined(model.bindings().get("secret").value()))
+                .as("the mask is Y's policy over the source's stored column, and the value is replaced under the null")
+                .contains("ifNull(", "\"events\".\"widget_id\"", "'w2'", "defaultValueOfArgumentType")
+                .doesNotContain("'w1'");
+        assertThat(ctx.renderInlined(model.bindings().get("widget_id").value())).isEqualTo("\"events\".\"widget_id\"");
+    }
+
+    /** A sensitive column stays hidden without the clearance however the column policies would mask it. */
+    @Test
+    void sensitiveColumnWithoutClearanceStaysHiddenEvenWhenItWouldBeMasked() {
+        appendSourceWithEnrichment(Privilege.TABLE_READ, "X");
+        final TableDefinitionEntity source = definitions.findById("events").orElseThrow();
+        source.getAccess().setRolesFor(Privilege.TABLE_READ, List.of("X", "Y"));
+        lenient().when(columns.findByTableNameOrderByOrdinal("events")).thenReturn(List.of(
+                column("events", "widget_id", QueryFieldType.STRING, 0), sensitiveColumn("events", "secret", QueryFieldType.STRING, 1)));
+        source.setRowPolicies(new RowPolicyCodec(new JsonMapperConfiguration().jsonMapper())
+                .write(Map.of("X", widgetIs("w1"), "Y", widgetIs("w2"))));
+        source.setColumnPolicies("{\"X\": [\"widget_id\"]}");
+
+        assertThat(oidcService("X", "Y").findModel("events", Privilege.TABLE_READ).orElseThrow().bindings())
+                .containsKey("widget_id").doesNotContainKey("secret");
+    }
+
+    /** A computed field is masked when a column it returns is, its mask the conjunction of theirs. */
+    @Test
+    void computedFieldsOverMaskedColumnsAreMasked() {
+        stubPayloadEntity(column("dial_usage_log_payload", "request_body", QueryFieldType.STRING, 0),
+                column("dial_usage_log_payload", "request_cache_control", QueryFieldType.STRING, 1));
+        final TableDefinitionEntity source = definitions.findById("dial_usage_log").orElseThrow();
+        source.getAccess().setRead(List.of("X", "Y"));
+        final TableDefinitionEntity payload = definitions.findBySourceTable("dial_usage_log").getFirst();
+        lenient().when(definitions.findById("dial_usage_log_payload")).thenReturn(Optional.of(payload));
+        lenient().when(columns.findByTableNameOrderByOrdinal("dial_usage_log")).thenReturn(List.of(
+                column("dial_usage_log", "trace_id", QueryFieldType.STRING, 0), column("dial_usage_log", "widget_id", QueryFieldType.STRING, 1)));
+        source.setRowPolicies(new RowPolicyCodec(new JsonMapperConfiguration().jsonMapper())
+                .write(Map.of("X", widgetIs("w1"), "Y", widgetIs("w2"))));
+        source.setColumnPolicies("{\"X\": [\"trace_id\"]}");
+
+        final QueryEntityModel model = oidcService("X", "Y").findModel("dial_usage_log", Privilege.TABLE_READ).orElseThrow();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body").isMasked()).isTrue();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body_full").isMasked())
+                .as("its inputs are masked, none hidden").isTrue();
+        assertThat(model.bindings().get("dial_usage_log_payload.request_body_full").value())
+                .as("a stand-in is never wrapped").isSameAs(model.bindings().get("dial_usage_log_payload.request_body_full").physicalField());
+    }
+
+    private static RowPolicy widgetIs(String widget) {
+        return new RowPolicy(new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("widget_id"), new ValueExpr(ValueType.STRING, widget))));
     }
 
     /** A computed field leaves the model with the payload columns it returns. */

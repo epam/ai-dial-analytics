@@ -2338,7 +2338,12 @@ The subset SHALL accept a statement that combines query blocks with a set operat
 `UNION DISTINCT`, `INTERSECT`, `INTERSECT ALL`, `INTERSECT DISTINCT`, `EXCEPT`, `EXCEPT ALL` and
 `EXCEPT DISTINCT`. A branch SHALL be any query block the subset accepts — a single entity with
 `WHERE`/`GROUP BY`/`HAVING`/`DISTINCT`, a join, a derived table, a CTE reference, a block carrying its own
-`ORDER BY` and `LIMIT`/`OFFSET`, or a nested set operation — and a chain MAY carry any number of branches.
+`ORDER BY` and `LIMIT`/`OFFSET`, or a nested set operation — and a chain MAY carry any number of branches. The one
+exception is an `INTERSECT` or `EXCEPT` of either mode whose branch outputs a column that depends on a field masked
+for the caller: execution and the validation of a saved query refuse it `400 bad_request`, and `validate-sql` reports
+it `valid: false` (see [structured-query](../structured-query/spec.md), "Set operations over a masked output"). `translate-sql` refuses
+every set operation with the composite-statement `400` for every caller, as "Composite statements execute without a
+structured-query document" states, so masking changes nothing there.
 
 **The governing rule for every semantic question below is that a statement ADAS accepts SHALL mean what
 ClickHouse means by the same text.** Where the SQL standard and ClickHouse disagree, ClickHouse decides;
@@ -2469,7 +2474,15 @@ A set-operation statement is a **composite** statement: it executes on every SQL
 #### Scenario: UNION DISTINCT deduplicates
 - **WHEN** a client submits `SELECT model FROM dial_usage_log UNION DISTINCT SELECT model FROM rate_analytics`
 - **THEN** each distinct `model` appears once, and the executed statement spells `UNION DISTINCT` so the
-  server's default mode cannot change the result
+  server's default mode cannot change the result — or, for a caller with an output that depends on a masked field,
+  spells `UNION ALL` under a grouping that collapses the same rows and keeps them in the order of their first
+  occurrence (see [structured-query](../structured-query/spec.md), "Masked inputs are reported per output cell");
+  either way it carries an explicit keyword
+
+#### Scenario: A masked UNION DISTINCT keeps the last branch's order under the row limit
+- **GIVEN** a caller for whom `route_name` is masked
+- **WHEN** it submits `SELECT route_name FROM t WHERE project_id = 'P1' UNION DISTINCT SELECT route_name FROM t ORDER BY route_name` over REST, and the distinct values exceed the default limit of 100 while the first branch holds fewer than 100
+- **THEN** the rows are the first branch's distinct values followed by the last branch's new values in `route_name` order — the first-occurrence order ClickHouse's `UNION DISTINCT` returns over the same masked values on one thread, and returns on several threads only in some runs — each marked when any row it collapses had the cell absent
 
 #### Scenario: Bare INTERSECT means ALL, not DISTINCT
 - **WHEN** a client submits a set operation whose two branches each yield the same value twice, combined with a bare `INTERSECT`
@@ -2583,6 +2596,11 @@ A set-operation statement is a **composite** statement: it executes on every SQL
 #### Scenario: A set operation over catalog metadata is rejected
 - **WHEN** a client submits `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES UNION ALL SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES`, or a statement combining a catalog relation with a queryable entity
 - **THEN** translation fails with 400 `bad_request` naming the unsupported construct, and neither ClickHouse nor the evaluator produces rows
+
+#### Scenario: An INTERSECT over a masked output is refused
+- **GIVEN** a caller for whom `user_hash` is masked
+- **WHEN** it submits `SELECT user_hash FROM dial_usage_log WHERE project_id = 'P1' INTERSECT SELECT user_hash FROM dial_usage_log WHERE project_id = 'P2'` for execution, and separately saves it as a `sql` saved query
+- **THEN** both fail with 400 `bad_request` naming `user_hash`, and the saved query is not stored
 
 ### Requirement: Lambda syntax carries the higher-order array functions
 

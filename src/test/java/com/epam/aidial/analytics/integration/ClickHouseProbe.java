@@ -1,6 +1,9 @@
 package com.epam.aidial.analytics.integration;
 
 import com.clickhouse.client.api.Client;
+import com.clickhouse.client.api.query.GenericRecord;
+
+import java.util.List;
 
 /**
  * Direct ClickHouse access for the {@code oidc}-mode integration tests, whose base class has no write client: seeding
@@ -21,8 +24,13 @@ final class ClickHouseProbe {
 
     /** Runs one statement. */
     static void execute(String sql) {
+        queryAll(sql);
+    }
+
+    /** Runs one statement and returns its rows. */
+    static List<GenericRecord> queryAll(String sql) {
         try (Client client = client()) {
-            client.queryAll(sql);
+            return client.queryAll(sql);
         }
     }
 

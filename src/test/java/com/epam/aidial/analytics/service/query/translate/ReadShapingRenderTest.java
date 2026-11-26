@@ -1,9 +1,11 @@
 package com.epam.aidial.analytics.service.query.translate;
 
 import com.epam.aidial.analytics.configuration.QueryDslConfiguration;
+import com.epam.aidial.analytics.service.query.ColumnMask;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.HigherOrderFunctions;
 import com.epam.aidial.analytics.service.query.JooqTypes;
+import com.epam.aidial.analytics.service.query.MaskRendering;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
@@ -636,6 +638,164 @@ class ReadShapingRenderTest {
             assertThat(outerWhere(sql)).containsIgnoringCase("and \"dial_usage_log_payload\".\"__adas_c0\")")
                     .doesNotContainIgnoringCase("ilike");
         }
+    }
+
+    /**
+     * Over a masked body the search is still computed inside the derived table, over the stored value, and the statement
+     * reads it behind the body's mask, which is evaluated where the source row is.
+     */
+    @Test
+    void maskedBodySearchIsStillDecidedInsideTheDerivedTableAndMaskedOutside() {
+        final StructuredQuery query = countingWhere(and(WINDOW, cmp(ComparisonOp.ICO, field(BODY), str("error"))));
+
+        for (final String sql : List.of(renderOn(maskedBody(), query), builder.buildCount(ctx, maskedBody(), query).getSQL(ParamType.INLINED))) {
+            assertThat(sql)
+                    .containsIgnoringCase("(\"dial_usage_log_payload\".\"request_body\" ilike '%error%') \"__adas_c0\"")
+                    .doesNotContainIgnoringCase("\"dial_usage_log_payload\".\"request_body\" from");
+            assertThat(outerWhere(sql)).containsIgnoringCase("\"dial_usage_log_payload\".\"__adas_c0\"")
+                    .containsIgnoringCase("\"dial_usage_log\".\"deployment\" = 'd1'");
+        }
+    }
+
+    /**
+     * The rendered-SQL safety check over the enrichment shapes: outside the payload's derived table, whose copied conjuncts
+     * and pushed calls read stored values on purpose, the masked body is read only behind its mask.
+     */
+    @Test
+    void maskedBodyIsReadOnlyBehindItsMaskOutsideTheDerivedTable() {
+        final String body = "\"" + PAYLOAD + "\".\"request_body\"";
+        final FilterNode search = and(WINDOW, cmp(ComparisonOp.ICO, field(BODY), str("error")));
+        final QueryEntityModel masked = maskedBody();
+        final List<SortItem> byTrace = List.of(new SortItem("trace_id", SortDir.ASC, null));
+        // Built once and rendered by MaskRendering's two passes, as the executor renders a statement.
+        final Map<String, org.jooq.Select<?>> shapes = new LinkedHashMap<>();
+        shapes.put("count over a body search", builder.buildCount(ctx, masked, countingWhere(search)));
+        shapes.put("a body search, the body projected", builder.build(ctx, masked, row(search, List.of(col(field("trace_id")), col(field(BODY))),
+                byTrace, new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("the body projected", builder.build(ctx, masked, row(WINDOW, List.of(col(field("trace_id")), col(field(BODY))), byTrace,
+                new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a call over the body", builder.build(ctx, masked, row(WINDOW, List.of(col(fn("length", field(BODY)), "size")), null,
+                new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a late-materialized page and its outer statement", builder.build(ctx, masked, lastTenWithBodies(),
+                StructuredQueryBuilder.MAX_LIMIT));
+        // The body, and a conjunct or call the derived table computes over it and the statement reads back (__adas_c<n>).
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        final List<MaskedSqlAudit.Masked> audited = List.of(MaskedSqlAudit.Masked.of(body, mask, MaskedSqlAudit.Kind.SCALAR),
+                new MaskedSqlAudit.Masked(Pattern.quote("\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX) + "\\d+\"", mask,
+                        MaskedSqlAudit.Kind.PUSHED));
+        shapes.forEach((shape, select) -> {
+            final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+            final String outer = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD);
+            assertThat(outer).as(shape + " reads the body or what is computed over it, outside the derived table: " + sql)
+                    .containsAnyOf(body, "\"" + PAYLOAD + "\".\"" + ReadShaping.CALL_PREFIX);
+            assertThat(MaskedSqlAudit.unguarded(outer, audited)).as(shape + ": " + sql).isEmpty();
+        });
+    }
+
+    /**
+     * A filter on a masked source field that a late-materialized page copies into its key subquery renders the mask's
+     * condition once in each scope that reads it, never once per reference: the page block, the outer statement.
+     */
+    @Test
+    void maskedFilterCopiedIntoThePageKeySubqueryRendersItsConditionOncePerScope() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put("deployment", bindings.get("deployment").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "trace_id"), String.class)
+                .eq("mask-trace"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final StructuredQuery page = row(and(WINDOW, cmp(ComparisonOp.EQ, field("deployment"), str("d1"))),
+                List.of(col(field("trace_id")), col(field("deployment")), col(field(BODY))), newestFirst(), new OffsetPage(0, 10, false));
+
+        final org.jooq.Select<?> select = builder.build(ctx, masked, page, StructuredQueryBuilder.MAX_LIMIT);
+        final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+        assertThat(pageKeySubqueries(sql)).as("a late-materialized page: " + sql).isNotEmpty();
+        assertThat(pageKeySubqueries(sql).getFirst()).as("the filter, in its pruning form, is copied into the page block")
+                .contains("'mask-trace'").contains("\"dial_usage_log\".\"deployment\" = 'd1'");
+        final int definitions = sql.split("'mask-trace'", -1).length - 1;
+        assertThat(definitions).as("once per scope that reads it: " + sql).isBetween(2, sql.toLowerCase().split("select ", -1).length - 1);
+    }
+
+    /**
+     * The readers that read a masked key's stored value on purpose are the only ones that do: the grain join's keys, the
+     * page block's key and the page restriction are cut out where they read, and the payload's derived table (its key
+     * subqueries included) as a whole; nothing else reads the key outside its mask.
+     */
+    @Test
+    void maskedGrainKeyIsReadStoredOnlyByTheKeyReaders() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        bindings.put("event_id", bindings.get("event_id").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class)
+                .eq("d1"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final String key = "\"dial_usage_log\".\"event_id\"";
+        final Map<String, org.jooq.Select<?>> shapes = new LinkedHashMap<>();
+        shapes.put("a late-materialized page projecting the key", builder.build(ctx, masked, row(WINDOW, List.of(col(field("event_id")),
+                col(field(BODY))), newestFirst(), new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.put("a count over a body search", builder.buildCount(ctx, masked, countingWhere(and(WINDOW, cmp(ComparisonOp.ICO, field(BODY),
+                str("error"))))));
+        shapes.put("a filter on the key", builder.build(ctx, masked, row(and(WINDOW, cmp(ComparisonOp.EQ, field("event_id"),
+                new ValueExpr(ValueType.STRING, "00000000-0000-4000-8000-000000000001"))), List.of(col(field("trace_id")), col(field(BODY))),
+                newestFirst(), new OffsetPage(0, 10, false)), StructuredQueryBuilder.MAX_LIMIT));
+        shapes.forEach((shape, select) -> {
+            final String sql = MaskRendering.render(() -> select.getSQL(ParamType.INLINED));
+            if (!shape.startsWith("a count")) {
+                assertThat(sql).as(shape + " is a late-materialized page, so the page readers are exercised: " + sql)
+                        .contains(key + " \"" + ReadShaping.PAGE_KEY + "\"");
+            }
+            // Each reader cut where it reads, never elsewhere: the grain join's keys, the page block's key, and the page
+            // restriction, which keeps the rows whose stored keys are the page's, and the rows whose stored key is null.
+            final String pageKeys = "\\) in \\(select \"" + ReadShaping.PAGE_KEY + "\"";
+            final String readers = MaskedSqlAudit.withoutDerivedTables(sql, PAYLOAD)
+                    .replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
+                    .replace(key + " \"" + ReadShaping.PAGE_KEY + "\"", "<page key>")
+                    .replaceAll("(?i)\\(" + Pattern.quote(key) + ", \"dial_usage_log\"\\.\"request_time\"" + pageKeys, "<page restriction>")
+                    .replaceAll("(?i)" + Pattern.quote(key) + pageKeys.substring(2), "<page restriction>")
+                    .replaceAll("(" + Pattern.quote("\"" + ReadShaping.PAGE_ALIAS + "\"") + "\\)\\)) or " + Pattern.quote(key) + " is null", "$1 <page restriction>");
+            assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
+                    .as(shape + ": " + sql).isEmpty();
+        });
+    }
+
+    /**
+     * A filter on a masked key that the payload's key subquery copies is read there behind its mask, as in the statement:
+     * only the subquery's selected key reads the stored value, so the derived table is audited, not cut.
+     */
+    @Test
+    void maskedKeyFilterCopiedIntoTheKeySubqueryKeepsItsMask() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        final String mask = "\"dial_usage_log\".\"deployment\" = 'd1'";
+        bindings.put("event_id", bindings.get("event_id").masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class)
+                .eq("d1"))));
+        final QueryEntityModel masked = new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
+        final String key = "\"dial_usage_log\".\"event_id\"";
+        final org.jooq.Select<?> count = builder.buildCount(ctx, masked, countingWhere(and(WINDOW, cmp(ComparisonOp.EQ, field("event_id"),
+                new ValueExpr(ValueType.STRING, "00000000-0000-4000-8000-000000000001")), cmp(ComparisonOp.ICO, field(BODY), str("error")))));
+        final String sql = MaskRendering.render(() -> count.getSQL(ParamType.INLINED));
+
+        final String keySubquery = "(?i)in \\(select " + Pattern.quote(key) + " from \"dial_usage_log\"";
+        final Matcher opened = Pattern.compile(keySubquery).matcher(sql);
+        assertThat(opened.find()).as("a key subquery over the source: " + sql).isTrue();
+        // Just past the subquery's own "(", whose depth the walk starts at.
+        int close = opened.start() + "in (".length();
+        for (int depth = 1; depth > 0; close++) {
+            depth += sql.charAt(close) == '(' ? 1 : sql.charAt(close) == ')' ? -1 : 0;
+        }
+        assertThat(sql.substring(opened.start(), close)).as("it copies the key filter, behind the key's mask")
+                .contains("'00000000-0000-4000-8000-000000000001'").contains(MaskRendering.ALIAS_PREFIX);
+        final String readers = sql.replace("(" + key + " = \"" + PAYLOAD + "\".\"event_id\")", "<join key>")
+                .replaceAll(keySubquery, "in (select <selected key> from \"dial_usage_log\"");
+        assertThat(MaskedSqlAudit.unguarded(readers, List.of(MaskedSqlAudit.Masked.of(key, mask, MaskedSqlAudit.Kind.SCALAR))))
+                .as(sql).isEmpty();
+    }
+
+    /** The test model with the body masked to the rows of deployment {@code d1}. */
+    private static QueryEntityModel maskedBody() {
+        final QueryEntityModel base = model();
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>(base.bindings());
+        bindings.put(BODY, bindings.get(BODY).masked(ColumnMask.of(DSL.field(DSL.name("dial_usage_log", "deployment"), String.class).eq("d1"))));
+        return new QueryEntityModel(base.entity(), base.table(), bindings, base.enrichments(), List.of(), null, true, true);
     }
 
     @Test

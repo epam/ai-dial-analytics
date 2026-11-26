@@ -145,7 +145,7 @@ public class PipelineDataController {
     @ApiResponse(responseCode = "400", description = "A malformed body, or one carrying an unknown member such "
             + "as `cursor` (`bad_request`)")
     @ApiResponse(responseCode = "403", description = "The caller may not read a column the declaration reads — one a "
-            + "column policy hides from it (`column_not_entitled`, checked first) or a `sensitive` one it lacks the "
+            + "column policy hides from it or masks for it (`column_not_entitled`, checked first) or a `sensitive` one it lacks the "
             + "clearance for (`sensitive_column_not_entitled`) —, is row-confined (`row_policy_confined`), lacks the "
             + "target's grant (`pipeline_access_denied`), or lacks `REGISTRY_ADMIN` (`forbidden`)")
     @ApiResponse(responseCode = "404", description = "No such pipeline (`unknown_pipeline`)")

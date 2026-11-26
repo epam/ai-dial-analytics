@@ -198,6 +198,11 @@ Read this before writing or widening a panel.
   and filter on `array_length(execution_path)`.
 - **A non-Latin-1 string literal is currently answered with HTTP 500**, which is why panel labels use
   ASCII `->` and `-` rather than `→` and `—`.
+- **Declare a panel's columns.** For a viewer a column policy masks a column for, a row whose cell is
+  absent carries one more member, `$masked`, naming the absent and partial cells
+  ([row-level-security.md](row-level-security.md#column-policies)). An Infinity panel that renders every
+  row member would show it as a column; every panel here lists its columns, so none does. A sum over a
+  masked column covers only the rows the viewer may read.
 
 The full dialect, including what is and is not supported, is [sql-reference.md](sql-reference.md).
 Panel-level caveats about the *data* live in the note panel each of the six analytics dashboards

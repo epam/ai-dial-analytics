@@ -16,7 +16,9 @@ import java.util.Map;
 @Schema(description = "Rows produced by a structured query, plus an optional total row count.")
 public record StructuredQueryResultDto(
         @Schema(
-                description = "Projected rows as field-name → value maps, in field order.",
+                description = "Projected rows as field-name → value maps, in field order. A row on which a column policy made a"
+                        + " cell absent, or an aggregate or window cell partial, also carries the reserved member `$masked`:"
+                        + " the names of those output columns, in projection order.",
                 example = "[{\"id\":\"3fa85f64-5717-4562-b3fc-2c963f66afa6\",\"name\":\"my-suite\"}]")
         List<Map<String, Object>> rows,
 

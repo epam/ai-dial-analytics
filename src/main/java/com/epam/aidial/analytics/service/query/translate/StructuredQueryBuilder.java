@@ -3,11 +3,13 @@ package com.epam.aidial.analytics.service.query.translate;
 import com.epam.aidial.analytics.configuration.QueryFinalProperties;
 import com.epam.aidial.analytics.exception.QueryValidationException;
 import com.epam.aidial.analytics.service.query.ArrayValuedFunctions;
+import com.epam.aidial.analytics.service.query.ColumnMark;
 import com.epam.aidial.analytics.service.query.EnrichmentJoin;
 import com.epam.aidial.analytics.service.query.EnrichmentJoins;
 import com.epam.aidial.analytics.service.query.FinalDecision;
 import com.epam.aidial.analytics.service.query.FinalTables;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
+import com.epam.aidial.analytics.service.query.OutputFlag;
 import com.epam.aidial.analytics.service.query.PartitionPreselection;
 import com.epam.aidial.analytics.service.query.QueryEntityModel;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
@@ -34,6 +36,7 @@ import com.epam.aidial.analytics.service.query.model.SortDir;
 import com.epam.aidial.analytics.service.query.model.SortItem;
 import com.epam.aidial.analytics.service.query.model.StructuredQuery;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.WindowExpr;
 import com.epam.aidial.analytics.service.query.model.WindowOrder;
 import org.jooq.Condition;
@@ -50,6 +53,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -103,6 +107,9 @@ public class StructuredQueryBuilder {
 
     /** Hard ceiling on a requested row limit; a request above it is rejected, never clamped. */
     public static final int MAX_LIMIT = 1000;
+
+    /** The derived table a marked distinct block with a window output computes in, suffixed apart from its outputs. */
+    private static final String WINDOWED_ALIAS = "__adas_w";
 
     /**
      * How a block's {@code page} is rendered. {@link #GOVERNED} is the shared row governance every
@@ -261,14 +268,14 @@ public class StructuredQueryBuilder {
         // entry point: the renders below, the page block's included, take the query as checked.
         ComputedFieldUse.requirePlainProjection(model, query);
         if (!readShaping) {
-            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, List.of());
+            return unshaped(dsl, model, query, maxLimit);
         }
         try {
             return shaped(dsl, model, query, maxLimit);
         } catch (QueryValidationException ex) {
             // Shaping translates parts of the query ahead of the statement; whatever it trips over, the unshaped
             // build trips over too, and reporting that build's refusal keeps every message what it always was.
-            return build(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, List.of());
+            return unshaped(dsl, model, query, maxLimit);
         }
     }
 
@@ -291,7 +298,17 @@ public class StructuredQueryBuilder {
      */
     SelectQuery<Record> build(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, List<Condition> keyConjuncts) {
-        return render(dsl, model, query, maxLimit, policy, LeafRestriction.NONE, Map.of(), false, true, keyConjuncts);
+        return build(dsl, model, query, maxLimit, policy, keyConjuncts, MaskMarking.Mode.NONE);
+    }
+
+    /**
+     * As {@link #build(DSLContext, QueryEntityModel, StructuredQuery, int, LimitPolicy, List)}, projecting the flags
+     * {@code marks} asks for: the composite renderer's, for a plan that reads a masked field — the statement's own
+     * outputs' marks on its root block, and on every block nested in it each output's marks for the block reading it.
+     */
+    SelectQuery<Record> build(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
+            LimitPolicy policy, List<Condition> keyConjuncts, MaskMarking.Mode marks) {
+        return render(dsl, model, query, maxLimit, policy, LeafRestriction.NONE, Map.of(), false, true, keyConjuncts, marks);
     }
 
     /**
@@ -307,7 +324,13 @@ public class StructuredQueryBuilder {
             LimitPolicy policy, LeafRestriction extra) {
         ComputedFieldUse.requirePlainProjection(model, query);
         final StructuredQueryBuilder renderer = windowTransfer ? withoutWindowTransfer() : this;
-        return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of());
+        return renderer.render(dsl, model, query, maxLimit, policy, extra, Map.of(), false, false, List.of(), MaskMarking.Mode.NONE);
+    }
+
+    /** The single-entity read path's statement unshaped, marking its outputs' masked inputs. */
+    private SelectQuery<Record> unshaped(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit) {
+        return render(dsl, model, query, maxLimit, LimitPolicy.GOVERNED, LeafRestriction.NONE, Map.of(), false, true, List.of(),
+                MaskMarking.Mode.ROOT);
     }
 
     /**
@@ -423,16 +446,25 @@ public class StructuredQueryBuilder {
         final Map<String, Set<String>> omitted = new HashMap<>();
         final Map<Expr, Field<?>> calls = new HashMap<>();
         for (final ReadShaping.PushedCall call : plan.calls()) {
-            final Field<?> translated = exprTranslator.toField(call.call(), bindings);
+            // Computed over the stored column: the derived table has no source row to evaluate a mask on.
+            final Field<?> translated = exprTranslator.toField(call.call(), stored(bindings, call.field()));
             computed.computeIfAbsent(call.table(), ignored -> new ArrayList<>()).add(translated.as(call.alias()));
             omitted.computeIfAbsent(call.table(), ignored -> new HashSet<>()).add(call.field());
-            calls.put(call.call(), DSL.field(DSL.name(call.table(), call.alias()), translated.getDataType()));
+            final Field<?> pushed = DSL.field(DSL.name(call.table(), call.alias()), translated.getDataType());
+            final QueryFieldBinding binding = bindings.get(call.field());
+            // A masked field's pushed call is read through its mask, taking on an absent cell the value the call gives
+            // over the absent value, so the statement returns what it returns unshaped.
+            calls.put(call.call(), binding == null || !binding.isMasked() ? pushed
+                    : DSL.field("if({0}, if({0}, {1}, defaultValueOfArgumentType(assumeNotNull({1}))), {2})", pushed.getDataType(),
+                            binding.mask().reference(), pushed, exprTranslator.toField(call.call(), absentAt(bindings, call.field()))));
         }
         final Map<FilterNode, Condition> substituted = new HashMap<>();
         final List<Condition> preselected = new ArrayList<>();
         int next = plan.calls().size();
         for (final ReadShaping.PushedConjunct conjunct : conjuncts) {
-            final Condition condition = filterTranslator.toCondition(conjunct.node(), bindings);
+            // The copy reads the stored value; the statement's own conjunct keeps its masked or rewritten form, which
+            // implies the copy, so the rows are unchanged.
+            final Condition condition = filterTranslator.toCondition(conjunct.node(), stored(bindings, conjunct.field()));
             where.computeIfAbsent(conjunct.table(), ignored -> new ArrayList<>()).add(condition);
             // A lookup on an aligned enrichment also names the partitions its rows live in (PartitionPreselection),
             // bounded by whatever the filter already bounds the source's partition column to.
@@ -445,7 +477,10 @@ public class StructuredQueryBuilder {
                 final String alias = ReadShaping.CALL_PREFIX + next++;
                 computed.computeIfAbsent(conjunct.table(), ignored -> new ArrayList<>()).add(DSL.field(condition).as(alias));
                 omitted.computeIfAbsent(conjunct.table(), ignored -> new HashSet<>()).add(conjunct.field());
-                substituted.put(conjunct.node(), DSL.condition(DSL.field(DSL.name(conjunct.table(), alias), Boolean.class)));
+                final Condition column = DSL.condition(DSL.field(DSL.name(conjunct.table(), alias), Boolean.class));
+                final QueryFieldBinding binding = bindings.get(conjunct.field());
+                substituted.put(conjunct.node(), binding == null || !binding.isMasked() ? column
+                        : DSL.and(DSL.condition(binding.mask().reference()), column));
             }
         }
         final Map<String, EnrichmentJoins.Shaping> shaping = new HashMap<>();
@@ -458,10 +493,35 @@ public class StructuredQueryBuilder {
         return new Pushdown(shaping, calls, substituted, preselected);
     }
 
-    /** The block's statement as the single-entity read path renders it: declaring its object paths, no key conjuncts. */
+    /** {@code bindings} with {@code name}'s field read as its stored column, for what an enrichment's derived table computes. */
+    private static Map<String, QueryFieldBinding> stored(Map<String, QueryFieldBinding> bindings, String name) {
+        final QueryFieldBinding binding = bindings.get(name);
+        if (binding == null || !binding.isMasked()) {
+            return bindings;
+        }
+        final Map<String, QueryFieldBinding> rebound = new HashMap<>(bindings);
+        rebound.put(name, new QueryFieldBinding(name, binding.physicalField(), binding.type(), binding.elementType(), binding.heavy(),
+                binding.prunedPaths()));
+        return rebound;
+    }
+
+    /** {@code bindings} with {@code name}'s field read as its absent value ({@code NULL}), for a pushed call's absent result. */
+    private static Map<String, QueryFieldBinding> absentAt(Map<String, QueryFieldBinding> bindings, String name) {
+        final QueryFieldBinding binding = bindings.get(name);
+        final Map<String, QueryFieldBinding> rebound = new HashMap<>(bindings);
+        rebound.put(name, new QueryFieldBinding(name, DSL.field("NULL", binding.physicalField().getDataType()), binding.type(),
+                binding.elementType(), binding.heavy()));
+        return rebound;
+    }
+
+    /**
+     * The block's statement as the single-entity read path renders it: declaring its object paths, no key conjuncts, and
+     * marking its outputs' masked inputs unless it is the page block, whose rows the outer statement reads.
+     */
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock) {
-        return render(dsl, model, query, maxLimit, policy, extra, shaping, pageBlock, true, List.of());
+        return render(dsl, model, query, maxLimit, policy, extra, shaping, pageBlock, true, List.of(),
+                pageBlock ? MaskMarking.Mode.NONE : MaskMarking.Mode.ROOT);
     }
 
     /**
@@ -470,11 +530,12 @@ public class StructuredQueryBuilder {
      * clause is rendered against the model {@link EnrichmentJoins#addReferenced} returns — the only model whose
      * bindings know a pruned path lives under an alias of that derived table. The key predicates are translated
      * against {@code model} itself: they render inside the key subquery, over the source, and name no enrichment
-     * column for pruning to change.
+     * column for pruning to change. {@code marks} says which flags the block projects ({@link MaskMarking}): the
+     * statement's outputs' marks, which the executor turns into {@code $masked}, or a nested block's per-output ones.
      */
     private SelectQuery<Record> render(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
             LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean pageBlock,
-            boolean declarePaths, List<Condition> keyConjuncts) {
+            boolean declarePaths, List<Condition> keyConjuncts, MaskMarking.Mode marks) {
         final boolean finalRead = readsFinal(model, query);
         final SelectQuery<Record> select = dsl.selectQuery();
         // The source takes FINAL only when its own engine collapses; ClickHouse refuses it on a plain MergeTree,
@@ -500,16 +561,150 @@ public class StructuredQueryBuilder {
         // Names that are select outputs (aliases / projected fields), so sort can reference the output
         // column instead of re-translating its expression.
         final Set<String> selectAliases = new HashSet<>();
+        // By output name, in projection order: what each output computes, and its rendered expression.
+        final Map<String, Expr> outputs = new LinkedHashMap<>();
+        final Map<String, Field<?>> outputFields = new LinkedHashMap<>();
         final Map<String, QueryFieldBinding> sortBindings = mode == QueryMode.AGGREGATE
-                ? buildAggregate(select, effective.bindings(), query, selectAliases)
-                : buildRow(select, effective, query, selectAliases, pageBlock);
+                ? buildAggregate(select, effective.bindings(), query, selectAliases, outputs, outputFields)
+                : buildRow(select, effective, query, selectAliases, pageBlock, outputs, outputFields);
+        if (policy == LimitPolicy.GOVERNED && !pageBlock) {
+            MaskMarking.refuseReservedName(List.copyOf(outputs.keySet()));
+        }
+        final boolean wildcard = query.select() == null || query.select().isEmpty();
+        MaskMarking.refuseCapturingNames(model, query, outputs,
+                wildcard && !pageBlock && outputs.values().stream().anyMatch(expr -> referencesMasked(expr, model)));
 
-        if (query.distinct()) {
+        List<Field<?>> flags = List.of();
+        final boolean grouped = query.distinct() && mode == QueryMode.ROW;
+        // A bare masked composite output's row flag (row mode) or group flag (aggregate mode): a distinct keeps it in the
+        // rows it compares, so an absent cell, whose expression reads the empty value, never merges with a stored empty one.
+        final List<Field<?>> bareFlags = new ArrayList<>();
+        outputs.values().forEach(expr -> {
+            final Field<?> bare = MaskMarking.bareIndicator(expr, effective.bindings());
+            if (bare != null) {
+                bareFlags.add(mode == QueryMode.AGGREGATE ? DSL.field("max({0})", Integer.class, bare) : bare);
+            }
+        });
+        final boolean marked = marks != MaskMarking.Mode.NONE
+                && MaskMarking.readsMarks(exprTranslator, effective.bindings(), outputs);
+        if (marks != MaskMarking.Mode.NONE) {
+            if (query.distinct() && marked && outputs.values().stream().anyMatch(WindowExpressions::containsWindow)) {
+                return windowedDistinct(dsl, model, query, maxLimit, policy, extra, shaping, declarePaths, keyConjuncts, marks,
+                        outputs);
+            }
+            final List<Field<?>> partition = new ArrayList<>(outputFields.values());
+            partition.addAll(bareFlags);
+            flags = MaskMarking.flags(exprTranslator, effective.bindings(), mode, outputs,
+                    !query.distinct() || !marked ? MaskMarking.Collapse.NONE
+                            : grouped ? MaskMarking.Collapse.GROUPED : MaskMarking.Collapse.WINDOWED,
+                    partition, marks);
+            select.addSelect(flags);
+        }
+        final boolean collapsed = grouped && marked;
+        if (collapsed) {
+            // A distinct whose rows carry marks is grouped by every output, by its expression and never its name, so the
+            // collapsed rows' flags combine instead of splitting the row. A constant output splits no group and is left
+            // out: ClickHouse reads a bare integer key as a projection position.
+            final List<Field<?>> groupKeys = new ArrayList<>();
+            outputFields.forEach((name, field) -> {
+                if (!(outputs.get(name) instanceof ValueExpr)) {
+                    groupKeys.add(field);
+                }
+            });
+            groupKeys.addAll(bareFlags);
+            select.addGroupBy(groupKeys);
+        } else if (query.distinct()) {
             select.setDistinct(true);
         }
-        select.addOrderBy(sortFields(query.sort(), sortBindings, selectAliases));
+        select.addOrderBy(sortFields(query.sort(), sortBindings, selectAliases, maskedFieldOutputs(outputs, effective.bindings()),
+                collapsed));
         applyPage(select, query.page(), maxLimit, policy);
         return select;
+    }
+
+    /**
+     * A distinct block with a window output whose rows carry marks, planned as the SQL front end plans one: the rows cannot
+     * be grouped, nor a window partitioned, by a window in the SELECT that computes it. The block without {@code distinct},
+     * sort and page computes its outputs, and each sort key that is not one, as a derived table with every output's flags;
+     * an outer distinct block over it collapses the rows by the grouped form, ORing the marks, and sorts and pages.
+     */
+    private SelectQuery<Record> windowedDistinct(DSLContext dsl, QueryEntityModel model, StructuredQuery query, int maxLimit,
+            LimitPolicy policy, LeafRestriction extra, Map<String, EnrichmentJoins.Shaping> shaping, boolean declarePaths,
+            List<Condition> keyConjuncts, MaskMarking.Mode marks, Map<String, Expr> outputs) {
+        final List<OutputColumn> columns = new ArrayList<>(query.select());
+        final Set<String> named = new HashSet<>(outputs.keySet());
+        if (query.sort() != null) {
+            query.sort().stream().filter(item -> named.add(item.field())).forEach(item -> columns.add(new OutputColumn(new FieldExpr(item.field()), null)));
+        }
+        final SelectQuery<Record> inner = render(dsl, model, new StructuredQuery(query.entity(), query.filter(), query.mode(), false, columns,
+                query.groupBy(), query.having(), null, null, query.finalRead()), 0, LimitPolicy.NESTED, extra, shaping, false, declarePaths,
+                keyConjuncts, MaskMarking.Mode.NESTED);
+        final Map<String, Field<?>> projected = new HashMap<>();
+        final Map<Integer, String> markFlags = new HashMap<>();
+        final Map<Integer, String> bareFlags = new HashMap<>();
+        for (final Field<?> field : inner.getSelect()) {
+            final OutputFlag flag = OutputFlag.of(field);
+            if (flag == null) {
+                projected.putIfAbsent(field.getName(), field);
+            } else if (!flag.zero()) {
+                (flag.bare() ? bareFlags : markFlags).put(flag.position(), field.getName());
+            }
+        }
+        final List<String> names = OutputColumnNaming.resolve(columns);
+        final String alias = windowedAlias(names);
+        final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
+        for (int i = 0; i < names.size(); i++) {
+            final String name = names.get(i);
+            final Expr expr = columns.get(i).expr();
+            final QueryFieldBinding binding = new QueryFieldBinding(name, DSL.field(DSL.name(alias, name), projected.get(name).getDataType()),
+                    ExprFieldType.of(expr, model.bindings()), ExprFieldType.ofElement(expr, model.bindings()), false);
+            final String mark = markFlags.get(i);
+            final String bare = bareFlags.get(i);
+            bindings.put(name, mark == null ? binding : binding.marked(new ColumnMark(DSL.field(DSL.name(alias, mark), Integer.class),
+                    bare == null ? null : DSL.field(DSL.name(alias, bare), Integer.class))));
+        }
+        final QueryEntityModel derived = new QueryEntityModel(alias, inner.asTable(alias), bindings, List.of(), List.of());
+        final List<OutputColumn> select = outputs.keySet().stream().map(name -> new OutputColumn(new FieldExpr(name), null)).toList();
+        return render(dsl, derived, new StructuredQuery(alias, null, QueryMode.ROW, true, select, null, null, query.sort(), query.page(),
+                null), maxLimit, policy, LeafRestriction.NONE, Map.of(), false, false, List.of(), marks);
+    }
+
+    /**
+     * {@link #WINDOWED_ALIAS}, suffixed until no output is named so or begins with it followed by {@code .}: such an output,
+     * in the scope that reads the derived table, would capture the {@code "<alias>"."<column>"} references.
+     */
+    private static String windowedAlias(List<String> names) {
+        String alias = WINDOWED_ALIAS;
+        while (true) {
+            final String candidate = alias;
+            if (names.stream().noneMatch(name -> name.equals(candidate) || name.startsWith(candidate + "."))) {
+                return alias;
+            }
+            alias = alias + "_";
+        }
+    }
+
+    /** Whether {@code expr} reads a masked field of {@code model}. */
+    private static boolean referencesMasked(Expr expr, QueryEntityModel model) {
+        final Set<String> names = new HashSet<>();
+        collectExpr(expr, names);
+        return names.stream().map(name -> model.bindings().get(name)).anyMatch(binding -> binding != null && binding.isMasked());
+    }
+
+    /**
+     * The outputs that project a masked field bare under that field's own name, as an enrichment field projected without
+     * {@code as} is: a reference to one by name inside its block can resolve to the stored column instead of the output,
+     * so the block renders every reference to it as the field's masked expression.
+     */
+    private static Set<String> maskedFieldOutputs(Map<String, Expr> outputs, Map<String, QueryFieldBinding> bindings) {
+        final Set<String> names = new HashSet<>();
+        outputs.forEach((name, expr) -> {
+            final QueryFieldBinding binding = bindings.get(name);
+            if (expr instanceof FieldExpr(String field) && field.equals(name) && binding != null && binding.isMasked()) {
+                names.add(name);
+            }
+        });
+        return names;
     }
 
     /**
@@ -703,7 +898,9 @@ public class StructuredQueryBuilder {
             QueryEntityModel model,
             StructuredQuery query,
             Set<String> selectAliases,
-            boolean pageBlock) {
+            boolean pageBlock,
+            Map<String, Expr> outputs,
+            Map<String, Field<?>> outputFields) {
         final Map<String, QueryFieldBinding> bindings = model.bindings();
         final List<OutputColumn> projection = query.select();
         if (pageBlock && (projection == null || projection.isEmpty())) {
@@ -722,7 +919,13 @@ public class StructuredQueryBuilder {
             }
             final List<Field<?>> all = new ArrayList<>(wildcard.size());
             for (final String name : wildcard) {
-                all.add(bindings.get(name).field());
+                final QueryFieldBinding binding = bindings.get(name);
+                // The output is keyed by the stored column's name, as the bare reference names it; a masked field reads
+                // its masked value under that same name.
+                final String output = binding.physicalField().getName();
+                all.add(binding.isMasked() ? binding.value().as(output) : binding.physicalField());
+                outputs.put(output, new FieldExpr(name));
+                outputFields.put(output, binding.value());
             }
             select.addSelect(all);
         } else {
@@ -737,6 +940,8 @@ public class StructuredQueryBuilder {
                 final String name = names.get(i);
                 fields.add(field.as(name));
                 selectAliases.add(name);
+                outputs.put(name, projection.get(i).expr());
+                outputFields.put(name, field);
             }
             select.addSelect(fields);
         }
@@ -747,7 +952,9 @@ public class StructuredQueryBuilder {
             SelectQuery<Record> select,
             Map<String, QueryFieldBinding> bindings,
             StructuredQuery query,
-            Set<String> selectAliases) {
+            Set<String> selectAliases,
+            Map<String, Expr> outputs,
+            Map<String, Field<?>> outputFields) {
         final List<String> groupBy = query.groupBy() == null ? List.of() : query.groupBy();
         final List<OutputColumn> selectEntries = query.select() == null ? List.of() : query.select();
         if (selectEntries.isEmpty()) {
@@ -788,13 +995,16 @@ public class StructuredQueryBuilder {
                     WindowExpressions.requireGroupedOperands(window, groupKeySet, aggregateAliases);
                 }
             });
+            outputs.put(name, col.expr());
             if (col.expr() instanceof FieldExpr(String fieldName) && groupBy.contains(fieldName)) {
                 final Field<?> field = exprTranslator.resolveField(fieldName, bindings);
                 selectFields.add(field.as(name));
                 selectAliases.add(name);
+                outputFields.put(name, field);
             } else {
                 final Field<?> expr = exprTranslator.toField(col.expr(), bindings);
                 selectFields.add(expr.as(name));
+                outputFields.put(name, expr);
                 // The alias carries the type its expression actually has, read by the same ExprFieldType
                 // every other type rule uses. A fixed type here would be load-bearing in the wrong
                 // direction: `having` is translated against these bindings, so every rule that reads an
@@ -818,6 +1028,14 @@ public class StructuredQueryBuilder {
         final List<Field<?>> groupFields = new ArrayList<>();
         for (final String key : groupBy) {
             groupFields.add(resolveGroupKey(key, bindings, selectAliases, shadowingAliases));
+            // A bare masked composite key reads its empty value where it is absent; its row flag keeps those rows out of
+            // the group of the rows that store an empty value. A key naming an output reads that output's expression.
+            final Expr keyExpr = exprTranslator.resolveFieldOrNull(key, bindings) != null ? new FieldExpr(key)
+                    : outputs.getOrDefault(key, new FieldExpr(key));
+            final Field<?> bare = MaskMarking.bareIndicator(keyExpr, bindings);
+            if (bare != null) {
+                groupFields.add(bare);
+            }
         }
 
         select.addSelect(selectFields);
@@ -883,18 +1101,31 @@ public class StructuredQueryBuilder {
         throw new QueryValidationException("unknown group-by field '" + key + "'");
     }
 
-    private List<SortField<?>> sortFields(
-            List<SortItem> sort, Map<String, QueryFieldBinding> bindings, Set<String> selectAliases) {
+    /**
+     * The block's sort keys. {@code maskedFieldOutputs} are outputs named after the masked field they project bare, which
+     * are ordered by that field's masked expression rather than by name; with {@code collapsed} the block is a distinct
+     * grouped by its outputs, so a key that is not an output is ordered by {@code any(<key>)}.
+     */
+    private List<SortField<?>> sortFields(List<SortItem> sort, Map<String, QueryFieldBinding> bindings, Set<String> selectAliases,
+            Set<String> maskedFieldOutputs, boolean collapsed) {
         if (sort == null || sort.isEmpty()) {
             return List.of();
         }
         final List<SortField<?>> fields = new ArrayList<>(sort.size());
         for (final SortItem item : sort) {
             // A sort key naming a select output is ordered by its output-column reference rather than
-            // by re-translating the expression.
-            final Field<?> field = selectAliases.contains(item.field())
-                    ? DSL.field(DSL.name(item.field()))
-                    : exprTranslator.resolveField(item.field(), bindings);
+            // by re-translating the expression — except an output named after the masked field it projects: inside its
+            // block the data store can resolve that name to the stored column, so it is ordered by the masked value.
+            final Field<?> field;
+            if (maskedFieldOutputs.contains(item.field())) {
+                field = exprTranslator.resolveField(item.field(), bindings);
+            } else if (selectAliases.contains(item.field())) {
+                field = DSL.field(DSL.name(item.field()));
+            } else if (collapsed) {
+                field = DSL.field("any({0})", Object.class, exprTranslator.resolveField(item.field(), bindings));
+            } else {
+                field = exprTranslator.resolveField(item.field(), bindings);
+            }
             SortField<?> sortField = item.dir() == SortDir.DESC ? field.desc() : field.asc();
             // Null ordering is client-controlled; when unspecified we emit no NULLS clause
             // and let the database default apply (ASC → NULLS LAST, DESC → NULLS FIRST).
@@ -1026,6 +1257,13 @@ public class StructuredQueryBuilder {
     public static Set<String> referencedFields(FilterNode node) {
         final Set<String> names = new HashSet<>();
         collectFilter(node, names);
+        return names;
+    }
+
+    /** Every field name an expression references (a lambda's own parameters excluded, a scalar subquery's body not). */
+    public static Set<String> referencedFields(Expr expr) {
+        final Set<String> names = new HashSet<>();
+        collectExpr(expr, names);
         return names;
     }
 

@@ -49,6 +49,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -209,12 +210,14 @@ public final class AggregateSqlValidator {
             if (StringUtils.isNotBlank(sql)) {
                 final Set<String> mentioned = mentionedNames(sql);
                 final Set<String> candidates = inputTable != null ? Set.of(inputTable) : readTablesOf(sql, target);
-                // A mentioned column a column policy hides, across every candidate, before any unentitled sensitive one.
+                // A mentioned column a column policy hides, across every candidate, before any unentitled sensitive one. A
+                // masked column is in the caller's schema, so it is not why the statement failed to plan: the 422 stands.
+                final Map<String, List<TableDefinitionEntity>> enrichments = new HashMap<>();
                 for (final String source : candidates) {
-                    sensitiveGuard.enforceVisibleEntity(source, mentioned, operation);
+                    enrichments.put(source, sensitiveGuard.enforceVisibleEntity(source, mentioned, operation, false));
                 }
                 for (final String source : candidates) {
-                    sensitiveGuard.enforceEntity(source, mentioned, operation);
+                    sensitiveGuard.enforceSensitiveEntity(source, mentioned, operation, enrichments.get(source));
                 }
             }
             throw ex;

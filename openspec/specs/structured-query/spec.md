@@ -1662,7 +1662,8 @@ literal SHALL escape the backslash as well as the quote, because ClickHouse read
 literal as an escape: a value matches exactly the characters the caller sent, and no value can close its
 literal early and run the rest of itself as SQL. Field bindings SHALL be
 sourced from the table-management catalog; allowlisted fields SHALL expand to their physical columns,
-qualified by their owning table. Source columns SHALL be referenced by their bare flat name; enrichment
+qualified by their owning table. A field masked for the caller (see "A masked field reads as absent at every
+reference") SHALL instead expand to its masked value. Source columns SHALL be referenced by their bare flat name; enrichment
 columns SHALL be referenced by their table-qualified flat name `<enrichment_table>.<column>` (the same
 name discovery publishes). When a query references columns contributed by one or more enrichments of
 the source, the translator SHALL emit a `LEFT JOIN` of each referenced enrichment table on the shared grain key
@@ -1703,7 +1704,9 @@ enrichment table — except where "A partition-only key on an aligned enrichment
 replaces the key sets with the transferred partition bounds, for a join to a partition-aligned enrichment
 whose every key predicate is a bound on the source's partition column. The keying SHALL be statement-wide: a conjunct naming one enrichment's column SHALL
 NOT prevent the source-only conjuncts beside it from keying that enrichment's join or any other. The
-query's **whole** `filter` SHALL still be applied, unchanged, in the statement's own `WHERE`; an
+query's **whole** `filter` SHALL still be applied, unchanged, in the statement's own `WHERE` — except that a reference
+to a masked field reads its masked value, and a conjunct that "A comparison on a masked field keeps the table's
+pruning" rewrites takes that form, which selects the same rows; an
 enrichment conjunct SHALL NOT be moved out of it, and SHALL be copied into a derived table only as
 "Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table" allows. A query with no
 `filter`, or whose `filter` has no source-only top-level conjunct (an enrichment-only filter, or an `or`
@@ -1929,7 +1932,8 @@ The system SHALL return query results as a response object carrying a `rows` arr
 `totalCount`. Each row SHALL be a field-name → value map produced from the ClickHouse client's
 records. Every projected column SHALL be present in every row, carrying a JSON `null` when its value
 is null (notably an unmatched LEFT-JOINed enrichment column) — a null cell SHALL NOT be dropped from
-the row object, so the row's key set matches the requested projection. Values SHALL be serialized in
+the row object, so the row's key set matches the requested projection, plus the `$masked` member on a row that
+carries one. Values SHALL be serialized in
 their natural JSON form, with the ClickHouse client's internal array wrapper unwrapped **at every
 depth**: an `array` cell SHALL serialize as a JSON array, and an `object` cell SHALL serialize as a
 JSON object whose nested arrays are themselves JSON arrays — never the wrapper's own field shape
@@ -1942,6 +1946,14 @@ column at all**, so it is absent from the row object rather than present as `nul
 null SHALL fail the request. The `totalCount` SHALL be
 populated only for row-mode queries that opt in via the offset page's `include_total`, computed as a
 separate count of the same filter; otherwise it SHALL be null.
+
+A row with at least one marked cell (see "Masked inputs are reported per output cell") SHALL carry one more member,
+`$masked`: a JSON array of the marked output columns' names, in projection order, each named as its key in the row. A
+row with no marked cell SHALL NOT carry `$masked`, so a caller none of whose columns is masked receives each row as
+exactly its output columns, each carrying the value the query computes, and no other member. `$masked` is never an
+output column (see "`$masked` is a reserved output
+column name"), so it cannot collide with one. A marked cell SHALL keep its key in the row, carrying its value: null for
+an absent field, or what the expression computed from the absent value.
 
 #### Scenario: Total count returned when requested
 
@@ -1980,6 +1992,18 @@ separate count of the same filter; otherwise it SHALL be null.
 
 - **WHEN** a row-mode query projects an `object` column whose stored value nests an object (e.g. `{"ctx": {"tags": ["a"]}}`)
 - **THEN** the member appears under the flattened key `"ctx.tags"` exactly as the `JSON` column returns it
+
+#### Scenario: A row with absent cells lists them in $masked
+
+- **GIVEN** a caller for whom `total_price` and `user_hash` are masked, present on the rows of `P1` only
+- **WHEN** it projects `project_id`, `user_hash` and `total_price` as `cost`
+- **THEN** a row of `P1` is `{"project_id": "P1", "user_hash": "…", "cost": …}` with no `$masked`, and a row of `P2`
+  is `{"project_id": "P2", "user_hash": null, "cost": null, "$masked": ["user_hash", "cost"]}`
+
+#### Scenario: A caller with no masked column sees no $masked
+
+- **WHEN** a caller none of whose columns is masked runs any query
+- **THEN** no row of the response carries `$masked`
 
 ### Requirement: Global aggregate returns a single row
 
@@ -2024,7 +2048,9 @@ endpoint SHALL continue to reject cursor pagination (that surface stays deferred
 ### Requirement: Output column naming when `as` is omitted
 
 A select entry's `as` key SHALL be optional for every expression kind and in both query modes; no
-query SHALL be rejected for omitting it. When `as` is absent (or blank), the system SHALL derive the
+query SHALL be rejected for omitting it, except that a query referencing a masked field is refused when a resolved
+name, given or derived, equals a table it reads or begins with that name followed by `.`, other than an enrichment
+field projected bare under its qualified flat name (see "A masked field reads as absent at every reference"). When `as` is absent (or blank), the system SHALL derive the
 output column name the way PostgreSQL derives an unnamed target-list name, restricted to the
 expressions this DSL can express:
 
@@ -3816,6 +3842,12 @@ conjunct is one of:
 - `in` whose every literal is non-null and not the field type's default;
 - `eq` of `starts_with(field, literal)` or `contains(field, literal)` against `true`, with a non-empty literal.
 
+A conjunct whose field is masked for the caller (see "A masked field reads as absent at every reference") SHALL still
+be copied, over the stored value, while the statement's own `WHERE` keeps the masked or rewritten form. Every listed
+conjunct is `NULL` or false on an absent cell, so that form implies the copy and the rows returned are unchanged.
+Where the derived table computes the conjunct as `__adas_c<n>`, the outer `WHERE` SHALL read `<mask> AND
+"__adas_c<n>"`, the mask being the field's mask condition over the source row.
+
 The conjunct SHALL also stay in the statement's own `WHERE`. An enrichment that receives a copied conjunct but has
 no source-only conjunct to key it SHALL be joined as a derived table restricted by its copied conjuncts alone.
 When the conjunct's field is `heavy` and the statement reads it nowhere but in copied conjuncts and in calls
@@ -3895,7 +3927,12 @@ is: `length`; `json_extract_string`, `json_extract_long`, `json_extract_double`,
 argument after the first SHALL be a literal. A field referenced anywhere else — raw, inside another function, inside
 a lambda, or in a call outside the list — SHALL be projected whole, and its calls SHALL be rendered over it as
 today. An enrichment carrying a pushed call but no key or copied conjunct SHALL be joined as a derived table with
-no `WHERE`. A heavy field a late-materialized block fetches for its page is not pushed.
+no `WHERE`. A heavy field a late-materialized block fetches for its page is not pushed. A heavy field masked for the
+caller SHALL be pushed as well. The outer statement SHALL read each pushed column through the field's mask, where the
+source row the mask reads is in scope, taking as the absent value the call's value on an absent cell: the scalar masked
+form for the calls that return `NULL` over `NULL`, and `''` for `json_extract_string_ci` and `[]` for
+`json_extract_array`, whose input is read as `''` when absent. Its references SHALL carry the mask into the row's
+flags.
 
 The calls are allow-listed because their value on an unmatched row is already the default of their result type,
 which is what a column computed inside the derived table reads on an unmatched row: over a `Nullable` column each
@@ -3930,7 +3967,11 @@ A statement whose `WHERE` carries a qualifying conjunct `C` over an aligned enri
 `PS = (SELECT DISTINCT partitionExpr(p) FROM E WHERE C [AND B] SETTINGS final = 0)`, `p` is the alignment column and
 `B` is the statement's source-only bounds on the source's partition column, rendered on `E.p` instead. A bound is a
 top-level source-only comparison conjunct that reads the source's partition column and nothing else and holds no
-subquery — `request_time >= now() - INTERVAL 1 DAY`, say. `B` exists so that a statement which already bounds its time
+subquery — `request_time >= now() - INTERVAL 1 DAY`, say. When the source's partition column is masked for the caller,
+a bound SHALL be only such a conjunct that "A comparison on a masked field keeps the table's pruning" rewrites, so
+every row it admits satisfies the comparison on the stored value; a null test is not a bound there. A qualifying
+conjunct `C` MAY be over a masked enrichment field: `C` is `NULL` or false on an absent cell, so the source rows the
+statement's own masked `WHERE` admits are among those whose partitions `PS` names. `B` exists so that a statement which already bounds its time
 does not pay a read of `C`'s column over all of `E`'s history to name the days it named itself; without a bound `PS`
 reads `C`'s column across every partition of `E`.
 
@@ -4111,6 +4152,10 @@ A reduction SHALL go one hop. A side that is restricted only by a reduction SHAL
 and no reduction SHALL be carried through a nested join. When both sides of an `INNER` join carry moved
 source-only conjuncts, each SHALL be reduced by the other's own moved conjuncts.
 
+Neither side SHALL be reduced when either key is masked for the caller (see "A masked field reads as absent at every
+reference"). The key set would hold the stored values of absent cells, so what the reduced side reads, and whether the
+statement stays within its budget, would depend on values absent to the caller.
+
 A reduction SHALL NOT change the statement's rows. A row of the reduced side whose key the restricted side cannot
 produce has no partner, so the join drops it in every allowed position. A `NULL` key never satisfies the
 equality, so excluding it changes nothing.
@@ -4150,6 +4195,12 @@ second and a fraction of the budget, returning the rows of an independently writ
 - **THEN** the conjunct moves into `a`'s operand block
 - **AND** `b` is not reduced, because `a` carries no moved source-only conjunct
 
+#### Scenario: A join on a masked key is not reduced
+
+- **GIVEN** `a JOIN b ON a.k = b.k WHERE b.x = 1`, for a caller for whom `k` is masked
+- **WHEN** the statement is rendered
+- **THEN** neither operand block carries a restriction built from the other's keys
+
 #### Scenario: NULL and duplicate keys keep the unreduced result
 
 - **GIVEN** a restricted side whose keys include `NULL` and repeated values, and an INNER join with that side
@@ -4162,7 +4213,10 @@ On the query surface, a keyed join to a partition-aligned enrichment SHALL be re
 partition-column bounds themselves, rendered on the enrichment's alignment column, **in place of** both key sets
 (`grain_key IN (…)` and `partition_column IN (…)`), when every source predicate that keys it is such a bound. A
 bound is a top-level source-only comparison of the statement's filter that reads the source's partition column
-and nothing else, and holds no subquery.
+and nothing else, and holds no subquery. When that column is masked for the caller, a bound SHALL be only such a
+comparison that "A comparison on a masked field keeps the table's pruning" rewrites; any other conjunct on it — a null
+test among them — keys the join as a non-bound predicate does, so the join still attaches every row the filter
+admits.
 
 The statements this applies to are the single-entity read statement (including the page block of a
 late-materialized read), its `include_total` count statement, and the entity blocks of a composite SQL statement.
@@ -4759,6 +4813,439 @@ filter that is only the comparison, that is none.
 
 - **WHEN** a caller posts a query filtering `user_hash = caller.user_hash` to `POST /v1/queries/execute-csv`
 - **THEN** the CSV body holds exactly the rows `POST /v1/queries/execute` returns to that caller for the same query
+
+### Requirement: A masked field reads as absent at every reference
+
+A field whose column is masked for the caller (see [table-access-control](../table-access-control/spec.md), "Column
+visibility by caller role") SHALL be part of the entity's schema, and a star projection SHALL include it under the
+rules that apply to any field (a heavy masked field stays out of the wildcard). Every reference to it — projection,
+filter, grouping, ordering, `having`, join condition, function, lambda and `case` operand, window argument, partition
+and ordering, aggregate input, array expansion, object-path access, a distinct projection, and the separate count
+behind `totalCount` — SHALL read its **masked value**: the stored value on a row where the column's mask condition is
+true, and the absent value on every other row. The reference a query SHALL agree with is the entity's **flattened
+rows** — each source row the caller reads, with its enrichment values attached by the grain join on the stored grain
+key and partition — in which every absent cell is then replaced by its absent value, an `array`, `map` or `object`
+cell read as the paragraph on those types below states. A query SHALL return exactly the rows and values it would
+return over that reference, so no clause, function or aggregate observes a stored value on a row where the cell is
+absent; the only queries this does not cover are those refused by "Set operations over a masked output" and a query
+carrying a table's name, refused below. Which rows the query reads is decided by row-policy evaluation, unchanged.
+
+The grain join is part of the entity, not a reference the query makes: because it runs on the stored keys before
+cells are replaced, a masked key or partition field does not detach an enrichment value, and each enrichment column is
+decided by its own visibility and mask. Every restriction the service
+derives from the caller's filter to narrow that join — the enrichment's key set, partition bounds transferred from the
+source, an aligned lookup's partition pre-selection — SHALL admit every source row the filter admits, and the
+late-materialized page every source row of the page, so none of them SHALL change which enrichment values those rows
+carry.
+
+The absent value SHALL be `NULL` for a field of a scalar type. An absent scalar cell SHALL be indistinguishable from
+a stored null of that type in its value and in every value, error and error message computed from it, including
+through functions that read a null's underlying value or that fail for particular values: none SHALL depend on the
+stored value of an absent cell (it differs from a stored null only in being marked, see "Masked inputs are reported
+per output cell"). For an `array`, `map` or `object` field, which the data store cannot make `NULL` inside an
+expression, the absent value SHALL be the type's empty value (`[]`, `{}`, `{}`) wherever the field is an operand, and
+an output cell that returns the bare field SHALL carry null, as a `NULL` cell does on that surface. A scalar subquery
+whose output is such a field is an operand of the block that reads it: that block's output carries the empty value,
+marked, where the subquery's cell is absent, and the empty value, unmarked, where the subquery finds no row, which the
+same statement over no masked field refuses. Where rows are
+compared rather than computed on — a distinct projection, a grouping key, a `union` that removes duplicates — an
+absent cell of such a field SHALL differ from every stored value, the stored empty value included, as its null output
+cell differs from a stored `[]` or `{}`; absent cells SHALL equal one another. A computed field over a masked column
+SHALL be null on every row where a column it returns is absent.
+
+Besides the grain join, which attaches enrichment values by the stored keys as part of the reference itself, three
+disclosures SHALL be accepted, and are the only ways a stored value of an absent cell may affect a response:
+- **The mask outcome.** Whether a cell is absent is itself the outcome of the mask condition (see "Column visibility
+  by caller role").
+- **Filter cost.** A pruned filter, a conjunct copied into an enrichment's derived table, or an aligned lookup's
+  partition pre-selection over a masked enrichment field, costs more or less depending on stored values, at the granularity of the data store's indexes. Repeated probes can recover an absent
+  value that the caller's own filter isolates in a granule (see "A comparison on a masked field keeps the table's
+  pruning" and "Null-rejecting enrichment-only conjuncts narrow the enrichment's derived table").
+- **Row order.** Where a query states no total order — no `sort`, ties under one, a page cut without a total order —
+  rows come back in the order the data store produces, which tracks the table's storage order. So do the values
+  inside an order-sensitive aggregate (such as an array of the group's values) and a ranking window without an
+  ordering. That order is decided by the stored ordering-key and partition values, absent cells included, so a masked
+  ordering-key or partition column's absent cells can often be read from the present values around them. This is
+  kept so that masking does not impose a sort on every query. An administrator who needs such a column's absent
+  values kept SHALL list it on every governing role and every row-contributing role, which makes it visible, or keep
+  it off every role whose rows interleave with another role's in storage order. Which rows and values a query with a total order returns never
+  depends on it; where the query leaves the choice open (an unordered page cut, `any`), the choice can.
+
+"SQL translation" states the corresponding exceptions for a masked field: it expands to its masked value, and a
+rewritten conjunct takes the form the next requirement gives it.
+
+A query that references a masked field SHALL be refused `400 bad_request`, on every surface that resolves it, when it
+carries a name that equals, case-sensitively, the name of a table it reads (its source or an enrichment), or begins
+with that name followed by `.`. An output whose name is the qualified flat name of the field it projects, referenced
+bare (an enrichment field `e.c` projected without `as`, or with `as` naming it `e.c`), is exempt. A source field's
+name is not qualified, so a source column exposed under the name of a table the query reads is not exempt, projected
+bare or through a wildcard. Within the block
+that defines such an output, the data store can resolve its name to the stored column instead of the output, in any
+clause. So every reference the service renders to the output inside that block — a sort, grouping, `having`, distinct
+or window key, a flag, or another output — SHALL be the output's masked expression, never its name. A block that
+reads it from a derived table reads the output's masked value. The rule on table names covers a lambda parameter, and
+every resolved output name at every level of the statement: an explicit `as` or SQL alias, a
+name derived from a field or function, and a name the service generates for an operand's output. The mask is evaluated over the stored row's columns, which
+the statement names by table, and a declared name equal to a table could capture those names. A query that names a
+masked field fails today with `unknown field`, because the field is hidden. A query whose only reference to a masked
+field is a wildcard ran today over the visible columns, and is refused once the wildcard includes the masked field:
+that is a breaking change for such a query. A query that references no masked field SHALL be unaffected. "Output column naming when `as` is
+omitted" states the exception for a derived name. `POST /v1/queries/validate-sql` SHALL report such a statement `valid: false` with
+the refusal as `issues[0]` (code `invalid_sql`), and saving a saved query or dashboard widget whose body carries one
+SHALL be refused `400 bad_request`.
+
+#### Scenario: Row order follows storage order, absent cells included
+
+- **GIVEN** a caller for whom `deployment`, an ordering-key column, is masked, present on its own rows and absent on
+  others' rows of the same project
+- **WHEN** it projects `user_hash` and `deployment` over that project with no `sort`
+- **THEN** the rows return the values the reference holds, in an order that may follow the stored `deployment`, so an
+  absent row can sit between present rows of the same value; no absent cell carries a value
+
+#### Scenario: A filter on a masked field matches only present cells
+
+- **GIVEN** a caller for whom `deployment` is masked, present on the rows of project `P1` only
+- **WHEN** it filters `deployment = 'd1'`
+- **THEN** only rows of `P1` whose `deployment` is `d1` match, even where a row of another project stores `d1`
+
+#### Scenario: An aggregate counts and sums present cells only
+
+- **GIVEN** a caller for whom `total_price` is masked, present on the rows of `P1` only
+- **WHEN** it runs `count(total_price)`, `sum(total_price)` and `count()` over the rows of `P1` and `P2`
+- **THEN** the first two cover the rows of `P1` only, and `count()` counts the rows of both projects
+
+#### Scenario: An absent cell is null to null tests and grouping
+
+- **GIVEN** a caller for whom `user_hash` is masked, present on the rows of `P1` only
+- **WHEN** it filters `user_hash` `is null`, and separately groups by `user_hash`
+- **THEN** the filter matches every row of `P2`, and the grouping puts every row of `P2` in the group whose key is
+  null
+
+#### Scenario: A value-dependent failure does not depend on an absent cell
+
+- **GIVEN** a caller for whom `total_tokens` is masked, absent on a row of `P2` that stores a value for which a
+  function fails, such as a `width_bucket` whose bucket count is computed from the cell
+- **WHEN** it projects that expression over the row, once with the stored value one that would make it fail and once
+  one that would not
+- **THEN** both queries return the same result for the row, as for a row that stores a null
+
+#### Scenario: An output named after the table is refused when a masked field is referenced
+
+- **GIVEN** a caller for whom `deployment` is masked on `dial_usage_log`
+- **WHEN** it projects `project_id` as `dial_usage_log` together with `deployment`
+- **THEN** the response is `400 bad_request`
+- **AND WHEN** it projects `project_id` as `dial_usage_log` and references no masked field
+- **THEN** the query runs
+- **AND WHEN** it posts the first statement to `POST /v1/queries/execute-sql` and to `validate-sql`, and saves it as a
+  `sql` saved query
+- **THEN** execution answers `400 bad_request`, validation `200` with `valid: false`, and the save `400 bad_request`
+  with nothing stored
+
+#### Scenario: A dotted output name led by a table name is refused
+
+- **GIVEN** a caller for whom `deployment` is masked on `dial_usage_log`
+- **WHEN** it projects the literal `'P1'` as `dial_usage_log.project_id`, groups by that name, and keeps groups whose
+  `max(deployment)` equals `'d2'`; or sorts by that name and then by `deployment`
+- **THEN** each query is refused `400 bad_request`
+- **AND WHEN** it projects the enrichment field `dial_usage_log_payload.request_body` without `as`, beside a masked
+  field
+- **THEN** the query runs, the output keyed `dial_usage_log_payload.request_body`
+- **AND WHEN** a table `orders` exposes a source column under the name `orders`, stored under another name, and the
+  caller projects that field without `as` beside a field masked for it
+- **THEN** the query is refused `400 bad_request`
+
+#### Scenario: References to an enrichment field's own name read its masked value
+
+- **GIVEN** a caller for whom the enrichment field `e.c` is masked, present on the rows of `P1` only, where two rows of
+  `P2` store different values that each sort before every value of `P1`, and one row of `P1` stores null
+- **WHEN** it projects `e.c` without `as` and sorts by it ascending, with a page of one row
+- **THEN** the row returned is a row of `P1` that stores a value, since the rows of `P2` sort as nulls, after every
+  value
+- **AND WHEN** it groups by `e.c` and `project_id`, and sorts by `e.c`
+- **THEN** the query runs, and the rows of `P2` form one group whose `e.c` is null
+- **AND WHEN** it groups by `e.c` alone and keeps only groups whose `e.c` is null
+- **THEN** the query runs and returns one group, whose `count()` counts the rows of `P2` and the null row of `P1`
+- **AND WHEN** it projects `e.c` with `distinct` in row mode, and separately in aggregate mode grouped by `e.c` and
+  `project_id`
+- **THEN** each query runs, and exactly one row has a null `e.c`, marked absent
+- **AND WHEN** a query's output is a scalar subquery that projects `e.c` without `as` over one row of `P2`
+- **THEN** that output is null and marked absent
+
+#### Scenario: A lambda cannot read an absent cell through a parameter name
+
+- **GIVEN** a caller for whom `deployment` is masked, absent on the rows of `P2`
+- **WHEN** it maps a Boolean array through a lambda whose body returns `deployment`, and whose parameter is named like
+  a name the service uses internally, such as `__adas_mcond_0`
+- **THEN** on the rows of `P2` every element is null
+- **AND WHEN** the parameter is named `dial_usage_log`, the table the query reads
+- **THEN** the response is `400 bad_request`
+
+#### Scenario: A null test on a masked partition field keeps the enrichment values
+
+- **GIVEN** a caller for whom `request_time`, the partition column `dial_usage_log_payload` is aligned on, is masked,
+  present on the rows of `P1` only, while `dial_usage_log_payload.request_body` is visible to it
+- **WHEN** it filters `request_time` `is null` and projects `dial_usage_log_payload.request_body`
+- **THEN** every row of `P2` matches, and each carries its stored `request_body`
+
+#### Scenario: A masked array field is empty as an operand and null as a cell
+
+- **GIVEN** a caller for whom the `array` field `execution_path` is masked, present on the rows of `P1` only
+- **WHEN** it filters on `execution_path` containing `'d1'`, and separately projects `execution_path` and its length
+  with no filter
+- **THEN** the filter matches no row of `P2`, and in the projection the rows of `P2` carry a null `execution_path`
+  cell and a length of `0`
+- **AND WHEN** it projects `execution_path` with `distinct`, and a row of `P1` stores an empty array
+- **THEN** the response carries one row with an empty `execution_path`, unmarked, and one with a null
+  `execution_path`, marked
+- **AND WHEN** it projects `execution_path` as `path` in aggregate mode with `count()`, grouped by `path`
+- **THEN** the same two groups come back, each counting only its own rows
+- **AND WHEN** the distinct projection also outputs the integer literal `3`
+- **THEN** the query runs and returns the same two rows, each with `3`
+
+### Requirement: A comparison on a masked field keeps the table's pruning
+
+A top-level conjunct of a query's filter that compares a masked scalar field, referenced directly, with an operand
+that contains no subquery and is not the null literal, nor an `in` list holding one — by `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, or a string-match
+operator — or tests it `is not null`, SHALL be evaluated as the field's mask condition conjoined with the same comparison on the stored
+column, the other operand reading masked values as it otherwise would. The operand may be a literal, a relative-time
+expression or a caller value. An absent cell never satisfies such a comparison, so the two forms select the same rows;
+the second lets the data store prune with the stored column's ordering key, partition key and skip indexes as it does
+for a caller allowed the column on every row.
+
+The pruning reads the stored column, so the amount of data the statement reads, and with it the query's latency and
+whether it exceeds the query budget (`422 query_budget_exceeded`), can depend on values stored in cells that are absent
+for the caller: a block of rows whose absent cells store a matching value is read and then discarded by the mask. The
+rows and values returned never depend on them. This cost channel SHALL be an accepted disclosure, in exchange for
+keeping a filter on a masked key or partition column as cheap as for a caller allowed the column. It is open only to
+a caller that already reads those rows. It discloses what the data store's indexes hold for the granules the caller's
+filter reaches: the ordering-key value where each granule starts, a skip index's summary of a granule, and a part's
+partition-key range. Where the caller's visible conjuncts narrow the read to a granule that an absent row starts, or in
+which it is the only row whose value the caller does not know, repeated equality or range probes can recover that
+row's stored value. No response carries the value. An administrator who needs such a column's absent values kept
+SHALL list it on every governing role and every row-contributing role, which makes it visible.
+
+A sort reads a masked field's masked value, never the stored ordering key, so it cannot read in key order: on a read
+without `FINAL` of a table whose ordering key leads with the masked column, or whose earlier key columns the filter
+fixes by equality, the data store reads every row the filter selects before it keeps the page, where a caller allowed
+the column could stop at the page limit. The rows returned are those of the masked order; only the query's time and
+budget are at stake.
+
+A comparison with the null literal, or an `in` list that holds one, is not rewritten. `NULL IN (…, NULL, …)` is true
+under ClickHouse's `transform_null_in = 1`, which query statements do not pin, so such a list stays unrewritten; a list
+without a null item is not true on `NULL` under either setting. A comparison with the null literal is a null test, not
+a comparison: an
+`is null` test, which an absent cell satisfies, SHALL NOT take this form. Every other reference to a masked field,
+including such a comparison under `or` or `not`, or against a subquery, SHALL read the masked value as "A masked field reads as absent at every
+reference" states. The form SHALL
+apply to the count behind `totalCount` and to each entity of a composite query, and it SHALL NOT change any result.
+
+#### Scenario: A key-column filter on a masked field prunes as for an unmasked caller
+
+- **GIVEN** a caller for whom `deployment`, an ordering-key column, is masked
+- **WHEN** it filters `deployment = 'd1'` over a time range
+- **THEN** the rows returned are those whose `deployment` is present and equals `d1`, and the statement reads no more
+  rows than the same filter reads for a caller allowed `deployment` on the same rows
+
+#### Scenario: A relative-time window on a masked time column prunes
+
+- **GIVEN** a caller for whom `request_time`, the partition column, is masked, present on the rows of `P1` only
+- **WHEN** it filters `request_time >= date_sub('day', 1, now())`
+- **THEN** the rows returned are the rows of `P1` from the last day, and the statement reads no more rows than the
+  same filter reads for a caller allowed `request_time` on the same rows
+
+#### Scenario: The comparison under or is not rewritten and still returns the same rows
+
+- **GIVEN** the same caller
+- **WHEN** it filters `deployment = 'd1' or project_id = 'P2'`
+- **THEN** the rows returned are those whose present `deployment` equals `d1`, together with the rows of `P2`
+
+### Requirement: Masked inputs are reported per output cell
+
+An output cell SHALL be **marked** when its value was computed with an absent input:
+
+- in row mode, when its expression references a masked field that is absent on that row;
+- for an aggregate output, when its input references a masked field absent on at least one row of its group — the
+  value covers the present cells only and is partial;
+- for a grouping output, when the masked field it references is absent on at least one row of its group;
+- for a window output, when its argument, partition or ordering references a masked field absent on at least one row
+  the window computes that row's value from — for an aggregate, the rows of its frame; for `row_number`, `rank` and
+  `dense_rank`, every row from the start of its partition to the current row, whatever frame the window declares;
+- for an output whose expression contains a scalar subquery, when that subquery's own output would be marked by these
+  rules;
+- in a composite query, when an output reads an operand's output column that is marked on the operand row it comes
+  from, or references a masked field of its own as above;
+- under a distinct projection, or a `union` that removes duplicates, when the cell is marked on at least one of the
+  rows that collapse into the returned row. Marks SHALL NOT take part in deciding which rows are equal, so the rows
+  returned are those the reference returns, and `sort`, paging and `having` apply as they do without masking (where a
+  page limit cuts through rows nothing orders, which of them it keeps is no more determined than in the reference). A
+  distinct projection that projects a window output SHALL run as a window computed before the rows are collapsed,
+  as the SQL surface plans it, and SHALL be marked by the same rule.
+
+An output that references no masked field, directly, through an operand's output column or through a scalar subquery,
+SHALL never be marked. A subquery that yields a set or a truth value (`in`,
+`exists`) SHALL mark nothing wherever it appears, a projected `case` included, and neither SHALL a scalar subquery
+that only filters; the outer operands compared with them mark by the rules above. A cell that is null only because an
+outer join found no matching operand row SHALL NOT be marked. How a surface reports the marks is that surface's concern: the JSON
+surfaces carry them in `$masked` (see "Response envelope"), while CSV export and Flight SQL carry none.
+
+#### Scenario: A row-mode cell over an absent input is marked
+
+- **GIVEN** a caller for whom `total_price` is masked, present on the rows of `P1` only
+- **WHEN** it projects `total_price` and `concat(project_id, '-x')` over the rows of `P1` and `P2`
+- **THEN** on the rows of `P2` `total_price` is marked and the other column is not
+
+#### Scenario: A partial aggregate is marked
+
+- **GIVEN** the same caller
+- **WHEN** it groups by `project_id` and projects `sum(total_price)` and `count()`
+- **THEN** the sum of the `P1` group is unmarked, the sum of the `P2` group is null and marked, and neither count is
+  marked
+- **AND WHEN** it groups by `deployment` instead, and a deployment's group mixes rows of `P1` and `P2`
+- **THEN** that group's sum is marked and covers its `P1` rows only
+
+#### Scenario: A distinct projection returns the same rows and ORs the marks
+
+- **GIVEN** a caller for whom `route_name` is masked, present on the rows of `P1` only, where a row of `P1` stores a
+  null `route_name` and every row of `P2` is absent
+- **WHEN** it projects `route_name` with `distinct`
+- **THEN** exactly one row has a null `route_name`, and it is marked
+
+#### Scenario: A distinct projection with a window output over a masked field runs
+
+- **GIVEN** a caller for whom `total_price` is masked, present on the rows of `P1` only
+- **WHEN** it runs a `distinct` projection of `project_id` and `sum(total_price)` over a window partitioned by
+  `project_id`, through the DSL and through SQL
+- **THEN** both return one row per project, with the `P1` sum unmarked and the `P2` sum null and marked
+
+#### Scenario: A ranking window with a narrow frame is marked by the rows ahead of it
+
+- **GIVEN** a caller for whom `total_price` is masked, absent on one row
+- **WHEN** it projects `row_number()` over a window ordered by `total_price` with nulls first and a frame of the
+  current row only, so the absent row sorts first
+- **THEN** every later row's number is marked, because the absent row is counted ahead of it
+
+#### Scenario: A union all keeps each branch's composite cell
+
+- **GIVEN** a caller for whom `execution_path` is masked, absent on the rows of `P2`
+- **WHEN** it unions all `execution_path` from one branch with `arrayConcat(execution_path, ['x'])` from another
+- **THEN** a `P2` row from the first branch carries a null cell and one from the second carries `['x']`, both marked
+
+#### Scenario: A union that removes duplicates ORs the marks
+
+- **GIVEN** a caller for whom `route_name` is masked, absent on the rows of `P2`, while a row of `P1` stores a null
+  `route_name`
+- **WHEN** it unions `route_name` from the rows of `P1` with `route_name` from the rows of `P2`, removing duplicates
+- **THEN** one row carries a null `route_name`, and it is marked
+
+#### Scenario: Marks travel through a derived table
+
+- **GIVEN** a caller for whom `total_price` is masked, absent on the rows of `P2`
+- **WHEN** it selects `cost` from a derived table that projects `total_price` as `cost`, or from a CTE that does
+- **THEN** on the rows of `P2` `cost` is null and marked
+
+#### Scenario: An unmatched outer join is not marked
+
+- **GIVEN** a caller for whom a joined operand's `total_price` is masked
+- **WHEN** a left join finds no operand row for a row of the preserved side
+- **THEN** that row's `total_price` cell is null and unmarked
+
+#### Scenario: Expanding an absent array yields no element and no mark
+
+- **GIVEN** a caller for whom the `array` field `execution_path` is masked, present on the rows of `P1` only
+- **WHEN** it expands `execution_path` into one row per element and counts the rows per element
+- **THEN** the counts cover the elements of the rows of `P1` only, and no count is marked: an absent array expands
+  to no element, so no expanded row carries an absent input
+
+#### Scenario: A share computed with a scalar subquery is marked when the subquery is partial
+
+- **GIVEN** a caller for whom `total_price` is masked, present on the rows of `P1` only
+- **WHEN** it projects `sum(total_price) / (select sum(total_price) from dial_usage_log)` grouped by `project_id`
+- **THEN** every group's share is marked, because the subquery's total covers the rows of `P1` only
+
+### Requirement: Set operations over a masked output
+
+An `intersect` or `except` SHALL be refused `400 bad_request`, naming the field, when an output column of either of its
+operands depends on a masked field — references it directly or through an operand's output column, or through a
+scalar subquery; a set-valued `in` or `exists` subquery, which marks nothing, does not count. The refusal SHALL apply wherever a query is resolved, so every surface accepts the same queries: DSL and SQL
+execution, CSV export, Flight SQL (`INVALID_ARGUMENT`), `POST /v1/queries/validate-sql`, which reports the statement
+`valid: false` with the refusal as `issues[0]` (code `invalid_sql`), and the validation of a saved query or dashboard
+widget body on save, which refuses
+it as it refuses any body its execution path rejects. `translate-sql` refuses every set operation for every caller
+already. The refusal holds whatever the caller's other columns, because a row-comparing set
+operation has no single row a mark could come from. A `union`, with or without duplicates, SHALL run, marked as "Masked
+inputs are reported per output cell" states. A masked field that an operand only filters on SHALL NOT cause the
+refusal. A caller none of whose fields is masked SHALL see no change. An operand that projects a wildcard depends on
+every masked field the wildcard includes, so a wildcard `intersect` or `except` that ran today over the visible
+columns is refused once a masked field joins the wildcard: that is a breaking change for such a statement. The refusal SHALL take precedence over the SQL
+subset's acceptance of `INTERSECT` and `EXCEPT` with any branch (see
+[sql-query-translation](../sql-query-translation/spec.md), "Set operations combine query blocks").
+
+#### Scenario: An intersect over a masked output is refused
+
+- **GIVEN** a caller for whom `user_hash` is masked
+- **WHEN** it posts `SELECT user_hash FROM dial_usage_log WHERE project_id = 'P1' INTERSECT SELECT user_hash FROM
+  dial_usage_log WHERE project_id = 'P2'` to `POST /v1/queries/execute-sql`
+- **THEN** the response is `400 bad_request` naming `user_hash`
+
+#### Scenario: The intersect refusal on Flight and on validation
+
+- **GIVEN** the same caller and statement
+- **WHEN** it runs the statement over Flight SQL, and posts it to `POST /v1/queries/validate-sql`
+- **THEN** Flight answers `INVALID_ARGUMENT`, and validation answers `200` with `valid: false` and the refusal as
+  `issues[0]`
+- **AND WHEN** it saves the statement as a `sql` saved query
+- **THEN** the save is refused `400 bad_request` and nothing is stored
+
+#### Scenario: A wildcard intersect is refused once a masked field joins the wildcard
+
+- **GIVEN** a caller for whom a non-heavy column of `dial_usage_log` is masked
+- **WHEN** it posts `SELECT * FROM dial_usage_log WHERE project_id = 'P1' INTERSECT SELECT * FROM dial_usage_log WHERE
+  project_id = 'P2'`
+- **THEN** the response is `400 bad_request` naming the masked field, where before masking the statement ran over the
+  visible columns
+
+#### Scenario: An intersect that only filters on a masked field runs
+
+- **GIVEN** the same caller
+- **WHEN** it intersects two selections of `project_id` whose filters read `user_hash`
+- **THEN** the query runs, and the filters read the masked value of `user_hash`
+
+### Requirement: `$masked` is a reserved output column name
+
+A top-level output column — one that becomes a key of the response rows — SHALL NOT be named `$masked`, whether the
+name is given (`as` in the DSL, an alias in SQL) or derived. A column of a nested block, a derived table or a CTE
+never reaches the response and MAY be so named.
+The name SHALL be matched exactly and case-sensitively, as JSON member names are, so `$Masked` is an ordinary name.
+A query naming one SHALL be refused `400 bad_request` on the HTTP surfaces and `INVALID_ARGUMENT` on Flight SQL, on
+every surface that resolves a query's output names — execution, CSV export, translation and validation — whatever the
+caller's column visibility, so a query's validity never depends on the caller's roles. `POST /v1/queries/validate-sql`
+SHALL report it `valid: false` with the refusal as `issues[0]` (code `invalid_sql`), and saving a saved query or
+dashboard widget whose body names one SHALL be refused `400 bad_request`.
+
+#### Scenario: A DSL alias $masked is refused
+
+- **WHEN** a caller posts a row-mode query projecting `{"field": "project_id", "as": "$masked"}`
+- **THEN** the response is `400 bad_request` and nothing is executed
+
+#### Scenario: A SQL alias $masked is refused
+
+- **WHEN** a caller posts `SELECT project_id AS "$masked" FROM dial_usage_log` to `POST /v1/queries/execute-sql`
+- **THEN** the response is `400 bad_request`
+- **AND WHEN** it posts the same statement to `POST /v1/queries/translate-sql`, or runs it over Flight SQL
+- **THEN** translation answers `400 bad_request` and Flight answers `INVALID_ARGUMENT`
+
+#### Scenario: A saved query naming $masked is not stored
+
+- **WHEN** a caller saves a `sql` saved query, or a dashboard with an inline widget, whose body projects a column as
+  `$masked`
+- **THEN** the save is refused `400 bad_request` and nothing is stored
+- **AND WHEN** the name is given to a column of a derived table the body reads from, not to a top-level output
+- **THEN** the save succeeds
+
+#### Scenario: A differently cased name is an ordinary alias
+
+- **WHEN** a caller projects `project_id` as `$Masked`
+- **THEN** the query runs and each row carries the key `$Masked`
 
 ## Implementation notes
 

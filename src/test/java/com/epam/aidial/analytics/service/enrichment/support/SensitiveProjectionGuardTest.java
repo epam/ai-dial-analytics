@@ -3,6 +3,12 @@ package com.epam.aidial.analytics.service.enrichment.support;
 import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
 import com.epam.aidial.analytics.exception.SensitiveColumnNotEntitledException;
 import com.epam.aidial.analytics.service.query.CatalogQueryService;
+import com.epam.aidial.analytics.service.query.model.ComparisonNode;
+import com.epam.aidial.analytics.service.query.model.ComparisonOp;
+import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccessFixture;
@@ -18,6 +24,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -140,6 +147,35 @@ class SensitiveProjectionGuardTest {
                 .isInstanceOf(ColumnNotEntitledException.class);
         assertThat(restricted.reattribute(SOURCE, "scan", new IllegalStateException("parse")))
                 .isInstanceOf(ColumnNotEntitledException.class);
+    }
+
+    @Test
+    @DisplayName("a masked column is refused column_not_entitled as a hidden one, while a parse failure judges hidden columns only")
+    void maskedColumnIsRefusedAsHiddenAndParseFailureJudgesHiddenOnly() {
+        final ColumnMappingEntity version = new ColumnMappingEntity();
+        version.setTableName(SOURCE);
+        version.setName("ingest_time");
+        version.setSourceName("ingested");
+        final ColumnMappingEntity claims = columns.findByTableNameOrderByOrdinal(SOURCE).getFirst();
+        when(columns.findByTableNameOrderByOrdinal(SOURCE)).thenReturn(List.of(claims, version));
+        final FilterNode p1 = new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("project_id"), new ValueExpr(ValueType.STRING, "P1")));
+        final SensitiveColumnAccess access = mock(SensitiveColumnAccess.class);
+        when(access.visibleColumns(SOURCE)).thenReturn(new ColumnVisibility(Set.of("jwt_claims"), Map.of("ingest_time", List.of(p1)),
+                Set.of("jwt_claims", "ingest_time"), null));
+        when(access.mayReadSensitive(SOURCE)).thenReturn(true);
+        when(access.maySeeSensitive(SOURCE)).thenReturn(true);
+        final SensitiveProjectionGuard restricted = new SensitiveProjectionGuard(access, columns, mock(CatalogQueryService.class));
+
+        for (final String spelling : List.of("ingested", "ingest_time")) {
+            assertThatThrownBy(() -> restricted.enforce(SOURCE, List.of(spelling), "scan"))
+                    .isInstanceOf(ColumnNotEntitledException.class)
+                    .hasMessageContaining("'ingest_time'")
+                    .hasMessageContaining("masks");
+        }
+        assertThatCode(() -> restricted.enforce(SOURCE, List.of("jwt_claims"), "scan")).doesNotThrowAnyException();
+        final RuntimeException failure = new IllegalStateException("parse");
+        assertThat(restricted.reattribute(SOURCE, "scan", failure)).as("nothing is hidden, so the failure keeps its attribution")
+                .isSameAs(failure);
     }
 
     @Test

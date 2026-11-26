@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.query;
 
 import com.epam.aidial.analytics.web.dto.query.QueryFieldType;
 import org.jooq.Field;
+import org.jooq.impl.DSL;
 
 import java.util.List;
 import java.util.Set;
@@ -29,24 +30,42 @@ import java.util.Set;
  * emitted was keyed.
  *
  * <p>{@code computed} is the registry entry of a {@link ComputedField computed field}, {@code null} for every
- * catalog binding; such a binding's {@code field} is the field's {@link ComputedField.StandIn stand-in}, which no
- * clause but a plain projection may use. {@code reads} is the physical columns the binding reads — the binding's own
- * {@code field} for a catalog binding, the stand-in's columns for a computed one — which is what a derived table
+ * catalog binding; such a binding's {@code physicalField} is the field's {@link ComputedField.StandIn stand-in}, which
+ * no clause but a plain projection may use. {@code reads} is the physical columns the binding reads — the binding's own
+ * {@code physicalField} for a catalog binding, the stand-in's columns for a computed one — which is what a derived table
  * holding the binding's enrichment must project.
+ *
+ * <p>{@code mask} is set when a column policy masks the field for the caller (see
+ * {@code openspec/specs/table-access-control/spec.md}): the cell is the stored value where the mask is true and
+ * {@code absent} — {@code NULL}, or the empty value of a composite type — elsewhere. {@code physicalField} is always the
+ * stored column, for the readers that read it on purpose (an enrichment's derived table, the grain join's keys, a
+ * rewritten conjunct guarded by the mask); every reference a query makes reads {@link #value()}.
+ *
+ * <p>{@code mark} is set on the binding of an operand column of a composite plan whose value the operand already masked:
+ * the column reads as itself, and only its marks travel ({@link ColumnMark}).
  */
 public record QueryFieldBinding(
         String name,
-        Field<?> field,
+        Field<?> physicalField,
         QueryFieldType type,
         QueryFieldType elementType,
         boolean heavy,
         Set<List<String>> prunedPaths,
         ComputedField computed,
-        List<Field<?>> reads) {
+        List<Field<?>> reads,
+        ColumnMask mask,
+        Field<?> absent,
+        ColumnMark mark) {
 
     public QueryFieldBinding {
         prunedPaths = prunedPaths == null ? Set.of() : Set.copyOf(prunedPaths);
-        reads = reads == null ? List.of(field) : List.copyOf(reads);
+        reads = reads == null ? List.of(physicalField) : List.copyOf(reads);
+    }
+
+    /** An unmasked binding. */
+    public QueryFieldBinding(String name, Field<?> field, QueryFieldType type, QueryFieldType elementType, boolean heavy,
+            Set<List<String>> prunedPaths, ComputedField computed, List<Field<?>> reads) {
+        this(name, field, type, elementType, heavy, prunedPaths, computed, reads, null, null, null);
     }
 
     /** A catalog binding with statement-specific pruned paths. */
@@ -83,8 +102,98 @@ public record QueryFieldBinding(
         return computed != null;
     }
 
+    /** Whether a column policy masks this field for the caller. */
+    public boolean isMasked() {
+        return mask != null;
+    }
+
+    /** This binding masked by {@code columnMask}: its cell is the stored value where the mask is true, else absent. */
+    public QueryFieldBinding masked(ColumnMask columnMask) {
+        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, prunedPaths, computed, reads, columnMask,
+                absentValue(type), mark);
+    }
+
+    /** This operand column's binding carrying {@code columnMark}, the marks its operand computed for it. */
+    public QueryFieldBinding marked(ColumnMark columnMark) {
+        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, prunedPaths, computed, reads, mask, absent,
+                columnMark);
+    }
+
+    /**
+     * What a mark over this field is keyed by — its mask, or the operand column's marks — or {@code null} when nothing
+     * this field reads can be absent. Two fields with the same source share one flag.
+     */
+    public Object markSource() {
+        return mask != null ? mask : mark;
+    }
+
+    /** Nonzero where this field's cell was absent, or computed from an absent input; {@code null} without a mark source. */
+    public Field<?> absentIndicator() {
+        if (mask != null) {
+            return DSL.field("(NOT {0})", Integer.class, mask.reference());
+        }
+        return mark == null ? null : mark.flag();
+    }
+
+    /**
+     * Nonzero where this field's cell, projected bare, is an absent composite value and so is returned as {@code null}:
+     * a masked {@code array}, {@code map} or {@code object} field, or an operand column that is one. {@code null} for any
+     * other field.
+     */
+    public Field<?> bareIndicator() {
+        if (mask != null) {
+            return computed == null && absent != null ? absentIndicator() : null;
+        }
+        final boolean composite = type == QueryFieldType.ARRAY || type == QueryFieldType.MAP || type == QueryFieldType.OBJECT;
+        return mark == null || !composite ? null : mark.bare();
+    }
+
     /** This binding as the statement renders it once its grain join projects {@code paths} as subcolumns. */
     public QueryFieldBinding prunedTo(Set<List<String>> paths) {
-        return new QueryFieldBinding(name, field, type, elementType, heavy, paths, computed, reads);
+        return new QueryFieldBinding(name, physicalField, type, elementType, heavy, paths, computed, reads, mask, absent, mark);
+    }
+
+    /**
+     * What a reference to the field reads: the stored column, or under a mask
+     * {@code if(mask, if(mask, f, defaultValueOfArgumentType(assumeNotNull(f))), NULL)} for a scalar and
+     * {@code if(mask, f, <empty>)} for a composite type. The inner {@code if} replaces the stored value under the
+     * {@code NULL} with the type's default: ClickHouse builds {@code if(c, f, NULL)} as the stored column with a null map
+     * on top, and a function computing on the cell — or failing on some values — would still see the stored value. A
+     * computed field's stand-in is never wrapped: it may render only bare, and its value is nulled from the row's flag.
+     */
+    public Field<?> value() {
+        if (mask == null || computed != null) {
+            return physicalField;
+        }
+        final Field<Boolean> condition = mask.reference();
+        if (absent != null) {
+            return DSL.field("if({0}, {1}, {2})", physicalField.getDataType(), condition, physicalField, absent);
+        }
+        return DSL.field("if({0}, if({0}, {1}, defaultValueOfArgumentType(assumeNotNull({1}))), NULL)",
+                physicalField.getDataType(), condition, physicalField);
+    }
+
+    /**
+     * {@code subcolumn}, a value read from inside this field (an {@code object} path), as a reference reads it: a
+     * {@code Dynamic} subcolumn holds a real {@code NULL} under {@code if}, so an absent cell reads as an absent path.
+     */
+    public Field<?> valueOf(Field<?> subcolumn) {
+        if (mask == null) {
+            return subcolumn;
+        }
+        return DSL.field("if({0}, {1}, NULL)", subcolumn.getDataType(), mask.reference(), subcolumn);
+    }
+
+    /**
+     * The empty value of a composite type, which keeps the column's type where {@code if(c, <array>, NULL)} would turn it
+     * into a {@code Variant} array and map functions reject; {@code null} for a scalar, whose absent value is {@code NULL}.
+     */
+    private static Field<?> absentValue(QueryFieldType type) {
+        return switch (type) {
+            case ARRAY -> DSL.field("[]");
+            case MAP -> DSL.field("map()");
+            case OBJECT -> DSL.field("CAST({0}, 'JSON')", Object.class, DSL.inline("{}"));
+            default -> null;
+        };
     }
 }

@@ -7,14 +7,19 @@ import com.epam.aidial.analytics.service.query.DocumentComparisons;
 import com.epam.aidial.analytics.service.query.ObjectPathUsage;
 import com.epam.aidial.analytics.service.query.QueryFieldBinding;
 import com.epam.aidial.analytics.service.query.model.ArrayExpr;
+import com.epam.aidial.analytics.service.query.model.CaseBranch;
+import com.epam.aidial.analytics.service.query.model.CaseExpr;
 import com.epam.aidial.analytics.service.query.model.ComparisonNode;
 import com.epam.aidial.analytics.service.query.model.ComparisonOp;
 import com.epam.aidial.analytics.service.query.model.Expr;
 import com.epam.aidial.analytics.service.query.model.FieldExpr;
 import com.epam.aidial.analytics.service.query.model.FilterNode;
 import com.epam.aidial.analytics.service.query.model.FnExpr;
+import com.epam.aidial.analytics.service.query.model.LambdaExpr;
 import com.epam.aidial.analytics.service.query.model.LogicalNode;
+import com.epam.aidial.analytics.service.query.model.LogicalOp;
 import com.epam.aidial.analytics.service.query.model.ParamExpr;
+import com.epam.aidial.analytics.service.query.model.ScalarSubqueryExpr;
 import com.epam.aidial.analytics.service.query.model.SubqueryNode;
 import com.epam.aidial.analytics.service.query.model.ValueExpr;
 import com.epam.aidial.analytics.service.query.model.ValueType;
@@ -27,6 +32,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.UnaryOperator;
@@ -81,10 +87,18 @@ public class FilterTranslator {
         return new FilterTranslator(expressions, Map.copyOf(conjuncts));
     }
 
+    /**
+     * A block's {@code WHERE} filter, or any other predicate tree. A top-level conjunct that compares a masked scalar field
+     * so that a {@code NULL} on its side rejects the row is rendered {@code mask AND <comparison on the stored column>}
+     * ({@link #prunable}): it rejects the same rows as the comparison over the masked value, and lets the data store prune
+     * by the stored column's ordering key, partition and skip indexes as it does for a caller allowed the column.
+     */
     public Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
-        return toCondition(node, bindings, Position.PREDICATE);
+        if (StructuredQueryBuilder.conjuncts(node).stream().noneMatch(conjunct -> prunable(conjunct, bindings) != null)) {
+            return toCondition(node, bindings, Position.PREDICATE);
+        }
+        return toPrunedCondition(node, bindings);
     }
-
 
     private Condition toCondition(FilterNode node, Map<String, QueryFieldBinding> bindings, Position windows) {
         if (node == null) {
@@ -99,6 +113,87 @@ public class FilterTranslator {
             case ComparisonNode comparison -> toComparison(comparison, bindings, windows);
             case SubqueryNode subquery -> toSubquery(subquery, bindings);
         };
+    }
+
+    /**
+     * {@code node} with each top-level conjunct of the pruning form rewritten. A non-empty {@code and} is walked, anything
+     * else translates as usual, an empty {@code and}'s refusal included. A conjunct the derived table computes is read as
+     * its substitution, which already carries the mask.
+     */
+    private Condition toPrunedCondition(FilterNode node, Map<String, QueryFieldBinding> bindings) {
+        if (node != null && pushed.containsKey(node)) {
+            return pushed.get(node);
+        }
+        if (node instanceof LogicalNode(LogicalOp op, List<FilterNode> args) && op == LogicalOp.AND && args != null && !args.isEmpty()) {
+            return DSL.and(args.stream().map(arg -> toPrunedCondition(arg, bindings)).toList());
+        }
+        final QueryFieldBinding masked = prunable(node, bindings);
+        return masked == null ? toCondition(node, bindings, Position.PREDICATE) : DSL.and(DSL.condition(masked.mask().reference()),
+                toComparison((ComparisonNode) node, unmasked(bindings, masked), Position.PREDICATE));
+    }
+
+    /**
+     * The masked binding a conjunct's left operand is when the conjunct takes the pruning form, else {@code null}: a
+     * masked scalar field, referenced bare, compared by {@code eq}, {@code ne}, {@code lt}, {@code le}, {@code gt},
+     * {@code ge}, {@code in} or a string match with an operand that holds no subquery and is not the null literal (nor an
+     * {@code in} list holding one), or tested {@code ne null} ({@code is not null}). {@code NULL op e} is never true for
+     * such a comparison, whatever {@code e} is, so conjoining the mask rejects exactly the rows the masked form rejects. A
+     * caller value as {@code e} is bound by the comparison's own translation: a known one is a literal, and an unknown one
+     * replaces the comparison with {@code NULL}, which rejects every row in either form.
+     */
+    static QueryFieldBinding prunable(FilterNode node, Map<String, QueryFieldBinding> bindings) {
+        if (!(node instanceof ComparisonNode(ComparisonOp op, List<Expr> args)) || args == null || args.size() != 2
+                || !(args.getFirst() instanceof FieldExpr(String name))) {
+            return null;
+        }
+        final QueryFieldBinding binding = bindings.get(name);
+        if (binding == null || !binding.isMasked() || binding.isComputed() || !ExprFieldType.isScalar(binding.type())) {
+            return null;
+        }
+        final Expr right = args.get(1);
+        // The other operand keeps reading masked values, so it may not read this field: it renders over the stored column.
+        if (holdsSubquery(right) || StructuredQueryBuilder.referencedFields(right).contains(name)) {
+            return null;
+        }
+        if (isNullLiteral(right)) {
+            return op == ComparisonOp.NE ? binding : null;
+        }
+        if (op == ComparisonOp.IN) {
+            return right instanceof ArrayExpr(List<Expr> items) && items != null && items.stream().noneMatch(FilterTranslator::isNullLiteral)
+                    ? binding : null;
+        }
+        return binding;
+    }
+
+    /**
+     * Whether {@code expr} holds a subquery: a scalar one, or an {@code in} or {@code exists} in a {@code case} condition,
+     * a lambda body included, which {@link WindowExpressions#visit} does not enter.
+     */
+    private static boolean holdsSubquery(Expr expr) {
+        final boolean[] found = {false};
+        WindowExpressions.visit(expr, visited -> found[0] |= visited instanceof ScalarSubqueryExpr
+                || visited instanceof LambdaExpr(List<String> params, Expr body) && holdsSubquery(body)
+                || visited instanceof CaseExpr(List<CaseBranch> when, Expr ignored) && when != null
+                && when.stream().anyMatch(branch -> branch != null && holdsSubquery(branch.when())));
+        return found[0];
+    }
+
+    /** Whether {@code node}'s tree holds an {@code in} or {@code exists}; its operands are {@link WindowExpressions#visit}ed. */
+    private static boolean holdsSubquery(FilterNode node) {
+        return switch (node) {
+            case null -> false;
+            case SubqueryNode ignored -> true;
+            case LogicalNode logical -> logical.args() != null && logical.args().stream().anyMatch(FilterTranslator::holdsSubquery);
+            case ComparisonNode ignored -> false;
+        };
+    }
+
+    /** {@code bindings} with {@code masked}'s field read as its stored column, for the comparison guarded by its mask. */
+    private static Map<String, QueryFieldBinding> unmasked(Map<String, QueryFieldBinding> bindings, QueryFieldBinding masked) {
+        final Map<String, QueryFieldBinding> rebound = new LinkedHashMap<>(bindings);
+        rebound.put(masked.name(), new QueryFieldBinding(masked.name(), masked.physicalField(), masked.type(), masked.elementType(),
+                masked.heavy(), masked.prunedPaths()));
+        return rebound;
     }
 
     /**

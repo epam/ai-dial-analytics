@@ -1,6 +1,12 @@
 package com.epam.aidial.analytics.service.table.grant;
 
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
+import com.epam.aidial.analytics.service.query.model.ComparisonNode;
+import com.epam.aidial.analytics.service.query.model.ComparisonOp;
+import com.epam.aidial.analytics.service.query.model.FieldExpr;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.model.ValueExpr;
+import com.epam.aidial.analytics.service.query.model.ValueType;
 import com.epam.aidial.analytics.service.security.RowPolicyFilter;
 import com.epam.aidial.analytics.service.security.RowPolicyFilterStubs;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
@@ -59,7 +65,7 @@ class TableCallerPermissionsTest {
         final JsonMapper jsonMapper = new JsonMapperConfiguration().jsonMapper();
         final SensitiveColumnAccess columnAccess = new SensitiveColumnAccess(new TableAccessEvaluator(definitions, governing, claims),
                 resolver, definitions, governing, claims, mock(ProviderRolePrivileges.class), new RowPolicyCodec(jsonMapper),
-                new ColumnPolicyCodec(jsonMapper));
+                new ColumnPolicyCodec(jsonMapper), columns);
         return new TableCallerPermissions(claims, resolver, rowPolicies, governing, columnAccess, columns);
     }
 
@@ -80,6 +86,19 @@ class TableCallerPermissionsTest {
         t.setColumnPolicies("{\"X\": [\"a\"]}");
         authenticateWith(EnumSet.of(Privilege.TABLE_LIST), "other");
         assertThat(oidc.resolve(t).columnsRestricted()).as("no governing role").isFalse();
+    }
+
+    @Test
+    @DisplayName("a masked column counts as restricted, though it is listed")
+    void maskedColumnIsRestricted() {
+        final TableDefinitionEntity t = table(Map.of(Privilege.TABLE_READ, List.of("X")));
+        authenticateWith(EnumSet.noneOf(Privilege.class), "X");
+        final FilterNode p1 = new ComparisonNode(ComparisonOp.EQ, List.of(new FieldExpr("p"), new ValueExpr(ValueType.STRING, "P1")));
+        final ColumnVisibility masked = new ColumnVisibility(Set.of("a"), Map.of("b", List.of(p1)), Set.of("a", "b"), null);
+
+        assertThat(masked.allows("b")).isTrue();
+        assertThat(oidc.resolve(t, masked, List.of(column("a"), column("b"))).columnsRestricted()).isTrue();
+        assertThat(oidc.resolve(t, masked, List.of(column("a"))).columnsRestricted()).as("only visible columns").isFalse();
     }
 
     @Test

@@ -405,12 +405,16 @@ final class ReadShaping {
         }
         final Map<String, QueryFieldBinding> rebound = new HashMap<>(model.bindings());
         final Set<String> partitionNames = new HashSet<>();
+        final Set<String> maskedNames = new HashSet<>();
         for (final Map.Entry<String, QueryFieldBinding> entry : model.bindings().entrySet()) {
             final QueryFieldBinding binding = entry.getValue();
-            if (binding.field().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
+            if (binding.physicalField().getQualifiedName().equals(join.sourcePartition().getQualifiedName())) {
                 partitionNames.add(entry.getKey());
+                if (binding.isMasked()) {
+                    maskedNames.add(entry.getKey());
+                }
                 rebound.put(entry.getKey(), new QueryFieldBinding(binding.name(),
-                        DSL.field(join.enrichmentPartition().getQualifiedName(), binding.field().getDataType()),
+                        DSL.field(join.enrichmentPartition().getQualifiedName(), binding.physicalField().getDataType()),
                         binding.type(), binding.elementType(), binding.heavy()));
             }
         }
@@ -421,6 +425,11 @@ final class ReadShaping {
         for (final FilterNode conjunct : StructuredQueryBuilder.sourceOnlyConjuncts(model, filter)) {
             final Set<String> reads = StructuredQueryBuilder.referencedFields(conjunct);
             if (!(conjunct instanceof ComparisonNode) || reads.isEmpty() || !partitionNames.containsAll(reads)) {
+                continue;
+            }
+            // A masked partition field transfers only a conjunct of the pruning form, which rejects every row whose stored
+            // partition fails the comparison; any other (`request_time is null`) admits absent rows the image would exclude.
+            if (reads.stream().anyMatch(maskedNames::contains) && FilterTranslator.prunable(conjunct, model.bindings()) == null) {
                 continue;
             }
             final boolean[] subquery = {false};
@@ -472,7 +481,11 @@ final class ReadShaping {
         return null;
     }
 
-    /** The type of {@code name} when it is an enrichment field, else {@code null}. */
+    /**
+     * The type of {@code name} when it is an enrichment field, else {@code null}. A masked field qualifies too: its copy
+     * reads the stored value inside the derived table, and the statement's own conjunct keeps its masked form, which
+     * implies the copy (every copyable conjunct is false or {@code NULL} on an absent cell).
+     */
     private static QueryFieldType fieldType(QueryEntityModel model, String name) {
         if (model.ownerOf(name) == null) {
             return null;
@@ -652,6 +665,7 @@ final class ReadShaping {
         final QueryFieldBinding binding = model.bindings().get(field);
         // A computed field is a stand-in, not a column a derived table could compute a call over; no call over one is
         // accepted anyway (StructuredQueryBuilder refuses it as projection-only).
+        // A masked field's call is computed over the stored value and read through the field's mask outside.
         if (binding == null || !binding.heavy() || binding.isComputed() || binding.type() != QueryFieldType.STRING
                 || model.ownerOf(field) == null) {
             return null;

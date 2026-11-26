@@ -1,6 +1,9 @@
 package com.epam.aidial.analytics.service.query;
 
 import com.epam.aidial.analytics.exception.QueryEntityNotFoundException;
+import com.epam.aidial.analytics.service.query.model.FilterNode;
+import com.epam.aidial.analytics.service.query.translate.FilterTranslator;
+import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
 import com.epam.aidial.analytics.service.table.ColumnMappingEntity;
@@ -17,6 +20,7 @@ import com.epam.aidial.analytics.web.dto.query.QuerySchemaFieldDto;
 import com.epam.aidial.analytics.web.security.Privilege;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
 import org.springframework.stereotype.Component;
@@ -24,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -31,6 +36,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.UnaryOperator;
 
 /**
  * The catalog-backed source of truth for the query path: which entities are queryable (materialized
@@ -47,6 +53,9 @@ public class CatalogQueryService {
     private final TableDefinitionRepository definitions;
     private final ColumnMappingRepository columns;
     private final SensitiveColumnAccess sensitiveAccess;
+    /** Translates a masked column's mask condition: the allowing roles' row policies, as the row filter translates them. */
+    private final FilterTranslator filterTranslator;
+    private final SecurityClaimsExtractor claims;
 
     /**
      * Entities already reported as not partition-local. Models are built per request, so without this the
@@ -195,12 +204,14 @@ public class CatalogQueryService {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         final List<QuerySchemaFieldDto> schema = new ArrayList<>();
         // Column policies are applied alongside the clearance, through the one per-caller decision, computed once per
-        // owning table for this build and never kept beyond it.
+        // owning table for this build and never kept beyond it. A masked column enters the model with its mask condition.
+        final Masks masks = new Masks(sourceName);
         final boolean maySeeSourceSensitive = sensitiveAccess.maySeeSensitive(sourceName);
         final ColumnVisibility sourceVisibility = sensitiveAccess.visibleColumns(source);
         for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(sourceName)) {
             if (sourceVisibility.allows(col.getName())) {
-                addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col, null);
+                addColumn(bindings, schema, sourceName, false, maySeeSourceSensitive, col, null,
+                        masks.of(sourceVisibility.masks(col.getName())));
             }
         }
 
@@ -243,22 +254,30 @@ public class CatalogQueryService {
                 }
                 // Enrichment columns are exposed qualified by their owning table ("table.column") so that
                 // two enrichments (or a source) can share a bare column name without colliding in the flat
-                // schema. The qualified name is what the query path references and joins fire on.
-                final String flatName =
-                        addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive, col, null);
+                // schema. The qualified name is what the query path references and joins fire on. A mask is over the
+                // source's columns: the enrichment's policies are its source's, judged on the row it is joined to.
+                final String flatName = addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive, col,
+                        null, masks.of(enrichmentVisibility.masks(col.getName())));
                 if (flatName != null) {
                     exposed.add(flatName);
                 }
             }
             // The enrichment's computed fields follow its catalog columns, through the same sensitive gate, and are
             // exposed like them so naming one pulls the grain join in. Never in tableBindings: a row policy judges
-            // what the store holds.
+            // what the store holds. One is masked when an input it returns is, and absent wherever any of them is.
             for (final ComputedFields.Descriptor computed : ComputedFields.of(enrichment.getName(), enrichmentColumns)) {
                 if (!enrichmentVisibility.allows(computed.column(), enrichmentColumns)) {
                     continue;
                 }
+                final List<ColumnMask> inputMasks = new ArrayList<>();
+                for (final String input : ColumnVisibility.inputs(computed.column(), enrichmentColumns)) {
+                    final ColumnMask inputMask = masks.of(enrichmentVisibility.masks(input));
+                    if (inputMask != null && !inputMasks.contains(inputMask)) {
+                        inputMasks.add(inputMask);
+                    }
+                }
                 final String flatName = addColumn(bindings, schema, enrichment.getName(), true, maySeeEnrichmentSensitive,
-                        computed.column(), computed.field());
+                        computed.column(), computed.field(), inputMasks.isEmpty() ? null : ColumnMask.allOf(inputMasks));
                 if (flatName != null) {
                     exposed.add(flatName);
                 }
@@ -300,9 +319,46 @@ public class CatalogQueryService {
         final Map<String, QueryFieldBinding> bindings = new LinkedHashMap<>();
         final List<QuerySchemaFieldDto> discarded = new ArrayList<>();
         for (final ColumnMappingEntity col : columns.findByTableNameOrderByOrdinal(table)) {
-            addColumn(bindings, discarded, table, false, true, col, null);
+            addColumn(bindings, discarded, table, false, true, col, null, null);
         }
         return bindings;
+    }
+
+    /**
+     * The mask conditions of one model build: one {@link ColumnMask} per allowing-role set, so the columns those roles
+     * allow share one condition. Each policy filter is translated against the governed table's physical columns — the
+     * source's, for an enrichment column too — with the caller values bound from the request's own claims, as the row
+     * filter binds them, rather than through a {@link CallerValues} scope: the model is built before execution opens
+     * one, and discovery and the pipeline paths open none.
+     */
+    private final class Masks {
+
+        private final String governed;
+        private final Map<List<FilterNode>, ColumnMask> built = new HashMap<>();
+        private Map<String, QueryFieldBinding> physical;
+        private UnaryOperator<String> callerValues;
+
+        private Masks(String governed) {
+            this.governed = governed;
+        }
+
+        /** The mask whose condition is the disjunction of {@code filters}; {@code null} for a column that is not masked. */
+        private ColumnMask of(List<FilterNode> filters) {
+            if (filters == null) {
+                return null;
+            }
+            return built.computeIfAbsent(filters, ignored -> {
+                if (physical == null) {
+                    physical = tableBindings(governed);
+                    callerValues = CallerValues.of(claims, "column_mask");
+                }
+                final List<Condition> conditions = new ArrayList<>(filters.size());
+                for (final FilterNode filter : filters) {
+                    conditions.add(RowPolicyPredicates.toCondition(filterTranslator, filter, physical, callerValues));
+                }
+                return ColumnMask.of(DSL.or(conditions));
+            });
+        }
     }
 
     private void reportCrossPartition(String entity, String reason) {
@@ -344,7 +400,8 @@ public class CatalogQueryService {
      * columns are qualified {@code owningTable.exposedName} so the flat namespace stays collision-free
      * across a source and its enrichments. The backing jOOQ {@link Field} is always the two-part physical
      * reference {@code owningTable.sourceName}; only the published flat name differs. A {@code computed} field's
-     * {@code col} is its transient descriptor, and its binding is backed by the field's stand-in instead.
+     * {@code col} is its transient descriptor, and its binding is backed by the field's stand-in instead. A {@code mask}
+     * makes the field masked: its binding reads the mask, and discovery marks it.
      */
     private String addColumn(
             Map<String, QueryFieldBinding> bindings,
@@ -353,7 +410,8 @@ public class CatalogQueryService {
             boolean enrichment,
             boolean maySeeSensitive,
             ColumnMappingEntity col,
-            ComputedField computed) {
+            ComputedField computed,
+            ColumnMask mask) {
         if (col.isSensitive() && !maySeeSensitive) {
             // Hidden, not forbidden: the column never enters the model, so discovery omits it and any
             // reference to it later fails as an ordinary unknown field, never revealing it exists.
@@ -365,10 +423,11 @@ public class CatalogQueryService {
         final QueryFieldType elementType = col.getType() == QueryFieldType.ARRAY
                 ? (col.getElementType() == null ? QueryFieldType.STRING : col.getElementType())
                 : null;
-        final QueryFieldBinding binding = computed != null
+        final QueryFieldBinding unmasked = computed != null
                 ? QueryFieldBinding.computed(flatName, computed, owningTable)
                 : new QueryFieldBinding(flatName, DSL.field(DSL.name(owningTable, col.getSourceName()), JooqTypes.of(col.getType())),
                         col.getType(), elementType, col.isHeavy());
+        final QueryFieldBinding binding = mask == null ? unmasked : unmasked.masked(mask);
         if (bindings.putIfAbsent(flatName, binding) != null) {
             // Qualification makes this impossible for a well-formed catalog; fail loud rather than
             // silently drop a column if the catalog is ever corrupted.
@@ -379,7 +438,8 @@ public class CatalogQueryService {
         // transfer-cost hint telling the client which fields a wildcard projection leaves behind.
         schema.add(new QuerySchemaFieldDto(
                 flatName, col.getType(), col.getElementType(), col.getEnumValues(), col.getSourceName(),
-                col.getDescription(), col.getDisplayName(), col.getTag(), col.isSensitive(), col.isHeavy(), computed != null));
+                col.getDescription(), col.getDisplayName(), col.getTag(), col.isSensitive(), col.isHeavy(), computed != null,
+                mask != null));
         return flatName;
     }
 }

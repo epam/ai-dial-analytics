@@ -70,7 +70,7 @@ class EnrichmentJoinsRestrictionTest {
             QueryEntityModel model, List<Condition> predicates, Map<String, Condition> restrictions) {
         final SelectQuery<Record> select = render.selectQuery();
         select.addFrom(model.table());
-        select.addSelect(model.bindings().get(SESSION).field());
+        select.addSelect(model.bindings().get(SESSION).physicalField());
         EnrichmentJoins.addReferenced(select, model, Set.of(SESSION), predicates, restrictions);
         return select.getSQL(ParamType.INLINED);
     }
@@ -78,7 +78,7 @@ class EnrichmentJoinsRestrictionTest {
     private String renderLegacy(QueryEntityModel model, List<Condition> predicates) {
         final SelectQuery<Record> select = render.selectQuery();
         select.addFrom(model.table());
-        select.addSelect(model.bindings().get(SESSION).field());
+        select.addSelect(model.bindings().get(SESSION).physicalField());
         EnrichmentJoins.addReferenced(select, model, Set.of(SESSION), predicates);
         return select.getSQL(ParamType.INLINED);
     }

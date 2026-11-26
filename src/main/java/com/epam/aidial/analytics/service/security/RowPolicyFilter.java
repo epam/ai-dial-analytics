@@ -216,11 +216,21 @@ public class RowPolicyFilter {
      */
     private List<RowPolicy> confining(
             Map<String, RowPolicy> policies, TableAccess access, Set<String> roles, boolean globalRead) {
-        // Walked in the policies' (role-sorted) order, so the rendered predicate is stable across requests.
-        final List<RowPolicy> matching = new ArrayList<>();
+        return confiningRoles(policies, access, roles, globalRead, rolePrivileges).stream().map(policies::get).toList();
+    }
+
+    /**
+     * The roles whose policies confine a caller carrying {@code roles} (see {@link #confining}), in the policies'
+     * (role-sorted) order, so the rendered predicate is stable across requests. Shared with column visibility
+     * ({@link SensitiveColumnAccess}), whose row-contributing roles are these less the governing ones, so the two cannot
+     * drift. Static for the reason {@link #readsTable} is.
+     */
+    public static List<String> confiningRoles(Map<String, RowPolicy> policies, TableAccess access, Set<String> roles,
+            boolean globalRead, ProviderRolePrivileges rolePrivileges) {
+        final List<String> matching = new ArrayList<>();
         policies.forEach((role, policy) -> {
             if (roles.contains(role)) {
-                matching.add(policy);
+                matching.add(role);
             }
         });
         if (matching.isEmpty()) {

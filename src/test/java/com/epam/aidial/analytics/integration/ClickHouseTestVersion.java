@@ -1,5 +1,8 @@
 package com.epam.aidial.analytics.integration;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * The ClickHouse server version the integration tests run against, held apart from {@link ClickHouseContainerSupport}
  * so that reading it starts no container: the multi-replica tests read it for their own cluster, and initializing
@@ -13,12 +16,25 @@ final class ClickHouseTestVersion {
      */
     static final String VERSION = System.getenv().getOrDefault("CLICKHOUSE_TEST_VERSION", "26.8");
 
-    /** Whether Keeper has the fsync throttle {@code clickhouse/keeper-no-fsync-throttle.xml} lifts: from 26.x; 25.x refuses it. */
-    static final boolean KEEPER_FSYNC_THROTTLE = !VERSION.startsWith("25.");
+    /**
+     * Whether Keeper has the fsync throttle {@code clickhouse/keeper-no-fsync-throttle.xml} lifts: 26.8 has it, while 25.3 and
+     * 26.3 refuse the setting as unknown and fail to start. A version between them runs without the file, only slower; a
+     * tag naming no version ({@code latest}) is taken as the newest.
+     */
+    static final boolean KEEPER_FSYNC_THROTTLE = atLeast(VERSION, 26, 8);
 
     /** The classpath resource that lifts Keeper's fsync throttle, merged only when {@link #KEEPER_FSYNC_THROTTLE}. */
     static final String NO_FSYNC_THROTTLE = "clickhouse/keeper-no-fsync-throttle.xml";
 
     private ClickHouseTestVersion() {
+    }
+
+    static boolean atLeast(String version, int major, int minor) {
+        final Matcher parts = Pattern.compile("^(\\d+)\\.(\\d+)").matcher(version);
+        if (!parts.find()) {
+            return true;
+        }
+        final int found = Integer.parseInt(parts.group(1));
+        return found > major || found == major && Integer.parseInt(parts.group(2)) >= minor;
     }
 }

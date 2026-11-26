@@ -152,7 +152,7 @@ public record TableDto(
      * table, {@code system} tables and enrichments included, and {@code true} in {@code none} mode.
      *
      * <p>{@code rows_restricted} and {@code columns_restricted} are not privileges: they report whether row policies
-     * confine the caller's reads to some of the table's rows and whether column policies hide one of its columns, and
+     * confine the caller's reads to some of the table's rows and whether column policies hide or mask one of its columns, and
      * both are {@code false} in {@code none} mode. A system table's revision snapshot carries no columns, so there
      * {@code columns_restricted} is {@code true} whenever a column policy confines the caller.
      */
@@ -170,7 +170,8 @@ public record TableDto(
             @Schema(description = "Whether row policies confine the caller's reads of this table to some of its rows; "
                     + "the policy itself is readable only through GET /v1/tables/{name}/access")
             @JsonProperty("rows_restricted") boolean rowsRestricted,
-            @Schema(description = "Whether column policies hide at least one of this table's columns from the caller; "
+            @Schema(description = "Whether column policies hide or mask at least one of this table's columns for the caller "
+                    + "(a masked column is listed, its value absent on the rows no role allowing it admits); "
                     + "false for a caller no column policy narrows. On a system table's revision snapshot, which carries "
                     + "no columns, true whenever a column policy confines the caller. The policies are readable only "
                     + "through GET /v1/tables/{name}/access")

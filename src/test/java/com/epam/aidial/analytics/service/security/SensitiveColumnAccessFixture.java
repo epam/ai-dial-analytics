@@ -1,6 +1,7 @@
 package com.epam.aidial.analytics.service.security;
 
 import com.epam.aidial.analytics.configuration.JsonMapperConfiguration;
+import com.epam.aidial.analytics.service.table.ColumnMappingRepository;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.grant.ColumnPolicyCodec;
 import com.epam.aidial.analytics.service.table.grant.GoverningAccess;
@@ -22,6 +23,6 @@ public final class SensitiveColumnAccessFixture {
         final JsonMapper jsonMapper = new JsonMapperConfiguration().jsonMapper();
         return new SensitiveColumnAccess(evaluator, mode, mock(TableDefinitionRepository.class), mock(GoverningAccess.class),
                 mock(SecurityClaimsExtractor.class), mock(ProviderRolePrivileges.class), new RowPolicyCodec(jsonMapper),
-                new ColumnPolicyCodec(jsonMapper));
+                new ColumnPolicyCodec(jsonMapper), mock(ColumnMappingRepository.class));
     }
 }
