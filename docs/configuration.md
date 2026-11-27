@@ -568,17 +568,17 @@ be mixed in one list. A value that names neither **fails startup**.
 
 | Privilege | Scope | Allows | Implies |
 |---|---|---|---|
-| `TABLE_LIST` | Table (global only, no per-table grant) | See that a table exists: its name and catalog list summary | — |
-| `TABLE_GET` | Table | Read a table's definition and column inventory | `TABLE_LIST` |
-| `TABLE_READ` | Table | Read a table's non-sensitive column values (queries, SQL, CSV export) | `TABLE_GET` |
-| `TABLE_SENSITIVE` | Table | Clearance: extends `TABLE_GET`, `TABLE_READ` and `TABLE_MODIFY` to sensitive columns; nothing alone | — |
-| `TABLE_WRITE` | Table | Insert rows into a table; confers no read of any kind | — |
-| `TABLE_MODIFY` | Table | Evolve a table's schema and update its description | `TABLE_GET` |
-| `TABLE_CREATE` | Global | Create a catalog table | — |
-| `TABLE_DELETE` | Global | Delete a catalog table | — |
-| `TABLE_GRANT` | Global | Read and replace a table's access entries (per-role privileges, row and column policies) | — |
-| `REGISTRY_READ` | Global | Read pipelines, sinks, data-sync run status and failures; export the catalog | — |
-| `REGISTRY_ADMIN` | Global | Author and execute pipelines | — |
+| `TABLE_LIST` | Table, no grant: a `get` grant already lists its table | See that a table exists: its name and catalog list summary | — |
+| `TABLE_GET` | Table (`get`) | Read a table's definition and column inventory | `TABLE_LIST` |
+| `TABLE_READ` | Table (`read`) | Read a table's non-sensitive column values (queries, SQL, CSV export) | `TABLE_GET` |
+| `TABLE_SENSITIVE` | Table (`sensitive`) | Clearance: extends `TABLE_GET`, `TABLE_READ` and `TABLE_MODIFY` to sensitive columns; nothing alone | — |
+| `TABLE_WRITE` | Table (`write`) | Insert rows into a table; confers no read of any kind | — |
+| `TABLE_MODIFY` | Table (`modify`) | Evolve a table's schema and update its description | `TABLE_GET` |
+| `TABLE_CREATE` | Global | Create a catalog table or an OTLP sink; import a catalog bundle | — |
+| `TABLE_DELETE` | Global | Delete a catalog table or an OTLP sink | — |
+| `TABLE_GRANT` | Global | Read and replace a table's access entries (per-role privileges, row and column policies); export or import them | — |
+| `REGISTRY_READ` | Global | Read pipelines, OTLP sinks, data-sync run status and failures; export the catalog | — |
+| `REGISTRY_ADMIN` | Global | Author and execute pipelines; import pipelines in a catalog bundle | — |
 | `AUDIT_READ` | Global | Read the audit activity feed | — |
 | `DATA_SYNC_OPERATE` | Global | Trigger a backfill and retry recorded data-sync failures | — |
 | `SAVED_QUERY_READ` | Global | Read `common` saved queries, `public` dashboards and the caller's own ones | — |
@@ -587,7 +587,7 @@ be mixed in one list. A value that names neither **fails startup**.
 | `SETTINGS_READ` | Global | Read the instance settings | — |
 | `SETTINGS_WRITE` | Global | Replace the instance settings | `SETTINGS_READ` |
 
-Implication is transitive, so `TABLE_READ` also confers `TABLE_LIST`. Nothing else implies anything:
+Implication is transitive, so `TABLE_READ` also confers `TABLE_LIST`. There is no other implication:
 `TABLE_WRITE` grants no read, `REGISTRY_ADMIN` does not imply `REGISTRY_READ`, and `SAVED_QUERY_PUBLISH` and
 `SAVED_QUERY_WRITE` do not imply each other.
 
@@ -603,14 +603,16 @@ Implication is transitive, so `TABLE_READ` also confers `TABLE_LIST`. Nothing el
 neither see them nor set a `sensitive` flag.
 
 **Per-table grants.** A privilege with scope *Table* can be held globally through a mapping or granted to a role
-on a single table (see [`row-level-security.md`](row-level-security.md)), except `TABLE_LIST`. A
-role's effective access is the union of the two, so narrowing a role starts with its mapping. A token whose
-roles map to no privilege is still authenticated, and per-table grants alone can authorize it, which is the
-usual setup for a BI tool or an exporter.
+on a single table under the key in parentheses (see [`row-level-security.md`](row-level-security.md)). A role's
+effective access is the union of the two, so a grant never takes access away: restricting a role to some tables
+starts with its mapping, while row and column policies narrow what it reads within a table. A token whose roles
+map to no privilege is still authenticated, and per-table grants alone can authorize it, which is the usual setup
+for a BI tool or an exporter.
 
 Mappings from releases before 0.2.3 may need edits; see
 [`release-0.2-upgrade.md`](release-0.2-upgrade.md#45-privileges-replace-the-two-admin-roles-023). The full
-authorization model is in `openspec/specs/authentication/spec.md` and `openspec/specs/table-access-control/spec.md`.
+authorization model is in [`authentication`](../openspec/specs/authentication/spec.md) and
+[`table-access-control`](../openspec/specs/table-access-control/spec.md).
 
 | Variable                 | Property                            | Default                                                 | Required   | Description                                                                                                                                                                                                                                        |
 |--------------------------|-------------------------------------|---------------------------------------------------------|------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

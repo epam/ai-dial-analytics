@@ -344,8 +344,9 @@ The list of privileges and what each one allows is in
 [`configuration.md`](configuration.md#authentication).
 
 **Before deploying**, read `SECURITY_ROLES_MAPPING`, `API_KEY_ROLES_MAPPING` and every provider's
-`roles-mapping`. A value that is neither a privilege nor a bundle stops ADAS at startup. A mapping that
-uses only `FULL_ADMIN` and `READ_ONLY_ADMIN` needs no edit. `API_KEY_ROLES_MAPPING` may now be left
+`roles-mapping`. A value that is neither a privilege nor a bundle stops ADAS at startup. That includes
+`TABLE_READ_SENSITIVE`, which is not a privilege: write `TABLE_READ` plus `TABLE_SENSITIVE` instead. A mapping
+that uses only `FULL_ADMIN` and `READ_ONLY_ADMIN` needs no edit. `API_KEY_ROLES_MAPPING` may now be left
 empty when `API_KEY_ENABLED=true`.
 
 **Who notices a difference:**
