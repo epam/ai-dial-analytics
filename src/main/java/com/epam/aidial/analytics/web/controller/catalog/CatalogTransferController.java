@@ -52,10 +52,11 @@ public class CatalogTransferController {
             + "by name, so a recreated one resumes from them";
 
     private static final String POLICY_DESCRIPTION = "What to do with a bundle object that already exists: "
-            + "FAIL_IF_EXISTS refuses the import (409), SKIP_IF_EXISTS keeps the existing object unchanged and imports "
-            + "the rest. OVERWRITE is refused (422): import never changes an existing object's definition, columns or "
-            + "pipeline. An existing access entry never conflicts: with include_access, the bundle's entries are written "
-            + "under either policy.";
+            + "FAIL_IF_EXISTS refuses the import (409); SKIP_IF_EXISTS keeps the existing object unchanged and imports "
+            + "the rest, reporting what OVERWRITE would change; OVERWRITE updates it where that is safe (adds columns, "
+            + "updates table and column metadata, re-declares a pipeline), keeps environment-specific fields, never drops, "
+            + "renames or retypes anything, and refuses an object it cannot bring to the bundle. An existing access entry "
+            + "never conflicts: with include_access, the bundle's entries are written under every policy.";
 
     private static final String INCLUDE_ACCESS_DESCRIPTION = "Also write the bundle's access entries, per role, onto "
             + "created, existing and system tables alike, never removing one; requires TABLE_GRANT. Default false: the "
@@ -116,7 +117,8 @@ public class CatalogTransferController {
             description = "Runs the import's validation pass — the real create services inside a rolled-back "
                     + "transaction, then the arm-time pipeline checks — and returns what an import would do with each "
                     + "object, and with `include_access=true` with each access entry under `access`. Answers 200 "
-                    + "whenever the bundle parses, problems included.")
+                    + "whenever the bundle parses, problems included, except 409 table_busy when another change holds a "
+                    + "table an OVERWRITE update needs past the lock timeout (retry).")
     public ImportPreview importPreview(
             @Parameter(description = "The bundle file, as exported") @RequestPart("file") MultipartFile file,
             @Parameter(description = POLICY_DESCRIPTION, required = true)
@@ -137,7 +139,8 @@ public class CatalogTransferController {
                     + "`include_access=true`, the bundle's access entries last, in one transaction; without it no access "
                     + "is written. On a failure part-way it deletes again what it created. 409 catalog_import_conflict "
                     + "under FAIL_IF_EXISTS when an object exists; 422 catalog_import_invalid when the pass finds a "
-                    + "problem — the preview reports each one.")
+                    + "problem — the preview reports each one; 409 table_busy when another change holds a table an "
+                    + "OVERWRITE update needs past the lock timeout (retry).")
     public ImportResult importBundle(
             @Parameter(description = "The bundle file, as exported") @RequestPart("file") MultipartFile file,
             @Parameter(description = POLICY_DESCRIPTION, required = true)

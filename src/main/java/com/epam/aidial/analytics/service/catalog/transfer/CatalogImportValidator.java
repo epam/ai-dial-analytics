@@ -1,15 +1,21 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.clickhouse.DdlExecutor;
+import com.epam.aidial.analytics.exception.TableBusyException;
+import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
+import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
 import com.epam.aidial.analytics.service.pipeline.PipelineService;
+import com.epam.aidial.analytics.service.table.PipelineInputDependents;
 import com.epam.aidial.analytics.service.table.TableAccessService;
 import com.epam.aidial.analytics.service.table.TableAccessService.EntryRequest;
 import com.epam.aidial.analytics.service.table.TableCatalogService;
 import com.epam.aidial.analytics.service.table.TableDefinitionEntity;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.service.table.TableSchemaCreationService;
+import com.epam.aidial.analytics.service.table.TableType;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
+import com.epam.aidial.analytics.web.dto.catalog.PlannedChange;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
 import com.epam.aidial.analytics.web.mapper.table.TableMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -20,7 +26,13 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -28,7 +40,8 @@ import java.util.stream.Stream;
 /**
  * The validation pass both import calls share, so a preview and an import cannot disagree.
  *
- * <p>It runs the real services — table create, define-schema, pipeline create — in import order inside
+ * <p>It runs the real services — table create, define-schema, pipeline create, and for an {@code OVERWRITE} update the
+ * table metadata update, schema patch and pipeline patch ({@link ObjectUpdater}) — in import order inside
  * one PostgreSQL transaction that is always rolled back, with ClickHouse DDL replaced by a no-op. Every check
  * those services make is therefore the check the import will meet, and nothing is written: no catalog row, no
  * ClickHouse table, no audit revision. Once every pipeline is created it checks every access entry of an import
@@ -37,7 +50,11 @@ import java.util.stream.Stream;
  * does, inside the same transaction, to report {@code armable}; arming only after all are created means an enrich
  * pipeline reading another one's target is checked against that pipeline, whichever comes first. Existing objects
  * the import keeps are not re-created, so later objects are validated against them rather than against the bundle's
- * version — under {@code FAIL_IF_EXISTS} too, so the preview of a conflicting bundle still validates its new objects.
+ * version — under {@code FAIL_IF_EXISTS} too, so the preview of a conflicting bundle still validates its new objects —
+ * and objects it updates are updated first, so later objects are validated against them as the import leaves them.
+ * The tables it updates are locked first, in the order the table services lock them, and every enabled pipeline that
+ * reads or writes one of them, and that the import does not re-declare, is armed again, so an update that would break
+ * a running pipeline is refused.
  *
  * <p>The pass runs in a transaction of its own ({@code REQUIRES_NEW}), so it can never doom a caller's. The
  * services join it (none uses {@code REQUIRES_NEW}), and a refusal one of them throws marks it rollback-only
@@ -63,11 +80,15 @@ class CatalogImportValidator {
     private final JdbcTemplate jdbc;
     private final TableAccessService tableAccess;
     private final TableDefinitionRepository definitions;
+    private final ObjectUpdater updater;
+    private final PipelineRepository pipelines;
+    private final PipelineInputDependents pipelineReads;
 
     CatalogImportValidator(PlatformTransactionManager transactionManager, TableCatalogService catalog,
             TableSchemaCreationService schemas, PipelineService pipelineService,
             TableMapper tableMapper, PipelineMapper pipelineMapper, JdbcTemplate jdbc, TableAccessService tableAccess,
-            TableDefinitionRepository definitions) {
+            TableDefinitionRepository definitions, ObjectUpdater updater, PipelineRepository pipelines,
+            PipelineInputDependents pipelineReads) {
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.catalog = catalog;
@@ -78,6 +99,9 @@ class CatalogImportValidator {
         this.jdbc = jdbc;
         this.tableAccess = tableAccess;
         this.definitions = definitions;
+        this.updater = updater;
+        this.pipelines = pipelines;
+        this.pipelineReads = pipelineReads;
     }
 
     /** Runs the pass over {@code plan}, adding each refusal to the object it concerns. Writes nothing. */
@@ -111,8 +135,9 @@ class CatalogImportValidator {
         }
 
         private void run() {
+            lockUpdatedTables();
             for (final PlannedObject table : plan.tables()) {
-                if (!table.creates() || stopped(table)) {
+                if (!table.writes() || stopped(table)) {
                     continue;
                 }
                 final String source = table.table().table().sourceTable();
@@ -120,10 +145,14 @@ class CatalogImportValidator {
                     refuse(table, source);
                     continue;
                 }
-                attempt(table, () -> createTable(table.table()));
+                if (table.updates()) {
+                    attempt(table, () -> updater.updateTable(table, DdlExecutor.NO_OP));
+                } else {
+                    attempt(table, () -> createTable(table.table()));
+                }
             }
             for (final PlannedObject pipeline : plan.pipelines()) {
-                if (!pipeline.creates() || stopped(pipeline)) {
+                if (!pipeline.writes() || stopped(pipeline)) {
                     continue;
                 }
                 final BundlePipeline.Declaration declaration = pipeline.pipeline().pipeline();
@@ -134,7 +163,11 @@ class CatalogImportValidator {
                     refuse(pipeline, refusedDependency);
                     continue;
                 }
-                attempt(pipeline, () -> pipelineService.create(pipelineMapper.toRegistration(pipeline.pipeline())));
+                if (pipeline.updates()) {
+                    attempt(pipeline, () -> updater.updatePipeline(pipeline));
+                } else {
+                    attempt(pipeline, () -> pipelineService.create(pipelineMapper.toRegistration(pipeline.pipeline())));
+                }
             }
             checkAccess();
             for (final PlannedObject pipeline : plan.pipelines()) {
@@ -153,6 +186,89 @@ class CatalogImportValidator {
                 }
                 arm(pipeline);
             }
+            if (!accessFailed && stoppedAt == null) {
+                regateReaders();
+            }
+        }
+
+        /**
+         * Locks every table the pass updates before it writes anything, enrichments first and otherwise by name, the
+         * order the table services lock an enrichment and its source in, so the pass, which holds each lock until it
+         * rolls back, never waits on a lock in the opposite order to a concurrent table write. A lock not granted in
+         * time is a {@link TableBusyException}, which ends the call as a retryable {@code 409 table_busy}, not as a
+         * refusal of the bundle.
+         */
+        private void lockUpdatedTables() {
+            plan.tables().stream().filter(PlannedObject::updates)
+                    .sorted(Comparator.comparingInt((PlannedObject table) -> table.table().table().type() == TableType.ENRICHMENT ? 0 : 1)
+                            .thenComparing(PlannedObject::name))
+                    .forEach(table -> definitions.findForUpdate(table.name()));
+        }
+
+        /**
+         * Re-gates every enabled pipeline that reads or writes a table the import updates and that the import does not
+         * re-declare itself, in the bundle or not: a raised {@code sensitive} or an added column can fail a gate that
+         * passed when the pipeline was armed, and its refresh would then fail on every run. Each is disabled and armed
+         * again, which runs the arm gate against the tables as the import leaves them; a refusal fails every updated
+         * table the pipeline depends on, and marks a bundle pipeline not armable.
+         */
+        private void regateReaders() {
+            final Map<String, List<String>> readers = new LinkedHashMap<>();
+            for (final PlannedObject table : plan.tables()) {
+                if (table.updates() && !table.failed()) {
+                    readersOf(table).forEach(pipeline -> readers.computeIfAbsent(pipeline, key -> new ArrayList<>()).add(table.name()));
+                }
+            }
+            final Map<String, PlannedObject> bundled = new HashMap<>();
+            plan.pipelines().forEach(pipeline -> bundled.put(pipeline.name(), pipeline));
+            for (final Map.Entry<String, List<String>> reader : readers.entrySet()) {
+                final PlannedObject inBundle = bundled.get(reader.getKey());
+                if (inBundle != null && inBundle.writes() || stoppedAt != null) {
+                    continue;
+                }
+                try {
+                    pipelineService.patch(reader.getKey(), null, false);
+                    pipelineService.patch(reader.getKey(), null, true);
+                } catch (RuntimeException ex) {
+                    final String problem = CatalogImportService.describe(ex);
+                    for (final String name : reader.getValue()) {
+                        plan.tables().stream().filter(table -> table.name().equals(name)).forEach(table -> table.fail("updating "
+                                + "table '" + name + "' would break enabled pipeline '" + reader.getKey() + "', which reads or "
+                                + "writes it: " + problem));
+                    }
+                    if (inBundle != null) {
+                        inBundle.armProblem(problem);
+                    }
+                    if (transactionAborted()) {
+                        stoppedAt = reader.getKey();
+                    }
+                }
+            }
+        }
+
+        /**
+         * The enabled pipelines that read or write {@code table} as the pass leaves it: the one targeting it, those
+         * declaring it as their input, those following it as their target's parent, and those reading it as an
+         * enrichment through their input's grain join.
+         */
+        private Set<String> readersOf(PlannedObject table) {
+            final String name = table.name();
+            final Set<PipelineEntity> found = new LinkedHashSet<>();
+            pipelines.findByTarget(name).ifPresent(found::add);
+            found.addAll(pipelines.findByInputTable(name));
+            final List<String> enrichments = definitions.findBySourceTable(name).stream().map(TableDefinitionEntity::getName)
+                    .toList();
+            if (!enrichments.isEmpty()) {
+                found.addAll(pipelines.findByTargetInAndInputTableIsNull(enrichments));
+            }
+            final Set<String> readers = new LinkedHashSet<>();
+            found.stream().filter(PipelineEntity::isEnabled).forEach(pipeline -> readers.add(pipeline.getName()));
+            if (table.table().table().type() == TableType.ENRICHMENT) {
+                pipelineReads.pipelinesReadingEnrichment(name).stream()
+                        .filter(reader -> pipelines.findById(reader).map(PipelineEntity::isEnabled).orElse(false))
+                        .forEach(readers::add);
+            }
+            return readers;
         }
 
         /**
@@ -230,9 +346,16 @@ class CatalogImportValidator {
             schemas.defineSchema(name, tableMapper.toDefineInput(table.schema()), DdlExecutor.NO_OP);
         }
 
-        /** What {@code PATCH enabled=true} would say about the pipeline as the import leaves it. */
+        /**
+         * What {@code PATCH enabled=true} would say about the pipeline as the import leaves it. A pipeline the import keeps
+         * enabled is armed already: one it skips passed the gate when it was armed (and is re-gated when a table it reads
+         * or writes is updated, {@link #regateReaders}), and one it updates passed it again in its own re-declaration,
+         * which runs the gate because it leaves the pipeline enabled. An enabled pipeline the update disables must pass
+         * too, or the import is refused: it would stop a running pipeline that could not be armed again.
+         */
         private void arm(PlannedObject pipeline) {
-            if (pipeline.existing() instanceof BundlePipeline existing && existing.exportedEnabled()) {
+            if (pipeline.existing() instanceof BundlePipeline existing && existing.exportedEnabled()
+                    && !pipeline.hasChange(PlannedChange.Op.DISABLE)) {
                 pipeline.armable(true);
                 return;
             }
@@ -240,7 +363,12 @@ class CatalogImportValidator {
                 pipelineService.patch(pipeline.name(), null, true);
                 pipeline.armable(true);
             } catch (RuntimeException ex) {
-                pipeline.armProblem(CatalogImportService.describe(ex));
+                final String problem = CatalogImportService.describe(ex);
+                pipeline.armProblem(problem);
+                if (pipeline.hasChange(PlannedChange.Op.DISABLE)) {
+                    pipeline.fail("the update disables enabled pipeline '" + pipeline.name() + "', which could not be "
+                            + "armed again as the import leaves it: " + problem);
+                }
                 if (transactionAborted()) {
                     stoppedAt = pipeline.name();
                 }
@@ -251,6 +379,9 @@ class CatalogImportValidator {
             try {
                 step.run();
                 return true;
+            } catch (TableBusyException ex) {
+                // Another change holds a table the pass needs: retryable, not a refusal of the bundle.
+                throw ex;
             } catch (RuntimeException ex) {
                 planned.fail(CatalogImportService.describe(ex));
                 refused.add(planned.name());

@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 import java.nio.charset.StandardCharsets;
@@ -177,6 +178,114 @@ class CatalogTransferAuthIntegrationTest extends AbstractOidcAuthIntegrationTest
         final List<String> columns = new ArrayList<>();
         entry.get("prev").get("schema").get("columns").forEach(col -> columns.add(col.get("name").asString()));
         assertThat(columns).contains("a", "k").doesNotContain("c");
+    }
+
+    // --- OVERWRITE ----------------------------------------------------------------------------------------
+
+    @Test
+    void overwriteNeedsTableModifyOnTheUpdatedTable() throws Exception {
+        final String bundle = withDescription(export(fullAdmin(), PLAIN).andReturn().getResponse().getContentAsString(),
+                PLAIN, "upstream wording");
+
+        upload("/v1/catalog/import", bundle, caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_MODIFY")));
+        assertThat(mockMvc.perform(get("/v1/tables/" + PLAIN).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andReturn().getResponse().getContentAsString()).doesNotContain("upstream wording");
+
+        grant(PLAIN, "importer", "get", "modify");
+        upload("/v1/catalog/import", bundle, caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].status").value("updated"));
+        mockMvc.perform(get("/v1/tables/" + PLAIN).header(HttpHeaders.AUTHORIZATION, bearer(fullAdmin())))
+                .andExpect(jsonPath("$.description").value("upstream wording"));
+    }
+
+    @Test
+    void overwriteRaisingSensitivityNeedsTheClearance() throws Exception {
+        grant(PLAIN, "importer", "get", "modify");
+        final ObjectNode bundle = (ObjectNode) JsonMapper.builder().build()
+                .readTree(export(fullAdmin(), PLAIN).andReturn().getResponse().getContentAsString());
+        ((ObjectNode) bundle.get("tables").get(0).get("schema").get("columns").get(0)).put("sensitive", true);
+
+        upload("/v1/catalog/import", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("forbidden"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_SENSITIVE")));
+
+        // As the schema patch does, a grant on the table is enough.
+        grant(PLAIN, "importer", "get", "modify", "sensitive");
+        upload("/v1/catalog/import", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].status").value("updated"));
+    }
+
+    @Test
+    void overwriteOfPipelineNeedsRegistryAdmin() throws Exception {
+        labels();
+        send(post("/v1/pipelines"), fullAdmin(), "{\"name\":\"cxa-labels-live\",\"kind\":\"enrich\",\"target\":\""
+                + LABELS + "\"," + Transforms.sql().output("note", "lower('X')").member()
+                + ",\"trigger\":{\"kind\":\"schedule\"}}").andExpect(status().isCreated());
+        final ObjectNode bundle = (ObjectNode) JsonMapper.builder().build().readTree(send(post("/v1/catalog/export"), fullAdmin(),
+                "{\"components\":[{\"type\":\"pipeline\",\"name\":\"cxa-labels-live\",\"dependencies\":false}]}")
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        ((ObjectNode) bundle.get("pipelines").get(0).get("pipeline").get("transform").get("outputs")).put("note", "lower('Y')");
+
+        upload("/v1/catalog/import", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("REGISTRY_ADMIN")));
+        upload("/v1/catalog/import", bundle.toString(), roles("importer", "author"), "OVERWRITE", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[0].status").value("updated"));
+    }
+
+    @Test
+    void overwriteOfTableWithHiddenColumnFailsInPreview() throws Exception {
+        grant(SECRET, "importer", "get", "modify");
+        final String bundle = withDescription(export(fullAdmin(), SECRET).andReturn().getResponse().getContentAsString(),
+                SECRET, "upstream wording");
+
+        upload("/v1/catalog/import/preview", bundle, caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].import_action").value("FAIL"))
+                .andExpect(jsonPath("$.tables[0].problems[0]")
+                        .value(org.hamcrest.Matchers.containsString("needs every column of it visible to the caller")));
+        upload("/v1/catalog/import", bundle, caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    @Test
+    void previewShowsNothingOfTableTheCallerMayNotGet() throws Exception {
+        final ObjectNode bundle = (ObjectNode) JsonMapper.builder().build()
+                .readTree(export(fullAdmin(), SECRET).andReturn().getResponse().getContentAsString());
+        final ArrayNode columns = (ArrayNode) bundle.get("tables").get(0).get("schema").get("columns");
+        ((ObjectNode) columns.get(1)).put("type", "long");
+        columns.addObject().put("source_name", "added").put("name", "added").put("type", "string");
+
+        final String preview = upload("/v1/catalog/import/preview", bundle.toString(), caller("importer"), "SKIP_IF_EXISTS",
+                false).andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[0].prev").doesNotExist())
+                .andExpect(jsonPath("$.tables[0].changes").isEmpty())
+                .andExpect(jsonPath("$.tables[0].not_applied").isEmpty())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(preview).doesNotContain("STRING");
+
+        // Under OVERWRITE a refused update still asks the update's privileges first.
+        upload("/v1/catalog/import/preview", bundle.toString(), caller("importer"), "OVERWRITE", false)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("TABLE_MODIFY")));
+    }
+
+    private static String withDescription(String bundle, String table, String description) throws Exception {
+        final ObjectNode root = (ObjectNode) JsonMapper.builder().build().readTree(bundle);
+        for (final JsonNode entry : root.get("tables")) {
+            if (entry.get("table").get("name").asString().equals(table)) {
+                ((ObjectNode) entry.get("table")).put("description", description);
+            }
+        }
+        return root.toString();
     }
 
     /** An enrichment of {@code PLAIN} carrying one sensitive column; it takes no read-side grant of its own. */

@@ -2,6 +2,7 @@ package com.epam.aidial.analytics.service.table;
 
 import com.epam.aidial.analytics.clickhouse.ClickHouseDdlExecutor;
 import com.epam.aidial.analytics.clickhouse.ClickHouseTableInspector;
+import com.epam.aidial.analytics.clickhouse.DdlExecutor;
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
 import com.epam.aidial.analytics.exception.ColumnInRowPolicyException;
 import com.epam.aidial.analytics.exception.ColumnNotEntitledException;
@@ -114,11 +115,35 @@ public class TableSchemaService {
      * response is read after the commit.
      */
     public TableView patchSchema(String name, PatchInput patch) {
-        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch));
+        return patchSchema(name, patch, ddlExecutor);
+    }
+
+    /**
+     * {@link #patchSchema(String, PatchInput)} with the {@code ALTER} run through {@code executor} instead of the
+     * ClickHouse one. Exists for the catalog import's validation pass, which runs this inside a Postgres transaction it
+     * rolls back and passes {@link DdlExecutor#NO_OP}, so nothing reaches ClickHouse; the no-op never fails, so the
+     * primary is never probed for an {@code ALTER} that was not sent. Every other caller uses the two-argument form.
+     */
+    public TableView patchSchema(String name, PatchInput patch, DdlExecutor executor) {
+        applyPatch(name, patch, executor);
         return catalogService.get(name);
     }
 
-    private void patchLocked(String name, PatchInput patch) {
+    /**
+     * {@link #patchSchema(String, PatchInput, DdlExecutor)} without reading the table back: it returns once the patch
+     * committed, so a caller recording what it changed — the catalog import, which reverts it — never mistakes a failed
+     * read after the commit for a patch that did not happen.
+     */
+    public void applyPatch(String name, PatchInput patch) {
+        applyPatch(name, patch, ddlExecutor);
+    }
+
+    /** {@link #applyPatch(String, PatchInput)} with the {@code ALTER} run through {@code executor}. */
+    public void applyPatch(String name, PatchInput patch, DdlExecutor executor) {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> patchLocked(name, patch, executor));
+    }
+
+    private void patchLocked(String name, PatchInput patch, DdlExecutor executor) {
         final TableDefinitionEntity definition = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
         // The source's lists name an enrichment's columns, so its row is locked too, enrichment first, when the request
@@ -440,7 +465,7 @@ public class TableSchemaService {
         }
         if (!commands.isEmpty()) {
             try {
-                ddlExecutor.execute(ddlRenderer.renderAlter(name, commands));
+                executor.execute(ddlRenderer.renderAlter(name, commands));
             } catch (RuntimeException ex) {
                 // An ALTER the primary executed is applied, even when the statement then failed waiting for another
                 // replica or with an error another replica reported: that replica applies it from the database log,

@@ -188,12 +188,22 @@ public class TableCatalogService {
      */
     @Transactional
     public TableView updateMetadata(String name, String description, Change<List<String>> tagOrder) {
+        return replaceMetadata(name, description == null ? Change.leave() : Change.set(description), tagOrder);
+    }
+
+    /**
+     * {@link #updateMetadata(String, String, Change)} with the description as a {@link Change} too, so it can be
+     * cleared: a "set" of null stores none. The catalog import's rollback restores a description the table never had
+     * this way, where the endpoint's null can only mean "keep".
+     */
+    @Transactional
+    public TableView replaceMetadata(String name, Change<String> description, Change<List<String>> tagOrder) {
         // Locked as the first load, like every definition writer, so it never writes back stale access state.
         final TableDefinitionEntity entity = definitions.findForUpdate(name)
                 .orElseThrow(() -> new TableNotFoundException("table '" + name + "' not found"));
         entity.requireModifiable();
-        if (description != null) {
-            entity.setDescription(description);
+        if (description.present()) {
+            entity.setDescription(description.value());
         }
         if (tagOrder.present()) {
             entity.setTagOrder(TableColumnRules.normalizeTagOrder(tagOrder.value()));

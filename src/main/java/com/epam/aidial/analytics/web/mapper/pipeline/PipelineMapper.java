@@ -259,6 +259,25 @@ public abstract class PipelineMapper {
     }
 
     /**
+     * The {@code PATCH /v1/pipelines/{name}} body a catalog import re-declares an existing pipeline with: the whole
+     * declaration, {@code kind} and {@code target} named, as a read-modify-write client sends it, and {@code enabled} left
+     * out so the patch keeps the stored state. Mapped through {@link #toRegistration(PipelineEntity, PatchPipelineRequest,
+     * Supplier)} like any other patch, so every rule of that path applies; the transform is the {@code PATCH} shape, so a
+     * folded legacy declaration's {@code output_vars} and an aggregate's {@code sql} pass through verbatim.
+     *
+     * <p>An enrich declaration without {@code inputs} follows its target's parent, which a patch spells {@code []}: a
+     * patch leaving {@code inputs} out keeps a declared source instead, or is refused for one that is not the parent
+     * ({@link #patchedInput}).
+     */
+    public PatchPipelineRequest toRedeclaration(BundlePipeline.Declaration declaration) {
+        final List<String> inputs = declaration.kind() == PipelineKind.ENRICH && declaration.inputs() == null
+                ? List.of() : declaration.inputs();
+        return new PatchPipelineRequest(declaration.name(), declaration.kind(), null, declaration.target(),
+                inputs, declaration.filter(), declaration.groupBy(), declaration.measures(), declaration.sql(),
+                declaration.trigger(), declaration.transform(), declaration.advanced());
+    }
+
+    /**
      * A stored pipeline as a catalog bundle entry: the {@code view=source} projection without its runtime
      * members ({@code generation}, {@code state}, {@code enabled}, timestamps, {@code notes}), so that
      * {@link #toRegistration(BundlePipeline)} recreates the same declaration. The transform's

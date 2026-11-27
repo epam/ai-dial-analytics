@@ -1,8 +1,11 @@
 package com.epam.aidial.analytics.service.catalog.transfer;
 
 import com.epam.aidial.analytics.configuration.TableLimitsProperties;
+import com.epam.aidial.analytics.service.enrichment.model.TransformType;
 import com.epam.aidial.analytics.service.pipeline.PipelineEntity;
+import com.epam.aidial.analytics.service.pipeline.PipelineKind;
 import com.epam.aidial.analytics.service.pipeline.PipelineRepository;
+import com.epam.aidial.analytics.service.pipeline.PipelineService;
 import com.epam.aidial.analytics.service.security.SecurityClaimsExtractor;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess;
 import com.epam.aidial.analytics.service.security.SensitiveColumnAccess.ColumnVisibility;
@@ -13,6 +16,7 @@ import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import com.epam.aidial.analytics.web.dto.catalog.BundlePipeline;
 import com.epam.aidial.analytics.web.dto.catalog.BundleTable;
 import com.epam.aidial.analytics.web.dto.catalog.CatalogBundle;
+import com.epam.aidial.analytics.web.dto.pipeline.PipelineRequests.PatchTransformRequest;
 import com.epam.aidial.analytics.web.dto.table.CreateTableRequest.ColumnRequest;
 import com.epam.aidial.analytics.web.dto.table.DefineSchemaRequest;
 import com.epam.aidial.analytics.web.mapper.pipeline.PipelineMapper;
@@ -25,6 +29,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -59,6 +64,7 @@ class ImportTargetReader {
     private final SecurityClaimsExtractor claims;
     private final SensitiveColumnAccess sensitiveAccess;
     private final TableAccessService tableAccess;
+    private final PipelineService pipelineService;
 
     @Transactional(readOnly = true)
     public ImportTarget read(CatalogBundle bundle, boolean includeAccess) {
@@ -72,7 +78,7 @@ class ImportTargetReader {
                     : Map.of();
             if (definition.isSystem()) {
                 tables.put(name, new ImportTarget.Table(name, definition.getType(), true, definition.getStatus(), null,
-                        null, access));
+                        null, access, false));
             } else {
                 final BundleTable full = exportService.bundleTable(definition);
                 final ColumnVisibility columnVisibility = sensitiveAccess.visibleColumns(definition);
@@ -80,7 +86,7 @@ class ImportTargetReader {
                         ? new BundleTable(full.table(), withoutHidden(full.schema(), sensitiveVisible, columnVisibility))
                         : null;
                 tables.put(name, new ImportTarget.Table(name, definition.getType(), false, definition.getStatus(), full,
-                        prev, access));
+                        prev, access, !columnVisibility.isAll()));
             }
         }
         final Set<String> pipelineNames = new LinkedHashSet<>();
@@ -89,16 +95,29 @@ class ImportTargetReader {
             pipelineNames.add(pipeline.pipeline().name());
             targets.add(pipeline.pipeline().target());
         }
+        // The pipeline writing a bundle table too: an update of an enrichment's columns bumps that pipeline's generation.
+        nullSafe(bundle.tables()).forEach(table -> targets.add(table.table().name()));
         final Map<String, BundlePipeline> bundled = new LinkedHashMap<>();
+        final Set<String> incomplete = new HashSet<>();
         for (final PipelineEntity pipeline : pipelines.findAllById(pipelineNames)) {
             bundled.put(pipeline.getName(), pipelineMapper.toBundle(pipeline));
+            if (!pipelineService.isDeclarationComplete(pipeline)) {
+                incomplete.add(pipeline.getName());
+            }
         }
         final Map<String, String> byTarget = new HashMap<>();
+        final Set<String> bumped = new HashSet<>();
         for (final PipelineEntity pipeline : pipelines.findByTargetIn(targets)) {
             byTarget.put(pipeline.getTarget(), pipeline.getName());
+            // PipelineGenerationService#onTargetColumnsChanged bumps only an llm pipeline; a Class-1 one re-resolves itself.
+            final PatchTransformRequest transform = pipeline.getKind() == PipelineKind.ENRICH
+                    ? pipelineMapper.toBundle(pipeline).pipeline().transform() : null;
+            if (transform != null && transform.type() == TransformType.LLM) {
+                bumped.add(pipeline.getName());
+            }
         }
         final boolean pipelinesVisible = !securityMode.isEnforced() || claims.hasPrivilege(Privilege.REGISTRY_READ);
-        return new ImportTarget(tables, bundled, pipelinesVisible, byTarget, reusedNames(pipelineNames),
+        return new ImportTarget(tables, bundled, pipelinesVisible, byTarget, bumped, incomplete, reusedNames(pipelineNames),
                 (int) definitions.count(), limits.maxTables(), limits.maxColumnsPerTable());
     }
 

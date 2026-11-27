@@ -3285,9 +3285,12 @@ A user table's identity and schema SHALL be exportable and importable as defined
 define-schema steps as `POST /v1/tables` and `PUT /v1/tables/{name}/schema`. Every rule in this capability therefore applies to an
 imported table: identifier and reserved-name checks, `max-tables` and `max-columns-per-table`, the write-mode rules and provenance
 injection. That capability owns which tables travel (system, OTLP landing, PENDING and FAILED tables do not), how columns travel ("Columns
-travel as stored") and the known provenance asymmetry. An import never patches or deletes an existing table's definition or columns; it only creates tables and
-deletes the ones it created during compensation. Called with `include_access=true`, it also writes access entries onto
-existing tables, as that capability's "Access import" defines.
+travel as stored") and the known provenance asymmetry. An import SHALL change an existing table's definition or columns only under
+`resolution_policy=OVERWRITE`, only through the same steps as `PUT /v1/tables/{name}` and `PATCH /v1/tables/{name}/schema` with
+every rule of those paths in force, and only by the changes that capability's "Updating an existing object" lists: it adds columns
+and updates table and column metadata, and never drops, renames or retypes a column or changes a frozen key. It deletes only the
+tables it created, and drops only the columns it added, during compensation. Called with `include_access=true`, it also writes
+access entries onto existing tables, as that capability's "Access import" defines.
 
 #### Scenario: An imported table obeys the create rules
 
@@ -3299,6 +3302,12 @@ existing tables, as that capability's "Access import" defines.
 - **WHEN** a bundle carrying access for an existing table `t` is imported with `resolution_policy=SKIP_IF_EXISTS` and
   `include_access=true`
 - **THEN** `t`'s columns, description and settings are unchanged, and only its access entries change
+
+#### Scenario: An update obeys the schema-patch rules
+
+- **WHEN** an `OVERWRITE` import adds a column to an existing table whose physical table already carries a column of that name
+- **THEN** the import's `ALTER` is refused as the schema patch's would be, the table is left `ACTIVE` and unchanged, and the import
+  compensates
 
 ### Requirement: A column a row policy references is protected against drop and rename
 

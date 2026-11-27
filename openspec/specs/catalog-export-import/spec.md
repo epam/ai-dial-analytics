@@ -5,9 +5,11 @@
 This capability defines catalog promotion between ADAS environments: `POST /v1/catalog/export` writes a versioned
 bundle of user tables, their columns, and pipelines with their dependency closure, and
 `POST /v1/catalog/import` validates such a bundle and recreates it on another environment. Each call has a
-preview twin, and the API shape mirrors deployment manager's config export/import. Import never changes an existing
-object's definition, columns or pipeline: system tables travel by name as required system tables whose definitions are
-checked, never written, and pipelines always land disabled. On request (`include_access`, with `TABLE_GRANT`) the
+preview twin, and the API shape mirrors deployment manager's config export/import. Only `resolution_policy=OVERWRITE`
+changes an existing object, and only where the existing mutation services can do it safely: it adds columns, updates table
+and column metadata and re-declares pipelines, keeps each environment's own tuning, and never drops, renames or retypes
+anything. System tables travel by name as required system tables whose definitions are checked, never written, and created
+pipelines always land disabled. On request (`include_access`, with `TABLE_GRANT`) the
 bundle also carries the covered tables' access entries, system tables included, and the import upserts them per role.
 Selectors narrow an export for a target that already has the tables: a pipeline alone, without its closure, or only
 some roles' access entries of a table, without its definition. Both import calls share one validation pass, which runs the real create services in a
@@ -366,18 +368,20 @@ A missing `file` part SHALL be `400`. An `options` part with an unknown field SH
 ### Requirement: Resolution policy
 
 Both import calls SHALL require the query parameter `resolution_policy`, with deployment manager's values `FAIL_IF_EXISTS`,
-`SKIP_IF_EXISTS` and `OVERWRITE`. Import SHALL never mutate an existing table definition, column or pipeline, apart from the access
-entries a table definition stores: an import called with `include_access=true` writes those onto existing tables as "Access import"
-defines, under either policy. An access entry is not a bundle object for this requirement, so an existing entry never makes `FAIL_IF_EXISTS` conflict.
+`SKIP_IF_EXISTS` and `OVERWRITE`. Only `OVERWRITE` SHALL change an existing table definition, column or pipeline, and only as
+"Updating an existing object" defines; apart from it, import changes only the access entries a table definition stores: an import
+called with `include_access=true` writes those onto existing tables as "Access import" defines, under every policy. An access entry
+is not a bundle object for this requirement, so an existing entry never makes `FAIL_IF_EXISTS` conflict.
 
 - `FAIL_IF_EXISTS`: any bundle object that already exists on the target SHALL make `/import` answer `409` with `error`
   `catalog_import_conflict`, writing nothing.
 - `SKIP_IF_EXISTS`: existing objects SHALL be kept unchanged, apart from their access, and the rest imported; later bundle objects SHALL be validated against
   the existing object, not the bundle's version of it.
-- `OVERWRITE`: SHALL be `422` with `error` `resolution_policy_unsupported` on both calls.
+- `OVERWRITE`: an existing object SHALL be updated as "Updating an existing object" defines, kept unchanged when nothing reaches
+  it, and the rest imported; later bundle objects SHALL be validated against the existing object as the import leaves it.
 
-A missing `resolution_policy` SHALL be `400`. A bundle re-run under `SKIP_IF_EXISTS` after a partial failure SHALL converge on the
-bundle's objects.
+A missing `resolution_policy` SHALL be `400`. A bundle re-run under `SKIP_IF_EXISTS` or `OVERWRITE` after a partial failure SHALL
+converge on the bundle's objects.
 
 #### Scenario: Second promotion fails under FAIL_IF_EXISTS
 
@@ -394,10 +398,12 @@ bundle's objects.
 - **WHEN** the bundle is re-exported with one new pipeline and imported with `SKIP_IF_EXISTS`
 - **THEN** only that pipeline has `import_action` `CREATE` and is created
 
-#### Scenario: OVERWRITE refused
+#### Scenario: OVERWRITE updates what differs
 
-- **WHEN** either import call passes `resolution_policy=OVERWRITE`
-- **THEN** the response is `422` with `error` `resolution_policy_unsupported`
+- **WHEN** a bundle already imported is re-exported after one column description changed on the source, and is imported with
+  `resolution_policy=OVERWRITE`
+- **THEN** the response is `200`, that table's entry is `UPDATE`, every other entry is `SKIP`, and the target's column carries the
+  new description
 
 #### Scenario: Missing policy
 
@@ -412,23 +418,223 @@ bundle's objects.
 - **THEN** the response is `200` with `outcome` `completed`, and each `dial_usage_log` access entry has `import_action` `CREATE`,
   `REPLACE` or `SKIP`
 
+### Requirement: Updating an existing object
+
+Under `resolution_policy=OVERWRITE` import SHALL compare each bundle table and pipeline that exists on the target as an ACTIVE user
+table, or as a pipeline, with the target's full object (not the caller-visible `prev`), and SHALL derive from the difference the
+changes listed below, each applied through the service the matching endpoint uses. An object with at least one change SHALL be
+`UPDATE`; an object with none SHALL be `SKIP`, whatever it keeps, so a bundle re-imported under `OVERWRITE` converges and its
+second run writes no revision. Every other planning rule applies to an `UPDATE` object as it does to a `CREATE` one: an object
+depending on a refused object is `FAIL` (an updated enrichment whose bundled source is refused included), a PENDING or FAILED
+existing table is `FAIL`, and a bundle table whose name is a system table on the target is `FAIL`.
+
+The bundle's side SHALL be compared in the form the write paths store it, so a hand-edited bundle that leaves a default implicit
+converges on its second run: a column's `nullable` left out resolves to its kind's default, a source's `write` left out is
+`append`, a column's `description`, `display_name` and `tag` are trimmed with blank read as unset, enum values and `tag_order`
+entries are trimmed, and an `aggregate` trigger's `kind` left out is `schedule`, any `kind` compared lowercased. `cardinality` SHALL
+NOT be compared: it has one legal value and is not stored. A pipeline's members SHALL be compared as JSON values, an object as a
+map, except `transform.outputs` and `transform.inputs`, whose entry order is stored and used (the output order is the composed
+response schema's property order), so a bundle that only reorders them is a `redeclare` of that member.
+
+A table SHALL change as follows, the columns matched by exposed `name`:
+
+- its `description` and `tag_order` SHALL follow the bundle (`update_table`, through the `PUT /v1/tables/{name}` path);
+- a column the bundle carries and the target lacks SHALL be added (`add_column`, through the `PATCH /v1/tables/{name}/schema` `add`
+  operation), appended after the target's columns;
+- a column's `description`, `display_name`, `tag` and `heavy` SHALL follow the bundle, and its `sensitive` flag SHALL follow it
+  from `false` to `true` only (`update_column`, through the schema-patch `update` operation);
+- all of a table's column changes SHALL be one schema patch, so their ClickHouse commands are one `ALTER`.
+
+A table SHALL keep, and report under `not_applied`: a column the target has and the bundle lacks (`extra_column`), since an import
+never drops a column; a column order that differs from the bundle's (`column_order`); a `sensitive` flag the bundle would clear
+(`sensitive_loosening`), since an import never widens access to a column; and its target-owned `ttl` (`target_owned`, see
+"Environment-specific values reported").
+
+A pipeline whose declaration differs from the bundle's, once the target-owned members are taken from the target, SHALL be
+re-declared from the bundle's `view=source` projection (`redeclare`, through the `PATCH /v1/pipelines/{name}` path), listing the
+declaration members that change. An `enrich` declaration without `inputs` follows its target's parent, and SHALL be re-declared with
+`inputs: []`, the patch's spelling of that, so a target declaring that parent as its source converges on it. Its `enabled` state SHALL be kept, except that an enabled `aggregate` pipeline SHALL be disabled
+first (`disable`), because a declaration patch on an enabled aggregate is refused, and SHALL stay disabled (see "Pipelines are
+imported disabled").
+
+A difference no listed change reaches SHALL make the entry `FAIL`, naming the field and saying the object must be deleted and
+re-imported or changed by hand: a column's `source_name`, `type`, `element_type`, `nullable` or enum values; a table's `type` or
+`write`; `ordering_key`, `partition_by`, `grain_key`, `source_table`, `identity_column` or `version_column`; and a
+pipeline's `kind` or `target`. An object with a change SHALL also be `FAIL` when the target table holds a column hidden from the
+caller, by sensitivity or by a column policy, or when the caller may not get the table, because the schema patch resolves the
+caller's visible columns only; and a table update that adds a column SHALL be `FAIL` when a column policy limits the columns the
+caller sees, since a column it adds could be hidden from the caller and the drop that reverts it on rollback could not name it. A
+pipeline update SHALL be `FAIL` when the bundle's declaration names no member beside `name`, `kind` and `target` (a patch could not
+clear the stored one), and when the target's declaration is an incomplete draft, which a rollback could not restore; the draft is
+deleted and the bundle imported again instead. The update's privileges ("Import authorization") are checked before any of these
+refusals, a refused object counting as one the import set out to update, so a caller lacking them is answered `403`.
+
+What an entry reports of an existing object SHALL be the caller's view of it, never the full object the decisions use: for a
+table the caller may not get, or a pipeline it may not read (`REGISTRY_READ`), `changes`, `not_applied` and `effects` SHALL be
+empty and a refusal SHALL only say there is one; for a table with columns hidden from the caller, they SHALL be those of the
+caller's view against the bundle without the hidden columns, and a refusal on a hidden column SHALL name neither its stored value
+nor what differs.
+
+Each object entry SHALL carry `changes[]`, `not_applied[]` and `effects[]`:
+
+- `changes`: `{ op, name, fields }`, `op` one of `update_table`, `add_column`, `update_column`, `disable` and `redeclare`, `name`
+  the column for a column change, and `fields` the members that change;
+- `not_applied`: `{ kind, name, reason }`, `kind` one of `extra_column`, `column_order`, `sensitive_loosening` and `target_owned`;
+- `effects`: `{ kind, pipeline }`, consequences the import reports and does not act on. `kind` is one of `generation_bump`,
+  `rebuild_from_zero`, `rearm_required` and `existing_rows_not_rederived`, and `pipeline` names the pipeline affected:
+  - a re-declaration bumps that pipeline's `generation` (`generation_bump`);
+  - so does a change to an enrichment's columns or column descriptions, which bumps the generation of the pipeline targeting it
+    when that is an `enrich` pipeline with an `llm` transform; a Class-1 (`sql`) pipeline re-resolves on each materialize and is
+    not bumped, and a disabled draft whose output mapping does not derive keeps its generation;
+  - a re-declared `aggregate` rebuilds its target from zero (`rebuild_from_zero`);
+  - an `aggregate` the import disabled must be re-armed (`rearm_required`);
+  - a re-declared `enrich` pipeline leaves the rows it already wrote with their previous values until a backfill re-derives them
+    (`existing_rows_not_rederived`).
+
+Under `SKIP_IF_EXISTS` an existing object's `SKIP` entry SHALL carry the `changes`, `not_applied` and `effects` `OVERWRITE` would
+give it and SHALL write none of them. Under `FAIL_IF_EXISTS`, and on `CREATE` entries, the three lists SHALL be empty.
+
+#### Scenario: A new column and changed descriptions are applied
+
+- **GIVEN** a target holding enrichment `usage_identity` and its `enrich` pipeline `usage-identity-live`, both from an earlier
+  import of a bundle
+- **WHEN** a later bundle adds a nullable column `client_version` to `usage_identity` and changes two column descriptions, and is
+  imported with `resolution_policy=OVERWRITE`
+- **THEN** the `usage_identity` entry is `UPDATE` with an `add_column` change for `client_version` and two `update_column` changes
+  naming `description`, its result `status` is `updated`, and `GET /v1/tables/usage_identity` lists `client_version` last and
+  the new descriptions
+
+#### Scenario: A changed output expression re-declares an enrich pipeline in place
+
+- **GIVEN** an enabled `enrich` pipeline `usage-identity-live` at generation 3
+- **WHEN** a bundle whose declaration of it changes one `transform.outputs` expression is imported with `OVERWRITE`
+- **THEN** the entry is `UPDATE` with a `redeclare` change naming `transform.outputs` and effects `generation_bump` and
+  `existing_rows_not_rederived`, and afterwards the pipeline is still enabled, at generation 4, with the bundle's expression
+
+#### Scenario: An enabled aggregate is disabled and left disabled
+
+- **GIVEN** an enabled `aggregate` pipeline `sessions_rollup`
+- **WHEN** a bundle changing its `filter` is imported with `OVERWRITE`
+- **THEN** the entry carries the changes `disable` and `redeclare` and the effects `rebuild_from_zero` and `rearm_required`, and
+  afterwards `GET /v1/pipelines/sessions_rollup` reports `enabled: false` with the bundle's `filter`
+
+#### Scenario: A second run converges
+
+- **WHEN** the same bundle is imported again with `OVERWRITE`
+- **THEN** every entry is `SKIP`, no revision is written, and the response is `200` with `outcome` `completed`
+
+#### Scenario: A column only the target has is kept
+
+- **WHEN** a target table carries a column `local_note` the bundle's version lacks, and the bundle is imported with `OVERWRITE`
+- **THEN** `local_note` still exists afterwards, and the entry carries a `not_applied` item of kind `extra_column` naming it
+
+#### Scenario: Sensitivity is tightened, never loosened
+
+- **WHEN** a bundle marks column `a` `sensitive: true` and column `b` `sensitive: false`, where the target has `a` not sensitive
+  and `b` sensitive, and is imported with `OVERWRITE`
+- **THEN** `a` is sensitive afterwards through an `update_column` change, `b` is still sensitive, and the entry carries a
+  `not_applied` item of kind `sensitive_loosening` naming `b`
+
+#### Scenario: A type change cannot be updated
+
+- **WHEN** a bundle changes the `type` of an existing column and is imported with `OVERWRITE`
+- **THEN** `/import/preview` reports the table entry `FAIL` naming the column and `type`, and `/import` is `422` with `error`
+  `catalog_import_invalid`, writing nothing
+
+#### Scenario: A changed pipeline target cannot be updated
+
+- **WHEN** a bundle declares an existing pipeline with a different `target` and is imported with `OVERWRITE`
+- **THEN** the pipeline entry is `FAIL` naming `target`
+
+#### Scenario: A hidden column blocks an update
+
+- **GIVEN** a caller without `TABLE_SENSITIVE` on a target table `t` that has a sensitive column
+- **WHEN** the caller imports, with `OVERWRITE`, a bundle that changes `t`'s description
+- **THEN** the `t` entry is `FAIL`, saying the update needs every column of `t` visible to the caller
+- **AND WHEN** the bundle's `t` equals the target's
+- **THEN** the `t` entry is `SKIP`
+
+#### Scenario: The safe policy previews what OVERWRITE would do
+
+- **WHEN** the bundle of "A new column and changed descriptions are applied" is imported with `SKIP_IF_EXISTS`
+- **THEN** the `usage_identity` entry is `SKIP` and lists the `add_column` and `update_column` changes, and the target is unchanged
+
+#### Scenario: Defaults left implicit converge
+
+- **GIVEN** a target source table whose column `score` is stored `nullable: false` with description `points`
+- **WHEN** a bundle declares `score` without `nullable`, with description `points ` and a blank `display_name`, leaves the table's
+  `write` out, and is imported with `OVERWRITE`
+- **THEN** the table entry is `SKIP` with no change
+
+#### Scenario: An aggregate trigger without a kind converges
+
+- **WHEN** a bundle declares an existing `aggregate` pipeline's trigger as `{"cron": ...}` with the target's cron, and is imported
+  with `OVERWRITE`
+- **THEN** the pipeline entry is `SKIP`
+
+#### Scenario: Reordered outputs are re-declared
+
+- **GIVEN** an `enrich` pipeline whose `transform.outputs` are `{summary, reasoning}` on the target
+- **WHEN** a bundle carrying the same outputs as `{reasoning, summary}` is imported with `OVERWRITE`
+- **THEN** the entry is `UPDATE` with a `redeclare` change naming `transform.outputs`
+
+#### Scenario: A declaration following its parent converges on one declaring it
+
+- **GIVEN** an `enrich` pipeline that declares `inputs: [usage_base]`, its target's parent source
+- **WHEN** a bundle in which the pipeline leaves `inputs` out is imported with `OVERWRITE`, and then again
+- **THEN** the first run re-declares it with a `redeclare` change naming `inputs`, and the second run is `SKIP` and leaves its
+  `generation` unchanged
+
+#### Scenario: A Class-1 pipeline is not reported bumped
+
+- **WHEN** a bundle adds a column to an enrichment whose pipeline has a `sql` transform, and is imported with `OVERWRITE`
+- **THEN** the table entry is `UPDATE` and its `effects` are empty
+
+#### Scenario: An enrichment update over a refused source is refused
+
+- **WHEN** an `OVERWRITE` bundle retypes a column of source `base` and changes a column description of its enrichment `sent`
+- **THEN** both entries are `FAIL`, `sent`'s naming `source_table 'base'`
+
+#### Scenario: A bare declaration or an incomplete draft is not updated
+
+- **WHEN** a bundle declares an existing complete pipeline with only `name`, `kind` and `target`, or declares in full a pipeline
+  that is an incomplete draft on the target, and is imported with `OVERWRITE`
+- **THEN** the pipeline entry is `FAIL`, saying the declaration names no member, or that the target's is an incomplete draft
+
+#### Scenario: A column added under a column policy is refused
+
+- **GIVEN** a caller whose role on table `t` carries a column policy naming every column of `t`
+- **WHEN** the caller imports with `OVERWRITE` a bundle adding column `x` to `t`
+- **THEN** the `t` entry is `FAIL`, naming the column policy
+- **AND WHEN** the bundle only rewords a column description of `t`
+- **THEN** the `t` entry is `UPDATE`
+
+#### Scenario: A table the caller may not get is reported without its differences
+
+- **GIVEN** a caller holding `TABLE_CREATE` and no grant on table `t`, which has a sensitive column `s` of type `string`
+- **WHEN** the caller previews with `SKIP_IF_EXISTS` a bundle retyping `s` and adding a column to `t`
+- **THEN** the `t` entry has no `prev`, empty `changes` and `not_applied`, and the response names no stored type
+- **AND WHEN** the caller previews the same bundle with `OVERWRITE`
+- **THEN** the response is `403` with `error` `forbidden`, naming `TABLE_MODIFY`
+
 ### Requirement: Import entries
 
 `ImportPreview` and `ImportResult` SHALL group entries by type (`required_system_tables`, `tables`, `pipelines`, and `access`, whose entries
 "Access import entries" defines), each object entry being
-`{ name, import_action, prev, next, differs, metadata_only, problems[] }`. The rules below are about object
-entries; an access entry is not an object.
+`{ name, import_action, prev, next, differs, metadata_only, changes[], not_applied[], effects[], problems[] }`. The rules below are
+about object entries; an access entry is not an object.
 
-- `import_action` SHALL be `CREATE` (new), `SKIP` (exists under `SKIP_IF_EXISTS`, or a required system table the target has)
-  or `FAIL` (exists under `FAIL_IF_EXISTS`, or fails validation under either policy, including a required system table the target lacks
-  and a pipeline whose target is held by a differently named pipeline).
+- `import_action` SHALL be `CREATE` (new), `UPDATE` (exists, and is changed under `OVERWRITE` as "Updating an existing object"
+  defines), `SKIP` (exists under `SKIP_IF_EXISTS`, exists with nothing to change under `OVERWRITE`, or a required system table the
+  target has) or `FAIL` (exists under `FAIL_IF_EXISTS`, or fails validation under any policy, including a required system table the
+  target lacks, a pipeline whose target is held by a differently named pipeline, and a difference `OVERWRITE` cannot apply).
 - `prev` SHALL be the target's existing object re-exported in bundle shape, or null when new; `next` SHALL be the bundle's object,
-  kept on `SKIP` entries too. `prev` SHALL follow the export's visibility rules for the caller: sensitive columns only with the
+  kept on `SKIP` and `UPDATE` entries too. `prev` SHALL follow the export's visibility rules for the caller: sensitive columns only with the
   clearance, no column a column policy hides from the caller (see [table-access-control](../table-access-control/spec.md),
   "Column visibility by caller role"), and null for a table the caller may not get or a pipeline without
   `REGISTRY_READ`. `differs` is still computed from the full objects, so it MAY be `true` when only a column omitted from `prev`
   differs, as for a sensitive column the caller cannot see.
-- An existing user table that is PENDING or FAILED SHALL be `FAIL` under either policy, telling the operator to delete it first; a
+- An existing user table that is PENDING or FAILED SHALL be `FAIL` under every policy, telling the operator to delete it first; a
   bundle table whose name is a system table on the target SHALL be `FAIL`. An object that depends on a refused object (an enrichment
   of a refused source, a pipeline reading or targeting one) SHALL be `FAIL` naming that dependency.
 - An enrichment table to be created, or a pipeline to be created, that depends on a table the bundle neither carries under `tables`
@@ -439,21 +645,23 @@ entries; an access entry is not an object.
   that pipeline exists. Its columns are left to the validation pass, and a system table among them is not checked as a required
   system table.
 - `differs` SHALL compare the serialized `prev` and `next`, excluding `enabled`, state and timestamps; `metadata_only` SHALL be true
-  when only descriptions, display names or tags differ.
+  when only descriptions, display names or tags differ. A `SKIP` entry under `OVERWRITE` MAY therefore carry `differs: true`, its
+  differences all listed under `not_applied`.
+- `changes`, `not_applied` and `effects` SHALL be filled as "Updating an existing object" defines, and SHALL be empty otherwise.
 - Pipeline entries SHALL also carry `armable`, `arm_problems[]` and `reused_name`.
-- `ImportResult` entries SHALL add `status`: `created`, `skipped`, `rolled_back`, `rollback_failed` or `failed`. An object not
+- `ImportResult` entries SHALL add `status`: `created`, `updated`, `skipped`, `rolled_back`, `rollback_failed` or `failed`. An object not
   attempted because the import stopped earlier SHALL be `skipped` with a problem naming where it stopped.
 - `import_action` SHALL be written in upper case, as deployment manager writes it.
 
 The top level SHALL carry `env_specific[]` and, on `ImportPreview`, `validation_errors[]` (bundle-level problems: limits, a name
 listed twice, a name listed both as a table and as a required system table, and the bundle-level access problems of "Access import"). `ImportResult` SHALL also carry `import_id` and `outcome`:
-`completed`; `rolled_back` when an object or the access step failed and compensation removed everything it had created; or `rollback_failed` when any
-entry ended `rollback_failed`.
+`completed`; `rolled_back` when an object or the access step failed and compensation removed everything it had created and
+reverted everything it had updated; or `rollback_failed` when any entry ended `rollback_failed`.
 
 #### Scenario: Differing object under either policy in preview
 
 - **WHEN** `/import/preview` runs with a bundle whose table `t` differs from the target's `t`, under each policy
-- **THEN** both responses are `200`, and the `t` entry carries `prev`, `next` and `differs: true`
+- **THEN** every response is `200`, and the `t` entry carries `prev`, `next` and `differs: true`
 
 #### Scenario: Description-only difference
 
@@ -478,24 +686,61 @@ entry ended `rollback_failed`.
 - **THEN** the `p` entry is `FAIL` naming `usage_base` and its state, and `/import` is `422` with `error`
   `catalog_import_invalid`
 
+#### Scenario: A converged object with a kept difference is SKIP
+
+- **WHEN** the only difference between a target table and the bundle's is a column the target has and the bundle lacks, and the
+  bundle is imported with `OVERWRITE`
+- **THEN** the entry is `SKIP` with `differs: true`, an empty `changes` and one `not_applied` item
+
 ### Requirement: Shared validation pass
 
-Both import calls SHALL run one validation pass that executes the real table create, define-schema and pipeline create
-services inside a single Postgres transaction that is always rolled back, with ClickHouse DDL replaced by a no-op, and then runs the
-arm-time pipeline checks on each pipeline, once every pipeline is created and, when the import is called with
+Both import calls SHALL run one validation pass that executes the real table create, define-schema, table update, schema-patch,
+pipeline create and pipeline patch services inside a single Postgres transaction that is always rolled back, with ClickHouse DDL
+replaced by a no-op, and then runs the
+arm-time pipeline checks on each pipeline it created or updated and left disabled, once every pipeline is created or updated and, when the import is called with
 `include_access=true` and no access entry is `FAIL`, every access entry of the bundle is applied in the same transaction (see
-"Access import"), to fill `armable` and `arm_problems`. `armable`, `arm_problems` and each access entry's `ineffective_grants` SHALL
+"Access import"), to fill `armable` and `arm_problems`. An updated pipeline that stays enabled SHALL be checked by its own
+re-declaration, which runs the arm-time gate because it leaves the pipeline enabled, and a refusal there SHALL make its entry `FAIL`.
+An enabled pipeline the update disables (an `aggregate`) SHALL be `FAIL` too when the arm-time checks refuse it as the import
+leaves it, since the import would stop a running pipeline that could not be armed again. Every enabled pipeline that reads or writes
+a table the import updates, and that the import does not re-declare, in the bundle or not, SHALL be disabled and armed again inside
+the pass, so the arm-time gate judges it against the tables as the import leaves them: a refusal SHALL make each updated table it
+depends on `FAIL`, naming the pipeline, and a bundle pipeline among them `armable: false`. A pipeline reads or writes a table when
+it targets it, declares it as its input, follows it as its target's parent, or reads it as an enrichment through its input's grain
+join.
+
+Before writing anything the pass SHALL lock every table it updates, enrichments first and otherwise by name, the order the table
+services lock an enrichment and its source in, and SHALL hold the locks until it rolls back. A lock not granted within
+`tables.lock-timeout` SHALL answer both calls `409` with `error` `table_busy` (retryable), never a refused bundle.
+`armable`, `arm_problems` and each access entry's `ineffective_grants` SHALL
 therefore describe the target as the import would leave it, its access included. When an access entry is `FAIL` before the access
 is applied (an entry the checks refuse, or a bundle-level problem), none SHALL be applied: arming SHALL still run, against the target
 without the bundle's access. When applying the access inside the pass fails, every access entry SHALL be `FAIL` and every pipeline
 SHALL carry the `not checked` arm problem instead of being armed, as "Access import" defines. In both cases every access entry's
 `ineffective_grants` SHALL be empty. The pass SHALL run in its own transaction, never a caller's, and SHALL tag its log lines with `catalog_import_validation=true`
-in the MDC, since the services it calls log registrations and arms that are rolled back. A SQL-level failure while arming SHALL leave
+in the MDC, since the services it calls log registrations, patches and arms that are rolled back. A SQL-level failure while arming SHALL leave
 the remaining pipelines with a `not checked` arm problem.
 
 The pass SHALL check identifier rules, reserved names, `max-tables` against the total after import, and `max-columns-per-table`
-including injected provenance columns. It SHALL list every Java-side refusal; a SQL-level failure SHALL stop the pass at that object
+including injected provenance columns and the columns an update adds. It SHALL list every Java-side refusal; a SQL-level failure SHALL stop the pass at that object
 and be reported on it.
+
+#### Scenario: An update leaving an enabled aggregate unarmable is refused
+
+- **GIVEN** an enabled `aggregate` `cx-rollup` writing measures `total` and `events` into `cx_roll`
+- **WHEN** a bundle dropping the `events` measure is previewed with `OVERWRITE`, `cx_roll` keeping its `events` column
+- **THEN** the pipeline entry is `FAIL`, saying it could not be armed again, `/import` is `422`, and `cx-rollup` stays enabled
+
+#### Scenario: A table update breaking an enabled pipeline outside the bundle is refused
+
+- **GIVEN** an enabled `aggregate` `cx-rollup` that sums `cx_base.score` into the non-sensitive `cx_roll.total`
+- **WHEN** a bundle carrying only `cx_base`, with `score` marked sensitive, is previewed with `OVERWRITE`
+- **THEN** the `cx_base` entry is `FAIL`, saying the update would break enabled pipeline `cx-rollup`, and `/import` is `422`
+
+#### Scenario: A held table lock is a retryable conflict
+
+- **WHEN** another transaction holds the row lock of a table an `OVERWRITE` preview updates past `tables.lock-timeout`
+- **THEN** the preview answers `409` with `error` `table_busy`
 
 #### Scenario: Armable reported on a fresh target
 
@@ -508,10 +753,25 @@ and be reported on it.
 - **WHEN** a skipped existing target table lacks a column a bundle pipeline requires
 - **THEN** that pipeline reports `armable: false` with an `arm_problems` entry naming the column
 
+#### Scenario: A column an update adds satisfies a pipeline
+
+- **WHEN** the same bundle is imported with `OVERWRITE`, and the bundle's version of that table carries the column
+- **THEN** the table entry is `UPDATE` with an `add_column` change for it, and the pipeline reports `armable: true`
+
 #### Scenario: Table limit counted on the total
 
 - **WHEN** the target holds `max-tables - 1` tables and the bundle creates two
 - **THEN** `validation_errors` reports the limit and `/import` is `422` with `error` `catalog_import_invalid`
+
+#### Scenario: An update over the column limit is refused
+
+- **WHEN** an `OVERWRITE` update would bring a target table over `max-columns-per-table`
+- **THEN** the table entry is `FAIL` naming the limit and `/import` is `422` with `error` `catalog_import_invalid`
+
+#### Scenario: An enabled enrich re-declaration the gate refuses fails in preview
+
+- **WHEN** an `OVERWRITE` import re-declares an enabled `enrich` pipeline with a declaration the arm-time gate refuses on the target
+- **THEN** the pipeline entry is `FAIL` with the gate's problem, and `/import` is `422` with `error` `catalog_import_invalid`
 
 #### Scenario: An imported row policy that confines the importer is reported at arm time
 
@@ -530,16 +790,39 @@ and be reported on it.
 
 ### Requirement: Import authorization
 
-Import SHALL require `TABLE_CREATE` at both endpoints, and because the create services are called in-process it SHALL repeat the
-controller gates programmatically: global `TABLE_MODIFY` when the bundle creates any table, `REGISTRY_ADMIN` when it creates any
-pipeline, and global `TABLE_SENSITIVE` when any created column is sensitive.
+Import SHALL require `TABLE_CREATE` at both endpoints, and because the create and update services are called in-process it SHALL
+repeat the controller gates programmatically: global `TABLE_MODIFY` when the bundle creates any table, `TABLE_MODIFY` on each table
+it updates (held globally or granted on that table), `REGISTRY_ADMIN` when it creates or updates any pipeline, global
+`TABLE_SENSITIVE` when any created column is sensitive, and `TABLE_SENSITIVE` on each table an update adds a sensitive column to
+or sets `sensitive: true` on a column of (held globally or granted on that table).
 
 A missing privilege SHALL be `403` with `error` `forbidden`. Compensation SHALL delete only objects this import created, without a
-`TABLE_DELETE` check. When security is not enforced, every check in this requirement SHALL be skipped.
+`TABLE_DELETE` check, and SHALL revert only objects this import updated. When security is not enforced, every check in this
+requirement SHALL be skipped.
 
 #### Scenario: Missing TABLE_MODIFY
 
 - **WHEN** a caller with `TABLE_CREATE` but not `TABLE_MODIFY` imports a bundle that creates a table
+- **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+
+#### Scenario: Missing TABLE_MODIFY on an updated table
+
+- **WHEN** a caller with `TABLE_CREATE`, and `TABLE_MODIFY` neither globally nor on table `t`, imports with `OVERWRITE` a bundle
+  that updates `t`
+- **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+- **AND WHEN** a role the caller carries is granted `modify` on `t`
+- **THEN** the import updates `t`
+
+#### Scenario: Tightening sensitivity needs TABLE_SENSITIVE
+
+- **WHEN** a caller without `TABLE_SENSITIVE` imports with `OVERWRITE` a bundle that sets `sensitive: true` on an existing column
+- **THEN** the response is `403` with `error` `forbidden`, and nothing is written
+- **AND WHEN** a role the caller carries is granted `sensitive` on that table
+- **THEN** the import marks the column sensitive
+
+#### Scenario: Updating a pipeline needs REGISTRY_ADMIN
+
+- **WHEN** a caller without `REGISTRY_ADMIN` imports with `OVERWRITE` a bundle that re-declares an existing pipeline
 - **THEN** the response is `403` with `error` `forbidden`, and nothing is written
 
 #### Scenario: Security mode none
@@ -571,25 +854,47 @@ pipeline's spend for the day counts toward the new one's daily limit. The acknow
 
 ### Requirement: Pipelines are imported disabled
 
-Import SHALL create every pipeline disabled, whatever its `exported_enabled`. Arming SHALL remain a separate `PATCH enabled=true`,
-which re-runs the arm-time validation; the import preview SHALL be recommended before arming and SHALL NOT be enforced.
+Import SHALL create every pipeline disabled, whatever its `exported_enabled`. An `OVERWRITE` update SHALL keep an existing pipeline's
+`enabled` state, except an enabled `aggregate` it re-declares, which SHALL be left disabled. Arming SHALL remain a separate
+`PATCH enabled=true`, which re-runs the arm-time validation; the import preview SHALL be recommended before arming and SHALL NOT be
+enforced. Import SHALL NOT arm a pipeline: the order in which pipelines are armed is the operator's, as the runbook sets out.
 
 #### Scenario: Enabled source pipeline lands disabled
 
 - **WHEN** a pipeline exported with `exported_enabled: true` is imported
 - **THEN** `GET /v1/pipelines/{name}` on the target reports `enabled: false`, and `PATCH enabled=true` then succeeds
 
+#### Scenario: An updated enrich pipeline keeps running
+
+- **WHEN** an enabled `enrich` pipeline is re-declared by an `OVERWRITE` import
+- **THEN** `GET /v1/pipelines/{name}` reports `enabled: true` afterwards
+
+#### Scenario: A disabled pipeline stays disabled
+
+- **WHEN** a disabled pipeline of either kind is re-declared by an `OVERWRITE` import
+- **THEN** it is still disabled afterwards
+
 ### Requirement: Best-effort compensation
 
-`/import` SHALL apply each object as its own committed step and, on the first failure, SHALL delete what this import created, in
-reverse order (pipelines, then enrichments, then sources). Compensation is best effort, not a guarantee.
+`/import` SHALL apply each object as its own committed step and, on the first failure, SHALL delete what this import created and
+revert what it updated, in reverse order (pipelines, then enrichments, then sources). Compensation is best effort, not a guarantee.
+
+An updated pipeline SHALL be reverted by re-declaring its previous declaration, and an updated table by restoring its previous
+column metadata, then its previous `description` (none, when it had none) and `tag_order`, then dropping the columns this import
+added, each step attempted even when an earlier one fails. Only once every pipeline and table is reverted SHALL a pipeline the
+import disabled be enabled again, since arming runs the gate against its target, which a column the import added fails until it is
+dropped. A revert that is refused or fails SHALL mark the entry `rollback_failed`; a reverted entry SHALL be `rolled_back`. A revert
+of a re-declaration bumps the pipeline's `generation` once more. A schema patch SHALL count as applied as soon as it commits, so
+a failure after the commit is still reverted.
 
 Before deleting a table, import SHALL check that any pipeline targeting it was created by this import; otherwise it SHALL leave the
 table and mark it `rollback_failed`. A crash mid-import, or a ClickHouse drop that succeeds before the catalog delete fails, MAY leave
-orphans; re-running the bundle with `SKIP_IF_EXISTS` SHALL recover a missing object, and SHALL refuse a left-behind PENDING or FAILED
-table until it is deleted. Each created object SHALL be written in its own audit revisions (table create, schema) under the
+orphans or a partly updated object; re-running the bundle with `SKIP_IF_EXISTS` SHALL recover a missing object, re-running it with
+`OVERWRITE` SHALL also finish an update, and either SHALL refuse a left-behind PENDING or FAILED
+table until it is deleted. Each created or updated object SHALL be written in its own audit revisions (table create, schema, table
+update, pipeline patch) under the
 importing user, and the import SHALL log one structured `catalog_import` event carrying an `import_id`, the bundle hash and the object
-list. Every audit revision the import writes — creates and compensation deletes alike — SHALL be tagged with that same `import_id`,
+list. Every audit revision the import writes — creates, updates and compensation deletes and reverts alike — SHALL be tagged with that same `import_id`,
 which the activity feed returns as `importId` (see the `audit-trail` capability), so what an import did, including what a crash
 mid-import left behind, is recoverable from the feed and not only from the log.
 
@@ -599,16 +904,48 @@ mid-import left behind, is recoverable from the feed and not only from the log.
 - **THEN** the first table is gone from both the catalog and ClickHouse, the `ImportResult` marks it `rolled_back`, and re-running
   with `SKIP_IF_EXISTS` after the cause is removed creates both
 
+#### Scenario: DDL failure after an update
+
+- **WHEN** an `OVERWRITE` import updates table `a`, adding column `x` and changing a description, and ClickHouse DDL then fails on
+  the second table
+- **THEN** `a` no longer has `x` and carries its previous description, no description when it had none, its entry is
+  `rolled_back`, the `outcome` is `rolled_back`, and re-running with `OVERWRITE` after the cause is removed updates both
+
+#### Scenario: A disabled aggregate is re-enabled after the tables are reverted
+
+- **GIVEN** an `OVERWRITE` import that added column `cost` to `sessions` and disabled and re-declared the enabled aggregate
+  `sessions_rollup` writing it
+- **WHEN** a later step fails
+- **THEN** compensation re-declares `sessions_rollup`'s previous declaration, reverts `sessions`, dropping `cost`, and only then
+  enables `sessions_rollup` again
+
 #### Scenario: Import revisions carry the import id
 
 - **WHEN** an import completes and returns `import_id` `X`
-- **THEN** every activity recorded for the objects it created carries `importId` `X`
+- **THEN** every activity recorded for the objects it created or updated carries `importId` `X`
 
 ### Requirement: Environment-specific values reported
 
-The import preview and result SHALL list under `env_specific` every environment-specific value in the bundle: pipeline
-`transform.model`, `advanced.rate_rpm`, cron triggers, absolute date literals in filters and in an `aggregate` pipeline's `sql`, and
-table `ttl`. Import SHALL NOT validate `transform.model` against the target. A date literal in `sql` SHALL be reported under the field
+The import preview and result SHALL list under `env_specific` every environment-specific value in the bundle, each item being
+`{ type, name, field, value, target_value, kept }`. The environment-specific fields are:
+
+- **target-owned:** every `advanced` member (`rows_per_scan`, `rows_per_call`, `rate_rpm`, `sample_fraction`,
+  `input_token_budget`), `trigger.cron`, the deployment binding `transform.preset`, `transform.model` and `transform.route`, and
+  table `ttl`;
+- **bundle-owned, reported only:** absolute date literals in filters and in an `aggregate` pipeline's `sql`.
+
+One rule set SHALL decide both what this list reports and what an `OVERWRITE` update keeps.
+
+An item SHALL be listed for each such field whose bundle value is set and, on an existing object, for each whose target value is set.
+`value` is the bundle's value and `target_value` the target's, null on a new object and null when the caller may not read the
+target's object (a table it may not get, a pipeline without `REGISTRY_READ`). `kept` SHALL be `true` when the target's value
+stays in place of the bundle's: on an existing object, for a target-owned field. The deployment binding is the exception: under
+`OVERWRITE`, when the bundle's `transform.preset` differs from the target's, the bundle's whole binding is taken and its three
+items are `kept: false`. So is `advanced.input_token_budget` unless both triggers are `group`, the one kind the budget is valid on:
+a bundle moving a pipeline to another trigger takes its own budget (none), and the item is `kept: false`. A target-owned `advanced` member the target leaves unset stays unset. A date literal, and every field of a new
+object, SHALL be `kept: false`.
+
+Import SHALL NOT validate `transform.model` against the target. A date literal in `sql` SHALL be reported under the field
 `sql`, found by the same literal scan as a filter's, so a statement's `WHERE request_time >= '2026-08-05'` is as visible to the operator
 as the same predicate written as a filter.
 
@@ -622,6 +959,33 @@ as the same predicate written as a filter.
 - **WHEN** a bundle aggregate pipeline's `sql` carries `WHERE request_time >= '2026-08-05'`
 - **THEN** `env_specific` holds an entry naming that pipeline, the field `sql` and the value `2026-08-05`
 
+#### Scenario: Every advanced member listed
+
+- **WHEN** a bundle pipeline declares `advanced.rows_per_scan: 500` and `advanced.sample_fraction: 0.5`
+- **THEN** `env_specific` holds an entry for each, with `kept: false` on a new pipeline
+
+#### Scenario: A target's tuning survives an update
+
+- **GIVEN** an existing pipeline with `trigger.cron` `0 */30 * * * *`, `advanced.rate_rpm: 20` and `transform.model` `model-b`
+- **WHEN** a bundle declaring `0 */10 * * * *`, `rate_rpm: 60`, `model-a` and the same preset, and a changed `transform.outputs`
+  expression, is imported with `OVERWRITE`
+- **THEN** the pipeline is re-declared with the bundle's outputs and keeps `0 */30 * * * *`, `rate_rpm: 20` and `model-b`, and the
+  three `env_specific` items carry `target_value` and `kept: true`
+- **AND WHEN** the only difference is those three values
+- **THEN** the entry is `SKIP` with three `not_applied` items of kind `target_owned`
+
+#### Scenario: A changed preset takes the bundle's binding
+
+- **WHEN** a bundle switches an existing pipeline from preset `chat_completion` to `dial_app_route` with a `model` and `route`, and is
+  imported with `OVERWRITE`
+- **THEN** the pipeline is re-declared with the bundle's preset, model and route, and their `env_specific` items carry
+  `kept: false`
+
+#### Scenario: A table's TTL survives an update
+
+- **WHEN** a bundle table's `ttl` differs from the existing table's and its description changed, and it is imported with `OVERWRITE`
+- **THEN** the table's description is updated, its TTL is unchanged, and its `env_specific` `ttl` item carries `kept: true`
+
 ### Requirement: Upload size limit
 
 The import endpoints SHALL refuse a multipart upload larger than the configured limits (`CATALOG_IMPORT_MAX_FILE_SIZE`,
@@ -634,19 +998,30 @@ The import endpoints SHALL refuse a multipart upload larger than the configured 
 
 ### Requirement: Post-import runbook
 
-The project SHALL document the promotion runbook in `docs/catalog-promotion.md`: review `env_specific` (a model must exist on the
-target, because nothing checks it at arm time); enable enrichment-producing pipelines before the aggregates that read them; preview and
-then arm each pipeline; expect aggregates to rebuild from zero; run any data-sync backfill separately, since runner state does not
-travel; and, when promoting access, review every access entry's roles and row-policy values in the import preview
-and the export preview's `left_behind`, handle the bundle as access configuration, and remove a role on the target with
-`DELETE /v1/tables/{name}/access?role=`, since an import never removes one; and, to move one pipeline or some roles' access into an
-environment that already has the tables, export it with `dependencies: false`, or with `access_only` and `roles`, and read the import
-preview for a table the target lacks, which the import then refuses rather than creates.
+The project SHALL document the promotion runbook in `docs/catalog-promotion.md`. It SHALL cover eight steps:
+
+1. Review `env_specific`. A model must exist on the target, because nothing checks it at arm time.
+2. Enable enrichment-producing pipelines before the aggregates that read them.
+3. Preview and then arm each pipeline.
+4. Expect aggregates to rebuild from zero.
+5. Run any data-sync backfill separately, since runner state does not travel.
+6. When promoting access:
+   - review every access entry's roles and row-policy values in the import preview and the export preview's `left_behind`;
+   - handle the bundle as access configuration;
+   - remove a role on the target with `DELETE /v1/tables/{name}/access?role=`, since an import never removes one.
+7. To move one pipeline or some roles' access into an environment that already has the tables:
+   - export it with `dependencies: false`, or with `access_only` and `roles`;
+   - read the import preview for a table the target lacks, which the import then refuses rather than creates.
+8. To bring a changed bundle to an environment that already has its objects:
+   - preview with `OVERWRITE`;
+   - read each entry's `changes`, `not_applied` and `effects`;
+   - re-arm the aggregates the import disabled in dependency order;
+   - backfill an `enrich` pipeline whose existing rows should be re-derived.
 
 #### Scenario: Runbook present
 
 - **WHEN** the change ships
-- **THEN** `docs/catalog-promotion.md` exists and covers each of the seven steps
+- **THEN** `docs/catalog-promotion.md` exists and covers each of the eight steps
 
 ### Requirement: An SQL declaration's import dependencies are read from its statement
 

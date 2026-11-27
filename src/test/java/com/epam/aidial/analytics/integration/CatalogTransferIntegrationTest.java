@@ -1,5 +1,6 @@
 package com.epam.aidial.analytics.integration;
 
+import com.epam.aidial.analytics.configuration.TableLimitsProperties;
 import com.epam.aidial.analytics.service.table.TableDefinitionLockingImpl;
 import com.epam.aidial.analytics.service.table.TableDefinitionRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -83,6 +84,8 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     private TableDefinitionLockingImpl locking;
     @Autowired
     private PlatformTransactionManager transactionManager;
+    @Autowired
+    private TableLimitsProperties limits;
 
     private String systemAccess;
 
@@ -236,14 +239,316 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     // --- 8.3 policy and OTLP ------------------------------------------------------------------------------
 
     @Test
-    void overwriteAndMissingPolicyAreRefused() throws Exception {
+    void missingPolicyIsRefused() throws Exception {
         final String bundle = exportFixture();
         for (final String path : List.of("/v1/catalog/import", "/v1/catalog/import/preview")) {
-            importCall(path, bundle, null, "OVERWRITE")
-                    .andExpect(status().isUnprocessableContent())
-                    .andExpect(jsonPath("$.error").value("resolution_policy_unsupported"));
             importCall(path, bundle, null, null).andExpect(status().isBadRequest());
         }
+    }
+
+    // --- OVERWRITE ----------------------------------------------------------------------------------------
+
+    @Test
+    void overwriteUpdatesWhatChangedKeepsTargetOwnedFieldsAndConverges() throws Exception {
+        mockMvc.perform(patch("/v1/pipelines/" + ROLLUP).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"enabled\":true}")).andExpect(status().isOk());
+        // This environment's own schedule, which the update keeps.
+        final String storedCron = "0 */30 * * * *";
+        mockMvc.perform(patch("/v1/pipelines/" + SENT_LIVE).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"target\":\"" + SENT + "\"," + Transforms.sql().output("sentiment", "lower('POS')").member()
+                        + ",\"trigger\":{\"kind\":\"schedule\",\"cron\":\"" + storedCron + "\"}}"))
+                .andExpect(status().isOk());
+        final long generationBefore = pipelineGeneration(SENT_LIVE);
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportFixture());
+        final ObjectNode sent = tableSchema(bundle, SENT);
+        ((ObjectNode) sent.get("columns").get(0)).put("description", "upstream wording");
+        ((ArrayNode) sent.get("columns")).addObject().put("source_name", "confidence").put("name", "confidence")
+                .put("type", "string").put("nullable", true).put("sensitive", false).put("heavy", false);
+        final ObjectNode sentLive = (ObjectNode) pipeline(bundle, SENT_LIVE);
+        ((ObjectNode) sentLive.get("transform").get("outputs")).put("sentiment", "lower('NEG')");
+        ((ObjectNode) sentLive.get("trigger")).put("cron", "7 */7 * * * *");
+        ((ObjectNode) pipeline(bundle, ROLLUP)).put("filter", "length(\"" + SENT + ".sentiment\") > 1");
+        final String evolved = bundle.toString();
+
+        importCall("/v1/catalog/import/preview", evolved, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + SENT + "')].import_action").value(hasItem("UPDATE")))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + SENT + "')].changes[*].op",
+                        contains("update_column", "add_column")))
+                // SENT_LIVE is a Class-1 (sql) pipeline, which a column change of its target does not bump.
+                .andExpect(jsonPath("$.tables[?(@.name == '" + SENT + "')].effects[*]").isEmpty())
+                .andExpect(jsonPath("$.tables[?(@.name != '" + SENT + "')].import_action", everyItem(is("SKIP"))))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + SENT_LIVE + "')].changes[0].fields[*]",
+                        contains("transform.outputs")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + SENT_LIVE + "')].not_applied[*].name",
+                        contains("trigger.cron")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + SENT_LIVE + "')].effects[*].kind",
+                        contains("generation_bump", "existing_rows_not_rederived")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].changes[*].op",
+                        contains("disable", "redeclare")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].effects[*].kind",
+                        contains("generation_bump", "rebuild_from_zero", "rearm_required")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].armable").value(hasItem(true)))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + DUL_LIVE + "')].import_action").value(hasItem("SKIP")))
+                .andExpect(jsonPath("$.env_specific[?(@.name == '" + SENT_LIVE + "' && @.field == 'trigger.cron')].kept")
+                        .value(hasItem(true)));
+        mockMvc.perform(get("/v1/tables/" + SENT)).andExpect(jsonPath("$.columns[*].name", not(hasItem("confidence"))));
+
+        final int lastRevisionBefore = lastRevision();
+        final String importId = importId(importCall("/v1/catalog/import", evolved, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + SENT + "')].status").value(hasItem("updated")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].status").value(hasItem("updated"))));
+        assertImportTaggedEverythingItWrote(importId, lastRevisionBefore);
+
+        mockMvc.perform(get("/v1/tables/" + SENT)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[?(@.name == 'sentiment')].description").value(hasItem("upstream wording")))
+                .andExpect(jsonPath("$.columns[*].name", hasItem("confidence")));
+        mockMvc.perform(get("/v1/pipelines/" + SENT_LIVE)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.transform.outputs.sentiment").value("lower('NEG')"))
+                .andExpect(jsonPath("$.trigger.cron").value(storedCron));
+        assertThat(pipelineGeneration(SENT_LIVE)).isGreaterThan(generationBefore);
+        mockMvc.perform(get("/v1/pipelines/" + ROLLUP)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.enabled").value(false))
+                .andExpect(jsonPath("$.filter").value("length(\"" + SENT + ".sentiment\") > 1"));
+
+        final long revisions = revisions();
+        importCall("/v1/catalog/import", evolved, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.tables[*].import_action", everyItem(is("SKIP"))))
+                .andExpect(jsonPath("$.pipelines[*].import_action", everyItem(is("SKIP"))));
+        assertThat(revisions()).isEqualTo(revisions);
+    }
+
+    @Test
+    void overwriteRefusesWhatItCannotUpdate() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportFixture());
+        ((ObjectNode) tableSchema(bundle, BASE).get("columns").get(2)).put("type", "string");
+        final String retyped = bundle.toString();
+
+        importCall("/v1/catalog/import/preview", retyped, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].problems[*]")
+                        .value(hasItem(containsString("type of column 'score'"))));
+        importCall("/v1/catalog/import", retyped, null, "OVERWRITE")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+    }
+
+    @Test
+    void ddlFailureAfterAnUpdateRevertsItAndRerunConverges() throws Exception {
+        // A table without a description, which the update gives one and the rollback must take away again.
+        jdbc.update("UPDATE table_definition SET description = NULL WHERE name = ?", BASE);
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportTables(BASE, SENT));
+        tableEntry(bundle, BASE).put("description", "upstream description");
+        final ObjectNode base = tableSchema(bundle, BASE);
+        final JsonNode labelBefore = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse()
+                .getContentAsString()).get("columns").get(1);
+        ((ObjectNode) base.get("columns").get(1)).put("description", "changed upstream");
+        ((ArrayNode) base.get("columns")).addObject().put("source_name", "extra").put("name", "extra")
+                .put("type", "string").put("nullable", true).put("sensitive", false).put("heavy", false);
+        ((ArrayNode) tableSchema(bundle, SENT).get("columns")).addObject().put("source_name", "confidence")
+                .put("name", "confidence").put("type", "string").put("nullable", true).put("sensitive", false)
+                .put("heavy", false);
+        final String evolved = bundle.toString();
+        // A ClickHouse column the catalog does not know, of another type, makes the second table's ALTER fail.
+        execute("ALTER TABLE " + SENT + " ADD COLUMN confidence UInt8");
+
+        final int lastRevisionBefore = lastRevision();
+        final String rolledBack = importId(importCall("/v1/catalog/import", evolved, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("rolled_back"))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].status").value(hasItem("rolled_back")))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + SENT + "')].status").value(hasItem("failed"))));
+        mockMvc.perform(get("/v1/tables/" + BASE)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.columns[*].name", not(hasItem("extra"))));
+        final JsonNode baseAfter = json.readTree(mockMvc.perform(get("/v1/tables/" + BASE)).andReturn().getResponse()
+                .getContentAsString());
+        assertThat(baseAfter.get("columns").get(1)).isEqualTo(labelBefore);
+        assertThat(baseAfter.path("description").isMissingNode() || baseAfter.get("description").isNull()).isTrue();
+        assertImportTaggedEverythingItWrote(rolledBack, lastRevisionBefore);
+
+        execute("ALTER TABLE " + SENT + " DROP COLUMN confidence");
+        importCall("/v1/catalog/import", evolved, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.tables[*].status", everyItem(is("updated"))));
+        mockMvc.perform(get("/v1/tables/" + BASE)).andExpect(jsonPath("$.columns[*].name", hasItem("extra")));
+        mockMvc.perform(get("/v1/tables/" + SENT)).andExpect(jsonPath("$.columns[*].name", hasItem("confidence")));
+    }
+
+    @Test
+    void columnAddedByUpdateSatisfiesPipeline() throws Exception {
+        final String bundle = exportFixture();
+        deletePipeline(ROLLUP);
+        purgeAudit(ROLLUP);
+        mockMvc.perform(patch("/v1/tables/" + ROLL + "/schema").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"drop\":[\"events\"]}"))
+                .andExpect(status().isOk());
+
+        importCall("/v1/catalog/import/preview", bundle, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + ROLL + "')].import_action").value(hasItem("UPDATE")))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + ROLL + "')].changes[*].name", contains("events")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].import_action").value(hasItem("CREATE")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].armable").value(hasItem(true)));
+    }
+
+    @Test
+    void anUpdateOverTheColumnLimitIsRefused() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportTables(BASE));
+        final ArrayNode columns = (ArrayNode) tableSchema(bundle, BASE).get("columns");
+        for (int i = 0; i < limits.maxColumnsPerTable(); i++) {
+            columns.addObject().put("source_name", "c" + i).put("name", "c" + i).put("type", "string").put("nullable", true)
+                    .put("sensitive", false).put("heavy", false);
+        }
+
+        importCall("/v1/catalog/import/preview", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("FAIL")));
+        importCall("/v1/catalog/import", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+        mockMvc.perform(get("/v1/tables/" + BASE)).andExpect(jsonPath("$.columns[*].name", not(hasItem("c0"))));
+    }
+
+    @Test
+    void anEnabledEnrichRedeclarationTheGateRefusesFailsInPreview() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportFixture());
+        ((ObjectNode) pipeline(bundle, SENT_LIVE).get("transform").get("outputs")).put("sentiment", "lower(no_such_column)");
+
+        importCall("/v1/catalog/import/preview", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + SENT_LIVE + "')].import_action").value(hasItem("FAIL")));
+        importCall("/v1/catalog/import", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+        mockMvc.perform(get("/v1/pipelines/" + SENT_LIVE))
+                .andExpect(jsonPath("$.transform.outputs.sentiment").value("lower('POS')"));
+    }
+
+    @Test
+    void disabledPipelinesStayDisabledWhenRedeclared() throws Exception {
+        final long rollupGeneration = pipelineGeneration(ROLLUP);
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportFixture());
+        ((ObjectNode) pipeline(bundle, ROLLUP)).put("filter", "length(\"" + SENT + ".sentiment\") > 2");
+        ((ObjectNode) pipeline(bundle, DUL_LIVE).get("transform").get("outputs")).put("note", "lower('Y')");
+
+        importCall("/v1/catalog/import", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].changes[*].op", contains("redeclare")));
+        mockMvc.perform(get("/v1/pipelines/" + ROLLUP)).andExpect(jsonPath("$.enabled").value(false));
+        mockMvc.perform(get("/v1/pipelines/" + DUL_LIVE)).andExpect(jsonPath("$.enabled").value(false))
+                .andExpect(jsonPath("$.transform.outputs.note").value("lower('Y')"));
+        assertThat(pipelineGeneration(ROLLUP)).isEqualTo(rollupGeneration + 1);
+    }
+
+    @Test
+    void updateLeavingEnabledAggregateUnarmableIsRefused() throws Exception {
+        mockMvc.perform(patch("/v1/pipelines/" + ROLLUP).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"enabled\":true}")).andExpect(status().isOk());
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportFixture());
+        // The bundle stops writing `events`, which the target's cx_roll keeps: an import never drops a column.
+        ((ArrayNode) pipeline(bundle, ROLLUP).get("measures")).remove(1);
+
+        importCall("/v1/catalog/import/preview", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + ROLLUP + "')].problems[*]")
+                        .value(hasItem(containsString("could not be armed again"))));
+        importCall("/v1/catalog/import", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.error").value("catalog_import_invalid"));
+        mockMvc.perform(get("/v1/pipelines/" + ROLLUP)).andExpect(jsonPath("$.enabled").value(true));
+    }
+
+    @Test
+    void tableUpdateBreakingEnabledPipelineOutsideTheBundleIsRefused() throws Exception {
+        mockMvc.perform(patch("/v1/pipelines/" + ROLLUP).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"enabled\":true}")).andExpect(status().isOk());
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportTables(BASE));
+        // cx-rollup sums score into cx_roll.total, which is not sensitive.
+        ((ObjectNode) tableSchema(bundle, BASE).get("columns").get(2)).put("sensitive", true);
+
+        importCall("/v1/catalog/import/preview", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].import_action").value(hasItem("FAIL")))
+                .andExpect(jsonPath("$.tables[?(@.name == '" + BASE + "')].problems[*]")
+                        .value(hasItem(containsString("would break enabled pipeline '" + ROLLUP + "'"))));
+        importCall("/v1/catalog/import", bundle.toString(), null, "OVERWRITE")
+                .andExpect(status().isUnprocessableContent());
+        mockMvc.perform(get("/v1/pipelines/" + ROLLUP)).andExpect(jsonPath("$.enabled").value(true));
+    }
+
+    @Test
+    void enrichDeclarationFollowingItsParentConvergesOnOneDeclaringIt() throws Exception {
+        final String bundle = exportFixture();
+        mockMvc.perform(patch("/v1/pipelines/" + SENT_LIVE).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"target\":\"" + SENT + "\",\"inputs\":[\"" + BASE + "\"],"
+                        + Transforms.sql().output("sentiment", "lower('POS')").member() + ",\"trigger\":{\"kind\":\"schedule\"}}"))
+                .andExpect(status().isOk());
+
+        importCall("/v1/catalog/import", bundle, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("completed"))
+                .andExpect(jsonPath("$.pipelines[?(@.name == '" + SENT_LIVE + "')].changes[0].fields[*]", contains("inputs")));
+        final long generation = pipelineGeneration(SENT_LIVE);
+        importCall("/v1/catalog/import", bundle, null, "OVERWRITE")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pipelines[*].import_action", everyItem(is("SKIP"))));
+        assertThat(pipelineGeneration(SENT_LIVE)).isEqualTo(generation);
+    }
+
+    /** The pass locks the tables it updates up front, and a lock another change holds is a retryable 409, not a refusal. */
+    @Test
+    void previewWaitingOnHeldTableLockAnswersTableBusy() throws Exception {
+        final ObjectNode bundle = (ObjectNode) json.readTree(exportTables(BASE));
+        tableEntry(bundle, BASE).put("description", "upstream description");
+        final Object timeout = ReflectionTestUtils.getField(locking, "lockTimeout");
+        ReflectionTestUtils.setField(locking, "lockTimeout", Duration.ofMillis(300));
+        try {
+            final int status = new TransactionTemplate(transactionManager).execute(tx -> {
+                definitions.findForUpdate(BASE).orElseThrow();
+                try (ExecutorService other = Executors.newSingleThreadExecutor()) {
+                    return other.submit(() -> importCall("/v1/catalog/import/preview", bundle.toString(), null, "OVERWRITE")
+                            .andExpect(jsonPath("$.error").value("table_busy"))
+                            .andReturn().getResponse().getStatus()).get(30, TimeUnit.SECONDS);
+                } catch (Exception ex) {
+                    throw new IllegalStateException(ex);
+                }
+            });
+            assertThat(status).isEqualTo(409);
+        } finally {
+            ReflectionTestUtils.setField(locking, "lockTimeout", timeout);
+        }
+    }
+
+    private static ObjectNode tableEntry(JsonNode bundle, String name) {
+        for (final JsonNode table : bundle.get("tables")) {
+            if (table.get("table").get("name").asString().equals(name)) {
+                return (ObjectNode) table.get("table");
+            }
+        }
+        throw new AssertionError("no table " + name);
+    }
+
+    private static ObjectNode tableSchema(JsonNode bundle, String name) {
+        for (final JsonNode table : bundle.get("tables")) {
+            if (table.get("table").get("name").asString().equals(name)) {
+                return (ObjectNode) table.get("schema");
+            }
+        }
+        throw new AssertionError("no table " + name);
+    }
+
+    private long pipelineGeneration(String name) throws Exception {
+        return json.readTree(mockMvc.perform(get("/v1/pipelines/" + name)).andReturn().getResponse().getContentAsString())
+                .get("generation").asLong();
     }
 
     @Test
@@ -1655,7 +1960,7 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
     /**
      * Every activity written since {@code lastRevisionBefore} — this test runs alone, so all of them are the
      * import's — carries {@code importId}, the feed filtered by it returns exactly those, and an imported column
-     * still points at a {@code Table} activity of the same import.
+     * that has a parent points at a {@code Table} activity of the same import.
      */
     private void assertImportTaggedEverythingItWrote(String importId, int lastRevisionBefore) throws Exception {
         final long written = jdbc.queryForObject("SELECT count(*) FROM audit_activity WHERE revision > ?", Long.class,
@@ -1674,9 +1979,11 @@ class CatalogTransferIntegrationTest extends AbstractClickHouseIntegrationTest {
                 tableActivityIds.add(activity.get("activityId").asString());
             }
         });
+        // A column a schema patch changes without the table row has no parent in its revision, which the feed allows.
         activities.forEach(activity -> {
-            if (activity.get("resourceType").asString().equals("TableColumn")) {
-                assertThat(tableActivityIds).contains(activity.get("parentActivityId").asString());
+            final JsonNode parent = activity.get("parentActivityId");
+            if (activity.get("resourceType").asString().equals("TableColumn") && parent != null && !parent.isNull()) {
+                assertThat(tableActivityIds).contains(parent.asString());
             }
         });
         final String one = activities.get(0).get("activityId").asString();

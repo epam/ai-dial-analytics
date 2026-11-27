@@ -1038,6 +1038,14 @@ public class PipelineService implements PipelineTargetCascade {
     }
 
     /**
+     * Whether {@code pipeline}'s stored declaration is complete: one a declaration patch leaving it disabled may not
+     * make incomplete again. The catalog import asks it before updating a pipeline it may have to restore.
+     */
+    public boolean isDeclarationComplete(PipelineEntity pipeline) {
+        return isStoredDeclarationComplete(pipeline);
+    }
+
+    /**
      * Whether the entity, as stored, names every member its kind authors. An unreadable stored spec counts
      * as incomplete: there is nothing whole to protect, and a re-declaration is how such a row is repaired.
      */

@@ -1804,9 +1804,18 @@
             "example": "transform.model",
             "type": "string"
           },
+          "kept": {
+            "description": "Whether the target's value stays in place of the bundle's: true for a target-owned field of an existing object, false for a new object, a date literal, and a deployment binding whose preset changed under OVERWRITE",
+            "type": "boolean"
+          },
           "name": {
             "description": "Object name",
             "example": "usage_sentiment_llm",
+            "type": "string"
+          },
+          "target_value": {
+            "description": "The target's value of the field on an existing object; absent on a new object or when the target leaves it unset",
+            "example": "gemini-2.5-pro",
             "type": "string"
           },
           "type": {
@@ -1815,7 +1824,7 @@
             "type": "string"
           },
           "value": {
-            "description": "The value",
+            "description": "The bundle's value; absent when only the target sets the field",
             "example": "gemini-2.5-flash-lite",
             "type": "string"
           }
@@ -2127,6 +2136,27 @@
         },
         "type": "object"
       },
+      "ImportEffect": {
+        "properties": {
+          "kind": {
+            "description": "`generation_bump` (the pipeline's generation moves, so dependent rollups wait for its next write), `rebuild_from_zero` (an aggregate rescans its input), `rearm_required` (the import disabled the pipeline) or `existing_rows_not_rederived` (rows already written keep their values until a backfill)",
+            "enum": [
+              "generation_bump",
+              "rebuild_from_zero",
+              "rearm_required",
+              "existing_rows_not_rederived"
+            ],
+            "example": "generation_bump",
+            "type": "string"
+          },
+          "pipeline": {
+            "description": "The pipeline affected",
+            "example": "usage-identity-live",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ImportEntry": {
         "properties": {
           "arm_problems": {
@@ -2140,14 +2170,29 @@
             "description": "Pipelines only: whether PATCH enabled=true would pass its arm-time checks after this import",
             "type": "boolean"
           },
+          "changes": {
+            "description": "What an OVERWRITE import changes on the existing object; under SKIP_IF_EXISTS, what it would change. Empty for a new object",
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "type": "array"
+          },
           "differs": {
             "description": "Whether prev and next differ, ignoring enabled, state and timestamps",
             "type": "boolean"
+          },
+          "effects": {
+            "description": "Consequences of the changes that the import reports and does not act on",
+            "items": {
+              "$ref": "#/components/schemas/ImportEffect"
+            },
+            "type": "array"
           },
           "import_action": {
             "description": "What import does with the object",
             "enum": [
               "CREATE",
+              "UPDATE",
               "SKIP",
               "FAIL"
             ],
@@ -2165,6 +2210,13 @@
           "next": {
             "description": "The bundle's object"
           },
+          "not_applied": {
+            "description": "What an OVERWRITE import keeps on the existing object although the bundle differs, and why",
+            "items": {
+              "$ref": "#/components/schemas/NotApplied"
+            },
+            "type": "array"
+          },
           "prev": {
             "description": "The target's existing object in bundle shape, as the caller may see it; absent when it is new or the caller may not see it"
           },
@@ -2180,7 +2232,7 @@
             "type": "boolean"
           },
           "status": {
-            "description": "Import result only: `created`, `skipped`, `rolled_back`, `rollback_failed` or `failed`. Access entries report theirs in `access`",
+            "description": "Import result only: `created`, `updated`, `skipped`, `rolled_back`, `rollback_failed` or `failed`. Access entries report theirs in `access`",
             "type": "string"
           }
         },
@@ -2950,6 +3002,31 @@
         },
         "type": "object"
       },
+      "NotApplied": {
+        "properties": {
+          "kind": {
+            "description": "`extra_column` (never dropped), `column_order` (never reordered), `sensitive_loosening` (sensitivity is never cleared) or `target_owned` (an environment-specific field)",
+            "enum": [
+              "extra_column",
+              "column_order",
+              "sensitive_loosening",
+              "target_owned"
+            ],
+            "example": "extra_column",
+            "type": "string"
+          },
+          "name": {
+            "description": "The column or field concerned",
+            "example": "local_note",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it is kept",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "OffsetPage": {
         "allOf": [
           {
@@ -3665,6 +3742,38 @@
               "not_class1"
             ],
             "example": "foreign_axis",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PlannedChange": {
+        "properties": {
+          "fields": {
+            "description": "The members that change",
+            "example": [
+              "description"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "The column, for a column change",
+            "example": "client_version",
+            "type": "string"
+          },
+          "op": {
+            "description": "`update_table` (PUT /v1/tables/{name}), `add_column` or `update_column` (PATCH /v1/tables/{name}/schema), `disable` or `redeclare` (PATCH /v1/pipelines/{name})",
+            "enum": [
+              "update_table",
+              "add_column",
+              "update_column",
+              "disable",
+              "redeclare"
+            ],
+            "example": "add_column",
             "type": "string"
           }
         },
@@ -6409,11 +6518,11 @@
     },
     "/v1/catalog/import": {
       "post": {
-        "description": "Runs the same validation pass as the preview and, only if it finds no problem, creates each object in dependency order as its own step: tables, then pipelines, always disabled, and, with `include_access=true`, the bundle's access entries last, in one transaction; without it no access is written. On a failure part-way it deletes again what it created. 409 catalog_import_conflict under FAIL_IF_EXISTS when an object exists; 422 catalog_import_invalid when the pass finds a problem — the preview reports each one.",
+        "description": "Runs the same validation pass as the preview and, only if it finds no problem, creates each object in dependency order as its own step: tables, then pipelines, always disabled, and, with `include_access=true`, the bundle's access entries last, in one transaction; without it no access is written. On a failure part-way it deletes again what it created. 409 catalog_import_conflict under FAIL_IF_EXISTS when an object exists; 422 catalog_import_invalid when the pass finds a problem — the preview reports each one; 409 table_busy when another change holds a table an OVERWRITE update needs past the lock timeout (retry).",
         "operationId": "importCatalog",
         "parameters": [
           {
-            "description": "What to do with a bundle object that already exists: FAIL_IF_EXISTS refuses the import (409), SKIP_IF_EXISTS keeps the existing object unchanged and imports the rest. OVERWRITE is refused (422): import never changes an existing object's definition, columns or pipeline. An existing access entry never conflicts: with include_access, the bundle's entries are written under either policy.",
+            "description": "What to do with a bundle object that already exists: FAIL_IF_EXISTS refuses the import (409); SKIP_IF_EXISTS keeps the existing object unchanged and imports the rest, reporting what OVERWRITE would change; OVERWRITE updates it where that is safe (adds columns, updates table and column metadata, re-declares a pipeline), keeps environment-specific fields, never drops, renames or retypes anything, and refuses an object it cannot bring to the bundle. An existing access entry never conflicts: with include_access, the bundle's entries are written under every policy.",
             "in": "query",
             "name": "resolution_policy",
             "required": true,
@@ -6566,11 +6675,11 @@
     },
     "/v1/catalog/import/preview": {
       "post": {
-        "description": "Runs the import's validation pass — the real create services inside a rolled-back transaction, then the arm-time pipeline checks — and returns what an import would do with each object, and with `include_access=true` with each access entry under `access`. Answers 200 whenever the bundle parses, problems included.",
+        "description": "Runs the import's validation pass — the real create services inside a rolled-back transaction, then the arm-time pipeline checks — and returns what an import would do with each object, and with `include_access=true` with each access entry under `access`. Answers 200 whenever the bundle parses, problems included, except 409 table_busy when another change holds a table an OVERWRITE update needs past the lock timeout (retry).",
         "operationId": "previewCatalogImport",
         "parameters": [
           {
-            "description": "What to do with a bundle object that already exists: FAIL_IF_EXISTS refuses the import (409), SKIP_IF_EXISTS keeps the existing object unchanged and imports the rest. OVERWRITE is refused (422): import never changes an existing object's definition, columns or pipeline. An existing access entry never conflicts: with include_access, the bundle's entries are written under either policy.",
+            "description": "What to do with a bundle object that already exists: FAIL_IF_EXISTS refuses the import (409); SKIP_IF_EXISTS keeps the existing object unchanged and imports the rest, reporting what OVERWRITE would change; OVERWRITE updates it where that is safe (adds columns, updates table and column metadata, re-declares a pipeline), keeps environment-specific fields, never drops, renames or retypes anything, and refuses an object it cannot bring to the bundle. An existing access entry never conflicts: with include_access, the bundle's entries are written under every policy.",
             "in": "query",
             "name": "resolution_policy",
             "required": true,

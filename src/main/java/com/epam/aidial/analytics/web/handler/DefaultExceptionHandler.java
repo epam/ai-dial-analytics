@@ -42,7 +42,6 @@ import com.epam.aidial.analytics.exception.PipelineValidationException;
 import com.epam.aidial.analytics.exception.QueryBudgetExceededException;
 import com.epam.aidial.analytics.exception.QueryEntityNotFoundException;
 import com.epam.aidial.analytics.exception.QueryValidationException;
-import com.epam.aidial.analytics.exception.ResolutionPolicyUnsupportedException;
 import com.epam.aidial.analytics.exception.RevisionNotFoundException;
 import com.epam.aidial.analytics.exception.RowPolicyConfinedException;
 import com.epam.aidial.analytics.exception.RunnerContractException;
@@ -719,12 +718,6 @@ public class DefaultExceptionHandler {
     public ErrorView handleCatalogBundleVersionUnsupported(HttpServletRequest req,
             CatalogBundleVersionUnsupportedException ex) {
         return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "catalog_bundle_version_unsupported", ex.getMessage());
-    }
-
-    @ResponseStatus(HttpStatus.UNPROCESSABLE_CONTENT)
-    @ExceptionHandler(ResolutionPolicyUnsupportedException.class)
-    public ErrorView handleResolutionPolicyUnsupported(HttpServletRequest req, ResolutionPolicyUnsupportedException ex) {
-        return new ErrorView(req, HttpStatus.UNPROCESSABLE_CONTENT, "resolution_policy_unsupported", ex.getMessage());
     }
 
     /** Written for the caller: it names the offending field, never an input fragment. */

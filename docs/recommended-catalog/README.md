@@ -38,7 +38,8 @@ The table and column descriptions in the bundle document each column in detail; 
 ## Importing it
 
 Import `adas-catalog.json` using the UI. Review the import preview before confirming: it must report no validation
-errors, and objects that already exist are kept unchanged. The general sequence is in
+errors. Under `SKIP_IF_EXISTS`, objects that already exist are kept unchanged; to bring them to this version of the
+bundle, see [Updating an installation](#updating-an-installation). The general sequence is in
 [`catalog-promotion.md`](../catalog-promotion.md).
 
 Points specific to this bundle:
@@ -57,3 +58,18 @@ Points specific to this bundle:
   `sessions_rollup`, whose filter and grouping read `usage_client_identity`.
 - **Expect a first rebuild.** `sessions_rollup` starts with no cursor and rescans `dial_usage_log` on its first runs
   (see step 5 of [`catalog-promotion.md`](../catalog-promotion.md)). The Sessions tab fills in as the pipelines catch up.
+
+## Updating an installation
+
+When this bundle changes — a new column, reworded descriptions, a changed expression — an installation that imported
+an earlier version takes the change by importing the new bundle with `resolution_policy=OVERWRITE` (step 7 of
+[`catalog-promotion.md`](../catalog-promotion.md)):
+
+1. **Preview with `OVERWRITE`.** Each object that changed is `UPDATE`, and its `changes` say what the import does.
+   `not_applied` lists what it keeps: columns the installation added, its cron triggers and TTLs, and any column it
+   marked `sensitive`. An object it cannot update is `FAIL` with the reason.
+2. **Import with `OVERWRITE`.** Running it again changes nothing.
+3. **Re-arm `sessions_rollup`** if its entry carries `rearm_required`: an enabled aggregate is re-declared disabled.
+   The `enrich` pipelines keep running, and `sessions_rollup` rebuilds from zero once armed.
+4. **Backfill** an `enrich` pipeline whose entry carries `existing_rows_not_rederived`, over the period its rows should
+   be recomputed for. Rows past the payload retention keep their earlier values.

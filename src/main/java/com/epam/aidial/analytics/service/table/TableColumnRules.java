@@ -384,11 +384,18 @@ public final class TableColumnRules {
      * reading it would believe an unmatched grain join yields NULL when it yields {@code {}}.
      */
     static boolean resolveNullable(ColumnInput col, TableType kind) {
-        if (col.type() == QueryFieldType.ARRAY || col.type() == QueryFieldType.MAP
-                || col.type() == QueryFieldType.OBJECT) {
+        return resolveNullable(col.type(), col.nullable(), kind);
+    }
+
+    /**
+     * {@link #resolveNullable(ColumnInput, TableType)} over a column's declared type and nullability: what a column so
+     * declared is stored with. The catalog import compares a bundle's columns with the stored ones through it.
+     */
+    public static boolean resolveNullable(QueryFieldType type, Boolean nullable, TableType kind) {
+        if (type == QueryFieldType.ARRAY || type == QueryFieldType.MAP || type == QueryFieldType.OBJECT) {
             return false;
         }
-        return col.nullable() != null ? col.nullable() : kind == TableType.ENRICHMENT;
+        return nullable != null ? nullable : kind == TableType.ENRICHMENT;
     }
 
     /** Whether {@code name} is a reserved system column (the {@code _}-prefix is ADAS-owned). */
