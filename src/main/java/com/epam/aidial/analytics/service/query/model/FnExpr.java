@@ -2,6 +2,8 @@ package com.epam.aidial.analytics.service.query.model;
 
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.annotation.Nulls;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
+import io.swagger.v3.oas.annotations.media.Schema;
 
 import java.util.List;
 
@@ -18,4 +20,11 @@ public record FnExpr(
         // Optional flag: absent/null defaults to false rather than failing deserialization.
         @JsonSetter(nulls = Nulls.AS_EMPTY) boolean distinct,
 
+        /*
+         * Declared explicitly: left implicit, the published FnExpr lost this member. swagger-core drops a subtype
+         * member that equals a member of the schema it composes the subtype under, and ComparisonNode.args has the
+         * same shape. QueryDslSchemas spells the bare $ref to Expr this gives as the oneOf of the expression types.
+         */
+        @ArraySchema(schema = @Schema(implementation = Expr.class),
+                arraySchema = @Schema(description = "The arguments, each an expression; empty for a call without arguments such as count"))
         List<Expr> args) implements Expr {}

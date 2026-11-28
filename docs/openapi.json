@@ -666,17 +666,7 @@
             ]
           },
           "when": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ComparisonNode"
-              },
-              {
-                "$ref": "#/components/schemas/LogicalNode"
-              },
-              {
-                "$ref": "#/components/schemas/SubqueryNode"
-              }
-            ]
+            "$ref": "#/components/schemas/FilterNode"
           }
         },
         "type": "object"
@@ -1014,66 +1004,59 @@
         "type": "object"
       },
       "ComparisonNode": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/FilterNode"
-          },
-          {
-            "properties": {
-              "args": {
-                "items": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/ArrayExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CaseExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/FieldExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/FnExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/LambdaExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/LambdaParamExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ParamExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ValueExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/WindowExpr"
-                    }
-                  ]
+        "properties": {
+          "args": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ArrayExpr"
                 },
-                "type": "array"
-              },
-              "op": {
-                "enum": [
-                  "eq",
-                  "ne",
-                  "co",
-                  "nc",
-                  "ico",
-                  "inc",
-                  "lt",
-                  "gt",
-                  "le",
-                  "ge",
-                  "in"
-                ],
-                "type": "string"
-              }
+                {
+                  "$ref": "#/components/schemas/CaseExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/FieldExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/FnExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/LambdaExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/LambdaParamExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/ParamExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/ValueExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/WindowExpr"
+                }
+              ]
             },
-            "type": "object"
+            "type": "array"
+          },
+          "op": {
+            "enum": [
+              "eq",
+              "ne",
+              "co",
+              "nc",
+              "ico",
+              "inc",
+              "lt",
+              "gt",
+              "le",
+              "ge",
+              "in"
+            ],
+            "type": "string"
           }
-        ]
+        },
+        "type": "object"
       },
       "CompositeQuery": {
         "properties": {
@@ -1962,6 +1945,17 @@
       },
       "Expr": {
         "discriminator": {
+          "mapping": {
+            "array": "#/components/schemas/ArrayExpr",
+            "case": "#/components/schemas/CaseExpr",
+            "field": "#/components/schemas/FieldExpr",
+            "fn": "#/components/schemas/FnExpr",
+            "lambda": "#/components/schemas/LambdaExpr",
+            "lambda_param": "#/components/schemas/LambdaParamExpr",
+            "param": "#/components/schemas/ParamExpr",
+            "value": "#/components/schemas/ValueExpr",
+            "window": "#/components/schemas/WindowExpr"
+          },
           "propertyName": "type"
         },
         "properties": {
@@ -2020,7 +2014,19 @@
         },
         "type": "object"
       },
-      "FilterNode": {},
+      "FilterNode": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ComparisonNode"
+          },
+          {
+            "$ref": "#/components/schemas/LogicalNode"
+          },
+          {
+            "$ref": "#/components/schemas/SubqueryNode"
+          }
+        ]
+      },
       "FnExpr": {
         "allOf": [
           {
@@ -2028,6 +2034,41 @@
           },
           {
             "properties": {
+              "args": {
+                "description": "The arguments, each an expression; empty for a call without arguments such as count",
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ArrayExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CaseExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FieldExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FnExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LambdaExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LambdaParamExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ParamExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ValueExpr"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WindowExpr"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
               "distinct": {
                 "type": "boolean"
               },
@@ -2566,17 +2607,7 @@
                 ]
               },
               "on": {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/ComparisonNode"
-                  },
-                  {
-                    "$ref": "#/components/schemas/LogicalNode"
-                  },
-                  {
-                    "$ref": "#/components/schemas/SubqueryNode"
-                  }
-                ]
+                "$ref": "#/components/schemas/FilterNode"
               },
               "right": {
                 "oneOf": [
@@ -2788,40 +2819,23 @@
         "type": "object"
       },
       "LogicalNode": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/FilterNode"
-          },
-          {
-            "properties": {
-              "args": {
-                "items": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/ComparisonNode"
-                    },
-                    {
-                      "$ref": "#/components/schemas/LogicalNode"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SubqueryNode"
-                    }
-                  ]
-                },
-                "type": "array"
-              },
-              "op": {
-                "enum": [
-                  "and",
-                  "or",
-                  "not"
-                ],
-                "type": "string"
-              }
+        "properties": {
+          "args": {
+            "items": {
+              "$ref": "#/components/schemas/FilterNode"
             },
-            "type": "object"
+            "type": "array"
+          },
+          "op": {
+            "enum": [
+              "and",
+              "or",
+              "not"
+            ],
+            "type": "string"
           }
-        ]
+        },
+        "type": "object"
       },
       "MaterializeRequest": {
         "properties": {
@@ -3083,6 +3097,10 @@
       },
       "PageSpec": {
         "discriminator": {
+          "mapping": {
+            "cursor": "#/components/schemas/CursorPage",
+            "offset": "#/components/schemas/OffsetPage"
+          },
           "propertyName": "type"
         },
         "properties": {
@@ -4301,18 +4319,8 @@
         "description": "A row policy: the rows the role may read, as a `filter` in the structured query's filter grammar over this table's own columns, or (request only) as `where`, the SQL condition that would follow WHERE. Stored and returned as `filter`. A policy narrows what the role reads; it never grants a read.",
         "properties": {
           "filter": {
-            "description": "The rows the role may read, in the structured query's filter grammar (CQL2-JSON). No aggregate or window functions, subqueries or enrichment fields, and no `param` other than the caller values `caller.user_hash` and `caller.project`.",
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ComparisonNode"
-              },
-              {
-                "$ref": "#/components/schemas/LogicalNode"
-              },
-              {
-                "$ref": "#/components/schemas/SubqueryNode"
-              }
-            ]
+            "$ref": "#/components/schemas/FilterNode",
+            "description": "The rows the role may read, in the structured query's filter grammar (CQL2-JSON). No aggregate or window functions, subqueries or enrichment fields, and no `param` other than the caller values `caller.user_hash` and `caller.project`."
           },
           "where": {
             "description": "Request only, instead of `filter`: the same policy as the SQL condition that would follow WHERE, for example `user_hash = caller.user_hash()` (the spelling without parentheses is accepted too). Translated to a `filter`, which is what is stored.",
@@ -5134,7 +5142,9 @@
           "entity": {
             "type": "string"
           },
-          "filter": {},
+          "filter": {
+            "$ref": "#/components/schemas/FilterNode"
+          },
           "final": {
             "type": "boolean"
           },
@@ -5145,17 +5155,7 @@
             "type": "array"
           },
           "having": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/ComparisonNode"
-              },
-              {
-                "$ref": "#/components/schemas/LogicalNode"
-              },
-              {
-                "$ref": "#/components/schemas/SubqueryNode"
-              }
-            ]
+            "$ref": "#/components/schemas/FilterNode"
           },
           "mode": {
             "enum": [
@@ -5233,62 +5233,55 @@
         "type": "object"
       },
       "SubqueryNode": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/FilterNode"
+        "properties": {
+          "kind": {
+            "enum": [
+              "IN",
+              "NOT_IN",
+              "EXISTS",
+              "NOT_EXISTS"
+            ],
+            "type": "string"
           },
-          {
-            "properties": {
-              "kind": {
-                "enum": [
-                  "IN",
-                  "NOT_IN",
-                  "EXISTS",
-                  "NOT_EXISTS"
-                ],
-                "type": "string"
-              },
-              "operands": {
-                "items": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/ArrayExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CaseExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/FieldExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/FnExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/LambdaExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/LambdaParamExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ParamExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ValueExpr"
-                    },
-                    {
-                      "$ref": "#/components/schemas/WindowExpr"
-                    }
-                  ]
+          "operands": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ArrayExpr"
                 },
-                "type": "array"
-              },
-              "subquery": {
-                "$ref": "#/components/schemas/CompositeQuery"
-              }
+                {
+                  "$ref": "#/components/schemas/CaseExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/FieldExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/FnExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/LambdaExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/LambdaParamExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/ParamExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/ValueExpr"
+                },
+                {
+                  "$ref": "#/components/schemas/WindowExpr"
+                }
+              ]
             },
-            "type": "object"
+            "type": "array"
+          },
+          "subquery": {
+            "$ref": "#/components/schemas/CompositeQuery"
           }
-        ]
+        },
+        "type": "object"
       },
       "TableDto": {
         "properties": {
@@ -5661,7 +5654,11 @@
           {
             "properties": {
               "value": {
-                "type": "string"
+                "description": "The literal as a string, parsed by value_type; null or absent when value_type is null",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "value_type": {
                 "enum": [
